@@ -5,8 +5,6 @@ import SwiftUI
 /// first time it is opened. Navicat's spine, wearing the CleanMyMac surfaces.
 struct SidebarTree: View {
     @Environment(AppModel.self) private var model
-    @State private var showURLPrompt = false
-    @State private var urlText = ""
 
     /// Ids to keep on screen while the filter box has text. `nil` means "no filter".
     private var visibleIDs: Set<String>? {
@@ -43,16 +41,6 @@ struct SidebarTree: View {
             Rectangle().fill(Color.black.opacity(0.18))
         }
         .overlay(alignment: .trailing) { Rectangle().fill(.white.opacity(0.07)).frame(width: 1) }
-        .alert("Add a connection from a URL", isPresented: $showURLPrompt) {
-            TextField("https://user:password@host:8443/catalog/schema", text: $urlText)
-            Button("Add") {
-                model.addConnection(fromURL: urlText)
-                urlText = ""
-            }
-            Button("Cancel", role: .cancel) { urlText = "" }
-        } message: {
-            Text("The password in the URL goes to your Keychain; the connections file never holds it.")
-        }
     }
 
     private var header: some View {
@@ -70,7 +58,7 @@ struct SidebarTree: View {
                 Spacer()
                 Menu {
                     Button("New Connection") { model.presentConnectionEditor(nil) }
-                    Button("Add from URL…") { showURLPrompt = true }
+                    Button("Add from URL…") { model.presentConnectionEditor(nil, startAtURL: true) }
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 13))
@@ -133,7 +121,7 @@ struct SidebarTree: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button("New Connection") { model.presentConnectionEditor(nil) }
                 .buttonStyle(.pill)
-            Button("Add from URL…") { showURLPrompt = true }
+            Button("Add from URL…") { model.presentConnectionEditor(nil, startAtURL: true) }
                 .buttonStyle(.pill)
         }
         .padding(12)
@@ -249,7 +237,7 @@ struct TreeRow: View {
             Button("Refresh") { model.refresh(node) }
             Divider()
             Button("New Query") { model.newTab(connectionID: node.connectionID) }
-        case .catalog, .schema:
+        case .catalog, .database, .schema:
             Button("Refresh") { model.refresh(node) }
             Button("New Query") { model.newTab(connectionID: node.connectionID) }
         case .table:
@@ -274,7 +262,8 @@ struct TreeRow: View {
     private var iconTint: Color {
         switch node.kind {
         case .connection: node.color.color
-        case .catalog: Tone.ice
+        case .catalog: Tone.violet
+        case .database: Tone.ice
         case .schema: Tone.amber
         case .table: Tone.secondary
         }
@@ -284,10 +273,16 @@ struct TreeRow: View {
 
     private var helpText: String {
         switch node.kind {
-        case .connection: "\(node.title) — double-click to edit, or expand to list catalogs"
-        case .catalog: "Catalog \(node.title) — expand to list schemas"
-        case .schema: "Schema \(node.title) — expand to list tables"
-        case .table: node.insertableText?.appending(" — double-click to insert") ?? node.title
+        case .connection:
+            "\(node.title) · \(node.connectionKind.label) — double-click to edit, or expand to browse"
+        case .catalog:
+            "Catalog \(node.title) — expand to list schemas"
+        case .database:
+            "Database \(node.title) — expand to list tables"
+        case .schema:
+            "Schema \(node.title) — expand to list tables"
+        case .table:
+            node.insertableText?.appending(" — double-click to insert") ?? node.title
         }
     }
 }

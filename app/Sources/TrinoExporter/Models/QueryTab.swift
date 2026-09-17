@@ -277,18 +277,26 @@ final class QueryTab: Identifiable {
     var trimmedSchema: String { targetSchema.trimmingCharacters(in: .whitespaces) }
     var trimmedTable: String { targetTable.trimmingCharacters(in: .whitespaces) }
 
-    var tableTarget: String { "\(trimmedCatalog).\(trimmedSchema).\(trimmedTable)" }
+    /// The target's dotted name with exactly the parts this driver has. Postgres writes inside
+    /// the database its connection already opened, so it has no catalog part; MySQL has no schema.
+    func target(for kind: ConnectionKind) -> String {
+        switch kind {
+        case .trino: "\(trimmedCatalog).\(trimmedSchema).\(trimmedTable)"
+        case .postgres: "\(trimmedSchema).\(trimmedTable)"
+        case .mysql: "\(trimmedCatalog).\(trimmedTable)"
+        }
+    }
 
     /// True when a run would drop a table: the toolbar turns coral and the orb asks first.
     var isDestructive: Bool { destination == .table && writeMode == .replace }
 
     /// One line naming what the run will do, used by the log and the status bar.
-    var runSummary: String {
+    func runSummary(for kind: ConnectionKind) -> String {
         switch destination {
         case .file:
             return "\(format.label) → \(outputDirectory?.path ?? "no folder")/\(trimmedName)"
         case .table:
-            return "\(writeMode.statement) \(tableTarget)"
+            return "\(writeMode.statement) \(target(for: kind))"
         }
     }
 
@@ -307,7 +315,9 @@ final class QueryTab: Identifiable {
             return "Running · \(rows.formatted()) rows written"
         case .done:
             if destination == .table {
-                return "Query OK · \(pluralized(rows, "row")) → \(writtenTable ?? tableTarget) · \(elapsedText)"
+                // `writtenTable` comes from the engine and is already in the driver's own
+                // shape; the fallback is only reached if a table run reported nothing.
+                return "Query OK · \(pluralized(rows, "row")) → \(writtenTable ?? trimmedTable) · \(elapsedText)"
             }
             return "Query OK · \(pluralized(rows, "row")) · \(files.count == 1 ? "1 file" : "\(files.count) files") · \(elapsedText)"
         case .failed:

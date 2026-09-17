@@ -129,12 +129,12 @@ enum Snapshot {
     @MainActor
     private static func seeded(scene: String) -> AppModel {
         let model = AppModel()
-        let primary = Connection(id: UUID(), name: "Trino production", color: .blue,
-                                 host: "trino.internal", port: 8443, httpScheme: "https",
-                                 user: "faisal", catalog: "hive", schema: "analytics", verify: true)
-        let secondary = Connection(id: UUID(), name: "Trino sandbox", color: .amber,
-                                   host: "localhost", port: 8080, httpScheme: "http",
-                                   user: "dev", catalog: "tpch", schema: "", verify: true)
+        let primary = Connection(id: UUID(), name: "Trino production", color: .blue, kind: .trino,
+                                 host: "trino.internal", port: 8443, scheme: "https",
+                                 user: "faisal", database: "hive", schema: "analytics", verify: true)
+        let secondary = Connection(id: UUID(), name: "Trino sandbox", color: .amber, kind: .trino,
+                                   host: "localhost", port: 8080, scheme: "http",
+                                   user: "dev", database: "tpch", schema: "", verify: true)
         model.connections = [primary, secondary]
         model.rebuildTree()
 
@@ -209,6 +209,27 @@ enum Snapshot {
             tab.startedAt = Date(timeIntervalSinceNow: -18)
         case "connection":
             model.presentConnectionEditor(primary.id)
+        case "new-connection":
+            // The new-connection flow starts at the type grid, not at a form.
+            model.presentConnectionEditor(nil)
+        case "connection-uri":
+            model.presentConnectionEditor(nil)
+        case "connection-postgres", "connection-mysql":
+            // The editor is not the same form three times over: Postgres has no catalog and
+            // swaps the TLS toggle for an SSL mode, MySQL has no schema at all.
+            let kind: ConnectionKind = scene == "connection-mysql" ? .mysql : .postgres
+            let extra = Connection(id: UUID(),
+                                   name: kind == .mysql ? "Reporting" : "Warehouse",
+                                   color: kind == .mysql ? .amber : .violet, kind: kind,
+                                   host: kind == .mysql ? "mysql.internal" : "pg.internal",
+                                   port: kind.defaultPort,
+                                   sslmode: kind.defaultSSLMode,
+                                   user: "analyst",
+                                   database: kind == .mysql ? "reporting" : "warehouse",
+                                   schema: "public", verify: true)
+            model.connections.append(extra)
+            model.rebuildTree()
+            model.presentConnectionEditor(extra.id)
         case "table":
             // The table destination: same tab, different toolbar, and a panel that reports the
             // statement Trino ran rather than a file list.

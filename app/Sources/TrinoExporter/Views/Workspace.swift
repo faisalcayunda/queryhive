@@ -164,7 +164,7 @@ struct QueryToolbar: View {
         .onChange(of: tab.destination) { _, destination in
             if destination == .table { model.prepareTableDestination(tab) }
         }
-        .confirmationDialog("Replace \(tab.tableTarget)?", isPresented: $confirmReplace) {
+        .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?", isPresented: $confirmReplace) {
             Button("Drop and Recreate", role: .destructive) { model.run(tab) }
         } message: {
             Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
@@ -225,9 +225,19 @@ struct TableTargetButton: View {
     @Bindable var tab: QueryTab
     @State private var showing = false
 
+    private var driverKind: ConnectionKind { model.connection(for: tab)?.kind ?? .trino }
+
     private var summary: String {
-        let parts = [tab.trimmedCatalog, tab.trimmedSchema, tab.trimmedTable].filter { !$0.isEmpty }
-        return parts.isEmpty ? "Choose a target…" : parts.joined(separator: ".")
+        let target = tab.target(for: driverKind)
+        return target.isEmpty ? "Choose a target…" : target
+    }
+
+    private var catalogs: [String] {
+        model.loadedNames(for: tab.connectionID, kind: driverKind == .mysql ? .database : .catalog)
+    }
+
+    private var schemas: [String] {
+        model.loadedNames(for: tab.connectionID, kind: .schema, database: tab.trimmedCatalog)
     }
 
     var body: some View {
@@ -254,21 +264,31 @@ struct TableTargetButton: View {
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("Where Trino writes the query's rows")
+        .help("Where \(driverKind.label) writes the query's rows")
         .popover(isPresented: $showing, arrowEdge: .bottom) { panel }
     }
 
     private var panel: some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionLabel(text: "Target table")
-            LabeledField("Catalog") {
-                ComboField(placeholder: "hive", text: $tab.targetCatalog,
-                           options: model.catalogNames(for: tab.connectionID), width: 332)
-            }
-            LabeledField("Schema") {
-                ComboField(placeholder: "analytics", text: $tab.targetSchema,
-                           options: model.schemaNames(for: tab.connectionID, catalog: tab.trimmedCatalog),
-                           width: 332)
+            // Only the fields this driver has. Postgres writes inside the database its connection
+            // already opened, so a catalog field would be a lie; MySQL has no schema level.
+            switch driverKind {
+            case .trino:
+                LabeledField("Catalog") {
+                    ComboField(placeholder: "hive", text: $tab.targetCatalog, options: catalogs, width: 332)
+                }
+                LabeledField("Schema") {
+                    ComboField(placeholder: "analytics", text: $tab.targetSchema, options: schemas, width: 332)
+                }
+            case .postgres:
+                LabeledField("Schema") {
+                    ComboField(placeholder: "public", text: $tab.targetSchema, options: schemas, width: 332)
+                }
+            case .mysql:
+                LabeledField("Database") {
+                    ComboField(placeholder: "mydb", text: $tab.targetCatalog, options: catalogs, width: 332)
+                }
             }
             LabeledField("Table") {
                 TextField("penerima_manfaat_2026", text: $tab.targetTable).field()

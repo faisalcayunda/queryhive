@@ -1,11 +1,12 @@
 """JSON-event command line engine for QueryHive.
 
-    python3 -s -u queryhive_engine.py test      connect and count catalogs
-    python3 -s -u queryhive_engine.py catalogs  list catalogs (SHOW CATALOGS)
-    python3 -s -u queryhive_engine.py schemas   list schemas of TRINO_CATALOG
-    python3 -s -u queryhive_engine.py tables    list tables of TRINO_CATALOG.TRINO_SCHEMA
+    python3 -s -u queryhive_engine.py db_drivers what drivers exist, and their levels
+    python3 -s -u queryhive_engine.py test      connect and count the top level
+    python3 -s -u queryhive_engine.py catalogs  list the driver's top level
+    python3 -s -u queryhive_engine.py schemas   list schemas of DB_DATABASE
+    python3 -s -u queryhive_engine.py tables    list tables of the level above
     python3 -s -u queryhive_engine.py export    stream SQL into one of nine formats
-    python3 -s -u queryhive_engine.py to_table  let Trino write SQL into a table
+    python3 -s -u queryhive_engine.py to_table  let the database write SQL into a table
 
 The desktop app runs this script as a child process and reads the protocol off
 its stdout: every stdout line is exactly one compact JSON object and nothing
@@ -17,6 +18,7 @@ stdout without ever filtering it.
 Settings are environment variables only; argv is read only for the command
 name, so a secret never shows up in a process listing. The events:
 
+    db_drivers drivers                               (kind, label, default_port, levels)
     test     test                                    (ok, catalog_count, host, user)
     catalogs catalogs                                (names)
     schemas  schemas                                 (names)
@@ -26,46 +28,61 @@ name, so a secret never shows up in a process listing. The events:
     to_table step connect, step write, progress..., done
              (or a single error event and exit 1)
 
+Three drivers sit behind one protocol: `trino` (the default), `postgres` and
+`mysql`, chosen by DB_KIND and described by exporter/drivers.py. Every DB_* name
+has its old TRINO_* alias and DB_* wins when both are set, so an app that sends
+only the parts and an older one that still sends TRINO_* both work. `db_drivers`
+reports the object-tree levels each driver actually has -- Trino
+catalog/schema/table, Postgres schema/table, MySQL database/table -- so the app
+never hard-codes that table.
+
 `catalogs`, `schemas` and `tables` feed the app's object tree and each run one
-statement -- SHOW CATALOGS, SHOW SCHEMAS FROM "<catalog>" and
-SHOW TABLES FROM "<catalog>"."<schema>" -- in the coordinator's own order, which
-is never re-sorted. All three report the same `names` array of strings, so one
-decoder reads them alike; the `test` event's count is `catalog_count`, never
-`catalogs`, which is a list here. The catalog and schema come from TRINO_CATALOG
-and TRINO_SCHEMA (the same settings build_config already puts on TrinoConfig),
-and either being blank is a usage error rather than an empty identifier. This
-mirrors exporter/web.py's /api/connections/{name}/schemas and .../tables
-endpoints, which name the catalog explicitly even though the session carries a
-default.
+statement the driver builds: SHOW CATALOGS / SHOW SCHEMAS FROM "<database>" /
+SHOW TABLES FROM "<database>"."<schema>" on Trino, the information_schema
+queries on Postgres, SHOW DATABASES / SHOW TABLES FROM `database` on MySQL --
+in the server's own order, which is never re-sorted. All three report the same
+`names` array of strings, so one decoder reads them alike. A command the driver
+has no level for is a usage error naming the driver rather than an empty
+identifier: `catalogs` does not exist on Postgres (the database is set on the
+connection) and `schemas` does not exist on MySQL. `test`'s count is
+`catalog_count`, never `catalogs`, which is a list here; it runs whichever
+top-level probe the driver has. This mirrors exporter/web.py's
+/api/connections/{name}/schemas and .../tables endpoints, which name the catalog
+explicitly even though the session carries a default.
 
 `export` streams through exporter.run_export: the connection settings mirror
-exporter/cli.py's option handling one for one (TRINO_URL first, its parts
-overridden by the individual variables, `~` expanded in paths, blank means
-"unset", a password implies https and the default port moves to 443), and the
-opts dict handed to the writers has exactly the keys cli.py builds.
+exporter/cli.py's option handling one for one (a URL first, its parts overridden
+by the individual variables, `~` expanded in paths, blank means "unset", a
+password implies https and the default port moves to 443), and the opts dict
+handed to the writers has exactly the keys cli.py builds.
 
-`to_table` is the opposite trade: Trino runs the SELECT and commits the result
-itself, so no row ever comes back to this process. It never opens a QueryStream
-(which rejects DDL/DML by design) and never fetches. SQL/SQL_PATH resolve
-exactly as `export`'s do, TARGET_CATALOG/TARGET_SCHEMA/TARGET_TABLE name the
-table to write, and WRITE_MODE is `create` (CTAS), `replace` (DROP TABLE IF
-EXISTS then CTAS) or `append` (INSERT INTO ... SELECT); any blank part or an
-unknown mode is a usage error before the network is touched. The `write` step is
-emitted once the connection is open and the first statement is next, so a
-`connect` that never succeeds leaves exactly one error event behind it and no
-`write`. Progress comes from the client's stats callback -- attached to each
-statement's cursor, because in trino 0.339.0 that is where the client takes it
--- reporting writtenRows when the coordinator reports it, otherwise
-processedRows, through the same throttle as `export`, with a final progress
-event whenever the last emitted value is not the row count the `done` event
-carries. `done` adds `table` ("catalog.schema.table" as written),
-`mode`, `query_id` and `cancelled`; `rows` is cursor.rowcount when Trino
-reported one (>= 0), otherwise the last progress value, otherwise -1, which is
-never turned into a made-up number. A cancelled write is not a failure: the run
-still emits `done` with `cancelled: true` and a warning saying the table is now
-uncertain, and exits 0. A real failure is one `error` event and exit 1, and it
-carries a `warnings` array whenever there is something the caller must still
-hear -- a failed `replace` has already dropped the old table by then.
+`to_table` is the opposite trade: the database runs the SELECT and commits the
+result itself, so no row ever comes back to this process. It never opens a
+QueryStream (which rejects DDL/DML by design) and never fetches. SQL/SQL_PATH
+resolve exactly as `export`'s do, TARGET_CATALOG/TARGET_SCHEMA/TARGET_TABLE name
+the table to write, and WRITE_MODE is `create` (CTAS), `replace` (DROP TABLE IF
+EXISTS then CTAS) or `append` (INSERT INTO ... SELECT); any part the driver uses
+being blank, or an unknown mode, is a usage error before the network is touched.
+The driver decides how many of the three parts it has a level for: Postgres
+ignores TARGET_CATALOG, MySQL ignores TARGET_SCHEMA. The `write` step is emitted
+once the connection is open and the first statement is next, so a `connect` that
+never succeeds leaves exactly one error event behind it and no `write`.
+Progress comes from the client's stats callback -- attached to each statement's
+cursor, because in trino 0.339.0 that is where the client takes it -- reporting
+writtenRows when it reports one, otherwise processedRows, through the same
+throttle as `export`, with a final progress event whenever the last emitted
+value is not the row count the `done` event carries. psycopg and pymysql have no
+stats callback at all, so those runs emit only that one final `progress` line,
+carrying whatever `cursor.rowcount` said (`-1` when the server reported none),
+and never a tick from a coordinator.
+`done` adds `table` (as the driver writes it), `mode`, `query_id` and
+`cancelled`; `rows` is cursor.rowcount when the server reported one (>= 0),
+otherwise the last progress value, otherwise -1, which is never turned into a
+made-up number. A cancelled write is not a failure: the run still emits `done`
+with `cancelled: true` and a warning saying the table is now uncertain, and
+exits 0. A real failure is one `error` event and exit 1, and it carries a
+`warnings` array whenever there is something the caller must still hear -- a
+failed `replace` has already dropped the old table by then.
 
 The engine is a sibling of scripts/iceberg_importer/importer.py, which speaks
 the same protocol for imports; this follows its structure, its emit() helper
@@ -107,14 +124,19 @@ def emit(event, **fields):
 # A bundle that lost its exporter package is still a failure the caller should
 # hear about in the protocol, not as a bare traceback on stderr.
 try:
+    from exporter.drivers import (  # noqa: E402
+        DRIVERS,
+        KINDS,
+        DatabaseConfig,
+        driver_of,
+    )
     from exporter.export import bundle, run_export  # noqa: E402
-    from exporter.source import TrinoConfig, describe_error  # noqa: E402
+    from exporter.source import describe_error  # noqa: E402
     from exporter.to_table import (  # noqa: E402
         CANCEL_WARNING,
         PROGRESS_EVERY as TO_TABLE_PROGRESS_EVERY,
         TableExportError,
         export_to_table,
-        quote_identifier,
     )
     from exporter.writers import WRITERS  # noqa: E402
 except Exception as _import_error:
@@ -214,31 +236,16 @@ def _flag(env, key, default=False):
 # --------------------------------------------------------------------------- #
 
 def build_config(env):
-    """Resolve the connection exactly as exporter/cli.py does.
+    """Resolve the connection into a DatabaseConfig, whatever the driver is.
 
-    TRINO_URL carries the whole connection; any individual variable overrides
-    its part. Without a URL, TRINO_HOST (plus its parts) builds the config.
+    DB_KIND picks the driver; DB_URL carries the whole connection and any
+    individual DB_* variable overrides its part. Every DB_* name has its old
+    TRINO_* alias (TRINO_URL, TRINO_HOST, TRINO_CATALOG, ...), DB_* wins when
+    both are set, and a blank value means "unset" -- so an app that sends only
+    the parts, and an older one that still sends TRINO_*, both work. The app
+    sends the parts only; DB_URL exists for the CLI and web paths.
     """
-    url = _value(env, "TRINO_URL")
-    overrides = dict(
-        host=_value(env, "TRINO_HOST") or None,
-        port=_int(env, "TRINO_PORT", None),
-        user=_value(env, "TRINO_USER") or None,
-        password=_value(env, "TRINO_PASSWORD") or None,
-        catalog=_value(env, "TRINO_CATALOG") or None,
-        schema=_value(env, "TRINO_SCHEMA") or None,
-    )
-    if url:
-        config = TrinoConfig.from_url(url, **overrides)
-    elif overrides["host"]:
-        config = TrinoConfig(**{k: v for k, v in overrides.items() if v is not None})
-    else:
-        raise ValueError("need TRINO_URL or TRINO_HOST")
-    if config.password and not (overrides["port"] or url):
-        config.port = 443  # a password implies https, so the default port moves too
-    config.user = config.user or os.environ.get("USER") or "trino"
-    config.verify = not _flag(env, "TRINO_INSECURE", False)
-    return config
+    return DatabaseConfig.from_env(env)
 
 
 def source_sql(env):
@@ -313,67 +320,103 @@ def _with_retries(config, env):
     return config
 
 
-def _show_names(env, sql):
-    """Run one SHOW statement and return each row's first column as a string.
+def _fetch_all(config, sql):
+    """Run one statement on one connection and return its rows.
 
-    One connection per command, always closed: the same shape as
-    run_test_command. Nothing is sorted (the coordinator's order is the answer)
-    and nothing is filtered -- a row the coordinator sent, even a column-less
-    one, must not raise IndexError.
+    One connection per command, always closed: the same shape run_test_command
+    has always had. The driver is asked for the statement, never assumed.
     """
-    config = _with_retries(build_config(env), env)
     conn = config.connect()
     try:
         cursor = conn.cursor()
         try:
             cursor.execute(sql)
-            rows = cursor.fetchall()
+            return cursor.fetchall()
         finally:
             cursor.close()
     finally:
         conn.close()
-    return [str(row[0]) if row else "" for row in rows]
+
+
+def _show_names(config, sql):
+    """Each row's first column as a string, in the server's own order.
+
+    Nothing is sorted (the server's order is the answer) and nothing is
+    filtered -- a row the server sent, even a column-less one, must not raise
+    IndexError.
+    """
+    return [str(row[0]) if row else "" for row in _fetch_all(config, sql)]
+
+
+def _browse_config(env):
+    """The config plus the driver, or a usage error before the network."""
+    config = _with_retries(build_config(env), env)
+    return config, driver_of(config)
 
 
 def run_test_command(env):
-    """Connect and run SHOW CATALOGS, reporting how many catalogs are visible."""
+    """Connect and run the driver's own top-level probe.
+
+    `catalog_count` is that probe's row count, named as it always was: SHOW
+    CATALOGS on Trino, SHOW DATABASES on MySQL, the schema list on Postgres --
+    the top level each driver actually has, so `test` never needs a catalog or
+    schema to be configured first.
+    """
     config = build_config(env)
-    conn = config.connect()
-    try:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SHOW CATALOGS")
-            rows = cursor.fetchall()
-        finally:
-            cursor.close()
-    finally:
-        conn.close()
+    driver = driver_of(config)
+    rows = _fetch_all(config, driver.probe_sql(config.database, config.schema))
     emit("test", ok=True, catalog_count=len(rows), host=config.host, user=config.user)
 
 
+def run_browse_command(env, command):
+    """One browse command, with the SQL and its level checks owned by the driver.
+
+    `catalogs`, `schemas` and `tables` all emit the same `names` array of
+    strings -- one decoder reads them alike -- while the statement behind each
+    one, the settings it needs and the driver that has no such level at all are
+    the driver's business. A command the driver cannot answer is a usage error
+    naming the driver, decided before anything is opened.
+    """
+    config, driver = _browse_config(env)
+    sql = getattr(driver, f"{command}_sql")(config.database, config.schema)
+    emit(command, names=_show_names(config, sql))
+
+
 def run_catalogs_command(env):
-    """SHOW CATALOGS: the catalogs the coordinator reports, in its own order."""
-    emit("catalogs", names=_show_names(env, "SHOW CATALOGS"))
+    """The driver's top level: catalogs on Trino, databases on MySQL."""
+    run_browse_command(env, "catalogs")
 
 
 def run_schemas_command(env):
-    """SHOW SCHEMAS FROM the configured catalog; a blank catalog is a usage error."""
-    catalog = _value(env, "TRINO_CATALOG")
-    if not catalog:
-        raise ValueError("TRINO_CATALOG is required to list schemas")
-    emit("schemas", names=_show_names(env, f"SHOW SCHEMAS FROM {quote_identifier(catalog)}"))
+    """The schema level, where the driver has one: Trino and Postgres do."""
+    run_browse_command(env, "schemas")
 
 
 def run_tables_command(env):
-    """SHOW TABLES FROM catalog.schema; either being blank is a usage error."""
-    catalog = _value(env, "TRINO_CATALOG")
-    schema = _value(env, "TRINO_SCHEMA")
-    if not catalog or not schema:
-        raise ValueError("TRINO_CATALOG and TRINO_SCHEMA are required to list tables")
-    sql = (
-        f"SHOW TABLES FROM {quote_identifier(catalog)}.{quote_identifier(schema)}"
+    """The tables of the driver's parent level(s), each quoted by the driver."""
+    run_browse_command(env, "tables")
+
+
+def run_db_drivers_command(env):
+    """Report every driver: kind, label, default port and object-tree levels.
+
+    The app builds its object tree from this instead of hard-coding the table
+    this module used to carry, so adding a driver here is enough for the tree to
+    know how many levels it has and how they are named. No settings are read and
+    nothing is opened.
+    """
+    emit(
+        "drivers",
+        drivers=[
+            {
+                "kind": DRIVERS[kind].kind,
+                "label": DRIVERS[kind].label,
+                "default_port": DRIVERS[kind].default_port,
+                "levels": list(DRIVERS[kind].levels),
+            }
+            for kind in KINDS
+        ],
     )
-    emit("tables", names=_show_names(env, sql))
 
 
 def run_export_command(env):
@@ -437,18 +480,22 @@ def run_to_table_command(env):
     write already earned (a failed `replace` has dropped the old table by then).
     """
     sql = source_sql(env)
-    catalog = _value(env, "TARGET_CATALOG")
-    schema = _value(env, "TARGET_SCHEMA")
-    table = _value(env, "TARGET_TABLE")
-    missing = [
-        key
-        for key, value in (
-            ("TARGET_CATALOG", catalog),
-            ("TARGET_SCHEMA", schema),
-            ("TARGET_TABLE", table),
-        )
-        if not value
-    ]
+    # The config names the driver, and the driver says which of the three
+    # TARGET_* settings it actually has a level for: postgres ignores
+    # TARGET_CATALOG (the database is the connection), mysql ignores
+    # TARGET_SCHEMA (it has no schema level). A part the driver does not use is
+    # not required, and is dropped from the statement rather than written.
+    config = _with_retries(build_config(env), env)  # validated before the connect step
+    driver = driver_of(config)
+    target = {
+        "TARGET_CATALOG": _value(env, "TARGET_CATALOG"),
+        "TARGET_SCHEMA": _value(env, "TARGET_SCHEMA"),
+        "TARGET_TABLE": _value(env, "TARGET_TABLE"),
+    }
+    catalog = target["TARGET_CATALOG"]
+    schema = target["TARGET_SCHEMA"]
+    table = target["TARGET_TABLE"]
+    missing = [key for key in driver.required_targets() if not target[key]]
     if missing:
         raise ValueError(f"{' and '.join(missing)} required to write a table")
     # Read the environment directly, not through _raw/_value: both fold a blank
@@ -466,8 +513,6 @@ def run_to_table_command(env):
     def on_progress(rows, state):
         progress_state["rows"] = rows
         emit("progress", rows=rows, state=state)
-
-    config = _with_retries(build_config(env), env)  # validated before the connect step
 
     emit("step", step="connect")  # before the network is touched
     try:
@@ -520,6 +565,11 @@ class _WarnedExportError(Exception):
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     commands = {
+        # db_drivers leads the usage line on purpose: `main`'s usage message has
+        # always ended with the browse-and-write commands in this order, and an
+        # app that parses that suffix must keep seeing it. It also costs nothing
+        # to ask, so it is the one command a caller can always run first.
+        "db_drivers": run_db_drivers_command,
         "test": run_test_command,
         "catalogs": run_catalogs_command,
         "schemas": run_schemas_command,

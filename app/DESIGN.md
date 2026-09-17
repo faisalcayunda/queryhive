@@ -125,6 +125,41 @@ so a depth-0 row's content lands on the gutter alongside the "OBJECTS" label.
 | Columns | What the coordinator reported in the `start` event: ordinal, name, type code as a chip. |
 | Files | What landed on disk: name, bytes, per-file Reveal, and a total with Reveal in Finder. |
 
+### Adding a connection
+
+Navicat's flow, and for the same reason: the driver decides the shape of everything after it, so
+it is chosen first, from a grid of tiles, and never again. The sheet has three states —
+`typePicker` → (`url`) → `form`:
+
+- A **new** connection opens on the grid. Picking a tile sets the driver, its default port and its
+  default encryption mode, then moves to the form.
+- An **existing** connection opens straight on the form; "Change Type…" goes back to the grid.
+- **"New Connection with URI…"** parses into the *form* rather than saving immediately, so the user
+  sees what the URL actually meant — an unexpected port or database is easy to paste without
+  reading. This is the only URL parser in the app; the sidebar's "Add from URL…" opens this sheet
+  at that state rather than keeping a second implementation.
+
+Each tile, and the connection's own tile everywhere it appears, carries the **driver's real brand
+mark** rather than a generic database glyph — the same thing every database client does, and what
+makes the grid readable at a glance. They live as `.svg` files under `assets/drivers/` and
+`app/make-driver-logos.sh` generates the Swift that draws them, so replacing a logo means
+replacing a file. `NSImage` decodes SVG on macOS 14, so they stay sharp at every size with no
+rasterising step. See `assets/drivers/README.md` for where each came from and what the licences
+do and do not cover.
+
+The form shows only the fields the driver has:
+
+| | Trino | PostgreSQL | MySQL |
+|---|---|---|---|
+| transport | Scheme (http/https) + Verify TLS | SSL mode | SSL mode |
+| `database` field | "Catalog" | "Database · Required" | "Database" |
+| `schema` field | yes | yes (`search_path`) | **no** |
+| tree | catalog → schema → table | schema → table | database → table |
+
+`ConnectionKind.levels` and the engine's `db_drivers` command are the same contract stated twice,
+and they have to agree. A `connections.json` written before QueryHive spoke to more than Trino
+still loads: the decoder reads the old `httpScheme` and `catalog` keys and never writes them.
+
 ### The SQL editor and its suggestions
 
 The editor is an `NSTextView` (`SQLEditor`), not SwiftUI's `TextEditor`. That is forced:
@@ -204,25 +239,35 @@ connections file and the Keychain are never touched.
 
 ## Engine CLI (`app/engine/queryhive_engine.py`)
 
-Commands: `test`, `catalogs`, `schemas`, `tables`, `export`. Every stdout line is one compact
-JSON object. Every failure, including a usage error, emits `{"event": "error", "message": ...}`
-and exits 1. Tracebacks go to stderr.
+Commands: `db_drivers`, `test`, `catalogs`, `schemas`, `tables`, `export`, `to_table`. Every
+stdout line is one compact JSON object. Every failure, including a usage error, emits
+`{"event": "error", "message": ...}` and exits 1. Tracebacks go to stderr.
 
 Settings come from environment variables only, so a password never appears in a process listing.
-The app additionally never puts the password inside `TRINO_URL`, so a URL echoed back in an
-error message cannot leak it.
+The app additionally never puts the password inside a URL, so a URL echoed back in an error
+message cannot leak it.
+
+Three drivers sit behind the one protocol, chosen by `DB_KIND`: `trino` (the default), `postgres`
+(`psycopg` 3.x) and `mysql` (`pymysql`). They are described by `exporter/drivers.py`; every DB_*
+name has its old `TRINO_*` alias and `DB_*` wins when both are set, so an app that sends only the
+parts and an older one that still sends `TRINO_*` both work.
 
 | Key | Used by | Meaning |
 |---|---|---|
-| `TRINO_URL` | all | Whole connection URL; the parts below override it. |
-| `TRINO_HOST`, `TRINO_PORT`, `TRINO_USER`, `TRINO_PASSWORD`, `TRINO_CATALOG`, `TRINO_SCHEMA` | all | Individual parts. A blank password means no BasicAuth. `TRINO_CATALOG`/`TRINO_SCHEMA` also name what `schemas` and `tables` list from. |
-| `TRINO_INSECURE` | all | `1` skips TLS verification. |
+| `DB_KIND` | all | `trino` (default), `postgres`, `mysql`. |
+| `DB_URL` / `TRINO_URL` | all | Whole connection URL; the parts below override it. Optional: the parts alone build a config. |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` / `TRINO_HOST`, `TRINO_PORT`, `TRINO_USER`, `TRINO_PASSWORD` | all | Individual parts. A blank port means the driver's default (8080 / 5432 / 3306). |
+| `DB_DATABASE` / `TRINO_CATALOG` | all | trino: catalog; postgres: `dbname`; mysql: database. Also what the browse commands list from. |
+| `DB_SCHEMA` / `TRINO_SCHEMA` | all | trino: schema; postgres: `search_path`; mysql: unused. |
+| `DB_SCHEME` | trino | `http` or `https`. A password implies https, as does port 443/8443. |
+| `DB_SSLMODE` | postgres, mysql | postgres `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full`; mysql `disable`\|`require`. |
+| `DB_INSECURE` / `TRINO_INSECURE` | all | `1` skips certificate verification. |
 | `SQL`, `SQL_PATH` | export, to_table | The statement, or a file holding it. One is required. |
-| `TARGET_CATALOG`, `TARGET_SCHEMA`, `TARGET_TABLE` | to_table | Where the rows are written. Any blank is a usage error. |
-| `WRITE_MODE` | to_table | `create` (default), `replace`, `append`. |
+| `TARGET_CATALOG`, `TARGET_SCHEMA`, `TARGET_TABLE` | to_table | Where the rows are written. The driver decides which it uses; a blank one it *does* use is a usage error. Postgres ignores `TARGET_CATALOG`, MySQL ignores `TARGET_SCHEMA`. |
+| `WRITE_MODE` | to_table | `create` (default), `replace`, `append`. All three drivers support all three. |
 | `FORMAT` | export | `txt` `csv` `json` `xml` `html` `sql` `xls` `xlsx` `dbf`. Default `csv`. |
 | `OUT_DIR`, `NAME`, `ZIP` | export | Where the files land, their base name, and whether to zip a multi-file result. |
-| `BATCH_SIZE`, `ROWS_PER_FILE`, `RETRIES` | export, browse | Rows per `fetchmany`, split threshold (`0`/blank = never), transient-error retries. `RETRIES` is floored at 1: the connector crashes on `max_attempts = 0`. |
+| `BATCH_SIZE`, `ROWS_PER_FILE`, `RETRIES` | export, browse | Rows per `fetchmany`, split threshold (`0`/blank = never), transient-error retries. `RETRIES` is floored at 1: the trino connector crashes on `max_attempts = 0`. |
 | `DELIMITER`, `ENCODING`, `HEADER`, `BOM`, `NULL_TEXT`, `JSONL`, `SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH`, `DBF_ENCODING` | export | Per-writer options, exactly the `opts` keys `cli.py` builds. |
 | `PROGRESS_MS` | export | Minimum gap between `progress` events (default 250). |
 
@@ -235,18 +280,28 @@ Events:
 | `progress` | `rows` (cumulative) |
 | `done` | `rows`, `files` [{`path`, `bytes`}], `warnings`, `query_id`, `cancelled` |
 | `test` | `ok`, `catalog_count`, `host`, `user` |
-| `catalogs`, `schemas`, `tables` | `names` — the identifiers, in the coordinator's own order |
+| `db_drivers` | `drivers` [{`kind`, `label`, `default_port`, `levels`}] |
+| `catalogs`, `schemas`, `tables` | `names` — the identifiers, in the server's own order |
 | `to_table` `done` | `rows`, `table`, `mode`, `query_id`, `cancelled`, `warnings`; `progress` also carries `state` |
 | `error` | `message` |
 
 - `step connect` is emitted before the network is touched; `step write` and `start` fire
   together, once the cursor is open and the first page exists.
 - `progress` is throttled to `PROGRESS_MS` and floored at one event per 1000 rows; a final
-  `progress` always precedes `done`.
+  `progress` always precedes `done`. psycopg and pymysql have no `stats_callback`, so those runs
+  emit only that final line and `done` carries `cursor.rowcount`-or-`-1`.
 - `test` reports `catalog_count`, **not** `catalogs`: `catalogs` is also the name of the browse
   *event*, whose payload is a string array. One key cannot be two types, so the count is named.
-- The three browse commands quote their identifiers, doubling any embedded `"`. A blank
-  `TRINO_CATALOG` (or `TRINO_SCHEMA` for `tables`) is a usage error, never `FROM ""`.
+  It runs whichever top-level probe the driver has, so it never needs a catalog or schema set.
+- `db_drivers` reports the object tree each driver has, so the app never hard-codes it: trino
+  `["catalog", "schema", "table"]`, postgres `["schema", "table"]` (the database is fixed by the
+  connection), mysql `["database", "table"]` (no schema level, and the middle node is built from
+  `catalogs`). It reads no settings and opens nothing.
+- Each browse command asks the driver for its statement and quotes identifiers the driver's way
+  (`"x"` with `""` for trino and postgres, `` `x` `` with ``` `` ``` for mysql). A command the
+  driver has no level for is a usage error naming the driver, never `FROM ""`: `catalogs` on
+  postgres ("postgres has no catalog level; the database is set on the connection") and `schemas`
+  on mysql. The settings a command needs being blank is a usage error too.
 - `SIGTERM`/`SIGINT` set a cancel flag that `run_export`'s `cancel` callback reads. A cancelled
   run still emits a well-formed `done` with `cancelled: true` and the files written so far, then
   exits 0. `Engine.run` redacts every env value whose key looks secret, plus each long `:`-split
@@ -256,20 +311,23 @@ Events:
 
 `to_table` is the opposite trade to `export`. Nothing is streamed back: the engine opens one
 connection, runs `CREATE TABLE … AS <select>` (or `DROP TABLE IF EXISTS` + `CREATE`, or
-`INSERT INTO … <select>`) and the coordinator writes the rows itself. A 500M-row CTAS costs the
-client one HTTP request and some polling, not 500M rows over the wire.
+`INSERT INTO … <select>`) and the database writes the rows itself. A 500M-row CTAS costs the
+client one request and some polling, not 500M rows over the wire.
 
 That means `QueryStream` is unusable here — it exists to pull rows and explicitly rejects a
-statement with no result set. `exporter/to_table.py` uses the DBAPI directly and leans on three
-things I verified in the installed client rather than assumed:
+statement with no result set. `exporter/to_table.py` uses the driver's DBAPI directly and leans
+on three things I verified in the installed client rather than assumed:
 
 - `cursor.execute()` blocks until the statement is **FINISHED**, so its return is the completion.
 - `cursor.rowcount` carries Trino's `update_count` for CTAS and INSERT, and is **-1** when the
-  coordinator reported none. The engine never turns that into a number.
+  server reported none. The engine never turns that into a number.
 - `stats_callback` fires on every coordinator update, which is the only progress signal available
   for a statement whose rows never arrive. It drives the `progress` events, and it is also where
   cancellation is noticed — the callback calls `cursor.cancel()` once, because a signal handler
-  cannot interrupt a blocking socket read reliably.
+  cannot interrupt a blocking socket read reliably. It is **trino only**: `psycopg` and `pymysql`
+  cursors take no such keyword, so `Driver.cursor` passes it for a driver that has progress stats
+  and not for one that does not. Those runs emit no intermediate `progress` and no cancel path,
+  and `done` carries `rowcount` or `-1`.
 
 **Every error path goes through `describe_error`.** trino-python-client 0.339.0 raises, at
 `client.py:985`,
@@ -295,24 +353,27 @@ CREATE then fails, the old table is gone. `TableExportError` carries the warning
 far so the app can say exactly that instead of reporting a bare failure, and the toolbar draws
 Replace in coral and asks for confirmation before starting.
 
-The target catalog/schema are deliberately **not** the session's `TRINO_CATALOG`/`TRINO_SCHEMA`:
-a query may read from one catalog and write into another.
+The target catalog/schema are deliberately **not** the session's `DB_DATABASE`/`DB_SCHEMA`:
+a query may read from one database and write into another.
 
 ## Object tree
 
 - One root per saved connection. `children == nil` means "never fetched"; `children == []` means
   "fetched and empty" — the distinction is what keeps a collapsed node from re-querying the
   coordinator on every redraw.
-- Expanding a node runs exactly one command: `.connection` → `catalogs`, `.catalog` → `schemas`,
-  `.schema` → `tables`. Tables are leaves.
+- Expanding a node runs exactly one command: `.connection` → `catalogs`, `.catalog`/`.database` →
+  `schemas` or `tables`, `.schema` → `tables`. Tables are leaves. Which levels exist comes from
+  `db_drivers`, not from a table in the UI: trino has all three, postgres has schemas under the
+  connection, mysql has databases under the connection and no schema level at all.
 - Browse runs send `RETRIES=2`: a typo'd catalog should come back quickly, not after five
   backoffs. A failed fetch keeps `children == nil`, so re-expanding retries, and shows the
   error as a child row.
 - `rebuildTree()` reuses nodes by id, so a rename, a recolour or a delete never collapses what
   the user had open. "Refresh" (context menu) drops one node's children; the tree header's
   reload button drops the lot.
-- Double-click inserts: a table's quoted `"catalog"."schema"."table"` goes into the active
-  query, a connection opens its editor, anything else toggles.
+- Double-click inserts: a table's quoted reference goes into the active query (`"catalog"."schema"."table"`
+  on trino, `"schema"."table"` on postgres, `` `database`.`table` `` on mysql), a connection opens
+  its editor, anything else toggles.
 - The filter box searches **what has already been loaded** and auto-opens matching levels. It
   cannot search a coordinator, and the UI says so.
 

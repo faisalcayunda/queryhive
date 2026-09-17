@@ -28,8 +28,13 @@ PYTHON_DIST_NAME="cpython-${PYTHON_VERSION}-macos-aarch64-none"
 # trino is left unpinned so the compile step resolves its own dependency tree;
 # the generated lockfile records the exact versions, which is what makes the
 # next build reproducible.
+# psycopg[binary] and PyMySQL are the Postgres and MySQL drivers
+# exporter/drivers.py reaches for; each is imported only when that driver is
+# used, but all three ship in the one engine so any connection works offline.
 TOP_LEVEL_REQS=(
   'trino>=0.330'
+  'psycopg[binary]>=3.1'
+  'PyMySQL>=1.1'
   'openpyxl==3.1.5'
   'xlwt==1.3.0'
 )
@@ -141,6 +146,8 @@ PYTHONPATH="$ENGINE_DIR/site-packages" PYTHONDONTWRITEBYTECODE=1 "$ENGINE_DIR/py
 import trino, openpyxl, xlwt
 import trino.auth
 import trino.dbapi
+import psycopg
+import pymysql
 " || die "post-trim import check failed, engine left in place for inspection (stamp not written)"
 
 # --- 7. stamp ----------------------------------------------------------------

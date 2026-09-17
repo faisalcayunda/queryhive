@@ -121,40 +121,8 @@ final class AppModel {
 
     // MARK: Connections
 
-    func presentConnectionEditor(_ connectionID: UUID?) {
-        editingConnection = ConnectionEditorTarget(connectionID)
-    }
-
-    func addConnection(fromURL text: String) {
-        guard let parsed = TrinoURL.parse(text) else {
-            notice = Notice(title: "Couldn't read that URL",
-                             message: "Expected something like https://user:password@trino.internal:8443/hive/analytics")
-            return
-        }
-        let name = parsed.host + (parsed.catalog.isEmpty ? "" : "/\(parsed.catalog)")
-        let connection = Connection(id: UUID(), name: name, color: .blue,
-                                    host: parsed.host, port: parsed.port, httpScheme: parsed.httpScheme,
-                                    user: parsed.user, catalog: parsed.catalog, schema: parsed.schema,
-                                    verify: true)
-        var next = connections
-        next.append(connection)
-        do {
-            try ConnectionStore.save(next)
-        } catch {
-            notice = Notice(title: "Couldn't save the connection", message: error.localizedDescription)
-            return
-        }
-        connections = next
-        if let password = parsed.password, !password.isEmpty {
-            do {
-                try ConnectionKeychain.set(password, for: connection.id)
-            } catch {
-                notice = Notice(title: "Couldn't save the password",
-                                 message: "Couldn't write the password for \(connection.name) to Keychain: \(error.localizedDescription)")
-            }
-        }
-        rebuildTree()
-        selectedTab?.connectionID = connection.id
+    func presentConnectionEditor(_ connectionID: UUID?, startAtURL: Bool = false) {
+        editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL)
     }
 
     func connectionName(id: UUID) -> String {
@@ -238,26 +206,41 @@ final class AppModel {
             node.error = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
-        switch node.kind {
-        case .connection:
+        // Which command lists a node's children depends on the driver as much as on the level:
+        // Trino's level under the connection is a catalog, MySQL's is a database, and Postgres
+        // has neither — its database is fixed by the connection, so its first level is a schema.
+        switch (connection.kind, node.kind) {
+        case (.trino, .connection):
             command = "catalogs"
-        case .catalog:
+        case (.trino, .catalog):
             command = "schemas"
-            env["TRINO_CATALOG"] = node.catalog ?? ""
-        case .schema:
+            env["DB_DATABASE"] = node.database ?? ""
+        case (.trino, .schema), (.postgres, .schema):
             command = "tables"
-            env["TRINO_CATALOG"] = node.catalog ?? ""
-            env["TRINO_SCHEMA"] = node.schema ?? ""
-        case .table:
+            if let database = node.database { env["DB_DATABASE"] = database }
+            env["DB_SCHEMA"] = node.schema ?? ""
+        case (.postgres, .connection):
+            command = "schemas"
+        case (.mysql, .connection):
+            // MySQL's information_schema calls a database a CATALOG_NAME, so `catalogs` is
+            // exactly `SHOW DATABASES`.
+            command = "catalogs"
+        case (.mysql, .database):
+            command = "tables"
+            env["DB_DATABASE"] = node.database ?? ""
+        default:
             return
         }
         env["RETRIES"] = "2"
         node.loading = true
         node.error = nil
         var message: String?
+        // `catalogs` means a catalog for Trino and a database for MySQL; the command is shared
+        // because it is the same question ("what is directly under the connection?").
+        let catalogNode = connection.kind == .mysql ? TreeNode.database : TreeNode.catalog
         Engine.run(command, env: env, onEvent: { event in
             switch event.event {
-            case "catalogs": node.children = (event.names ?? []).map { TreeNode.catalog($0, parent: node) }
+            case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
             case "schemas": node.children = (event.names ?? []).map { TreeNode.schema($0, parent: node) }
             case "tables": node.children = (event.names ?? []).map { TreeNode.table($0, parent: node) }
             case "error": message = event.message
@@ -281,21 +264,16 @@ final class AppModel {
         selectedTab?.insertIntoSQL(text)
     }
 
-    /// Catalog names the tree has already loaded for a connection. These are the options behind
-    /// the target fields' chevron; empty until that connection has been expanded, which is why
-    /// the field is a combo box rather than a menu.
-    func catalogNames(for connectionID: UUID?) -> [String] {
+    /// Names the tree has already loaded at one level. These are the options behind the target
+    /// fields' chevron; empty until that connection has been expanded, which is why the field is
+    /// a combo box rather than a menu. `database` narrows to one parent where the level has one.
+    func loadedNames(for connectionID: UUID?, kind: TreeNode.Kind, database: String = "") -> [String] {
         guard let connectionID else { return [] }
         return allNodes()
-            .filter { $0.connectionID == connectionID && $0.kind == .catalog }
-            .map(\.title)
-            .sorted()
-    }
-
-    func schemaNames(for connectionID: UUID?, catalog: String) -> [String] {
-        guard let connectionID, !catalog.isEmpty else { return [] }
-        return allNodes()
-            .filter { $0.connectionID == connectionID && $0.kind == .schema && $0.catalog == catalog }
+            .filter { node in
+                node.connectionID == connectionID && node.kind == kind
+                    && (database.isEmpty || node.database == database)
+            }
             .map(\.title)
             .sorted()
     }
@@ -304,8 +282,18 @@ final class AppModel {
     /// the output name, so the common case needs no typing.
     func prepareTableDestination(_ tab: QueryTab) {
         guard let connection = connection(for: tab) else { return }
-        if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.catalog }
-        if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
+        // The three drivers do not share a target shape: Postgres writes inside the database it
+        // is already connected to, so its catalog field is meaningless, and MySQL has no schema
+        // at all. Only the fields the driver actually has get a default.
+        switch connection.kind {
+        case .trino:
+            if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.database }
+            if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
+        case .postgres:
+            if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
+        case .mysql:
+            if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.database }
+        }
         if tab.trimmedTable.isEmpty { tab.targetTable = tab.trimmedName }
     }
 
@@ -336,7 +324,7 @@ final class AppModel {
 
         for node in allNodes() where matches(node.title) {
             switch node.kind {
-            case .catalog: add(node.title, .catalog)
+            case .catalog, .database: add(node.title, .catalog)
             case .schema: add(node.title, .schema)
             case .table: add(node.title, .table)
             case .connection: break
@@ -433,7 +421,7 @@ final class AppModel {
         tab.panel = .log
         tab.writtenTable = nil
         tab.note(.info, "\(connection.name) · \(connection.displayTarget)")
-        tab.note(.info, tab.runSummary)
+        tab.note(.info, tab.runSummary(for: connection.kind))
 
         let directory = tab.outputDirectory
         let command = tab.destination == .table ? "to_table" : "export"
@@ -521,30 +509,32 @@ final class AppModel {
     /// the connection editor's Test button, so the engine contract lives in exactly one place.
     /// The password travels in its own variable and never inside `TRINO_URL`, so a URL echoed
     /// back in an error message can never carry the secret.
-    static func connectionEnvironment(host: String, port: Int, scheme: String, user: String,
-                                      password: String?, catalog: String, schema: String,
-                                      verify: Bool) -> [String: String] {
-        var path = ""
-        if !catalog.isEmpty {
-            path = "/\(catalog)"
-            if !schema.isEmpty { path += "/\(schema)" }
-        }
-        return [
-            "TRINO_URL": "\(scheme.isEmpty ? "http" : scheme)://\(host):\(port)\(path)",
-            "TRINO_HOST": host,
-            "TRINO_PORT": String(port),
-            "TRINO_USER": user,
-            "TRINO_PASSWORD": password ?? "",
-            "TRINO_CATALOG": catalog,
-            "TRINO_SCHEMA": schema,
-            "TRINO_INSECURE": verify ? "" : "1",
+    static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
+                                      password: String?, database: String, schema: String,
+                                      scheme: String, sslmode: String, verify: Bool) -> [String: String] {
+        [
+            "DB_KIND": kind.rawValue,
+            "DB_HOST": host,
+            "DB_PORT": String(port),
+            "DB_USER": user,
+            "DB_PASSWORD": password ?? "",
+            "DB_DATABASE": database,
+            "DB_SCHEMA": schema,
+            // Trino's transport is a scheme; the other two express encryption through sslmode.
+            // Sending the wrong one is harmless — the engine ignores what a driver has no use
+            // for — but sending both would be confusing to read in a bug report.
+            "DB_SCHEME": kind == .trino ? (scheme.isEmpty ? "http" : scheme) : "",
+            "DB_SSLMODE": kind.hasSSLModes ? (sslmode.isEmpty ? kind.defaultSSLMode : sslmode) : "",
+            "DB_INSECURE": verify ? "" : "1",
         ]
     }
 
     static func connectionEnvironment(_ connection: Connection, password: String?) -> [String: String] {
-        connectionEnvironment(host: connection.host, port: connection.port, scheme: connection.httpScheme,
-                              user: connection.user, password: password, catalog: connection.catalog,
-                              schema: connection.schema, verify: connection.verify)
+        connectionEnvironment(kind: connection.kind, host: connection.host, port: connection.port,
+                              user: connection.user, password: password,
+                              database: connection.database, schema: connection.schema,
+                              scheme: connection.scheme, sslmode: connection.sslmode,
+                              verify: connection.verify)
     }
 
     /// Full environment for one export run: the connection plus the query, the destination and

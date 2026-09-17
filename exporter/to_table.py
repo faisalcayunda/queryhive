@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from trino.exceptions import TrinoUserError
 
+from .drivers import DRIVERS, Driver, driver_of
 from .source import TrinoConfig, describe_error
 
 log = logging.getLogger(__name__)
@@ -95,19 +96,24 @@ class TableResult:
 
 
 def quote_identifier(name: str) -> str:
-    """One double-quoted SQL identifier, with any embedded `"` doubled.
+    """One Trino-quoted SQL identifier, with any embedded `"` doubled.
 
-    The single implementation of Trino's one escape inside "..." (`""` for a
-    literal quote). app/engine/queryhive_engine.py imports this function rather
-    than carrying its own copy, so `schemas`, `tables` and `to_table` can never
-    disagree about how a name is quoted.
+    Kept as the Trino spelling of `Driver.quote` for callers that predate the
+    drivers module; every statement built here now asks the config's own driver
+    instead, so `schemas`, `tables` and `to_table` still cannot disagree about
+    how a name is quoted -- postgres doubles `"`, mysql doubles a backtick.
     """
-    return '"' + str(name).replace('"', '""') + '"'
+    return DRIVERS["trino"].quote(name)
 
 
-def table_reference(catalog: str, schema: str, table: str) -> str:
-    """`catalog.schema.table` as the caller reports it: written plainly, unquoted."""
-    return f"{catalog}.{schema}.{table}"
+def table_reference(catalog: str, schema: str, table: str, driver: Driver | None = None) -> str:
+    """The target as the driver writes it: `catalog.schema.table`, unquoted.
+
+    The parts the driver has no level for are dropped, which is the same three
+    settings meaning what the driver can actually use -- postgres reports
+    `schema.table`, mysql `database.table`.
+    """
+    return (driver or DRIVERS["trino"]).reference(catalog, schema, table)
 
 
 def _sql_body(sql: str) -> str:
@@ -120,21 +126,23 @@ def _sql_body(sql: str) -> str:
     return str(sql).strip().rstrip(";")
 
 
-def build_statements(mode, catalog, schema, table, sql) -> list[str]:
+def build_statements(mode, catalog, schema, table, sql, driver: Driver | None = None) -> list[str]:
     """The statements to run, in order, for one write mode.
 
-    The target is quoted part by part: a DROP must never be able to hit a
-    different table than the CREATE after it because one name happened to need
-    quotes and the other did not.
+    The target is quoted part by part by the driver -- a DROP must never be able
+    to hit a different table than the CREATE after it because one name happened
+    to need quotes and the other did not. All three drivers support all three
+    modes.
     """
-    target = ".".join(quote_identifier(part) for part in (catalog, schema, table))
+    driver = driver or DRIVERS["trino"]
+    target = driver.qualified(catalog, schema, table)
     body = _sql_body(sql)
     if mode == "create":
-        return [f"CREATE TABLE {target} AS {body}"]
+        return [driver.create_sql(target, body)]
     if mode == "replace":
-        return [f"DROP TABLE IF EXISTS {target}", f"CREATE TABLE {target} AS {body}"]
+        return [driver.drop_sql(target), driver.create_sql(target, body)]
     if mode == "append":
-        return [f"INSERT INTO {target} {body}"]
+        return [driver.append_sql(target, body)]
     raise ValueError(f"unknown WRITE_MODE {mode!r}; expected one of {', '.join(_WRITE_MODES)}")
 
 
@@ -236,17 +244,25 @@ def export_to_table(
 ) -> TableResult:
     """Run the write statements for `mode`; return what the coordinator reported.
 
+    `config` may be a TrinoConfig or a DatabaseConfig for any driver; the driver
+    decides how the target is quoted and how many of its three parts survive.
+
     One connection, one statement at a time, one fresh cursor each, each closed
     in a `finally`. The stats callback is attached to each of those cursors --
-    trino 0.339.0 takes it on `Connection.cursor()`, not on `connect()`.
+    trino 0.339.0 takes it on `Connection.cursor()`, not on `connect()` -- and
+    only for trino: psycopg and pymysql take no such keyword, so a driver with
+    no progress support simply gets a plain cursor and the reporter never fires.
     `on_write` fires once the connection is open and the first statement is
-    about to run; cancellation is checked inside the stats callback and asks
-    the coordinator to stop exactly once. A cancelled run returns normally with
-    a warning naming what is now uncertain -- the caller decides what that means
-    -- while a real failure raises TableExportError with the same warnings.
+    about to run; cancellation is checked inside the stats callback and asks the
+    coordinator to stop exactly once, so a driver with no stats has no cancel
+    path either -- a blocking `execute` cannot be interrupted from here anyway.
+    A cancelled run returns normally with a warning naming what is now uncertain
+    -- the caller decides what that means -- while a real failure raises
+    TableExportError with the same warnings.
     """
-    statements = build_statements(mode, catalog, schema, table, sql)
-    result = TableResult(table=table_reference(catalog, schema, table), mode=mode)
+    driver = driver_of(config)
+    statements = build_statements(mode, catalog, schema, table, sql, driver=driver)
+    result = TableResult(table=table_reference(catalog, schema, table, driver), mode=mode)
     # The DROP of a `replace` runs first and cannot be undone; remember it the
     # moment it succeeds so no later failure can hide it from the caller.
     drop_index = 0 if mode == "replace" else None
@@ -288,11 +304,12 @@ def export_to_table(
 
     # No keyword arguments for connect(): in the bundled client (trino 0.339.0)
     # `stats_callback` belongs to Connection.cursor(), and dbapi.connect()
-    # rejects it with a TypeError. The callback is attached per statement below.
-    conn = config.connect()
+    # rejects it with a TypeError. The callback is attached per statement below,
+    # by the driver, and only for a driver that has progress stats at all.
+    conn = driver.connect(config)
     try:
         for index, statement in enumerate(statements):
-            cursor = conn.cursor(stats_callback=on_stats_tick)
+            cursor = driver.cursor(conn, on_stats_tick)
             last_cursor = cursor
             if index == 0 and on_write is not None:
                 # The connection is open and this statement is next: exactly what

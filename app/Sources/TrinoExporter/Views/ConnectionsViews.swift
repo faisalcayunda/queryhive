@@ -8,7 +8,15 @@ func connectionTile(_ connection: Connection, size: CGFloat = 22) -> some View {
         .fill(LinearGradient(colors: [connection.color.color, connection.color.color.opacity(0.55)],
                               startPoint: .topLeading, endPoint: .bottomTrailing))
         .frame(width: size, height: size)
-        .overlay(Image(systemName: "server.rack").font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white))
+        .overlay {
+            if let logo = DriverLogo.image(for: connection.kind) {
+                Image(nsImage: logo).resizable().scaledToFit()
+                    .frame(width: size * 0.68, height: size * 0.68)
+            } else {
+                Image(systemName: connection.kind.symbol)
+                    .font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
+            }
+        }
 }
 
 /// The toolbar's connection dropdown. `.menuStyle(.borderlessButton)` drops any custom label in
@@ -84,19 +92,29 @@ private enum TestState {
 /// The connection editor, as Navicat presents it: a modal connection-properties dialog with
 /// Test, Save and Delete. Nothing behind it changes until Save.
 struct ConnectionEditorSheet: View {
-    let connectionID: UUID?
+    let target: ConnectionEditorTarget
     @Environment(AppModel.self) private var model
+
+    private var connectionID: UUID? { target.connectionID }
     @Environment(\.dismiss) private var dismiss
 
+    /// Which of the sheet's three states is showing. A saved connection starts at `.form`.
+    private enum Step { case typePicker, url, form }
+
+    @State private var step = Step.typePicker
+    @State private var urlText = ""
+    @State private var urlError: String?
     @State private var editingID: UUID?
     @State private var name = ""
     @State private var color = ConnectionColor.blue
+    @State private var kind = ConnectionKind.trino
     @State private var host = ""
-    @State private var port = 8443
-    @State private var httpScheme = "https"
+    @State private var port = ConnectionKind.trino.defaultPort
+    @State private var scheme = "https"
+    @State private var sslmode = ConnectionKind.postgres.defaultSSLMode
     @State private var user = ""
     @State private var credential = ""
-    @State private var catalog = ""
+    @State private var database = ""
     @State private var schema = ""
     @State private var verifyTLS = true
     @State private var confirmDelete = false
@@ -114,34 +132,37 @@ struct ConnectionEditorSheet: View {
     private var isDirty: Bool {
         guard let original else {
             return !(name.isEmpty && host.isEmpty && user.isEmpty && credential.isEmpty
-                     && catalog.isEmpty && schema.isEmpty && port == 8443 && httpScheme == "https")
+                     && database.isEmpty && schema.isEmpty)
         }
         return !credential.isEmpty || name != original.name || color != original.color
-            || host != original.host || port != original.port || httpScheme != original.httpScheme
-            || user != original.user || catalog != original.catalog || schema != original.schema
+            || kind != original.kind || host != original.host || port != original.port
+            || scheme != original.scheme || sslmode != original.sslmode
+            || user != original.user || database != original.database || schema != original.schema
             || verifyTLS != original.verify
     }
 
-    /// Name, host and user are what the engine cannot invent. Port and scheme always carry a
-    /// value; a blank password simply means "connect without BasicAuth".
+    /// Name, host and user are what the engine cannot invent, and Postgres cannot open a
+    /// connection without a database at all. Port and encryption always carry a value; a blank
+    /// password simply means "connect without one".
     private var missingRequired: Set<String> {
         var missing = Set<String>()
         if name.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("name") }
         if host.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("host") }
         if user.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("user") }
         if !(1...65535).contains(port) { missing.insert("port") }
+        if kind.requiresDatabase, database.trimmingCharacters(in: .whitespaces).isEmpty {
+            missing.insert("database")
+        }
         return missing
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-            ScrollView {
-                form.padding(20)
+            switch step {
+            case .typePicker: typePicker
+            case .url: urlStep
+            case .form: formStep
             }
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
-            footer
         }
         .frame(width: 560, height: 640)
         .background(Tone.canvas)
@@ -155,14 +176,139 @@ struct ConnectionEditorSheet: View {
         .onDisappear { testProcess?.terminate() }
     }
 
+    /// Step one, and only for a connection that does not exist yet: pick the type from a grid of
+    /// tiles, the way Navicat does. Choosing the driver first is not decoration — the three have
+    /// different default ports, different required fields and different tree shapes, so the form
+    /// cannot be drawn until the driver is known. Editing an existing connection skips straight
+    /// to the form.
+    private var typePicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("New Connection")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .padding(.horizontal, 20)
+                .frame(height: 84, alignment: .leading)
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            VStack(alignment: .leading, spacing: 14) {
+                SectionLabel(text: "Select a connection type")
+                HStack(spacing: 12) {
+                    ForEach(ConnectionKind.allCases) { option in
+                        ConnectionTypeTile(kind: option) { choose(option) }
+                    }
+                }
+                Text("The driver decides the default port, which fields are required, and what the "
+                     + "object tree can browse.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(20)
+            Spacer()
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            HStack(spacing: 10) {
+                Button("New Connection with URI…") { step = .url }
+                    .buttonStyle(.pill)
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.pill)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 62)
+        }
+    }
+
+    /// Step two, only reached from "New Connection with URI…". It parses into the *form* rather
+    /// than saving straight away, so the user sees what the URL actually meant before committing
+    /// to it — a URL with an unexpected port or database is easy to paste without reading.
+    private var urlStep: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("New Connection with URI")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .padding(.horizontal, 20)
+                .frame(height: 84, alignment: .leading)
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            VStack(alignment: .leading, spacing: 12) {
+                SectionLabel(text: "Connection URI")
+                TextField("postgresql://user:password@host:5432/mydb", text: $urlText)
+                    .field(invalid: urlError != nil)
+                    .onSubmit { applyURL() }
+                if let urlError {
+                    Text(urlError).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                }
+                Text("""
+                     trino://user:password@host:8443/hive/analytics
+                     postgresql://user:password@host:5432/mydb
+                     mysql://user:password@host:3306/mydb
+                     """)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(20)
+            Spacer()
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            HStack(spacing: 10) {
+                Button("Back") { step = .typePicker }
+                    .buttonStyle(.pill)
+                Spacer()
+                HubButton(title: "Continue", symbol: "arrow.right", hue: .connection) { applyURL() }
+                    .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 62)
+        }
+    }
+
+    private var formStep: some View {
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            ScrollView {
+                form.padding(20)
+            }
+            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            footer
+        }
+    }
+
+    /// Picking a tile is the only place the driver is chosen; the form then has no type control,
+    /// because changing it would invalidate half of what is already filled in.
+    private func choose(_ option: ConnectionKind) {
+        if port == kind.defaultPort { port = option.defaultPort }
+        kind = option
+        if option.hasSSLModes, sslmode.isEmpty { sslmode = option.defaultSSLMode }
+        step = .form
+    }
+
+    private func applyURL() {
+        guard let parsed = ConnectionURL.parse(urlText) else {
+            urlError = "Couldn't read that. Expected something like postgresql://user:password@host:5432/mydb"
+            return
+        }
+        urlError = nil
+        kind = parsed.kind
+        host = parsed.host
+        port = parsed.port
+        scheme = parsed.scheme.isEmpty ? "https" : parsed.scheme
+        sslmode = parsed.kind.defaultSSLMode
+        user = parsed.user
+        credential = parsed.password ?? ""
+        database = parsed.database
+        schema = parsed.schema
+        if name.isEmpty {
+            name = parsed.host + (parsed.database.isEmpty ? "" : "/\(parsed.database)")
+        }
+        step = .form
+    }
+
     private var header: some View {
         HStack(spacing: 14) {
-            SymbolHero(symbol: "server.rack", hue: .connection, size: 56, halo: false)
+            ConnectionBrandTile(kind: kind, size: 56)
             VStack(alignment: .leading, spacing: 2) {
                 Text(editingID == nil ? "New Connection" : (name.isEmpty ? "Connection" : name))
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .lineLimit(1)
-                Text(editingID == nil ? "Not saved yet." : "Saved coordinator.")
+                Text(editingID == nil ? "Not saved yet." : "Saved \(kind.label) connection.")
                     .font(.system(size: 12))
                     .foregroundStyle(Tone.secondary)
             }
@@ -173,6 +319,9 @@ struct ConnectionEditorSheet: View {
                     .foregroundStyle(Tone.amber)
                     .labelStyle(.titleAndIcon)
             }
+            Button("Change Type…") { step = .typePicker }
+                .buttonStyle(.pill)
+                .help("Pick a different driver — this clears the fields that only applied to \(kind.label)")
         }
         .padding(.horizontal, 20)
         .frame(height: 84)
@@ -181,26 +330,29 @@ struct ConnectionEditorSheet: View {
     private var form: some View {
         VStack(alignment: .leading, spacing: 14) {
             LabeledField("Name · Required") {
-                TextField("Trino production", text: $name).field(invalid: attemptedSave && missingRequired.contains("name"))
+                TextField("\(kind.label) production", text: $name)
+                    .field(invalid: attemptedSave && missingRequired.contains("name"))
                 requiredHint("name")
             }
             LabeledField("Color") { ColorSwatchPicker(selection: $color) }
             LabeledField("Host · Required") {
-                TextField("trino.internal", text: $host).field(invalid: attemptedSave && missingRequired.contains("host"))
+                TextField("db.internal", text: $host).field(invalid: attemptedSave && missingRequired.contains("host"))
                 requiredHint("host")
             }
             HStack(alignment: .top, spacing: 12) {
-                LabeledField("Scheme") {
-                    Segmented(selection: $httpScheme, options: ["https", "http"]) { $0.uppercased() }
+                if kind == .trino {
+                    LabeledField("Scheme") {
+                        Segmented(selection: $scheme, options: ["https", "http"]) { $0.uppercased() }
+                    }
+                    .frame(width: 150)
                 }
-                .frame(width: 160)
                 LabeledField("Port · Required") {
-                    TextField("8443", value: $port, format: .number.grouping(.never))
+                    TextField(String(kind.defaultPort), value: $port, format: .number.grouping(.never))
                         .field(invalid: attemptedSave && missingRequired.contains("port"))
                     requiredHint("port")
                 }
             }
-            .onChange(of: httpScheme) { old, new in
+            .onChange(of: scheme) { old, new in
                 // Follow the standard port for the scheme, but only while the user is still on
                 // the other scheme's standard one.
                 if old == "http", new == "https", port == 8080 { port = 8443 }
@@ -213,21 +365,41 @@ struct ConnectionEditorSheet: View {
             LabeledField(editingID == nil ? "Password" : "Password · leave blank to keep") {
                 SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
                     .field()
-                Text("Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https.")
+                Text(passwordHint)
                     .font(.system(size: 11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(alignment: .top, spacing: 12) {
-                LabeledField("Catalog") { TextField("hive", text: $catalog).field() }
-                LabeledField("Schema") { TextField("analytics", text: $schema).field() }
+                LabeledField(kind.databaseLabel + (kind.requiresDatabase ? " · Required" : "")) {
+                    TextField(kind == .trino ? "hive" : "mydb", text: $database)
+                        .field(invalid: attemptedSave && missingRequired.contains("database"))
+                    requiredHint("database")
+                }
+                if kind.hasSchemaLevel {
+                    LabeledField("Schema") { TextField("public", text: $schema).field() }
+                }
             }
-            ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+            if kind.hasSSLModes {
+                LabeledField("SSL mode") {
+                    Segmented(selection: $sslmode, options: kind.sslModes) { $0 }
+                }
+            } else {
+                ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+            }
 
             if case .idle = testState {} else {
                 Rectangle().fill(.white.opacity(0.08)).frame(height: 1).padding(.vertical, 2)
                 testResultRow
             }
+        }
+    }
+
+    private var passwordHint: String {
+        switch kind {
+        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https."
+        case .postgres: "Postgres accepts a password over any SSL mode, including \"prefer\"."
+        case .mysql: "MySQL accepts a password over either SSL mode."
         }
     }
 
@@ -246,10 +418,10 @@ struct ConnectionEditorSheet: View {
                 ProgressView().controlSize(.small)
                 Text("Testing…").font(.body13).foregroundStyle(Tone.secondary)
             }
-        case .success(let catalogs):
+        case .success(let level):
             HStack(spacing: 8) {
                 Circle().fill(Tone.mint).frame(width: 10, height: 10)
-                Text("Connected · \(pluralized(catalogs, "catalog")).")
+                Text("Connected · \(pluralized(level, kind == .postgres ? "schema" : "catalog")).")
                     .font(.body13)
                     .textSelection(.enabled)
             }
@@ -298,21 +470,28 @@ struct ConnectionEditorSheet: View {
         testProcess = nil
         testRun = UUID()
         editingID = connectionID
+        // Editing an existing connection goes straight to its fields; only a new one needs the
+        // type chosen first.
+        step = connectionID != nil ? .form : (target.startAtURL ? .url : .typePicker)
         testState = .idle
         credential = ""
         guard let connection = original else {
             draftID = UUID()
-            name = ""; color = .blue; host = ""; port = 8443; httpScheme = "https"
-            user = ""; catalog = ""; schema = ""; verifyTLS = true
+            name = ""; color = .blue; kind = .trino; host = ""
+            port = ConnectionKind.trino.defaultPort; scheme = "https"
+            sslmode = ConnectionKind.postgres.defaultSSLMode
+            user = ""; database = ""; schema = ""; verifyTLS = true
             return
         }
         name = connection.name
         color = connection.color
+        kind = connection.kind
         host = connection.host
         port = connection.port
-        httpScheme = connection.httpScheme
+        scheme = connection.scheme
+        sslmode = connection.sslmode.isEmpty ? connection.kind.defaultSSLMode : connection.sslmode
         user = connection.user
-        catalog = connection.catalog
+        database = connection.database
         schema = connection.schema
         verifyTLS = connection.verify
     }
@@ -324,11 +503,13 @@ struct ConnectionEditorSheet: View {
         let connection = Connection(id: id,
                                      name: name.trimmingCharacters(in: .whitespaces),
                                      color: color,
+                                     kind: kind,
                                      host: host.trimmingCharacters(in: .whitespaces),
                                      port: port,
-                                     httpScheme: httpScheme,
+                                     scheme: scheme,
+                                     sslmode: sslmode,
                                      user: user.trimmingCharacters(in: .whitespaces),
-                                     catalog: catalog.trimmingCharacters(in: .whitespaces),
+                                     database: database.trimmingCharacters(in: .whitespaces),
                                      schema: schema.trimmingCharacters(in: .whitespaces),
                                      verify: verifyTLS)
         // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
@@ -393,13 +574,15 @@ struct ConnectionEditorSheet: View {
             return
         }
         let env = AppModel.connectionEnvironment(
+            kind: kind,
             host: host.trimmingCharacters(in: .whitespaces),
             port: port,
-            scheme: httpScheme,
             user: user.trimmingCharacters(in: .whitespaces),
             password: credential.isEmpty ? storedPassword : credential,
-            catalog: catalog.trimmingCharacters(in: .whitespaces),
+            database: database.trimmingCharacters(in: .whitespaces),
             schema: schema.trimmingCharacters(in: .whitespaces),
+            scheme: scheme,
+            sslmode: sslmode,
             verify: verifyTLS
         )
         var catalogs = 0
@@ -417,5 +600,103 @@ struct ConnectionEditorSheet: View {
                 testState = .failure(message ?? log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)")
             }
         })
+    }
+}
+
+/// One tile in the new-connection grid. Navicat's picker is the reference: the type is a
+/// picture with a name, not an entry in a dropdown, because it is the one choice that decides
+/// everything after it.
+struct ConnectionTypeTile: View {
+    let kind: ConnectionKind
+    let action: () -> Void
+    @State private var hovering = false
+
+    /// Each driver's own colour, so the grid reads at a glance. These are the projects' brand
+    /// hues, not their logos — the glyph stays this app's own.
+    private var hue: Hue {
+        switch kind {
+        case .trino: Hue(glow: Tone.ice, accent: Tone.violet)
+        case .postgres: Hue(glow: Color(hex: 0x5B9BEE), accent: Color(hex: 0x2C5C9E))
+        case .mysql: Hue(glow: Color(hex: 0x2BB7E0), accent: Color(hex: 0x00698C))
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(hue.gradient)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
+                                                 startPoint: .top, endPoint: .center))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(.white.opacity(0.28))
+                    }
+                    .overlay {
+                        if let logo = DriverLogo.image(for: kind) {
+                            Image(nsImage: logo).resizable().scaledToFit()
+                                .frame(width: 44, height: 44)
+                                .shadow(color: .black.opacity(0.3), radius: 3, y: 2)
+                        } else {
+                            Image(systemName: kind.symbol)
+                                .font(.system(size: 26, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .shadow(color: .black.opacity(0.25), radius: 3, y: 2)
+                        }
+                    }
+                    .frame(width: 74, height: 74)
+                    .shadow(color: hue.accent.opacity(hovering ? 0.6 : 0.35), radius: hovering ? 16 : 10, y: 4)
+
+                Text(kind.label)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                Text(verbatim: "port \(kind.defaultPort)")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Tone.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .background(Color.white.opacity(hovering ? 0.07 : 0.03),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(hovering ? 0.18 : 0.09)))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// The editor header's tile: the driver's own mark on its own colour, so the sheet says which
+/// database it is configuring before the form says anything.
+struct ConnectionBrandTile: View {
+    let kind: ConnectionKind
+    var size: CGFloat = 56
+
+    private var hue: Hue {
+        switch kind {
+        case .trino: Hue(glow: Tone.ice, accent: Tone.violet)
+        case .postgres: Hue(glow: Color(hex: 0x5B9BEE), accent: Color(hex: 0x2C5C9E))
+        case .mysql: Hue(glow: Color(hex: 0x2BB7E0), accent: Color(hex: 0x00698C))
+        }
+    }
+
+    var body: some View {
+        let tile = RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+        tile.fill(hue.gradient)
+            .overlay(tile.fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
+                                               startPoint: .top, endPoint: .center)))
+            .overlay(tile.strokeBorder(.white.opacity(0.3)))
+            .overlay {
+                if let logo = DriverLogo.image(for: kind) {
+                    Image(nsImage: logo).resizable().scaledToFit()
+                        .frame(width: size * 0.56, height: size * 0.56)
+                }
+            }
+            .frame(width: size, height: size)
+            .shadow(color: hue.accent.opacity(0.5), radius: size * 0.16, y: size * 0.06)
     }
 }

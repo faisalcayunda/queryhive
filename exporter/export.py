@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
 
+from .drivers import DatabaseConfig
 from .source import QueryStream, TrinoConfig
 from .writers import WRITERS, Column
 
@@ -249,7 +250,7 @@ def _prefetched(batches: Iterable[Sequence], depth: int = 2) -> Iterator[Sequenc
 
 
 def run_export(
-    config: TrinoConfig,
+    config: TrinoConfig | DatabaseConfig,
     sql: str,
     out_dir: str | Path,
     basename: str,

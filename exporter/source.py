@@ -1,4 +1,9 @@
-"""Batched, resumable-ish row streaming from Trino.
+"""Batched, resumable-ish row streaming from a database.
+
+Nothing here is Trino-specific but the retry classes and the plain-HTTP
+auto-upgrade below, which is guarded so a Postgres or MySQL config cannot trip
+it: a `DatabaseConfig` for any driver is accepted anywhere a `TrinoConfig` is,
+and only its `.connect()` is used.
 
 The single biggest cause of "error fetching results" is pulling the whole
 result set into memory with fetchall(). This module never does that: it walks
@@ -30,6 +35,7 @@ from typing import Iterator
 import trino
 from trino import exceptions as trino_exc
 
+from .drivers import DRIVERS, DatabaseConfig
 from .writers import Column
 
 log = logging.getLogger(__name__)
@@ -91,7 +97,13 @@ def describe_error(exc: BaseException) -> str:
 @dataclass
 class TrinoConfig:
     """Where to connect. Nothing here is assumed: host, port, scheme and every
-    credential come from the caller (CLI flag, env var, or the web form)."""
+    credential come from the caller (CLI flag, env var, or the web form).
+
+    Still the config exporter/cli.py and exporter/web.py build, and unchanged in
+    every field they touch. `exporter/drivers.py` owns the connection itself now
+    (`DatabaseConfig` is its multi-driver sibling); `kind` is the one addition,
+    and it is what `Driver` sees instead of a class check.
+    """
 
     host: str = ""
     port: int = 8080
@@ -105,6 +117,7 @@ class TrinoConfig:
     session_properties: dict[str, str] = field(default_factory=dict)
     request_timeout: float = 300.0
     max_attempts: int = 5
+    kind: str = "trino"
 
     @classmethod
     def from_url(cls, url: str, **overrides) -> "TrinoConfig":
@@ -146,36 +159,29 @@ class TrinoConfig:
         ):
             self.http_scheme = "https"
 
-    def connect(self):
-        if not self.host:
-            raise ValueError("no Trino host configured")
-        auth = None
-        if self.password:
-            auth = trino.auth.BasicAuthentication(self.user, self.password)
-        return trino.dbapi.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            catalog=self.catalog or None,
-            schema=self.schema or None,
-            http_scheme=self.http_scheme,
-            auth=auth,
-            verify=self.verify,
-            source=self.source,
-            session_properties=self.session_properties or None,
-            request_timeout=self.request_timeout,
-            max_attempts=self.max_attempts,
-            # keeps a long query alive while a slow writer drains the batch
-            heartbeat_interval=30.0,
-        )
+    def connect(self, stats_callback=None):
+        """trino.dbapi.connect, built by the Trino driver.
+
+        One implementation for both config shapes: `DatabaseConfig(kind="trino")`
+        and this class reach the same keyword arguments. `stats_callback` is
+        accepted for signature parity with DatabaseConfig.connect and ignored --
+        trino 0.339.0 takes it on `Connection.cursor()`.
+        """
+        return DRIVERS["trino"].connect(self, stats_callback)
 
 
 class QueryStream:
-    """Context manager yielding (columns, row iterator)."""
+    """Context manager yielding (columns, row iterator).
+
+    `config` is anything with a `.connect()`: a TrinoConfig, a DatabaseConfig
+    for any of the three drivers, or a caller's own object. Nothing here reads a
+    driver-specific field -- only the plain-HTTP auto-upgrade below does, and it
+    is guarded so a Postgres or MySQL config cannot trip it.
+    """
 
     def __init__(
         self,
-        config: TrinoConfig,
+        config: TrinoConfig | DatabaseConfig,
         sql: str,
         batch_size: int = 10_000,
         retries: int = 5,
@@ -234,12 +240,23 @@ class QueryStream:
                 # Any other HttpError (bad SQL, auth failure) is a real error.
                 if "plain HTTP" not in str(exc) and b"plain HTTP" not in getattr(exc, "args", (b"",))[0:1]:
                     raise
-                if self.config.http_scheme != "https":
+                # Trino-only, and guarded: a psycopg or pymysql config has no
+                # scheme to upgrade, and `dataclasses.replace(..., scheme=...)`
+                # on one would be a TypeError. TrinoConfig names the field
+                # `http_scheme`, DatabaseConfig names it `scheme`.
+                field_name = (
+                    "http_scheme" if hasattr(self.config, "http_scheme")
+                    else "scheme" if hasattr(self.config, "scheme")
+                    else None
+                )
+                if field_name is None:
+                    raise  # not a Trino connection: nothing to upgrade, no retry
+                if getattr(self.config, field_name) != "https":
                     import dataclasses
                     log.warning(
                         "auto-upgrading scheme to https (nginx 400: plain HTTP sent to HTTPS port)"
                     )
-                    self.config = dataclasses.replace(self.config, http_scheme="https")
+                    self.config = dataclasses.replace(self.config, **{field_name: "https"})
                 last = exc
                 if attempt == self.retries:
                     break

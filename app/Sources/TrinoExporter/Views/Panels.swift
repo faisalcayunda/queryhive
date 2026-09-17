@@ -168,7 +168,10 @@ struct LogRow: View {
 /// ever reaches this app, so there is no file list and no preview — the target, the mode and the
 /// row count the coordinator reported are the entire result.
 struct TablePanel: View {
+    @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
+
+    private var driverKind: ConnectionKind { model.connection(for: tab)?.kind ?? .trino }
 
     private var rowsText: String {
         switch tab.stage {
@@ -182,7 +185,7 @@ struct TablePanel: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    infoRow("Target", tab.writtenTable ?? tab.tableTarget, monospaced: true)
+                    infoRow("Target", tab.writtenTable ?? tab.target(for: driverKind), monospaced: true)
                     infoRow("Statement", tab.writeMode.statement)
                     infoRow("Rows written", rowsText)
                     if let queryID = tab.queryID {
@@ -203,7 +206,7 @@ struct TablePanel: View {
                 Spacer()
                 Button("Copy Name") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(tab.writtenTable ?? tab.tableTarget, forType: .string)
+                    NSPasteboard.general.setString(tab.writtenTable ?? tab.target(for: driverKind), forType: .string)
                 }
                 .buttonStyle(.pill)
                 .disabled(tab.trimmedTable.isEmpty)

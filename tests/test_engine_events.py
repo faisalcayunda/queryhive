@@ -77,6 +77,36 @@ try:
 except ImportError:
     trino = _install_trino_stub()
 
+
+def _install_driver_stub(name):
+    """The import surface of psycopg / pymysql, for a checkout without them.
+
+    exporter/drivers.py imports each client package inside connect(), so the
+    module only has to exist the moment a check reaches that driver -- and every
+    check replaces its connect() with a fake before that. The app bundles the
+    real packages; a bare checkout may not have them.
+    """
+    print(f"note: {name} is not installed; using a local stub for the import surface", file=sys.stderr)
+    module = types.ModuleType(name)
+
+    def connect(**kwargs):  # pragma: no cover - always replaced by the fake
+        raise AssertionError("the fake connect was not installed")
+
+    module.connect = connect
+    sys.modules[name] = module
+    return module
+
+
+try:
+    import psycopg
+except ImportError:
+    psycopg = _install_driver_stub("psycopg")
+
+try:
+    import pymysql
+except ImportError:
+    pymysql = _install_driver_stub("pymysql")
+
 ENGINE_PATH = ROOT / "app" / "engine" / "queryhive_engine.py"
 _spec = importlib.util.spec_from_file_location("queryhive_engine", ENGINE_PATH)
 engine = importlib.util.module_from_spec(_spec)
@@ -239,7 +269,25 @@ def fake_connect(factory):
         trino.dbapi.connect = original
 
 
+@contextlib.contextmanager
+def fake_dbapi(module, factory):
+    """Replace one client package's connect() for the duration of one check.
+
+    drivers.py reaches for `psycopg.connect` / `pymysql.connect` at call time, so
+    patching the module attribute is what routes a check down that driver's path
+    without a server.
+    """
+    original = module.connect
+    module.connect = factory
+    try:
+        yield
+    finally:
+        module.connect = original
+
+
 ENGINE_KEYS = (
+    "DB_KIND", "DB_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_DATABASE",
+    "DB_SCHEMA", "DB_SCHEME", "DB_SSLMODE", "DB_INSECURE",
     "TRINO_URL", "TRINO_HOST", "TRINO_PORT", "TRINO_USER", "TRINO_PASSWORD", "TRINO_CATALOG",
     "TRINO_SCHEMA", "TRINO_INSECURE", "SQL", "SQL_PATH", "FORMAT", "OUT_DIR", "NAME", "ZIP",
     "BATCH_SIZE", "ROWS_PER_FILE", "RETRIES", "DELIMITER", "ENCODING", "HEADER", "BOM",
@@ -1246,6 +1294,485 @@ def check_error_event_survives_an_unstringable_failure():
     events = events_of(out)
     assert event_names(events) == ["error"], events
     assert "the real message" in events[0]["message"], events
+
+
+# --------------------------------------------------------------------------- #
+# postgres and mysql: the same protocol, three different drivers
+# --------------------------------------------------------------------------- #
+
+POSTGRES_SCHEMAS_SQL = (
+    "SELECT schema_name FROM information_schema.schemata "
+    "WHERE schema_name NOT LIKE 'pg\\_%' "
+    "AND schema_name <> 'information_schema' ORDER BY 1"
+)
+
+
+def postgres_tables_sql(schema):
+    return (
+        "SELECT table_name FROM information_schema.tables "
+        f"WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE' ORDER BY 1"
+    )
+
+
+class NoStatsConnection:
+    """A connection whose cursor() takes nothing at all.
+
+    The real psycopg and pymysql cursors accept no `stats_callback`, so this
+    fake does not either: if to_table ever handed one over, the TypeError the
+    bundled interpreter would raise shows up here instead of only in a live run.
+    """
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.cursor_calls = 0
+        self.closed = False
+
+    def cursor(self):
+        self.cursor_calls += 1
+        return self._cursor
+
+    def close(self):
+        self.closed = True
+
+
+def check_postgres_kind_reaches_psycopg():
+    """DB_KIND=postgres with DB_HOST opens psycopg, never Trino; aliases still do.
+
+    The two halves of the environment contract in one place: a driver is chosen
+    by DB_KIND and its connect path is the client that driver names, while the
+    older TRINO_* names keep reaching the Trino path they always did.
+    """
+    trino_calls = []
+    pg_seen = {}
+    cursor = FakeCursor([("public",)])
+
+    def pg_connect(**kwargs):
+        pg_seen.update(kwargs)
+        return FakeConnection(cursor)
+
+    def trino_connect(**kwargs):
+        trino_calls.append(kwargs)
+        return FakeConnection(FakeCursor())
+
+    with fake_dbapi(psycopg, pg_connect), fake_connect(trino_connect):
+        code, out, _err = run_engine(
+            "test", DB_KIND="postgres", DB_HOST="pg.internal", DB_PORT="5433",
+            DB_USER="analyst", DB_DATABASE="appdb", DB_PASSWORD="secret",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert not trino_calls, "DB_KIND=postgres still went through trino.dbapi.connect"
+    assert pg_seen["host"] == "pg.internal" and pg_seen["port"] == 5433, pg_seen
+    assert pg_seen["user"] == "analyst" and pg_seen["dbname"] == "appdb", pg_seen
+    assert pg_seen["password"] == "secret", pg_seen
+    assert cursor.statements == [POSTGRES_SCHEMAS_SQL], cursor.statements  # test's own probe
+    assert cursor.closed, "the engine left a handle open"
+
+    trino_seen = {}
+    trino_cursor = FakeCursor([("system",), ("hive",)])
+
+    def trino_connect_ok(**kwargs):
+        trino_seen.update(kwargs)
+        return FakeConnection(trino_cursor)
+
+    with fake_connect(trino_connect_ok):
+        code, out, _err = run_engine(
+            "test", TRINO_HOST="trino.internal", TRINO_PORT="8081", TRINO_USER="analyst",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert trino_seen["host"] == "trino.internal" and trino_seen["port"] == 8081, trino_seen
+    assert trino_seen["user"] == "analyst", trino_seen
+    assert trino_cursor.statements == ["SHOW CATALOGS"], trino_cursor.statements
+    assert only_event(events_of(out), "test")["catalog_count"] == 2
+
+
+def check_db_names_beat_trino_aliases():
+    """DB_* wins when both it and its TRINO_* alias name the same setting."""
+    trino_seen = {}
+
+    def connect(**kwargs):
+        trino_seen.update(kwargs)
+        return FakeConnection(FakeCursor([("hive",)]))
+
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "test",
+            DB_HOST="db.internal", TRINO_HOST="trino.internal",
+            DB_PORT="9999", TRINO_PORT="8081",
+            DB_USER="dbuser", TRINO_USER="trinuser",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert trino_seen["host"] == "db.internal", trino_seen
+    assert trino_seen["port"] == 9999, trino_seen
+    assert trino_seen["user"] == "dbuser", trino_seen
+
+    # DB_DATABASE is TRINO_CATALOG's successor, so it names the connection's
+    # catalog too -- and, on postgres, the database.
+    trino_seen = {}
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "test", DB_HOST="trino.internal", DB_DATABASE="hive", TRINO_CATALOG="other",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert trino_seen["catalog"] == "hive", trino_seen
+
+    pg_seen = {}
+
+    def pg_connect(**kwargs):
+        pg_seen.update(kwargs)
+        return FakeConnection(FakeCursor([("public",)]))
+
+    with fake_dbapi(psycopg, pg_connect):
+        code, out, _err = run_engine(
+            "test", DB_KIND="postgres", DB_HOST="pg.internal",
+            DB_DATABASE="appdb", TRINO_CATALOG="hive",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert pg_seen["dbname"] == "appdb", pg_seen
+
+
+def check_identifier_quoting_per_driver():
+    """Each driver doubles its own quote character and leaves the other's alone."""
+    from exporter.drivers import DRIVERS
+
+    assert DRIVERS["trino"].quote('we"ird') == '"we""ird"', DRIVERS["trino"].quote('we"ird')
+    assert DRIVERS["postgres"].quote('we"ird') == '"we""ird"', DRIVERS["postgres"].quote('we"ird')
+    assert DRIVERS["mysql"].quote("we`ird") == "`we``ird`", DRIVERS["mysql"].quote("we`ird")
+    # A name holding the other driver's quote char is not this driver's business.
+    assert DRIVERS["mysql"].quote('we"ird') == '`we"ird`', DRIVERS["mysql"].quote('we"ird')
+    assert DRIVERS["trino"].quote("we`ird") == '"we`ird"', DRIVERS["trino"].quote("we`ird")
+    assert DRIVERS["postgres"].quote("we`ird") == '"we`ird"', DRIVERS["postgres"].quote("we`ird")
+
+
+def check_qualified_drops_the_level_it_lacks():
+    """One target, three statements: the parts a driver has no level for go."""
+    from exporter.drivers import DRIVERS
+
+    assert DRIVERS["trino"].qualified("hive", "analytics", "foo") == '"hive"."analytics"."foo"'
+    assert DRIVERS["postgres"].qualified("hive", "analytics", "foo") == '"analytics"."foo"'
+    assert DRIVERS["mysql"].qualified("hive", "analytics", "foo") == "`hive`.`foo`"
+    # Postgres cannot reach another database and MySQL has no schema: each drops
+    # the slot it has no place for rather than writing a name that cannot exist.
+    assert DRIVERS["postgres"].slots == ("schema", "table")
+    assert DRIVERS["mysql"].slots == ("database", "table")
+
+
+def check_postgres_has_no_catalog_level():
+    """`catalogs` on postgres is a usage error naming the driver; the rest work."""
+    calls = []
+
+    def connect(**kwargs):
+        calls.append(kwargs)
+        return FakeConnection(FakeCursor())
+
+    with fake_dbapi(psycopg, connect):
+        code, out, _err = run_engine("catalogs", DB_KIND="postgres", DB_HOST="pg.internal")
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["error"], events
+    assert "postgres" in events[0]["message"], events[0]
+    assert "catalog" in events[0]["message"], events[0]
+    assert not calls, "the engine connected for a command the driver cannot answer"
+
+    cases = (
+        ("schemas", [("public",), ("analytics",)], {}, POSTGRES_SCHEMAS_SQL),
+        ("tables", [("wilayah",)], {"DB_SCHEMA": "analytics"}, postgres_tables_sql("analytics")),
+    )
+    for command, rows, values, expected in cases:
+        cursor = FakeCursor(rows)
+
+        def pg_connect(**kwargs):
+            return FakeConnection(cursor)
+
+        with fake_dbapi(psycopg, pg_connect):
+            code, out, _err = run_engine(
+                command, DB_KIND="postgres", DB_HOST="pg.internal", **values
+            )
+        assert code == 0, f"{command}: exit {code}, stdout={out!r}"
+        assert cursor.statements == [expected], cursor.statements
+        assert only_event(events_of(out), command)["names"] == [row[0] for row in rows]
+
+    # A blank DB_SCHEMA is a usage error before the network, named as a setting.
+    calls = []
+    with fake_dbapi(psycopg, lambda **kwargs: calls.append(kwargs) or FakeConnection(FakeCursor())):
+        code, out, _err = run_engine("tables", DB_KIND="postgres", DB_HOST="pg.internal")
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    message = events_of(out)[0]["message"]
+    assert "DB_SCHEMA" in message and "TRINO_SCHEMA" in message, message
+    assert not calls, "the engine connected despite a blank schema"
+
+
+def check_mysql_catalogs_are_databases():
+    """MySQL's top level is its databases, and `tables` needs the database level."""
+    seen = {}
+    cursor = FakeCursor([("information_schema",), ("mydb",)])
+
+    def connect(**kwargs):
+        seen.update(kwargs)
+        return FakeConnection(cursor)
+
+    with fake_dbapi(pymysql, connect):
+        code, out, _err = run_engine("catalogs", DB_KIND="mysql", DB_HOST="mysql.internal",
+                                     DB_USER="root")
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["SHOW DATABASES"], cursor.statements
+    assert only_event(events_of(out), "catalogs")["names"] == ["information_schema", "mydb"]
+    assert seen["host"] == "mysql.internal" and seen["port"] == 3306, seen
+    assert seen["user"] == "root", seen
+
+    cursor = FakeCursor([("orders",), ("users",)])
+    seen = {}
+
+    def connect_tables(**kwargs):
+        seen.update(kwargs)
+        return FakeConnection(cursor)
+
+    with fake_dbapi(pymysql, connect_tables):
+        code, out, _err = run_engine("tables", DB_KIND="mysql", DB_HOST="mysql.internal",
+                                     DB_DATABASE="mydb", DB_SCHEMA="ignored")
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["SHOW TABLES FROM `mydb`"], cursor.statements
+    assert seen["database"] == "mydb", seen
+    assert only_event(events_of(out), "tables")["names"] == ["orders", "users"]
+
+    # MySQL has no schema level at all.
+    calls = []
+    with fake_dbapi(pymysql, lambda **kwargs: calls.append(kwargs) or FakeConnection(FakeCursor())):
+        code, out, _err = run_engine("schemas", DB_KIND="mysql", DB_HOST="mysql.internal")
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    message = events_of(out)[0]["message"]
+    assert "mysql" in message and "schema" in message, message
+    assert not calls, "the engine connected for a command the driver cannot answer"
+
+    # And a blank database is a usage error before the network.
+    calls = []
+    with fake_dbapi(pymysql, lambda **kwargs: calls.append(kwargs) or FakeConnection(FakeCursor())):
+        code, out, _err = run_engine("tables", DB_KIND="mysql", DB_HOST="mysql.internal")
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    assert "DB_DATABASE" in events_of(out)[0]["message"], events_of(out)[0]
+    assert not calls, "the engine connected despite a blank database"
+
+
+def check_to_table_builds_each_drivers_statement():
+    """`create` and `replace` through postgres and mysql, quoted their way."""
+    cursor = FakeCursor(rowcount=3)
+
+    def pg_connect(**kwargs):
+        return FakeConnection(cursor)
+
+    with fake_dbapi(psycopg, pg_connect):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="postgres", DB_HOST="pg.internal", SQL="SELECT 1",
+            TARGET_CATALOG="ignored", TARGET_SCHEMA="analytics", TARGET_TABLE="foo",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ['CREATE TABLE "analytics"."foo" AS SELECT 1'], cursor.statements
+    done = events_of(out)[-1]
+    assert done["table"] == "analytics.foo", done  # the reference the driver wrote
+    assert done["mode"] == "create" and done["rows"] == 3, done
+
+    cursors = []
+
+    def pg_factory():
+        fresh = FakeCursor(rowcount=1)
+        cursors.append(fresh)
+        return fresh
+
+    with fake_dbapi(psycopg, lambda **kwargs: FakeConnection(pg_factory)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="postgres", DB_HOST="pg.internal", SQL="SELECT 1",
+            WRITE_MODE="replace", TARGET_SCHEMA="analytics", TARGET_TABLE="foo",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert [c.statements for c in cursors] == [
+        ['DROP TABLE IF EXISTS "analytics"."foo"'],
+        ['CREATE TABLE "analytics"."foo" AS SELECT 1'],
+    ], [c.statements for c in cursors]
+    assert events_of(out)[-1]["warnings"], events_of(out)[-1]
+
+    cursor = FakeCursor(rowcount=2)
+
+    def my_connect(**kwargs):
+        return FakeConnection(cursor)
+
+    with fake_dbapi(pymysql, my_connect):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="mysql", DB_HOST="mysql.internal", SQL="SELECT 1",
+            TARGET_CATALOG="mydb", TARGET_SCHEMA="ignored", TARGET_TABLE="foo",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["CREATE TABLE `mydb`.`foo` AS SELECT 1"], cursor.statements
+    assert events_of(out)[-1]["table"] == "mydb.foo", events_of(out)[-1]
+
+    cursors = []
+
+    def my_factory():
+        fresh = FakeCursor(rowcount=1)
+        cursors.append(fresh)
+        return fresh
+
+    with fake_dbapi(pymysql, lambda **kwargs: FakeConnection(my_factory)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="mysql", DB_HOST="mysql.internal", SQL="SELECT 1",
+            WRITE_MODE="replace", TARGET_CATALOG="mydb", TARGET_TABLE="foo",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert [c.statements for c in cursors] == [
+        ["DROP TABLE IF EXISTS `mydb`.`foo`"],
+        ["CREATE TABLE `mydb`.`foo` AS SELECT 1"],
+    ], [c.statements for c in cursors]
+
+    # A quote character inside a target part is doubled by the driver that owns it.
+    cursor = FakeCursor(rowcount=1)
+    with fake_dbapi(psycopg, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="postgres", DB_HOST="pg.internal", SQL="SELECT 1",
+            TARGET_SCHEMA='an"alytics', TARGET_TABLE="foo",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ['CREATE TABLE "an""alytics"."foo" AS SELECT 1'], cursor.statements
+
+    cursor = FakeCursor(rowcount=1)
+    with fake_dbapi(pymysql, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="mysql", DB_HOST="mysql.internal", SQL="SELECT 1",
+            TARGET_CATALOG="my`db", TARGET_TABLE="fo`o",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["CREATE TABLE `my``db`.`fo``o` AS SELECT 1"], cursor.statements
+
+
+def check_to_table_ignores_the_level_a_driver_lacks():
+    """Postgres does not need TARGET_CATALOG, MySQL does not need TARGET_SCHEMA."""
+    cursor = FakeCursor(rowcount=1)
+    with fake_dbapi(psycopg, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="postgres", DB_HOST="pg.internal", SQL="SELECT 1",
+            TARGET_SCHEMA="analytics", TARGET_TABLE="foo",  # no TARGET_CATALOG at all
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ['CREATE TABLE "analytics"."foo" AS SELECT 1'], cursor.statements
+
+    cursor = FakeCursor(rowcount=1)
+    with fake_dbapi(pymysql, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "to_table", DB_KIND="mysql", DB_HOST="mysql.internal", SQL="SELECT 1",
+            TARGET_CATALOG="mydb", TARGET_TABLE="foo",  # no TARGET_SCHEMA at all
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["CREATE TABLE `mydb`.`foo` AS SELECT 1"], cursor.statements
+
+    # The part that IS required is still a usage error before the network.
+    for kind, module, values in (
+        ("postgres", psycopg, {"TARGET_SCHEMA": "analytics"}),
+        ("mysql", pymysql, {"TARGET_CATALOG": "mydb"}),
+    ):
+        calls = []
+        with fake_dbapi(module, lambda **kwargs: calls.append(kwargs) or FakeConnection(FakeCursor())):
+            code, out, _err = run_engine(
+                "to_table", DB_KIND=kind, DB_HOST="db.internal", SQL="SELECT 1", **values
+            )
+        assert code == 1, f"{kind}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        assert event_names(events) == ["error"], events
+        assert "TARGET_TABLE" in events[0]["message"], events[0]
+        assert not calls, f"{kind}: the engine connected despite a blank target"
+
+
+def check_drivers_without_stats_get_no_stats_callback():
+    """psycopg and pymysql cursors take no stats_callback, and none is passed.
+
+    `NoStatsConnection.cursor()` refuses every keyword, which is the real
+    signature of both clients: handing one the trino keyword would be a
+    TypeError on the first statement, and a driver with no progress support must
+    simply report no progress instead.
+    """
+    for kind, module, values in (
+        ("postgres", psycopg, {"TARGET_SCHEMA": "analytics"}),
+        ("mysql", pymysql, {"TARGET_CATALOG": "mydb"}),
+    ):
+        cursor = FakeCursor(rowcount=4)
+        connection = NoStatsConnection(cursor)
+        seen = {}
+
+        def connect(**kwargs):
+            seen.update(kwargs)
+            return connection
+
+        with fake_dbapi(module, connect):
+            code, out, err = run_engine(
+                "to_table", DB_KIND=kind, DB_HOST="db.internal", SQL="SELECT 1",
+                WRITE_MODE="replace", TARGET_TABLE="foo", **values
+            )
+        assert code == 0, f"{kind}: exit {code}, stdout={out!r}, stderr={err!r}"
+        assert "unexpected keyword argument" not in err, err
+        assert connection.cursor_calls == 2, connection.cursor_calls  # DROP and CREATE
+        assert "stats_callback" not in seen, seen
+        events = events_of(out)
+        assert [event["step"] for event in events if event["event"] == "step"] == ["connect", "write"]
+        # One progress event, and it is the runner's final "true total" line --
+        # there is no stats callback to tick it, so no intermediate progress.
+        progress = [event for event in events if event["event"] == "progress"]
+        assert [event["rows"] for event in progress] == [4], events
+        assert all(event["state"] is None for event in progress), progress
+        done = events[-1]
+        assert done["event"] == "done" and done["rows"] == 4, done
+        assert done["cancelled"] is False, done
+        assert done["warnings"] and "dropped" in done["warnings"][0], done
+
+
+def check_db_drivers_reports_every_kind():
+    """`db_drivers` describes all three: label, default port and tree levels."""
+    code, out, _err = run_engine("db_drivers")  # no settings at all, and no network
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert events_of(out) == [{
+        "event": "drivers",
+        "drivers": [
+            {"kind": "trino", "label": "Trino", "default_port": 8080,
+             "levels": ["catalog", "schema", "table"]},
+            {"kind": "postgres", "label": "PostgreSQL", "default_port": 5432,
+             "levels": ["schema", "table"]},
+            {"kind": "mysql", "label": "MySQL", "default_port": 3306,
+             "levels": ["database", "table"]},
+        ],
+    }], out
+
+
+def check_postgres_and_mysql_stdout_is_json_only():
+    """Every stdout line of a postgres and of a mysql run is one compact JSON object."""
+    runs = (
+        ("postgres", psycopg, "schemas", [("public",), ("analytics",)], {}),
+        ("postgres", psycopg, "to_table", [], {"TARGET_SCHEMA": "analytics", "TARGET_TABLE": "foo"}),
+        ("mysql", pymysql, "catalogs", [("information_schema",), ("mydb",)], {}),
+        ("mysql", pymysql, "to_table", [], {"TARGET_CATALOG": "mydb", "TARGET_TABLE": "foo"}),
+    )
+    for kind, module, command, rows, values in runs:
+        cursor = FakeCursor(rows, rowcount=8)
+        with fake_dbapi(module, lambda **kwargs: FakeConnection(cursor)):
+            code, out, _err = run_engine(
+                command, DB_KIND=kind, DB_HOST="db.internal", SQL="SELECT 1", **values
+            )
+        assert code == 0, f"{kind}/{command}: exit {code}, stdout={out!r}"
+        lines = out.splitlines()
+        assert lines, f"{kind}/{command}: no stdout at all"
+        for line in lines:
+            assert line.strip() == line and line, f"{kind}/{command}: padding or a blank line in {line!r}"
+            payload = json.loads(line)  # raises if any line is not exactly one JSON object
+            assert isinstance(payload, dict) and isinstance(payload.get("event"), str), payload
+
+    # A run that fails is one error line and exit 1, whatever the driver.
+    for kind, module in (("postgres", psycopg), ("mysql", pymysql)):
+        def refuse(**kwargs):
+            raise OSError("connection refused")
+
+        with fake_dbapi(module, refuse):
+            code, out, err = run_engine("test", DB_KIND=kind, DB_HOST="db.invalid")
+        assert code == 1, f"{kind}: exit {code}, stdout={out!r}"
+        lines = out.splitlines()
+        assert len(lines) == 1, lines
+        event = json.loads(lines[0])
+        assert event["event"] == "error", event
+        assert "connection refused" in event["message"], event
+        assert "Traceback" in err and "Traceback" not in out, (err, out)
 
 
 # --------------------------------------------------------------------------- #

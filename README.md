@@ -55,10 +55,17 @@ rounded type, gradient accents — is the same one its sibling `scripts/iceberg_
 per stdout line so the UI can show a live row counter, a real cancel, and the columns the
 coordinator returned.
 
-Connections are saved in `~/Library/Application Support/QueryHive/connections.json` with the
-password in your Keychain; "Add from URL…" takes a
-`https://user:password@host:8443/catalog/schema` string and splits it for you. Double-clicking a
-table in the tree drops its quoted name into the query.
+Connections come in three kinds — **Trino**, **PostgreSQL** and **MySQL** — and adding one works
+the way Navicat's does: pick the type from a grid of tiles, then fill in its fields. The driver is
+not a label: it decides the default port, which fields are required, how an identifier is quoted,
+and what the object tree can even browse. Trino has catalog → schema → table; Postgres has no
+cross-database browsing, so its database is fixed by the connection and its tree is schema →
+table; MySQL has no schema level, so its tree is database → table.
+
+They are saved in `~/Library/Application Support/QueryHive/connections.json` with the password in
+your Keychain, and "Add from URL…" accepts `trino://`, `postgresql://` or `mysql://` and shows you
+what it parsed before saving. Double-clicking a table in the tree drops its name into the query,
+quoted the way that connection's driver wants.
 
 The SQL editor suggests as you type — table, schema and catalog names from the objects you have
 loaded, the columns the last run reported, and Trino keywords — filtered by the word under the
@@ -242,8 +249,9 @@ app/
     Models/SQLSuggestions.swift  suggestion model, ranking kinds, the Trino keyword list
     Views/Panels.swift      the Log / Columns / Files panel
     Views/ConnectionsViews.swift  connection picker, colour swatches, editor sheet
-  exporter/to_table.py        CTAS / INSERT INTO ... SELECT, executed by the coordinator
-  engine/queryhive_engine.py  JSON-event CLI the app drives (test, catalogs, schemas, tables, export, to_table)
+  exporter/to_table.py        CTAS / INSERT INTO ... SELECT, executed by the database
+  exporter/drivers.py         Trino / PostgreSQL / MySQL: quoting, levels, connect
+  engine/queryhive_engine.py  JSON-event CLI the app drives (db_drivers, test, catalogs, schemas, tables, export, to_table)
   build-engine.sh             builds the bundled standalone CPython + pinned packages
   build.sh                    builds app/dist/QueryHive.app
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code

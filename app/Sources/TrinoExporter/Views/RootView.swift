@@ -22,7 +22,7 @@ struct RootView: View {
         .background(Tone.canvas)
         .ignoresSafeArea()
         .sheet(item: $model.editingConnection) { target in
-            ConnectionEditorSheet(connectionID: target.connectionID)
+            ConnectionEditorSheet(target: target)
                 .environment(model)
         }
         .alert(model.notice?.title ?? "", isPresented: Binding(
