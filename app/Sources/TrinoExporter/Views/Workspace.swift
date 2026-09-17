@@ -5,6 +5,9 @@ import SwiftUI
 /// under it. Navicat's query window, dressed in the CleanMyMac palette.
 struct Workspace: View {
     @Environment(AppModel.self) private var model
+    /// The workspace's own height, published by the background reader below. `nil` until the first
+    /// layout pass, which is why the ceiling is optional rather than a number.
+    @State private var workspaceHeight: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,13 +18,22 @@ struct Workspace: View {
                 // undo stack and scroll position into the next one.
                 EditorPane(tab: tab).id(tab.id)
                 PanelResizer()
-                BottomPanel(tab: tab)
+                BottomPanel(tab: tab, ceiling: workspaceHeight.map { $0 * AppModel.panelShare })
             } else {
                 EmptyWorkspace()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Backdrop(hue: .exporter))
+        // As a background, not a wrapper: a GeometryReader around the stack would propose its own
+        // (unbounded) size and the layout would collapse. This one only reports.
+        .background {
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { workspaceHeight = geometry.size.height }
+                    .onChange(of: geometry.size.height) { _, height in workspaceHeight = height }
+            }
+        }
     }
 }
 

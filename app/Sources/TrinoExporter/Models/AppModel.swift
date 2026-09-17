@@ -27,10 +27,18 @@ final class AppModel {
 
     // MARK: Layout
 
-    var sidebarWidth: CGFloat = 252
+    var sidebarWidth: CGFloat = 264
     /// Taller than it was. Run now puts rows in the panel rather than writing a file, so the
     /// panel is the main event instead of a message strip — 232pt showed four rows of it.
-    var panelHeight: CGFloat = 344
+    /// The panel is the result grid now, so it starts at a bit over half the window and the editor
+    /// keeps the rest — the proportion a query editor with a real result set wants, rather than the
+    /// message strip this used to be.
+    var panelHeight: CGFloat = 480
+
+    /// But never more than this share of the window, so the editor cannot be squeezed to nothing
+    /// when the window is small. Applied at layout time, not stored: a height the user dragged to
+    /// on a large display must survive being restored on a small one.
+    static let panelShare: CGFloat = 0.55
     var panelCollapsed = false
 
     // MARK: Sheets and alerts

@@ -6,6 +6,8 @@ import SwiftUI
 struct BottomPanel: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
+    /// The most this panel may take, so a window dragged small cannot squeeze the editor away.
+    var ceiling: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +29,7 @@ struct BottomPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(height: model.panelCollapsed ? Metrics.panelTabs : model.panelHeight)
+        .frame(height: model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity))
         .background(Color.black.opacity(0.20))
         .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
     }

@@ -37,7 +37,7 @@ struct QueryHiveApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 1240, height: 800)
+        .defaultSize(width: 1320, height: 880)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Query") { model.newTab() }

@@ -204,6 +204,18 @@ that the drag itself was shifting: each event alternated between the real delta 
 and the seam shivered under the pointer. `.global` measures against the window, which the drag does
 not move.
 
+### The default split
+
+The panel starts at 480pt and the window at 1320×880 — a little over half the height for the result
+grid, which is what a query editor with a real result set wants and what this app looks like in
+use. It was 344pt for a panel that was a message strip, and the strip is gone.
+
+`panelHeight` is still absolute because that is what the resizer sets, but it is **capped at
+`AppModel.panelShare` of the workspace** at layout time. A height dragged on a large display must
+survive being restored on a small one; without the cap, restoring 480pt onto a 700pt window leaves
+the editor 79pt tall. The cap is applied when drawing, never stored, so the user's own value is
+never overwritten by the window it happened to open in.
+
 ### Where controls sit
 
 The rule, learned from getting it wrong: **an action belongs next to what it acts on.** The editor
