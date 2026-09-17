@@ -65,8 +65,40 @@ loaded, the columns the last run reported, and Trino keywords — filtered by th
 caret and ranked so an object beats a keyword on the same prefix. ↑ ↓ pick, ⏎ or ⇥ accepts, esc
 dismisses, and ⌃Space opens the list on demand. Nothing is offered inside a string literal.
 
-The DMG below is the older pywebview build of the same tool — the browser UI wrapped in a
-window. Both drive the identical `exporter` package.
+### Ship it as a DMG
+
+```bash
+./app/build-dmg.sh          # -> app/dist/QueryHive-0.0.1-arm64.dmg (40 MB)
+```
+
+The DMG holds the app, an `/Applications` symlink and a `READ ME.txt`. The build verifies its own
+artifact before reporting success: it mounts the image, checks the signature, confirms the binary
+really is arm64, reads the minimum macOS out of the Mach-O, and renders a full UI snapshot **from
+the read-only volume** — so a DMG that only works after being copied out cannot pass.
+
+**Gatekeeper.** The build is ad-hoc signed: the signature is internally valid and the app never
+reports as damaged, but Apple has not vetted it, so a *downloaded* copy is quarantined and macOS
+refuses the first launch until the user allows it once. The `READ ME.txt` in the DMG spells out
+the three ways to do that. There is no way around it except notarization:
+
+```bash
+xcrun notarytool store-credentials queryhive-notary \
+  --apple-id <you@example.com> --team-id <TEAMID> --password <app-specific-password>
+NOTARY_PROFILE=queryhive-notary ./app/build-dmg.sh --notarize
+```
+
+That needs a **Developer ID Application** certificate. An "Apple Development" certificate does not
+substitute for one — measured on this project, `spctl` rejects it exactly as it rejects ad-hoc
+(`origin=Apple Development: ...`). `app/QueryHive.entitlements` carries the two hardened-runtime
+exceptions a bundled CPython needs, but it has not been exercised against a real Developer ID yet,
+so the first notarized build must be launched and its engine used before it is published.
+
+**Requirements.** Apple Silicon (arm64) and macOS 14 or later. Every Apple Silicon Mac can run
+macOS 14, so architecture is not a limit; an Intel Mac cannot run it at all, and the app carries
+its own Python so nothing else needs installing.
+
+The root `build_dmg.sh` is the older pywebview build of the same tool — the browser UI wrapped in
+a window. Both drive the identical `exporter` package.
 
 ## Install
 

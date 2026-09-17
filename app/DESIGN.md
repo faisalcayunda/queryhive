@@ -359,4 +359,26 @@ launched as
 `PYTHONDONTWRITEBYTECODE=1`, every inherited `PYTHON*` variable removed, and the working
 directory `~/Library/Application Support/QueryHive/`.
 
-The bundle is ad-hoc signed, not notarized: on first launch Gatekeeper will complain.
+### Distribution
+
+`app/build-dmg.sh` packages the app into `app/dist/QueryHive-<version>-arm64.dmg` and then proves
+the artifact: it mounts the image and checks the signature, the architecture, the minimum macOS
+from the Mach-O, and that the UI renders from the read-only volume. A DMG that only works after
+being copied out fails the build.
+
+**The app is ad-hoc signed.** That signature is internally valid — `codesign --verify --deep
+--strict` passes and the app never reports as damaged — but Apple has not vetted it, so a
+downloaded copy is quarantined and macOS blocks the first launch until the user allows it once.
+Nothing about the app can change that; only notarization can, and notarization needs a paid Apple
+Developer Program membership and a **Developer ID Application** certificate.
+
+An "Apple Development" certificate is not a substitute, and this was measured rather than assumed:
+signing the bundle with one yields `spctl: rejected, origin=Apple Development: …`, identical to
+ad-hoc. It is therefore not used.
+
+`build-dmg.sh --notarize` is the whole remaining path, and `QueryHive.entitlements` carries the
+two hardened-runtime exceptions a bundled CPython needs (`disable-library-validation` for the
+extension modules dlopen'd out of the bundle, `allow-unsigned-executable-memory` for ctypes).
+Those entitlements are **unverified against a real Developer ID** — this machine has none — so the
+first notarized build has to be launched and its engine exercised (Test Connection, then an
+export) before it is published.
