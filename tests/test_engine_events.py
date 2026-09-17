@@ -1234,7 +1234,7 @@ def check_to_table_usage_line_lists_the_command():
         code = engine.main([ENGINE_PATH.name])
     assert code == 1, f"exit {code}"
     message = events_of(out.getvalue())[0]["message"]
-    assert message.endswith("test|catalogs|schemas|tables|export|to_table|preview"), message
+    assert message.endswith("test|catalogs|schemas|tables|export|to_table|preview|count"), message
 
 
 def check_describe_error_survives_a_client_error_that_cannot_stringify():
@@ -1660,6 +1660,243 @@ def check_preview_batch_key_is_not_the_integer_rows():
     done = only_event(events, "done")
     assert isinstance(done["rows"], int) and not isinstance(done["rows"], bool), done
     assert isinstance(done["truncated"], bool), done
+
+
+# --------------------------------------------------------------------------- #
+# count: the true total of the statement on screen, fetched only when asked
+# --------------------------------------------------------------------------- #
+
+COUNT_COLUMNS = [("_col0", "bigint", None, None, None, None, None)]
+
+
+def count_fake(rows, columns=COUNT_COLUMNS, **kwargs):
+    """(cursor, connect factory) for one count run, with nothing shared."""
+    cursor = FakeCursor(rows, columns, **kwargs)
+    return cursor, (lambda **values: FakeConnection(cursor))
+
+
+def check_count_reports_one_integer_and_a_done():
+    """A SELECT gives step connect, one `count` carrying the total, and a done."""
+    cursor, connect = count_fake([[6000]])
+    with fake_connect(connect):
+        code, out, err = run_engine(
+            "count", TRINO_HOST="trino.internal", TRINO_USER="analyst",
+            SQL="SELECT * FROM wilayah", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}, stderr={err!r}"
+    events = events_of(out)
+
+    assert event_names(events) == ["step", "count", "done"], events
+    assert events[0] == {"event": "step", "step": "connect"}, events[0]
+    assert "count" in event_names(events[:2]), "the count did not arrive right after the step"
+
+    counted = only_event(events, "count")  # exactly one event with that name
+    assert counted["rows"] == 6000, counted
+
+    done = events[-1]
+    assert done["event"] == "done", events
+    assert isinstance(done["elapsed_ms"], int) and done["elapsed_ms"] >= 0, done
+    # One event named `count`, and no `done.rows` for a decoder to mistake it for.
+    assert "rows" not in done, done
+
+
+def check_count_wraps_the_statement_exactly():
+    """The statement handed to the cursor is the wrap, byte for byte."""
+    cursor, connect = count_fake([[3]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "count", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [
+        "SELECT COUNT(*) FROM (SELECT * FROM t) AS queryhive_count"
+    ], cursor.statements
+
+
+def check_count_strips_one_trailing_semicolon():
+    """A trailing semicolon and the whitespace after it are stripped, and only that."""
+    statements = [
+        ("SELECT 1;", "SELECT COUNT(*) FROM (SELECT 1) AS queryhive_count"),
+        ("SELECT 1;  ", "SELECT COUNT(*) FROM (SELECT 1) AS queryhive_count"),
+        ("  SELECT 1 ;  \n", "SELECT COUNT(*) FROM (SELECT 1) AS queryhive_count"),
+        (  # a semicolon inside the statement is not the one that is stripped
+            "SELECT 'a;b' AS s FROM t",
+            "SELECT COUNT(*) FROM (SELECT 'a;b' AS s FROM t) AS queryhive_count",
+        ),
+        (  # nor is a semicolon the caller put in the middle of a comment
+            "SELECT 1 -- one; two",
+            "SELECT COUNT(*) FROM (SELECT 1 -- one; two) AS queryhive_count",
+        ),
+        (  # WITH is a SELECT statement too, and stays verbatim inside the parens
+            "WITH x AS (SELECT 1) SELECT * FROM x;",
+            "SELECT COUNT(*) FROM (WITH x AS (SELECT 1) SELECT * FROM x) AS queryhive_count",
+        ),
+    ]
+    for sql, expected in statements:
+        cursor, connect = count_fake([[1]])
+        with fake_connect(connect):
+            code, out, _err = run_engine(
+                "count", TRINO_HOST="trino.internal", SQL=sql, RETRIES="0",
+            )
+        assert code == 0, f"{sql!r}: exit {code}, stdout={out!r}"
+        assert cursor.statements == [expected], (sql, cursor.statements)
+
+
+def check_count_keeps_the_callers_limit_inside_the_parens():
+    """A LIMIT stays inside: the count is of the limited set, which the grid shows."""
+    cursor, connect = count_fake([[1000]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "count", TRINO_HOST="trino.internal", LIMIT="5",
+            SQL="SELECT * FROM t LIMIT 1000", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [
+        "SELECT COUNT(*) FROM (SELECT * FROM t LIMIT 1000) AS queryhive_count"
+    ], cursor.statements
+    assert only_event(events_of(out), "count")["rows"] == 1000, out
+
+
+def check_count_refuses_a_statement_that_is_not_a_select():
+    """An INSERT, an EXPLAIN or a DDL statement is a usage error before the network.
+
+    Wrapping one of those would ask the coordinator to run something that is not
+    a query and then report a number for it, so the verdict is made on the
+    statement's first keyword before a connection is opened.
+    """
+    for sql in (
+        "INSERT INTO t VALUES (1)",
+        "  insert into t values (1)",
+        "EXPLAIN SELECT 1",
+        "UPDATE t SET a = 1",
+        "DELETE FROM t",
+        "DROP TABLE t",
+        "CREATE TABLE t (a int)",
+        "/* a note */ INSERT INTO t VALUES (1)",  # a comment is not a keyword
+        "-- a note\nINSERT INTO t VALUES (1)",
+    ):
+        calls = []
+        with fake_connect(lambda **kwargs: calls.append(kwargs)):
+            code, out, _err = run_engine(
+                "count", TRINO_HOST="trino.invalid", SQL=sql, RETRIES="0",
+            )
+        assert code == 1, f"{sql!r}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        assert event_names(events) == ["error"], (sql, events)
+        assert "SELECT" in events[0]["message"], (sql, events[0])
+        assert not calls, f"{sql!r}: the engine connected for a statement it cannot count"
+
+
+def check_count_refuses_two_statements():
+    """`SELECT 1; SELECT 2` is a usage error: only one statement may be counted."""
+    for sql in ("SELECT 1; SELECT 2", "SELECT 1; SELECT 2;"):
+        calls = []
+        with fake_connect(lambda **kwargs: calls.append(kwargs)):
+            code, out, _err = run_engine(
+                "count", TRINO_HOST="trino.invalid", SQL=sql, RETRIES="0",
+            )
+        assert code == 1, f"{sql!r}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        assert event_names(events) == ["error"], (sql, events)
+        assert "SELECT" in events[0]["message"], (sql, events[0])
+        # A fresh list, never `calls.clear()`: that returns None, so the fake would
+        # hand QueryStream a connection it cannot call cursor() on and the check
+        # would pass on the wrong failure.
+        assert not list(calls), f"{sql!r}: the engine connected for a two-statement file"
+
+
+def check_count_blank_sql_is_usage_error():
+    """A blank SQL is a usage error: error event, exit 1, no network."""
+    calls = []
+    with fake_connect(lambda **kwargs: calls.append(kwargs)):
+        code, out, _err = run_engine(
+            "count", TRINO_HOST="trino.internal", SQL="", SQL_PATH="",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["error"], events
+    assert "SQL" in events[0]["message"], events[0]
+    assert not calls, "the engine connected despite a blank SQL"
+
+
+def check_count_connection_failure():
+    """A connect that will not open: step connect, then one error, exit 1."""
+
+    def refuse(**kwargs):
+        raise OSError("connection refused")
+
+    with fake_connect(refuse):
+        code, out, err = run_engine(
+            "count", TRINO_HOST="trino.invalid", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["step", "error"], events
+    assert events[0] == {"event": "step", "step": "connect"}, events
+    assert "OSError" in events[-1]["message"] and "connection refused" in events[-1]["message"], events
+    assert "Traceback" in err and "Traceback" not in out, (err, out)
+
+
+def check_count_empty_result_is_an_error_not_a_zero():
+    """No row, no column and a row that is not an integer are all errors.
+
+    A count that did not come back is not a count of zero, and `rowcount` is not
+    a substitute: the fake reports a perfectly good 0 and a -1 while the cursor
+    yields nothing, and neither may become the answer.
+    """
+    cases = [
+        ([], 0),          # no rows at all, but rowcount claims zero
+        ([], -1),         # trino's "the server did not say"
+        ([[]], 0),        # a row with no column
+        ([[None]], 0),    # a NULL
+        ([["6000"]], 0),  # the number as text
+        ([[6000.0]], 0),  # a float
+        ([[True]], 0),    # a bool is an int in Python, and is not a count
+    ]
+    for rows, rowcount in cases:
+        cursor, connect = count_fake(rows, rowcount=rowcount)
+        with fake_connect(connect):
+            code, out, err = run_engine(
+                "count", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+            )
+        assert code == 1, f"{rows!r} rowcount={rowcount}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        assert event_names(events) == ["step", "error"], (rows, events)
+        assert "count" not in event_names(events), (rows, events)
+        assert "Traceback" in err and "Traceback" not in out, (err, out)
+
+
+def check_count_emits_a_json_number_not_a_string():
+    """The total is a JSON number, and a bigint past 2**31 survives as one."""
+    big = 2**31 + 7
+    cursor, connect = count_fake([[big]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "count", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    line = [line for line in out.splitlines() if json.loads(line)["event"] == "count"][0]
+    assert f'"rows": {big}' in line, line  # the wire form, not just the parsed value
+    counted = only_event(events_of(out), "count")
+    assert counted["rows"] == big, counted
+    assert isinstance(counted["rows"], int) and not isinstance(counted["rows"], bool), counted
+
+
+def check_count_stdout_is_json_only():
+    """Every stdout line of a count run is one compact JSON object."""
+    cursor, connect = count_fake([[42]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "count", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    lines = out.splitlines()
+    assert lines, "no stdout at all"
+    for line in lines:
+        assert line.strip() == line and line, f"padding or a blank line in {line!r}"
+        payload = json.loads(line)  # raises if any line is not exactly one JSON object
+        assert isinstance(payload, dict) and isinstance(payload.get("event"), str), payload
+    assert lines[-1].startswith('{"event": "done"'), lines[-1]
 
 
 # --------------------------------------------------------------------------- #

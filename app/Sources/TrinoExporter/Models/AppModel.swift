@@ -600,8 +600,11 @@ final class AppModel {
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
-        // The filters described rows that are about to be replaced.
+        tab.previewedSQL = sql
+        // The filters and the last total described rows that are about to be replaced.
         tab.columnFilters = [:]
+        tab.totalRows = nil
+        tab.countError = nil
         tab.panel = .result
         panelCollapsed = false
 
@@ -653,6 +656,42 @@ final class AppModel {
 
     func cancelPreview(_ tab: QueryTab) {
         tab.previewProcess?.terminate()
+    }
+
+    /// DBeaver's "fetch row count": asks the server how many rows the statement on screen really
+    /// returns. Deliberately a button and not something the preview does — it is a second query
+    /// over the whole result, which can be slow and which the user should choose to pay for.
+    func countRows(_ tab: QueryTab) {
+        guard !tab.countingRows, let sql = tab.previewedSQL, !sql.isEmpty,
+              let connection = connection(for: tab) else { return }
+        let env: [String: String]
+        do {
+            var built = try connectionEnvironment(connection)
+            built["SQL"] = sql
+            built["RETRIES"] = String(tab.retries)
+            env = built
+        } catch {
+            tab.countError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        tab.countingRows = true
+        tab.countError = nil
+        let run = UUID()
+        tab.countToken = run
+        tab.countProcess = Engine.run("count", env: env, onEvent: { event in
+            guard tab.countToken == run else { return }
+            if event.event == "error" { tab.countError = event.message }
+            if let count = event.count { tab.totalRows = count }
+        }, onExit: { status, log in
+            guard tab.countToken == run else { return }
+            tab.countProcess = nil
+            tab.countingRows = false
+            if status != 0, tab.totalRows == nil {
+                tab.countError = tab.countError
+                    ?? log.split(separator: "\n").last.map(String.init)
+                    ?? "The count failed."
+            }
+        })
     }
 
     /// The environment for a preview: the connection plus the statement and the row cap. Deliberately

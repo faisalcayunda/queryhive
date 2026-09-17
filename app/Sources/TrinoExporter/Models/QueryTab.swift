@@ -328,6 +328,17 @@ final class QueryTab: Identifiable {
     /// nothing is highlighted.
     var selection = NSRange(location: 0, length: 0)
 
+    /// The SQL the grid is actually showing. A count must be of *this*, not of whatever the editor
+    /// holds now — the user may have typed since the run, and a total for a different statement
+    /// would be a number that looks authoritative and is not.
+    var previewedSQL: String?
+
+    /// How many rows the statement really returns, once the user has asked. `nil` means "not
+    /// asked", which is different from "fewer than the limit".
+    var totalRows: Int?
+    var countingRows = false
+    var countError: String?
+
     /// Filters by column index: a result may repeat a name and the grid draws by position.
     /// Cleared whenever new rows arrive, because the ones they described are gone.
     var columnFilters: [Int: String] = [:]
@@ -370,6 +381,10 @@ final class QueryTab: Identifiable {
     /// must not be able to cancel the export, or vice versa.
     var previewProcess: Process?
     var previewToken = UUID()
+    /// The count is its own process and token too: asking for a total must not disturb the run it
+    /// is asking about.
+    var countProcess: Process?
+    var countToken = UUID()
     var cancelled = false
     /// Set while the debounced... no: set when the user has asked to stop but the engine has
     /// not exited yet, so the toolbar can disable Stop instead of queueing more signals.

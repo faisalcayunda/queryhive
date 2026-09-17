@@ -109,6 +109,9 @@ struct Event: Decodable {
     // `done`, and one key cannot be two types.
     var data: [[String?]]?
     var truncated: Bool?
+    /// The `count` command's answer. Its own event name, so it can never be confused with
+    /// `done.rows`, which is the number a preview sent rather than the number that exists.
+    var count: Int?
     var elapsedMs: Int?
     var host: String?
     var user: String?

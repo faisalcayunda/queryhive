@@ -8,6 +8,7 @@
     python3 -s -u queryhive_engine.py export    stream SQL into one of nine formats
     python3 -s -u queryhive_engine.py to_table  let the database write SQL into a table
     python3 -s -u queryhive_engine.py preview   run SQL and show the first rows as JSON
+    python3 -s -u queryhive_engine.py count     the true number of rows the statement returns
 
 The desktop app runs this script as a child process and reads the protocol off
 its stdout: every stdout line is exactly one compact JSON object and nothing
@@ -29,6 +30,8 @@ name, so a secret never shows up in a process listing. The events:
     to_table step connect, step write, progress..., done
              (or a single error event and exit 1)
     preview  step connect, columns, rows:data..., done
+             (or a single error event and exit 1)
+    count    step connect, count, done
              (or a single error event and exit 1)
 
 Three drivers sit behind one protocol: `trino` (the default), `postgres` and
@@ -113,6 +116,32 @@ milliseconds. A failure -- a bad setting, SQL that will not run, a missing SQL -
 is one `error` event and exit 1, exactly as `export`'s is, and `step connect`
 still precedes the network.
 
+`count` answers the grid footer's "1.000 rows", which is really "the first
+1.000": it reports how many rows the statement on screen would return if nothing
+capped it. Unlike `preview` it does rewrite the statement -- that is the whole
+point, and it is a deliberate question the user asked rather than a silent
+change behind their back -- by wrapping it once:
+
+    SELECT COUNT(*) FROM ( <sql> ) AS queryhive_count
+
+The wrap has two rules. A trailing semicolon is stripped first, because a
+semicolon inside the parentheses is a syntax error; only the final one is
+touched, so a semicolon in a string literal or in the middle of the statement
+survives. And only a single SELECT may be wrapped: the first keyword after
+leading whitespace and `--` / `/* */` comments must be SELECT or WITH, so an
+INSERT, an EXPLAIN or the first half of a multi-statement file is a usage error
+instead of something that runs. A LIMIT inside the caller's SQL stays inside the
+parentheses, so the count is of the limited set -- exactly what the grid shows.
+The events are `step connect`, one `count` carrying the total as `rows`, and one
+`done` with `elapsed_ms`. `count` is an integer and the only event with that
+name, so it can never be confused with `preview`'s `done.rows`, which is the
+number of rows actually sent. The number comes from the first row of the
+cursor and nowhere else: an empty result set, a missing value or a value that is
+not an integer is an error rather than a zero, and `cursor.rowcount` -- `-1` on
+a Trino that did not say -- is never turned into a count. Counts are bigint on
+Trino and may exceed a 32-bit Int, so the value is emitted as a Python int and
+left to JSON.
+
 The engine is a sibling of scripts/iceberg_importer/importer.py, which speaks
 the same protocol for imports; this follows its structure, its emit() helper
 and its exit-code discipline.
@@ -123,6 +152,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -679,6 +709,156 @@ def run_preview_command(env):
     )
 
 
+# A leading `--` line comment or `/* */` block comment is not the statement's
+# first keyword, so it is skipped before the "is this a SELECT?" verdict is made.
+_COUNT_COMMENT = re.compile(r"\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/)", re.S)
+
+# The characters a string literal or a quoted identifier may be opened with, and
+# the character that closes each. `''`, `""` and ` `` ` are doubled inside their
+# own literal, never an escape, so the scanner below has no backslash handling:
+# that is the SQL rule, and it is what keeps `SELECT 'a;b'` from being read as
+# two statements.
+_COUNT_QUOTES = {"'": "'", '"': '"', "`": "`"}
+
+# What `count` wraps: the statement inside the parentheses, and the alias the
+# wrapper gives it. One rule, one home -- a check asserts the exact statement.
+COUNT_WRAPPER = "SELECT COUNT(*) FROM ({sql}) AS queryhive_count"
+
+
+def _count_semicolons(body):
+    """The offsets of the `;` that really separate statements in `body`.
+
+    A semicolon inside a string literal, a quoted identifier, a `--` line
+    comment or a `/* */` block comment is text, not a statement separator, and
+    only the last one may be the trailing terminator this command strips.
+    """
+    found = []
+    i, n = 0, len(body)
+    while i < n:
+        char = body[i]
+        if char == "'" or char == '"' or char == "`":
+            closer = _COUNT_QUOTES[char]
+            i += 1
+            while i < n:
+                if body[i] == closer:
+                    if i + 1 < n and body[i + 1] == closer:  # '' is an embedded quote
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == "-" and body.startswith("--", i):
+            newline = body.find("\n", i)
+            i = n if newline < 0 else newline + 1
+            continue
+        if char == "/" and body.startswith("/*", i):
+            end = body.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if char == ";":
+            found.append(i)
+        i += 1
+    return found
+
+
+def count_statement(sql):
+    """`sql` as the single SELECT `count` will run it inside of.
+
+    The caller's SQL goes inside the parentheses; only the final semicolon (with
+    the whitespace after it) is removed first, because a semicolon anywhere
+    inside the parentheses is a syntax error. Nothing else about the statement
+    is touched: a LIMIT stays where the caller put it, so the count is of the
+    limited set, which is what the grid is showing. A semicolon inside a string
+    literal, a quoted identifier or a comment is text and survives.
+
+    An empty statement, a first keyword other than SELECT or WITH, or a second
+    statement anywhere in the string, is a usage error made before the network
+    is touched. Wrapping an INSERT or an EXPLAIN would ask the coordinator to do
+    something other than count, and a half-statement from a multi-statement file
+    -- `SELECT 1; SELECT 2` -- must never be run on its own: only the statement
+    the user is looking at may be counted, and this command cannot tell which of
+    several the grid is showing.
+    """
+    body = sql.strip()
+    if body.endswith(";"):
+        body = body[:-1].rstrip()
+    if not body:
+        raise ValueError("SQL or SQL_PATH is required")
+    separators = _count_semicolons(body)
+    if separators:
+        raise ValueError(
+            "count can only count a single SELECT statement; "
+            f"{len(separators) + 1} statements were given"
+        )
+    match = _COUNT_COMMENT.match(body)
+    while match:
+        body = body[match.end():].lstrip()
+        match = _COUNT_COMMENT.match(body)
+    keyword = re.match(r"[A-Za-z]+", body)
+    first = keyword.group(0).upper() if keyword else ""
+    if first not in ("SELECT", "WITH"):
+        raise ValueError(
+            f"count can only count a single SELECT (or WITH) statement, "
+            f"got {first or body[:20]!r}"
+        )
+    return COUNT_WRAPPER.format(sql=body)
+
+
+def _count_value(rows):
+    """The integer in the count cursor's first row, or a failure.
+
+    A count that did not come back is not a zero: an empty result set, a row
+    with no column, or a value that is not an integer -- a string, a float, a
+    NULL, a bool -- is an error, so the caller is never handed a number this
+    process did not actually get. `int` is checked before anything else because
+    `bool` is an `int`; a bigint over a 32-bit Int is still a Python int and is
+    left to JSON.
+    """
+    if not rows:
+        raise RuntimeError("count query returned no rows")
+    row = rows[0]
+    if not row:
+        raise RuntimeError("count query returned a row with no value")
+    value = row[0]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError(f"count query returned {value!r}, not an integer")
+    return value
+
+
+def run_count_command(env):
+    """How many rows the caller's statement really returns.
+
+    The deliberate counterpart to `preview`'s 1000-row page: the statement is
+    wrapped in `SELECT COUNT(*) FROM ( ... ) AS queryhive_count`, so the grid's
+    footer can say "6000 rows" instead of "the first 1.000". That rewrite is the
+    point of the command and happens nowhere else -- `preview` and `export` still
+    run the caller's SQL byte for byte -- and it is one the caller asked for.
+
+    The connection is a QueryStream, like `preview`'s, so retries, the
+    plain-HTTP upgrade and the close discipline are shared; the value is read
+    from the first row of the cursor. `cursor.rowcount` is never consulted: it
+    is `-1` on Trino, and this codebase has been careful never to turn that into
+    a count. `count` is emitted once and is the only event with that name, so a
+    decoder can never confuse it with `preview`'s `done.rows`. A failure -- a
+    statement that is not a single SELECT, SQL that will not run, a count that
+    did not come back -- is one `error` event and exit 1, with `step connect`
+    emitted before the network was touched.
+    """
+    sql = source_sql(env)  # a bad or missing SQL fails before the connect step
+    statement = count_statement(sql)  # ... and so does a statement count cannot wrap
+    config = _with_retries(build_config(env), env)
+    started = time.monotonic()  # the whole run: connect, count and emit
+    emit("step", step="connect")  # before the network is touched
+    with QueryStream(
+        config, statement,
+        retries=max(0, _int(env, "RETRIES", 5)),
+    ) as stream:
+        rows = list(stream.rows())
+    emit("count", rows=_count_value(rows))
+    emit("done", elapsed_ms=int((time.monotonic() - started) * 1000))
+
+
 class _WarnedExportError(Exception):
     """An error the caller must also report warnings for.
 
@@ -712,6 +892,7 @@ def main(argv=None):
         "export": run_export_command,
         "to_table": run_to_table_command,
         "preview": run_preview_command,
+        "count": run_count_command,
     }
     if len(argv) != 2 or argv[1] not in commands:
         emit("error", message=f"usage: {argv[0] if argv else __file__} {'|'.join(commands)}")

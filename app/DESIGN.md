@@ -170,6 +170,23 @@ is what a database client does with a table, and it is what the gesture is for. 
 into whatever editor happens to be in front is the same action as before, and it is still there —
 in the context menu, where a deliberate choice belongs.
 
+### Counting, DBeaver's way
+
+`1.000 rows` was the fetched count wearing a total's clothes. The footer now says what it means —
+`First 1000 rows · limit reached` when the cap stopped it — and offers **Count all**, which asks the
+server how many rows the statement really returns and then reads `1.000 of 48.320 rows`.
+
+It is a button rather than something the preview does, because it is a **second query over the whole
+result**: it can be slow, and the user should choose to pay for it. It is also the one place this
+app rewrites SQL, wrapping the statement in `SELECT COUNT(*) FROM ( … ) AS queryhive_count`, and
+that is acceptable precisely because it is deliberate and visible. Everything about the wrap is
+conservative: only the final `;` is stripped, a `;` inside a string literal or a comment survives,
+and a statement that is not a single `SELECT`/`WITH` is refused rather than executed.
+
+The count is of `previewedSQL` — the statement that produced what is on screen, remembered at run
+time — not of whatever the editor holds when the button is pressed. A total for a different
+statement is a number that looks authoritative and is not.
+
 ### Run looks, Export writes
 
 Navicat's split, and the thing that makes this a query editor rather than a one-way pipe. The

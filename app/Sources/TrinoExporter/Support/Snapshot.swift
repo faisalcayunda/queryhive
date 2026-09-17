@@ -269,6 +269,8 @@ enum Snapshot {
                 truncated: true,
                 queryID: "20260131_120412_00042_abcde",
                 elapsedMS: 412)
+            // The statement that produced what is on screen, so "Count all" has something.
+            tab.previewedSQL = tab.sql
             tab.stage = .done
             tab.panel = .result
         case "syntax":

@@ -184,6 +184,49 @@ struct ResultGrid: View {
         }
     }
 
+    /// What the footer claims. Never "N rows" for a limited result without saying so, and once the
+    /// server has been asked, the two numbers appear together.
+    private func summaryText(_ preview: PreviewResult) -> String {
+        let fetched = tab.columnFilters.isEmpty
+            ? preview.rows.count
+            : filteredRows.count
+        let scope = tab.columnFilters.isEmpty ? "" : " of \(preview.rows.count.formatted())"
+
+        if let total = tab.totalRows {
+            return "\(fetched.formatted())\(scope) of \(total.formatted()) rows"
+        }
+        return tab.columnFilters.isEmpty
+            ? preview.summary
+            : "\(fetched.formatted())\(scope) rows"
+    }
+
+    /// DBeaver's count, as a button. Only offered once there is a result to count, and only while
+    /// the statement on screen is the one that produced it.
+    @ViewBuilder private var countControl: some View {
+        if tab.previewedSQL != nil, tab.preview != nil {
+            if tab.countingRows {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text("Counting…").font(.system(size: 11)).foregroundStyle(Tone.secondary)
+                }
+            } else if let error = tab.countError {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Tone.coral)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 260, alignment: .leading)
+                    .help(error)
+            } else if tab.totalRows == nil {
+                PillButton(title: "Count all", symbol: "number", role: .quiet, compact: true) {
+                    model.countRows(tab)
+                }
+                .help("Ask the server how many rows this statement really returns. "
+                      + "Runs a second query over the whole result, so it can be slow.")
+            }
+        }
+    }
+
     /// A funnel per column, always visible and dim until it has something to say: a filter that
     /// only appears on hover is a filter nobody finds.
     private func filterButton(_ index: Int) -> some View {
@@ -251,11 +294,12 @@ struct ResultGrid: View {
             if let preview = tab.preview {
                 // Never "N rows" while a filter is on: that reads as the size of the result
                 // rather than the size of what survived the filter.
-                Text(tab.columnFilters.isEmpty
-                     ? preview.summary
-                     : "\(filteredRows.count.formatted()) of \(preview.rows.count.formatted()) rows")
+                // "1.000 rows" was the fetched count wearing a total's clothes. The wording now
+                // says which it is, and a fetched total makes the two one sentence.
+                Text(summaryText(preview))
                     .font(.system(size: 11))
                     .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty ? Tone.amber : Tone.secondary)
+                countControl
                 if preview.elapsedMS > 0 {
                     Text("· \(preview.elapsedMS) ms").font(.system(size: 11)).foregroundStyle(Tone.secondary)
                 }
