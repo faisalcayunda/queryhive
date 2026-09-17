@@ -330,6 +330,28 @@ dropdown belongs — a chevron only appears once there is something behind it. O
 now fetches the catalogs, and choosing one fetches its schemas; the field shows a spinner while
 that is in flight rather than looking empty.
 
+### Colouring the query
+
+The editor colours SQL by what each token *is*: keywords in violet, functions in ice, strings in
+mint, numbers in amber, quoted identifiers in gold, `null` / `true` / `false` in coral, comments in
+dim italic, punctuation in grey.
+
+One scan, six ordered alternatives, then the words are classified. Ordering rather than state is
+what handles the cases a naive splitter gets wrong — a `--` inside a string and a quote inside a
+comment are resolved by the alternatives being tried in sequence, the same way a reader resolves
+them. A word is a function when a `(` follows it, which is the only thing that distinguishes
+`count(` from a column called `count`.
+
+Two things it deliberately does not do. It **stops past 200,000 characters** rather than paying for
+a full scan on every keystroke of a pasted dump. And it sets **attributes only**, never the string:
+that is what keeps it from looping back through `textDidChange`, and why the binding keeps exactly
+what was typed.
+
+`updateNSView` cannot do the colouring — it returns early when the string already matches, and
+re-running the scan on every SwiftUI update would make typing pay for the model's changes. Text
+that arrives from outside the editor is coloured at the two points where it can: when the view is
+first built, and after a binding-driven replacement.
+
 ### The SQL editor and its suggestions
 
 The editor is an `NSTextView` (`SQLEditor`), not SwiftUI's `TextEditor`. That is forced:

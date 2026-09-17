@@ -271,6 +271,27 @@ enum Snapshot {
                 elapsedMS: 412)
             tab.stage = .done
             tab.panel = .result
+        case "syntax":
+            // Every class the colourer knows, in SQL that reads like the real thing.
+            tab.sql = """
+            -- Ringkasan penerima manfaat per wilayah, 2026
+            WITH bersih AS (
+                SELECT kode_wilayah,
+                       UPPER(TRIM(nama)) AS nama,
+                       CAST(jumlah_jiwa AS bigint) AS jiwa,
+                       COUNT(*) OVER (PARTITION BY kode_wilayah) AS baris
+                FROM "hive"."analytics"."penerima_manfaat"
+                WHERE tahun = 2026 AND aktif = true AND catatan IS NOT NULL
+            )
+            /* hanya wilayah yang lolos verifikasi */
+            SELECT b.kode_wilayah, b.nama, b.jiwa, b.baris, 'SLHS_TERBIT' AS status
+            FROM bersih b
+            JOIN `gold`.`dim_wilayah` w ON w.kode = b.kode_wilayah
+            WHERE b.jiwa >= 3.5 AND b.nama LIKE '%Sukamaju%'
+            ORDER BY b.jiwa DESC
+            LIMIT 1000;
+            """
+            tab.panel = .log
         case "table-opened":
             // What double-clicking a table in the tree now does. There is no server here, so the
             // rows are seeded the way the real reply would arrive — the tab, its name, the SQL and

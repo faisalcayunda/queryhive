@@ -71,6 +71,11 @@ struct SQLEditor: NSViewRepresentable {
         textView.interceptKey = { [weak coordinator = context.coordinator] event in
             coordinator?.handle(event) ?? false
         }
+        // Whatever the tab was holding when it opened — restored SQL, a loaded file, a table just
+        // double-clicked — is coloured once here. `updateNSView` cannot do it: it returns early
+        // when the string already matches, and re-running the scan on every SwiftUI update would
+        // make typing pay for the model's changes.
+        context.coordinator.recolour()
         return container
     }
 
@@ -88,6 +93,9 @@ struct SQLEditor: NSViewRepresentable {
         // leave the caret at the end of what was just written, not back where it used to be.
         let appended = length > previous.count && text.hasPrefix(previous)
         textView.setSelectedRange(NSRange(location: appended ? length : min(caret, length), length: 0))
+        // Text that arrived from outside the editor — opening a table, loading a file — has never
+        // been through `textDidChange` and would otherwise stay uncoloured.
+        context.coordinator.recolour()
     }
 
     // MARK: Coordinator
@@ -100,6 +108,7 @@ struct SQLEditor: NSViewRepresentable {
 
         private var debounce: DispatchWorkItem?
         private var suppressAutoTrigger = false
+        private var isColouring = false
 
         init(_ parent: SQLEditor) {
             self.parent = parent
@@ -110,6 +119,7 @@ struct SQLEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
+            colour(textView)
             if suppressAutoTrigger {
                 // The change we just made was accepting a suggestion; re-opening the list over
                 // the word it just inserted would be maddening.
@@ -121,6 +131,20 @@ struct SQLEditor: NSViewRepresentable {
             let work = DispatchWorkItem { [weak self] in self?.refresh(manual: false) }
             debounce = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        }
+
+        /// Attributes only — the string is never touched, so this cannot loop back through
+        /// `textDidChange`, and the binding keeps whatever the user typed.
+        func recolour() {
+            guard let textView else { return }
+            colour(textView)
+        }
+
+        private func colour(_ textView: NSTextView) {
+            guard !isColouring else { return }
+            isColouring = true
+            SQLSyntax.apply(to: textView)
+            isColouring = false
         }
 
         func textDidBeginEditing(_ notification: Notification) {
