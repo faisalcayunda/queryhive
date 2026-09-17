@@ -162,6 +162,14 @@ outside a single-quoted string and outside `--` and `/* */` comments. A semicolo
 Postgres dollar-quoted body would fool it, and that is deliberate — such a script is rare, and
 refusing to guess beats splitting wrongly and running half a statement.
 
+### Double-click opens a table
+
+The tree's double-click is **Open**: a new tab named after the table holding `SELECT * FROM
+"catalog"."schema"."table"`, already run, so the rows are on screen before anything is typed. That
+is what a database client does with a table, and it is what the gesture is for. Inserting the name
+into whatever editor happens to be in front is the same action as before, and it is still there —
+in the context menu, where a deliberate choice belongs.
+
 ### Run looks, Export writes
 
 Navicat's split, and the thing that makes this a query editor rather than a one-way pipe. The

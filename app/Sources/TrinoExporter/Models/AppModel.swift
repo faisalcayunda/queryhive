@@ -80,6 +80,19 @@ final class AppModel {
 
     // MARK: Tabs
 
+    /// Opens a table the way a database client does: a new tab holding `SELECT * FROM it` with the
+    /// query already run, so the rows are on screen before anything has been typed. Double-clicking
+    /// a table used to insert its name into whatever editor happened to be in front, which is the
+    /// context-menu action; opening it is what the double-click is for.
+    func openTable(_ node: TreeNode) {
+        guard let name = node.insertableText else { return }
+        newTab(connectionID: node.connectionID)
+        guard let tab = selectedTab else { return }
+        tab.title = node.title
+        tab.sql = "SELECT * FROM \(name)"
+        preview(tab)
+    }
+
     func newTab(connectionID: UUID? = nil) {
         tabCounter += 1
         let tab = QueryTab(title: "Query \(tabCounter)")
@@ -233,7 +246,7 @@ final class AppModel {
 
     // MARK: Object tree
 
-    private func allNodes() -> [TreeNode] {
+    func allNodes() -> [TreeNode] {
         var result: [TreeNode] = []
         func walk(_ nodes: [TreeNode]) {
             for node in nodes {

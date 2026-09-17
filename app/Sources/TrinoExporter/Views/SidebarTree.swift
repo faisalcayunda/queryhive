@@ -101,7 +101,7 @@ struct SidebarTree: View {
     }
 
     private var hint: some View {
-        Text("Double-click a table to insert it")
+        Text("Double-click a table to open it · right-click to insert its name")
             .font(.system(size: 10))
             .foregroundStyle(.white.opacity(0.35))
             .lineLimit(1)
@@ -299,7 +299,7 @@ struct TreeRow: View {
 
     private func doubleClick() {
         switch node.kind {
-        case .table: model.insert(node)
+        case .table: model.openTable(node)
         case .connection: model.presentConnectionEditor(node.connectionID)
         default:
             model.selectedNodeID = node.id

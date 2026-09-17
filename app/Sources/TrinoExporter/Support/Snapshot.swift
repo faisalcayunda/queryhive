@@ -271,6 +271,31 @@ enum Snapshot {
                 elapsedMS: 412)
             tab.stage = .done
             tab.panel = .result
+        case "table-opened":
+            // What double-clicking a table in the tree now does. There is no server here, so the
+            // rows are seeded the way the real reply would arrive — the tab, its name, the SQL and
+            // the run are all `openTable`'s doing.
+            if let node = model.allNodes().first(where: { $0.kind == .table }) {
+                model.openTable(node)
+                model.selectedTab?.previewing = false
+                model.selectedTab?.preview = PreviewResult(
+                    columns: [
+                        Event.Column(name: "id_sppg", type: "varchar"),
+                        Event.Column(name: "status_operasional_sppg", type: "varchar"),
+                        Event.Column(name: "memiliki_hari_berhenti_ops", type: "boolean"),
+                        Event.Column(name: "status_slhs_terakhir", type: "varchar"),
+                    ],
+                    rows: [
+                        ["0ZDLVY6W", "operasional", "false", "SLHS_TERBIT"],
+                        ["1YEQ3SGF", "operasional", "false", "SLHS_TERBIT"],
+                        ["2UGE3CG", "operasional", "false", "SLHS_TERBIT"],
+                        ["4FYJ5ETO", "operasional", "false", "SLHS_TERBIT"],
+                        ["59QMlA7P", "operasional", "false", "SLHS_TERBIT"],
+                        ["6JLBLEJ6", "operasional", "false", "SUDAH_DIAJUKAN"],
+                        ["6MJZJZMY", "berhenti-ops-sementara", "true", "SLHS_TERBIT"],
+                    ],
+                    truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 233)
+            }
         case "grid-filtered":
             // A filter narrows what was fetched; the footer has to say so rather than claim the
             // result is this small.
