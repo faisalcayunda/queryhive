@@ -125,6 +125,97 @@ final class AppModel {
         editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL)
     }
 
+    /// Set while a delete is waiting for the user to confirm. Held on the model rather than in a
+    /// row so the tree's context menu and the editor's Delete button ask the same question.
+    var pendingDeletion: UUID?
+
+    var pendingDeletionName: String {
+        guard let id = pendingDeletion else { return "this connection" }
+        return connections.first { $0.id == id }?.name ?? "this connection"
+    }
+
+    func requestDelete(_ id: UUID) {
+        pendingDeletion = id
+    }
+
+    /// Removes a connection, its Keychain item, and its hold on any open tab. The JSON is written
+    /// before the Keychain so a failure never leaves a saved connection whose password is gone.
+    func deleteConnection(_ id: UUID) {
+        var next = connections
+        next.removeAll { $0.id == id }
+        do {
+            try ConnectionStore.save(next)
+        } catch {
+            notice = Notice(title: "Couldn't delete connection", message: error.localizedDescription)
+            return
+        }
+        connections = next
+        do {
+            try ConnectionKeychain.delete(for: id)
+        } catch {
+            notice = Notice(title: "Couldn't delete the Keychain password", message: error.localizedDescription)
+        }
+        for tab in tabs where tab.connectionID == id {
+            tab.connectionID = connections.first?.id
+        }
+        rebuildTree()
+    }
+
+    /// Copies a connection under a new name. The password comes along: a duplicate that silently
+    /// connects as nobody would be a worse outcome than not duplicating at all.
+    func duplicateConnection(_ id: UUID) {
+        guard let original = connections.first(where: { $0.id == id }) else { return }
+        var copy = original
+        copy.id = UUID()
+        copy.name = "\(original.name) copy"
+        var next = connections
+        next.append(copy)
+        do {
+            try ConnectionStore.save(next)
+        } catch {
+            notice = Notice(title: "Couldn't duplicate the connection", message: error.localizedDescription)
+            return
+        }
+        connections = next
+        if let password = try? ConnectionKeychain.get(for: id), !password.isEmpty {
+            do {
+                try ConnectionKeychain.set(password, for: copy.id)
+            } catch {
+                notice = Notice(title: "Duplicated, but without the password",
+                                 message: "Couldn't write the password for \(copy.name) to Keychain: \(error.localizedDescription). Set it in the connection editor.")
+            }
+        }
+        rebuildTree()
+    }
+
+    /// Recolours a saved connection. The colour is the user's own tag — it is what the sidebar
+    /// row and the tree tile are painted with.
+    func setColor(_ color: ConnectionColor, for id: UUID) {
+        guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
+        var next = connections
+        next[index].color = color
+        do {
+            try ConnectionStore.save(next)
+        } catch {
+            notice = Notice(title: "Couldn't save the colour", message: error.localizedDescription)
+            return
+        }
+        connections = next
+        rebuildTree()
+    }
+
+    /// Opens a `.sql` file into a fresh query tab rather than the one that is already open, so
+    /// running a script never overwrites work in progress.
+    func runSQLFile(connectionID: UUID) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = Self.sqlContentTypes
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a .sql file to open in a new query"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        newTab(connectionID: connectionID)
+        selectedTab?.loadSQL(from: url)
+    }
+
     func connectionName(id: UUID) -> String {
         connections.first { $0.id == id }?.name ?? "connection"
     }

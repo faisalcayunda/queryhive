@@ -370,6 +370,10 @@ final class QueryTab: Identifiable {
         panel.allowedContentTypes = AppModel.sqlContentTypes
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadSQL(from: url)
+    }
+
+    func loadSQL(from url: URL) {
         do {
             sql = try String(contentsOf: url, encoding: .utf8)
             if title.hasPrefix("Query ") { title = url.deletingPathExtension().lastPathComponent }

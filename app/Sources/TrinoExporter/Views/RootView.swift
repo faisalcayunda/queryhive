@@ -25,6 +25,19 @@ struct RootView: View {
             ConnectionEditorSheet(target: target)
                 .environment(model)
         }
+        .confirmationDialog("Delete \(model.pendingDeletionName)?",
+                            isPresented: Binding(
+                                get: { model.pendingDeletion != nil },
+                                set: { if !$0 { model.pendingDeletion = nil } }
+                            )) {
+            Button("Delete", role: .destructive) {
+                if let id = model.pendingDeletion { model.deleteConnection(id) }
+                model.pendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { model.pendingDeletion = nil }
+        } message: {
+            Text("This removes the saved connection and its Keychain password. This can't be undone.")
+        }
         .alert(model.notice?.title ?? "", isPresented: Binding(
             get: { model.notice != nil },
             set: { if !$0 { model.notice = nil } }

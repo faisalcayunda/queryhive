@@ -540,24 +540,7 @@ struct ConnectionEditorSheet: View {
 
     private func delete() {
         guard let id = editingID else { return }
-        var next = model.connections
-        next.removeAll { $0.id == id }
-        do {
-            try ConnectionStore.save(next)
-        } catch {
-            model.notice = Notice(title: "Couldn't delete connection", message: error.localizedDescription)
-            return
-        }
-        model.connections = next
-        do {
-            try ConnectionKeychain.delete(for: id)
-        } catch {
-            model.notice = Notice(title: "Couldn't delete the Keychain password", message: error.localizedDescription)
-        }
-        for tab in model.tabs where tab.connectionID == id {
-            tab.connectionID = model.connections.first?.id
-        }
-        model.rebuildTree()
+        model.deleteConnection(id)
         dismiss()
     }
 

@@ -233,19 +233,69 @@ struct TreeRow: View {
     @ViewBuilder private var menu: some View {
         switch node.kind {
         case .connection:
-            Button("Edit Connection…") { model.presentConnectionEditor(node.connectionID) }
-            Button("Refresh") { model.refresh(node) }
+            // Navicat's connection menu, minus the entries this app has nothing behind: no
+            // connection profiles, no server-side "New Database", no groups or sharing. What is
+            // left is what the app can actually do.
+            Button("Open Connection") { model.expand(node) }
             Divider()
+            Button("Edit Connection…") { model.presentConnectionEditor(node.connectionID) }
+            Button("Duplicate Connection") { model.duplicateConnection(node.connectionID) }
+            Button("Delete Connection…") { model.requestDelete(node.connectionID) }
+            Divider()
+            Button("New Connection") { model.presentConnectionEditor(nil) }
+            Divider()
+            // No keyboard shortcuts in here: this app's ⌘R is Run and ⌘T is already New Query
+            // from the Query menu, so printing either beside a different action would mislead,
+            // and declaring one twice can fire it twice.
             Button("New Query") { model.newTab(connectionID: node.connectionID) }
+            Button("Open SQL File…") { model.runSQLFile(connectionID: node.connectionID) }
+            Divider()
+            Menu("Color") {
+                ForEach(ConnectionColor.allCases) { color in
+                    Button {
+                        model.setColor(color, for: node.connectionID)
+                    } label: {
+                        // The colour's own name, with a tick on the one in use. A context menu
+                        // cannot draw swatches, and inventing a row of coloured dots that only
+                        // works in one menu would be worse than saying the colour.
+                        if node.color == color {
+                            Label(color.rawValue.capitalized, systemImage: "checkmark")
+                        } else {
+                            Text(color.rawValue.capitalized)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Refresh") { model.refresh(node) }
+            Button("Reveal connections.json") {
+                if let url = try? ConnectionStore.directory() {
+                    NSWorkspace.shared.activateFileViewerSelecting([url.appendingPathComponent("connections.json")])
+                }
+            }
         case .catalog, .database, .schema:
             Button("Refresh") { model.refresh(node) }
-            Button("New Query") { model.newTab(connectionID: node.connectionID) }
-        case .table:
-            Button("Insert into Query") { model.insert(node) }
             Button("Copy Name") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(node.title, forType: .string)
             }
+            Divider()
+            Button("New Query") { model.newTab(connectionID: node.connectionID) }
+            Button("Open SQL File…") { model.runSQLFile(connectionID: node.connectionID) }
+        case .table:
+            Button("Insert into Query") { model.insert(node) }
+            if let qualified = node.insertableText {
+                Button("Copy Qualified Name") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(qualified, forType: .string)
+                }
+            }
+            Button("Copy Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(node.title, forType: .string)
+            }
+            Divider()
+            Button("Refresh") { model.refresh(node) }
         }
     }
 

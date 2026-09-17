@@ -160,6 +160,27 @@ The form shows only the fields the driver has:
 and they have to agree. A `connections.json` written before QueryHive spoke to more than Trino
 still loads: the decoder reads the old `httpScheme` and `catalog` keys and never writes them.
 
+### The object tree's context menu
+
+Navicat's, minus the entries this app has nothing behind — no connection profiles, no groups or
+sharing, no server-side "New Database", and no separate "Console" (New Query already is one).
+What is left is what the app can actually do:
+
+| level | menu |
+|---|---|
+| connection | Open Connection · Edit / Duplicate / Delete · New Connection · New Query, Open SQL File… · Color ▸ · Refresh · Reveal connections.json |
+| catalog, database, schema | Refresh · Copy Name · New Query · Open SQL File… |
+| table | Insert into Query · Copy Qualified Name · Copy Name · Refresh |
+
+Two things are deliberately absent from it. **Keyboard shortcuts**, because this app's ⌘R is Run
+and ⌘T is already New Query from the Query menu — printing either beside a different action
+misleads, and declaring one in two places can fire it twice. And **colour swatches**, because a
+context menu cannot draw them; the Color submenu names the colours and ticks the current one
+rather than inventing a row of dots that only works in one menu.
+
+Delete asks before it acts, and the question lives on `AppModel.pendingDeletion` rather than in
+the row, so the tree and the editor's Delete button ask the same one.
+
 ### The SQL editor and its suggestions
 
 The editor is an `NSTextView` (`SQLEditor`), not SwiftUI's `TextEditor`. That is forced:
