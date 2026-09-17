@@ -337,13 +337,19 @@ struct PanelResizer: View {
         .frame(height: 7)
         .onHover { $0 ? NSCursor.resizeUpDown.set() : NSCursor.arrow.set() }
         .gesture(
-            DragGesture(minimumDistance: 1)
+            // `.global`, not the default local space. This handle moves as the pane it borders
+            // resizes — that is what dragging it does — so a local coordinate space measures the
+            // translation against an origin that is itself moving. The value then alternates
+            // between the real delta and zero, and the seam shivers under the pointer.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
-                    if startHeight == nil { startHeight = model.panelHeight }
+                    if startHeight == nil {
+                        startHeight = model.panelHeight
+                        model.panelCollapsed = false
+                    }
                     let base = startHeight ?? model.panelHeight
                     // Dragging the seam down makes the panel shorter.
                     model.panelHeight = min(560, max(96, base - value.translation.height))
-                    model.panelCollapsed = false
                 }
                 .onEnded { _ in startHeight = nil }
         )

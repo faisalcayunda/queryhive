@@ -143,7 +143,10 @@ struct SidebarResizer: View {
         .frame(width: 7)
         .onHover { $0 ? NSCursor.resizeLeftRight.set() : NSCursor.arrow.set() }
         .gesture(
-            DragGesture(minimumDistance: 1)
+            // `.global`, not the default local space. Same reason as the panel seam: this handle
+            // moves as the drag resizes the sidebar, so a local coordinate space measures the
+            // translation against an origin that is itself moving.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
                     if startWidth == nil { startWidth = model.sidebarWidth }
                     let base = startWidth ?? model.sidebarWidth

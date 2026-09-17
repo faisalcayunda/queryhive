@@ -194,6 +194,16 @@ left, alternating rows, `null` in italic dim rather than an empty cell (which is
 thing), and a footer that never overstates what is on screen — `First N rows · limit reached` in
 amber when the cap stopped it, `N rows` otherwise.
 
+### The seams do not shiver
+
+Both drag handles capture the pane's size at the start of a drag and set it from
+`value.translation`. That arithmetic was always right; the jitter was in which coordinate space it
+was measured in. `DragGesture` defaults to **local** space — the handle's own — and the handle
+*moves* as the drag resizes the pane it borders. So the translation was measured against an origin
+that the drag itself was shifting: each event alternated between the real delta and roughly zero,
+and the seam shivered under the pointer. `.global` measures against the window, which the drag does
+not move.
+
 ### Where controls sit
 
 The rule, learned from getting it wrong: **an action belongs next to what it acts on.** The editor
