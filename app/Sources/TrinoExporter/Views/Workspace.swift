@@ -145,15 +145,7 @@ struct QueryToolbar: View {
 
             ToolbarSeparator()
 
-            Segmented(selection: $tab.destination, options: [Destination.file, .table]) { $0.label }
-                .frame(width: 116)
-                .help("Write the result to a file, or have Trino write it into a table")
-
-            switch tab.destination {
-            case .file: fileControls
-            case .table: tableControls
-            }
-
+            ExportSettingsButton(tab: tab)
             Spacer(minLength: 8)
         }
         .padding(.horizontal, Metrics.gutter)
@@ -206,149 +198,6 @@ struct QueryToolbar: View {
         }
     }
 
-    @ViewBuilder private var fileControls: some View {
-        FormatPickerButton(tab: tab)
-        FolderButton(tab: tab)
-        HStack(spacing: 6) {
-            Image(systemName: "doc.text").font(.system(size: 10)).foregroundStyle(Tone.secondary)
-            TextField("export", text: $tab.outputName)
-                .toolbarField()
-                .frame(minWidth: 104, idealWidth: 132, maxWidth: 132)
-        }
-        .help("Base file name, without the extension")
-    }
-
-    @ViewBuilder private var tableControls: some View {
-        // One button instead of four fields. Catalog, schema, table and mode do not fit across a
-        // toolbar at the window's minimum width, and the value that would get truncated first is
-        // the table name — the one thing the user must read back before Replace drops it.
-        TableTargetButton(tab: tab)
-            .frame(minWidth: 176, idealWidth: 260, maxWidth: 300)
-        WriteModeButton(mode: $tab.writeMode)
-    }
-}
-
-/// The table destination's target, collapsed into a single toolbar button. Mirrors the file
-/// destination's format button: the toolbar names what will happen, the popover is where the
-/// detail lives.
-struct TableTargetButton: View {
-    @Environment(AppModel.self) private var model
-    @Bindable var tab: QueryTab
-
-    private var showing: Binding<Bool> {
-        Binding(get: { model.targetPopoverOpen }, set: { model.targetPopoverOpen = $0 })
-    }
-
-    private var driverKind: ConnectionKind { model.connection(for: tab)?.kind ?? .trino }
-
-    private var summary: String {
-        let target = tab.target(for: driverKind)
-        return target.isEmpty ? "Choose a target…" : target
-    }
-
-    /// The tree's own knowledge plus whatever this popover has fetched; see
-    /// `AppModel.targetChoices`. Fetched on appear, because a dropdown that is only populated
-    /// once you have browsed the tree elsewhere is a text field wearing a chevron.
-    private var catalogs: [String] {
-        model.targetChoices(for: tab.connectionID, kind: driverKind == .mysql ? .database : .catalog)
-    }
-
-    private var schemas: [String] {
-        model.targetChoices(for: tab.connectionID, kind: .schema, database: tab.trimmedCatalog)
-    }
-
-    var body: some View {
-        Button { showing.wrappedValue.toggle() } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "tablecells")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Tone.mint)
-                Text(summary)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(tab.trimmedTable.isEmpty ? Tone.secondary : .white)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Tone.secondary)
-            }
-            .padding(.horizontal, 9)
-            .frame(maxWidth: .infinity)
-            .frame(height: Metrics.control)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.white.opacity(0.10)))
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .help("Where \(driverKind.label) writes the query's rows")
-        .popover(isPresented: showing, arrowEdge: .bottom) { panel }
-    }
-
-    private var panel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionLabel(text: "Target table")
-            // Only the fields this driver has. Postgres writes inside the database its connection
-            // already opened, so a catalog field would be a lie; MySQL has no schema level.
-            switch driverKind {
-            case .trino:
-                LabeledField("Catalog") {
-                    ComboField(placeholder: "hive", text: $tab.targetCatalog, options: catalogs, width: 332,
-                               loading: model.isLoadingOptions(for: tab.connectionID))
-                }
-                LabeledField("Schema") {
-                    ComboField(placeholder: "analytics", text: $tab.targetSchema, options: schemas, width: 332,
-                               loading: model.isLoadingOptions(for: tab.connectionID, catalog: tab.trimmedCatalog))
-                }
-            case .postgres:
-                LabeledField("Schema") {
-                    ComboField(placeholder: "public", text: $tab.targetSchema, options: schemas, width: 332,
-                               loading: model.isLoadingOptions(for: tab.connectionID))
-                }
-            case .mysql:
-                LabeledField("Database") {
-                    ComboField(placeholder: "mydb", text: $tab.targetCatalog, options: catalogs, width: 332,
-                               loading: model.isLoadingOptions(for: tab.connectionID))
-                }
-            }
-            LabeledField("Table") {
-                TextField("penerima_manfaat_2026", text: $tab.targetTable).field()
-            }
-            Divider().overlay(.white.opacity(0.08))
-            SectionLabel(text: "If the table already exists")
-            ForEach(WriteMode.allCases) { mode in
-                Button { tab.writeMode = mode } label: {
-                    HStack(alignment: .top, spacing: 9) {
-                        Image(systemName: tab.writeMode == mode ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 12))
-                            .foregroundStyle(tab.writeMode == mode ? mode.tint : .white.opacity(0.3))
-                            .padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(mode.statement)
-                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(mode == .replace ? Tone.coral : .white)
-                            Text(mode.help)
-                                .font(.system(size: 11))
-                                .foregroundStyle(Tone.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(14)
-        .frame(width: 360)
-        .onAppear {
-            model.loadCatalogs(for: tab.connectionID)
-            model.loadSchemas(for: tab.connectionID, catalog: tab.trimmedCatalog)
-        }
-        .onChange(of: tab.targetCatalog) { _, catalog in
-            model.loadSchemas(for: tab.connectionID, catalog: catalog.trimmingCharacters(in: .whitespaces))
-        }
-    }
 }
 
 /// Create / Replace / Append as a menu button. Replace is drawn in coral, because it is the one
@@ -391,85 +240,6 @@ struct WriteModeButton: View {
     }
 }
 
-/// The format button opens a popover rather than a menu: the nine writers want a tile grid, and
-/// each one's own options belong right next to the choice, the way Navicat's export wizard puts
-/// them.
-struct FormatPickerButton: View {
-    @Bindable var tab: QueryTab
-    @State private var showing = false
-
-    var body: some View {
-        Button { showing.toggle() } label: {
-            HStack(spacing: 7) {
-                Image(systemName: tab.format.symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tab.format.tint)
-                Text(tab.format.label)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Tone.secondary)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 28)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.white.opacity(0.10)))
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .help(tab.format.fullLabel)
-        .popover(isPresented: $showing, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 12) {
-                SectionLabel(text: "Format")
-                FormatGrid(selection: $tab.format)
-                Divider().overlay(.white.opacity(0.08))
-                FormatOptionsPanel(tab: tab)
-                Divider().overlay(.white.opacity(0.08))
-                StreamingOptions(tab: tab)
-            }
-            .padding(14)
-            .frame(width: 372)
-        }
-    }
-}
-
-struct FolderButton: View {
-    @Bindable var tab: QueryTab
-    @State private var hovering = false
-
-    var body: some View {
-        Button { choose() } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "folder.fill").font(.system(size: 10)).foregroundStyle(Tone.amber)
-                Text(tab.outputDirectory?.lastPathComponent ?? "Choose folder")
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 28)
-            .frame(maxWidth: 118)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(.white.opacity(hovering ? 0.18 : 0.10)))
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(tab.outputDirectory?.path ?? "Choose an output folder")
-    }
-
-    private func choose() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        if let directory = tab.outputDirectory { panel.directoryURL = directory }
-        if panel.runModal() == .OK, let url = panel.url { tab.outputDirectory = url }
-    }
-}
-
 // MARK: Editor
 
 struct EditorPane: View {
@@ -506,10 +276,7 @@ struct EditorPane: View {
                     .disabled(tab.sql.isEmpty)
                 Spacer(minLength: 0)
             }
-            // Navicat's object pickers live in a strip of their own; here they fill the right half
-            // of the header that was already there. They are a lookup, not an action, which is why
-            // they are the one thing on the far side of this row.
-            ObjectPickers(tab: tab)
+
             .padding(.horizontal, Metrics.gutter)
             .frame(height: Metrics.paneHeader)
 

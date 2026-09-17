@@ -10,7 +10,8 @@ struct ResultGrid: View {
 
     /// Per-column pixel width, computed once per result rather than per cell: at 1000 rows the
     /// per-cell version is O(rows × columns) work on every render pass.
-    private var widths: [CGFloat] {
+    /// Natural widths, before the viewport has a say.
+    private var naturalWidths: [CGFloat] {
         guard let preview = tab.preview else { return [] }
         return preview.columns.enumerated().map { index, column in
             let header = column.name.count
@@ -24,6 +25,22 @@ struct ResultGrid: View {
             return min(max(CGFloat(max(header, longest)) * 7.2 + 20, 84), 320)
         }
     }
+
+    /// What the grid actually draws. When the columns come to less than the panel is wide, the
+    /// slack is shared out between them: a result whose columns stop two thirds of the way across
+    /// reads as unfinished, and the empty band beside it is the first thing the eye lands on.
+    private func widths(fitting available: CGFloat) -> [CGFloat] {
+        let natural = naturalWidths
+        let total = natural.reduce(0, +)
+        // The row-number gutter is not one of these columns, so it has to come out of the space
+        // they share — without this the columns always fell exactly that short of filling.
+        let forColumns = available - gutterWidth
+        guard total > 0, total < forColumns else { return natural }
+        let slack = forColumns - total
+        return natural.map { $0 + slack * ($0 / total) }
+    }
+
+    private var gutterWidth: CGFloat { 44 + 16 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,21 +79,27 @@ struct ResultGrid: View {
     }
 
     private func grid(_ preview: PreviewResult) -> some View {
-        ScrollView([.horizontal, .vertical]) {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                Section {
-                    ForEach(Array(preview.rows.enumerated()), id: \.offset) { index, row in
-                        rowView(row, index: index, columns: preview.columns)
+        // The reader has to be outside the scroller: inside it, `geometry` would report the
+        // content's width, which is the thing being decided.
+        GeometryReader { geometry in
+            let widths = widths(fitting: geometry.size.width)
+            ScrollView([.horizontal, .vertical]) {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        ForEach(Array(preview.rows.enumerated()), id: \.offset) { index, row in
+                            rowView(row, index: index, columns: preview.columns, widths: widths)
+                        }
+                    } header: {
+                        headerRow(preview.columns, widths: widths)
                     }
-                } header: {
-                    headerRow(preview.columns)
                 }
+                .frame(minWidth: geometry.size.width, alignment: .topLeading)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func headerRow(_ columns: [Event.Column]) -> some View {
+    private func headerRow(_ columns: [Event.Column], widths: [CGFloat]) -> some View {
         HStack(spacing: 0) {
             gutter("#")
             ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
@@ -98,7 +121,7 @@ struct ResultGrid: View {
         .overlay(Rectangle().fill(.white.opacity(0.12)).frame(height: 1), alignment: .bottom)
     }
 
-    private func rowView(_ row: [String?], index: Int, columns: [Event.Column]) -> some View {
+    private func rowView(_ row: [String?], index: Int, columns: [Event.Column], widths: [CGFloat]) -> some View {
         HStack(spacing: 0) {
             gutter("\(index + 1)")
             ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, column in

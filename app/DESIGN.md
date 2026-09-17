@@ -108,6 +108,25 @@ Two rules that came out of looking at the result rather than the code:
   "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
   without reading it.
 
+### One toolbar, one Export button
+
+The toolbar had become a settings panel with a Run button on it: a File/Table switch, a format
+menu, a folder chip and a name field, all sitting in a row at the same weight as Run. Every one of
+those choices now lives behind the **Export** button's chevron, which opens the destination — File
+or Table, format and its options, folder and name, or the target table and its write mode — and
+names what pressing the button will do before you press it. The grid's footer keeps a contextual
+Export, because that is where the result is; the toolbar keeps one, because that is where you are
+when you decide.
+
+The object pickers are **gone**. The tree already inserts a qualified, quoted name on a double
+click, it is always on screen, and it knows each driver's levels for real. A second way to do the
+same thing, empty until a fetch came back, earned its removal rather than a redesign.
+
+The grid's columns now **share out whatever width the panel has**. A result whose columns stop two
+thirds of the way across reads as unfinished, and the empty band beside it is the first thing the
+eye lands on. The row-number gutter comes out of the space first — without that the columns always
+fell exactly that far short.
+
 ### The editor's own strip
 
 Navicat's query window stacks three rows: an icon toolbar, a strip of object pickers with Run and

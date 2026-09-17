@@ -272,14 +272,6 @@ final class QueryTab: Identifiable {
     /// so "Run Current Statement" knows which one the user is looking at.
     var caret = 0
 
-    /// The editor's object pickers' current choice. They narrow what the next picker offers and
-    /// insert a name; nothing here reaches the engine except through the option fetches, so they
-    /// are not the same thing as the export destination's catalog/schema.
-    var pickerDatabase = ""
-    var pickerSchema = ""
-    /// A table picked from the picker, about to be inserted.
-    var pickerTable = ""
-
     var previewing = false
     var preview: PreviewResult?
     var previewError: String?

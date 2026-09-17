@@ -133,6 +133,9 @@ final class AppModel {
     /// tool can open it — it is otherwise unreachable, and it went a long time unseen.
     var targetPopoverOpen = false
 
+    /// The export settings popover, on the model for the same reason.
+    var exportSettingsOpen = false
+
     /// Set while a delete is waiting for the user to confirm. Held on the model rather than in a
     /// row so the tree's context menu and the editor's Delete button ask the same question.
     var pendingDeletion: UUID?
@@ -370,8 +373,6 @@ final class AppModel {
     /// Schemas fetched for one catalog, keyed by "connection|catalog". Postgres has no catalog
     /// level, so its key ends in an empty catalog.
     private var schemaOptions: [String: [String]] = [:]
-    /// Tables fetched for one schema, keyed like the schemas.
-    private var tableOptions: [String: [String]] = [:]
     /// Keys with a fetch in flight, so a field can say it is working instead of looking empty.
     private(set) var loadingOptions: Set<String> = []
 
@@ -415,46 +416,6 @@ final class AppModel {
         }, onExit: { [weak self] _, _ in
             self?.loadingOptions.remove(key)
         })
-    }
-
-    func loadTables(for connectionID: UUID?, catalog: String, schema: String) {
-        guard let connectionID, let connection = connections.first(where: { $0.id == connectionID }) else { return }
-        let key = optionKey(connectionID, "\(catalog)|\(schema)")
-        guard tableOptions[key] == nil, !loadingOptions.contains(key) else { return }
-        guard var env = try? connectionEnvironment(connection) else { return }
-        env["RETRIES"] = "2"
-        if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
-        if !schema.isEmpty { env["DB_SCHEMA"] = schema }
-        loadingOptions.insert(key)
-        Engine.run("tables", env: env, onEvent: { [weak self] event in
-            guard event.event == "tables" else { return }
-            self?.tableOptions[key] = event.names ?? []
-        }, onExit: { [weak self] _, _ in
-            self?.loadingOptions.remove(key)
-        })
-    }
-
-    /// What a table picker offers: the tree's loaded tables for that schema plus whatever has been
-    /// fetched. Same union as the destination fields, for the same reason.
-    func tableChoices(for connectionID: UUID?, catalog: String, schema: String) -> [String] {
-        var names = Set(loadedTableNames(for: connectionID, catalog: catalog, schema: schema))
-        if let connectionID {
-            names.formUnion(tableOptions[optionKey(connectionID, "\(catalog)|\(schema)")] ?? [])
-        }
-        return names.sorted()
-    }
-
-    private func loadedTableNames(for connectionID: UUID?, catalog: String, schema: String) -> [String] {
-        guard let connectionID else { return [] }
-        return allNodes()
-            .filter { $0.connectionID == connectionID && $0.kind == .table
-                && (schema.isEmpty || $0.schema == schema) }
-            .map(\.title)
-    }
-
-    func isLoadingTables(for connectionID: UUID?, catalog: String, schema: String) -> Bool {
-        guard let connectionID else { return false }
-        return loadingOptions.contains(optionKey(connectionID, "\(catalog)|\(schema)"))
     }
 
     private func optionKey(_ connectionID: UUID, _ catalog: String) -> String {
