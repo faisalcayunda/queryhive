@@ -46,44 +46,69 @@ struct DestinationPopover: View {
         model.run(tab)
     }
 
+    /// A scrolling body between two pinned ends.
+    ///
+    /// The wizard is taller than a laptop screen's worth of popover once a format brings its own
+    /// options, and the first version simply grew until Cancel and Export fell off the bottom —
+    /// the two controls you need most were the ones that disappeared. The destination stays at the
+    /// top and the buttons at the bottom; only the middle moves.
     private var panel: some View {
         @Bindable var tab = tab
-        return VStack(alignment: .leading, spacing: 12) {
-            SectionLabel(text: "Destination")
-            Segmented(selection: $tab.destination, options: [Destination.file, .table]) { $0.label }
-            Text(summary)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(Tone.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+        return VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(text: "Destination")
+                Segmented(selection: $tab.destination, options: [Destination.file, .table]) { $0.label }
+                Text(summary)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Tone.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Divider().overlay(.white.opacity(0.08))
-            switch tab.destination {
-            case .file:
-                FormatGrid(selection: $tab.format)
-                Divider().overlay(.white.opacity(0.08))
-                FormatOptionsPanel(tab: tab)
-                Divider().overlay(.white.opacity(0.08))
-                StreamingOptions(tab: tab)
-                Divider().overlay(.white.opacity(0.08))
-                LabeledField("Folder") {
-                    HStack(spacing: 8) {
-                        Text(tab.outputDirectory?.path ?? "No folder chosen")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(tab.outputDirectory == nil ? Tone.coral : .white)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        PillButton(title: "Choose…", symbol: "folder", compact: true) { chooseFolder() }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    switch tab.destination {
+                    case .file:
+                        FormatGrid(selection: $tab.format)
+                        Divider().overlay(.white.opacity(0.08))
+                        FormatOptionsPanel(tab: tab)
+                        Divider().overlay(.white.opacity(0.08))
+                        StreamingOptions(tab: tab)
+                        Divider().overlay(.white.opacity(0.08))
+                        LabeledField("Folder") {
+                            HStack(spacing: 8) {
+                                Text(tab.outputDirectory?.path ?? "No folder chosen")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(tab.outputDirectory == nil ? Tone.coral : .white)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                PillButton(title: "Choose…", symbol: "folder", compact: true) { chooseFolder() }
+                            }
+                        }
+                        LabeledField("File name") { TextField("export", text: $tab.outputName).field() }
+                    case .table:
+                        TableTargetFields(tab: tab)
                     }
                 }
-                LabeledField("File name") { TextField("export", text: $tab.outputName).field() }
-            case .table:
-                TableTargetFields(tab: tab)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Tall enough for the format grid plus one options block; past that the wizard scrolls
+            // rather than growing off the screen.
+            .frame(height: 396)
+            .scrollBounceBehavior(.basedOnSize)
+
             Divider().overlay(.white.opacity(0.08))
+
             HStack(spacing: 8) {
                 if let blocked {
                     Text(blocked).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                        .lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
                 PillButton(title: "Cancel", role: .quiet) { model.exportSettingsOpen = false }
@@ -94,8 +119,8 @@ struct DestinationPopover: View {
                 }
                 .disabled(blocked != nil || tab.stage == .running)
             }
+            .padding(14)
         }
-        .padding(14)
         .frame(width: 400)
         .onAppear {
             model.loadCatalogs(for: tab.connectionID)
