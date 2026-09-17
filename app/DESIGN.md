@@ -116,6 +116,14 @@ of a 1240pt window — an 800pt journey to reach a button that edits the text di
 and a row whose two ends did not look related. They are now one group on the left. The same
 mistake put the run spinner at the right end of the panel bar, away from the tabs it describes.
 
+A **button's outcome belongs beside the button**. "Connected · 56 catalogs" used to render up in
+the form, above the divider, with a wall between the action and its own result; it now sits
+directly right of Test Connection. That cost a layout decision: the footer holds five things, so
+the status carries a *negative* `layoutPriority` — it yields width before the button beside it
+does, or a greedy status squeezes "Test Connection" down to "Test Conn…". Success truncates at the
+tail, a failure in the middle (its cause is at the end, its class prefix at the start, and the
+whole message stays in the tooltip). The sheet is 620pt wide for the same reason.
+
 **Headers group left; footers commit right.** Those are different conventions on purpose. A header
 is a label plus its actions, so they sit together at the start. A footer ends a panel or a dialog,
 and its action belongs in the corner where the pointer already is — `Reveal in Finder`,
@@ -293,6 +301,11 @@ The tile follows Apple's grid: the squircle is 0.805 of the canvas with a 0.225 
 no drop shadow is baked in, because the Dock draws its own.
 
 ### Reviewing the design without a human in front of the window
+
+Some states have no route from a fixture: the connection editor's footer only shows a result after
+a real test against a real server, and there is none here. `ConnectionEditorTarget.previewTestCount`
+exists for exactly that — snapshot scaffolding, named as such — because the alternative is a state
+nobody has ever looked at, which is how that footer's layout came to be wrong in the first place.
 
 ```bash
 app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh.png --scene done

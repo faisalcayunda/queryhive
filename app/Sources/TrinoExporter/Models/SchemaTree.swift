@@ -158,9 +158,14 @@ struct ConnectionEditorTarget: Identifiable {
     /// Open straight at the URI step, for the sidebar's "Add from URL…" — the sheet owns URL
     /// parsing now, so there is no second implementation of it to drift.
     var startAtURL = false
+    /// Snapshot scaffolding. The footer's test state is otherwise unreachable without a server to
+    /// test against, and a footer nobody has looked at is a footer that ships broken — which is
+    /// exactly how its layout came to be wrong.
+    var previewTestCount: Int?
 
-    init(_ connectionID: UUID?, startAtURL: Bool = false) {
+    init(_ connectionID: UUID?, startAtURL: Bool = false, previewTestCount: Int? = nil) {
         self.connectionID = connectionID
         self.startAtURL = startAtURL
+        self.previewTestCount = previewTestCount
     }
 }

@@ -229,6 +229,9 @@ enum Snapshot {
             tab.files = []
             tab.logLines = Array(tab.logLines.prefix(4))
             tab.startedAt = Date(timeIntervalSinceNow: -18)
+        case "connection-tested":
+            // The footer's success state, which is otherwise unreachable without a server.
+            model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
         case "table-target":

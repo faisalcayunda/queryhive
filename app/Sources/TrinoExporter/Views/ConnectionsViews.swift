@@ -164,7 +164,7 @@ struct ConnectionEditorSheet: View {
             case .form: formStep
             }
         }
-        .frame(width: 560, height: 640)
+        .frame(width: 620, height: 660)
         .background(Tone.canvas)
         .preferredColorScheme(.dark)
         .confirmationDialog("Delete \(name.isEmpty ? "this connection" : name)?", isPresented: $confirmDelete) {
@@ -383,11 +383,6 @@ struct ConnectionEditorSheet: View {
             } else {
                 ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
             }
-
-            if case .idle = testState {} else {
-                Rectangle().fill(.white.opacity(0.08)).frame(height: 1).padding(.vertical, 2)
-                testResultRow
-            }
         }
     }
 
@@ -405,30 +400,49 @@ struct ConnectionEditorSheet: View {
         }
     }
 
-    @ViewBuilder private var testResultRow: some View {
+    /// The last test's outcome, on one line next to the button. A failure's message can be long
+    /// — the engine prefixes it with the exception class and Trino's connection errors run to a
+    /// paragraph — so the class prefix is dropped for reading and the whole thing stays in the
+    /// tooltip.
+    @ViewBuilder private var testStatus: some View {
         switch testState {
-        case .idle:
+        case .idle, .running:
+            // Nothing to add: the button beside this says "Testing…" while it works.
             EmptyView()
-        case .running:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Testing…").font(.body13).foregroundStyle(Tone.secondary)
-            }
         case .success(let level):
-            HStack(spacing: 8) {
-                Circle().fill(Tone.mint).frame(width: 10, height: 10)
-                Text("Connected · \(pluralized(level, kind == .postgres ? "schema" : "catalog")).")
-                    .font(.body13)
-                    .textSelection(.enabled)
-            }
+            statusLine("Connected · \(pluralized(level, kind == .postgres ? "schema" : "catalog"))",
+                       tint: Tone.mint, truncation: .tail)
         case .failure(let message):
-            HStack(alignment: .top, spacing: 8) {
-                Circle().fill(Tone.coral).frame(width: 10, height: 10).padding(.top, 4)
-                Text(message).font(.body13).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
+            // Middle, not tail: a connection error's cause is at the end of the sentence
+            // ("… Connection refused"), and its class prefix is at the start.
+            statusLine(Self.shortDiagnosis(message), tint: Tone.coral, truncation: .middle)
+                .help(message)
         }
     }
 
+    private func statusLine(_ text: String, tint: Color,
+                            truncation: Text.TruncationMode) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(tint).frame(width: 7, height: 7).layoutPriority(1)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(tint == Tone.coral ? Tone.coral : .white.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(truncation)
+        }
+        // Negative priority: the status yields its width before the button beside it does. A
+        // greedy frame here squeezed "Test Connection" down to "Test Conn…".
+        .layoutPriority(-1)
+    }
+
+    /// Drops the engine's `TypeName: ` prefix. It is useful in a log and noise beside a button.
+    private static func shortDiagnosis(_ message: String) -> String {
+        guard let separator = message.range(of: ": ") else { return message }
+        return String(message[separator.upperBound...])
+    }
+
+    /// Left has the action and its outcome; right has the terminal choices, in the order a
+    /// dialog's footer always puts them.
     private var footer: some View {
         HStack(spacing: 10) {
             // The running state keeps the capsule's shape so the footer does not reflow the
@@ -448,6 +462,7 @@ struct ConnectionEditorSheet: View {
                     .keyboardShortcut("t", modifiers: .command)
                     .help("Test Connection (⌘T)")
             }
+            testStatus
 
             Spacer()
 
@@ -473,6 +488,8 @@ struct ConnectionEditorSheet: View {
         // type chosen first.
         step = connectionID != nil ? .form : (target.startAtURL ? .url : .typePicker)
         testState = .idle
+        // After the reset, not before: this line used to sit above it and was silently wiped.
+        if let count = target.previewTestCount { testState = .success(count) }
         credential = ""
         guard let connection = original else {
             draftID = UUID()

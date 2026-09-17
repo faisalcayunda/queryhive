@@ -121,8 +121,10 @@ final class AppModel {
 
     // MARK: Connections
 
-    func presentConnectionEditor(_ connectionID: UUID?, startAtURL: Bool = false) {
-        editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL)
+    func presentConnectionEditor(_ connectionID: UUID?, startAtURL: Bool = false,
+                                 previewTestCount: Int? = nil) {
+        editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL,
+                                                   previewTestCount: previewTestCount)
     }
 
     /// Whether the target popover is open. On the model rather than in the view so the snapshot
