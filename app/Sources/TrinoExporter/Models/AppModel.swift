@@ -370,6 +370,8 @@ final class AppModel {
     /// Schemas fetched for one catalog, keyed by "connection|catalog". Postgres has no catalog
     /// level, so its key ends in an empty catalog.
     private var schemaOptions: [String: [String]] = [:]
+    /// Tables fetched for one schema, keyed like the schemas.
+    private var tableOptions: [String: [String]] = [:]
     /// Keys with a fetch in flight, so a field can say it is working instead of looking empty.
     private(set) var loadingOptions: Set<String> = []
 
@@ -413,6 +415,46 @@ final class AppModel {
         }, onExit: { [weak self] _, _ in
             self?.loadingOptions.remove(key)
         })
+    }
+
+    func loadTables(for connectionID: UUID?, catalog: String, schema: String) {
+        guard let connectionID, let connection = connections.first(where: { $0.id == connectionID }) else { return }
+        let key = optionKey(connectionID, "\(catalog)|\(schema)")
+        guard tableOptions[key] == nil, !loadingOptions.contains(key) else { return }
+        guard var env = try? connectionEnvironment(connection) else { return }
+        env["RETRIES"] = "2"
+        if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
+        if !schema.isEmpty { env["DB_SCHEMA"] = schema }
+        loadingOptions.insert(key)
+        Engine.run("tables", env: env, onEvent: { [weak self] event in
+            guard event.event == "tables" else { return }
+            self?.tableOptions[key] = event.names ?? []
+        }, onExit: { [weak self] _, _ in
+            self?.loadingOptions.remove(key)
+        })
+    }
+
+    /// What a table picker offers: the tree's loaded tables for that schema plus whatever has been
+    /// fetched. Same union as the destination fields, for the same reason.
+    func tableChoices(for connectionID: UUID?, catalog: String, schema: String) -> [String] {
+        var names = Set(loadedTableNames(for: connectionID, catalog: catalog, schema: schema))
+        if let connectionID {
+            names.formUnion(tableOptions[optionKey(connectionID, "\(catalog)|\(schema)")] ?? [])
+        }
+        return names.sorted()
+    }
+
+    private func loadedTableNames(for connectionID: UUID?, catalog: String, schema: String) -> [String] {
+        guard let connectionID else { return [] }
+        return allNodes()
+            .filter { $0.connectionID == connectionID && $0.kind == .table
+                && (schema.isEmpty || $0.schema == schema) }
+            .map(\.title)
+    }
+
+    func isLoadingTables(for connectionID: UUID?, catalog: String, schema: String) -> Bool {
+        guard let connectionID else { return false }
+        return loadingOptions.contains(optionKey(connectionID, "\(catalog)|\(schema)"))
     }
 
     private func optionKey(_ connectionID: UUID, _ catalog: String) -> String {
@@ -561,12 +603,17 @@ final class AppModel {
         preview(tab)
     }
 
-    func preview(_ tab: QueryTab) {
+    /// `statementOnly` is "Run Current Statement": the statement the caret sits in, for a file
+    /// holding several. It falls back to the whole editor when the scanner finds nothing.
+    func preview(_ tab: QueryTab, statementOnly: Bool = false) {
         guard !tab.previewing, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
+        let sql = statementOnly
+            ? (sqlStatement(in: tab.sql, atUTF16Offset: tab.caret) ?? tab.sql)
+            : tab.sql
         let env: [String: String]
         do {
-            env = try previewEnvironment(for: tab, connection: connection)
+            env = try previewEnvironment(for: tab, connection: connection, sql: sql)
         } catch {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
@@ -629,9 +676,10 @@ final class AppModel {
 
     /// The environment for a preview: the connection plus the statement and the row cap. Deliberately
     /// *not* the destination — looking at rows must not depend on having picked a file or a table.
-    private func previewEnvironment(for tab: QueryTab, connection: Connection) throws -> [String: String] {
+    private func previewEnvironment(for tab: QueryTab, connection: Connection,
+                                    sql: String) throws -> [String: String] {
         var env = try connectionEnvironment(connection)
-        env["SQL"] = tab.sql
+        env["SQL"] = sql
         env["LIMIT"] = String(max(1, tab.rowLimit))
         env["RETRIES"] = String(tab.retries)
         return env

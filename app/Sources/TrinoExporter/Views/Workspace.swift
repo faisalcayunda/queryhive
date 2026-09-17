@@ -165,26 +165,44 @@ struct QueryToolbar: View {
         }
     }
 
-    /// **Run looks; Export writes.** The toolbar's primary action is Run, because that is the one
-    /// you press over and over while working on a query; Export belongs to the result it exports
-    /// and lives in the grid's footer. A table run's destructive confirmation went with it.
+    /// Run with its variants on a chevron, and Stop beside it. Navicat's shape, in this app's
+    /// toolbar rather than in a strip of its own.
+    ///
+    /// Stop used to swap into Run's slot, which moved the button out from under the pointer at
+    /// exactly the moment someone was reaching for it. It is always here now, disabled when there
+    /// is nothing to stop. What is *not* here is Navicat's "Continue on Error": this engine runs
+    /// one statement per run, so there is no script to continue.
     @ViewBuilder private var actionButton: some View {
-        if tab.previewing {
-            HubButton(title: "Stop", symbol: "stop.fill", hue: .failure) { model.cancelPreview(tab) }
-                .keyboardShortcut(".", modifiers: .command)
-                .help("Stop the query (⌘.)")
-        } else if tab.stage == .running {
-            HubButton(title: tab.stopping ? "Stopping…" : "Stop", symbol: "stop.fill", hue: .failure) {
-                model.stop(tab)
-            }
-            .disabled(tab.stopping)
-            .keyboardShortcut(".", modifiers: .command)
-            .help("Stop the export (⌘.)")
-        } else {
+        let running = tab.previewing || tab.stage == .running
+        HStack(spacing: 2) {
             HubButton(title: "Run", symbol: "play.fill", hue: .exporter) { model.preview(tab) }
-                .disabled(model.runBlockedReason != nil)
+                .disabled(running || model.runBlockedReason != nil)
                 .keyboardShortcut("r", modifiers: .command)
                 .help(model.runBlockedReason ?? "Run the query and show the rows (⌘R)")
+
+            Menu {
+                Button("Run") { model.preview(tab) }
+                Button("Run Current Statement") { model.preview(tab, statementOnly: true) }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(running ? .white.opacity(0.3) : .white.opacity(0.75))
+                    .frame(width: 18, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .frame(width: 18)
+            .disabled(running || model.runBlockedReason != nil)
+            .help("Run, or run only the statement the caret is in")
+
+            IconButton(symbol: "stop.fill", tint: running ? Tone.coral : Tone.secondary,
+                       help: running ? "Stop (⌘.)" : "Nothing to stop", diameter: 28) {
+                if tab.previewing { model.cancelPreview(tab) } else { model.stop(tab) }
+            }
+            .disabled(!running)
+            .keyboardShortcut(".", modifiers: .command)
         }
     }
 
@@ -430,7 +448,7 @@ struct FolderButton: View {
             }
             .padding(.horizontal, 9)
             .frame(height: 28)
-            .frame(maxWidth: 150)
+            .frame(maxWidth: 118)
             .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(.white.opacity(hovering ? 0.18 : 0.10)))
@@ -488,10 +506,14 @@ struct EditorPane: View {
                     .disabled(tab.sql.isEmpty)
                 Spacer(minLength: 0)
             }
+            // Navicat's object pickers live in a strip of their own; here they fill the right half
+            // of the header that was already there. They are a lookup, not an action, which is why
+            // they are the one thing on the far side of this row.
+            ObjectPickers(tab: tab)
             .padding(.horizontal, Metrics.gutter)
             .frame(height: Metrics.paneHeader)
 
-            SQLEditor(text: $tab.sql, focused: $focused, completion: model.completion,
+            SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, completion: model.completion,
                       candidates: { prefix, qualified in
                           model.suggestions(for: tab, prefix: prefix, qualified: qualified)
                       })

@@ -13,6 +13,8 @@ import SwiftUI
 struct SQLEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var focused: Bool
+    /// UTF-16 caret offset, republished on every selection change.
+    @Binding var caret: Int
     /// Shared with the popup overlay drawn by the parent.
     let completion: EditorCompletion
     /// Candidates for a typed prefix. `qualified` is true when the word follows a `.`, which is
@@ -130,9 +132,12 @@ struct SQLEditor: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView else { return }
+            // "Run Current Statement" needs to know which one the caret is in.
+            parent.caret = textView.selectedRange().location
             // Clicking somewhere else with the list open should close it, not leave it pinned to
             // the old caret. Typing keeps it open because that path re-runs `refresh`.
-            guard parent.completion.active, let textView else { return }
+            guard parent.completion.active else { return }
             if (textView.string as NSString).length == 0 { parent.completion.dismiss() }
         }
 

@@ -109,17 +109,7 @@ final class TreeNode: Identifiable {
     /// way this connection's driver wants it, with exactly the parts that driver has.
     var insertableText: String? {
         guard kind == .table else { return nil }
-        switch connectionKind {
-        case .trino:
-            guard let database, let schema else { return nil }
-            return "\"\(database)\".\"\(schema)\".\"\(title)\""
-        case .postgres:
-            guard let schema else { return nil }
-            return "\"\(schema)\".\"\(title)\""
-        case .mysql:
-            guard let database else { return nil }
-            return "`\(database)`.`\(title)`"
-        }
+        return qualifiedName(database: database, schema: schema, table: title, for: connectionKind)
     }
 
     var subtitle: String? {
@@ -167,5 +157,23 @@ struct ConnectionEditorTarget: Identifiable {
         self.connectionID = connectionID
         self.startAtURL = startAtURL
         self.previewTestCount = previewTestCount
+    }
+}
+
+/// A table's fully qualified, quoted name for one driver — the single place that knows Trino and
+/// Postgres use double quotes while MySQL uses backticks. The tree's double-click and the editor's
+/// object pickers both go through it, so the two cannot produce different SQL for the same table.
+func qualifiedName(database: String?, schema: String?, table: String,
+                   for kind: ConnectionKind) -> String? {
+    switch kind {
+    case .trino:
+        guard let database, let schema else { return nil }
+        return "\"\(database)\".\"\(schema)\".\"\(table)\""
+    case .postgres:
+        guard let schema else { return nil }
+        return "\"\(schema)\".\"\(table)\""
+    case .mysql:
+        guard let database else { return nil }
+        return "`\(database)`.`\(table)`"
     }
 }

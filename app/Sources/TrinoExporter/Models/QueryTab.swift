@@ -268,6 +268,18 @@ final class QueryTab: Identifiable {
     /// it is a property of looking, not of the query, so it is not part of the statement.
     var rowLimit = 1000
 
+    /// Where the caret is, in UTF-16 units, as `NSTextView` reports it. Published by the editor
+    /// so "Run Current Statement" knows which one the user is looking at.
+    var caret = 0
+
+    /// The editor's object pickers' current choice. They narrow what the next picker offers and
+    /// insert a name; nothing here reaches the engine except through the option fetches, so they
+    /// are not the same thing as the export destination's catalog/schema.
+    var pickerDatabase = ""
+    var pickerSchema = ""
+    /// A table picked from the picker, about to be inserted.
+    var pickerTable = ""
+
     var previewing = false
     var preview: PreviewResult?
     var previewError: String?
@@ -415,4 +427,59 @@ final class QueryTab: Identifiable {
             note(.error, "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)")
         }
     }
+}
+
+/// The statement the caret sits in.
+///
+/// A scanner, not a parser: it splits on a `;` that is outside a single-quoted string and outside
+/// a `--` or `/* */` comment, which is what a file of ordinary statements needs. A semicolon
+/// inside a Postgres dollar-quoted body would fool it, and that is a deliberate trade — such a
+/// script is rare, and refusing to guess beats splitting wrongly and running half a statement.
+func sqlStatement(in sql: String, atUTF16Offset caret: Int) -> String? {
+    var found: [(Range<String.Index>, String)] = []
+    var start = sql.startIndex
+    var index = sql.startIndex
+    var inString = false
+    var inLineComment = false
+    var inBlockComment = false
+
+    func peek() -> Character? {
+        let next = sql.index(after: index)
+        return next < sql.endIndex ? sql[next] : nil
+    }
+    func take() {
+        let text = sql[start..<index].trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { found.append((start..<index, text)) }
+        start = sql.index(after: index)
+    }
+
+    while index < sql.endIndex {
+        let character = sql[index]
+        if inLineComment {
+            if character == "\n" { inLineComment = false }
+        } else if inBlockComment {
+            if character == "*", peek() == "/" { inBlockComment = false; index = sql.index(after: index) }
+        } else if inString {
+            if character == "'" { inString = false }
+        } else if character == "'" {
+            inString = true
+        } else if character == "-", peek() == "-" {
+            inLineComment = true
+            index = sql.index(after: index)
+        } else if character == "/", peek() == "*" {
+            inBlockComment = true
+            index = sql.index(after: index)
+        } else if character == ";" {
+            take()
+        }
+        index = sql.index(after: index)
+    }
+    let tail = sql[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+    if !tail.isEmpty { found.append((start..<sql.endIndex, tail)) }
+    guard !found.isEmpty else { return nil }
+
+    let caretIndex = String.Index(utf16Offset: min(max(caret, 0), sql.utf16.count), in: sql)
+    if let (_, text) = found.first(where: { $0.0.contains(caretIndex) }) { return text }
+    // Caret in the whitespace after a statement: that statement is the one being looked at.
+    return found.last(where: { $0.0.lowerBound <= caretIndex })?.1 ?? found.first?.1
 }

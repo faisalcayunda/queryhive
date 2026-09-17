@@ -108,6 +108,32 @@ Two rules that came out of looking at the result rather than the code:
   "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
   without reading it.
 
+### The editor's own strip
+
+Navicat's query window stacks three rows: an icon toolbar, a strip of object pickers with Run and
+Stop, then the editor. Copied literally that would be a third row of chrome in an app whose
+toolbar already carries a connection *and* a destination Navicat's does not have. So the three
+things worth having were fitted to the rows that already exist:
+
+| Navicat | here | why |
+|---|---|---|
+| object pickers on their own strip | at the right of the editor header, which was empty | they are a lookup, not an action, so they take the far side of a row whose actions sit left |
+| `Run ⌄` | Run with a chevron menu beside it | the primary action stays one click; the variants stay one more |
+| `□ Stop` beside Run | Stop beside Run, disabled when idle | it used to swap into Run's slot, which moved the button out from under the pointer exactly when it was being reached for |
+| icon toolbar: EXPLAIN, format, layout toggles | **not copied** | the engine has no EXPLAIN, no formatter, and one grid — a button with nothing behind it is worse than no button |
+| "Continue on Error" | **not copied** | one statement runs per run; there is no script to continue |
+
+The pickers follow the connection's driver levels exactly as the tree does — no schema picker for
+MySQL, no catalog picker for Postgres — and inserting goes through `qualifiedName`, the same
+routine the tree's double-click uses, so the two cannot produce different SQL for the same table.
+They are `Menu`s and not the combo boxes the export destination uses: everything here already
+exists, so a free-text field would only invite the typo the picker exists to prevent.
+
+"Run Current Statement" is `sqlStatement(in:at:)`: a scanner, not a parser. It splits on a `;`
+outside a single-quoted string and outside `--` and `/* */` comments. A semicolon inside a
+Postgres dollar-quoted body would fool it, and that is deliberate — such a script is rare, and
+refusing to guess beats splitting wrongly and running half a statement.
+
 ### Run looks, Export writes
 
 Navicat's split, and the thing that makes this a query editor rather than a one-way pipe. The
