@@ -209,6 +209,11 @@ enum Snapshot {
             tab.startedAt = Date(timeIntervalSinceNow: -18)
         case "connection":
             model.presentConnectionEditor(primary.id)
+        case "disabled":
+            // No connection and no SQL: the primary action in its "not yet" state, which is what
+            // a user sees the moment the app opens.
+            tab.connectionID = nil
+            tab.sql = ""
         case "new-connection":
             // The new-connection flow starts at the type grid, not at a form.
             model.presentConnectionEditor(nil)

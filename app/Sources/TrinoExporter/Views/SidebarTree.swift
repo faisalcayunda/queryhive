@@ -119,10 +119,8 @@ struct SidebarTree: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("New Connection") { model.presentConnectionEditor(nil) }
-                .buttonStyle(.pill)
-            Button("Add from URL…") { model.presentConnectionEditor(nil, startAtURL: true) }
-                .buttonStyle(.pill)
+            PillButton(title: "New Connection", symbol: "plus") { model.presentConnectionEditor(nil) }
+            PillButton(title: "Add from URL…", symbol: "link", role: .quiet) { model.presentConnectionEditor(nil, startAtURL: true) }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

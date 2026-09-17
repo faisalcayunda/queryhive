@@ -464,12 +464,12 @@ struct EditorPane: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(Tone.secondary)
                 Spacer()
-                Button("Load File…") { tab.loadSQLFromFile() }
-                    .buttonStyle(.pill)
+                PillButton(title: "Load File…", symbol: "folder", compact: true) { tab.loadSQLFromFile() }
                     .keyboardShortcut("o", modifiers: .command)
                     .help("Load SQL from a file (⌘O)")
-                Button("Clear") { tab.sql = "" }
-                    .buttonStyle(.pill)
+                // Quiet: clearing is not a commitment, and giving it the same weight as
+                // "Load File…" made the pair read as two equal choices.
+                PillButton(title: "Clear", symbol: "xmark", role: .quiet, compact: true) { tab.sql = "" }
                     .disabled(tab.sql.isEmpty)
             }
             .padding(.horizontal, Metrics.gutter)

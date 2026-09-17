@@ -41,7 +41,7 @@ several queries are open at once. What the two share is the palette, the glass a
 | Backdrop | `Backdrop(hue:)` behind the workspace only; the tree and the status bar carry their own material. Radial gradients, never `.blur` (a snapshot capture does not render it). |
 | Surfaces | Panels are `.glass(radius)` where they float, flat tinted fills where they are chrome. |
 | Type | Rounded for titles (30pt `heroTitle`, 14pt `cardTitle`), `body13` for prose, monospaced for anything the engine produced — paths, counts, query ids, column names. |
-| Action | `HubButton`: a gradient capsule with a sheen, a coloured glow and a press-scale. The round orb belongs to a full-screen flow; this app's primary action is a toolbar button. |
+| Action | Two buttons, not one. `HubButton` is the primary: a gradient capsule with a sheen, a coloured glow and a press-scale. `PillButton` is everything else, and its `role` — `secondary`, `quiet`, `destructive` — is what stops a row of them reading as identical blobs. |
 | Mark | `HiveMark` (single cell, 15pt, sidebar header) and `HiveHero` (seven-cell comb with the centre cell lit, empty workspace only). The comb is one glyph shared by both, and the lattice divisor must clear its **height** (5.464r), not its width (5r). Every hexagon in the app comes from `hexagonPath`. |
 
 ### Shell
@@ -86,6 +86,27 @@ several queries are open at once. What the two share is the palette, the glass a
   connection name and the table name. The one value that must never be truncated is the table
   about to be dropped, so the toolbar shows `catalog.schema.table` with middle truncation and the
   popover holds full-width fields plus the three write modes spelled out.
+
+### Buttons
+
+Four levels, and a button picks one by what it does rather than by where it sits:
+
+| | look | used by |
+|---|---|---|
+| primary (`HubButton`) | gradient capsule, glow, press-scale | Run / Save / Done / Continue |
+| `PillButton(.secondary)` | tinted fill, hairline border, glyph | Load File…, Test Connection, Copy Name, Reveal in Finder |
+| `PillButton(.quiet)` | border only, fills on hover | Clear, Cancel, Back |
+| `PillButton(.destructive)` | coral fill and border | Delete |
+
+Two rules that came out of looking at the result rather than the code:
+
+- **A disabled primary loses its colour entirely.** It was `opacity(0.4)` + `saturation(0.2)` on the
+  gradient, which produced a muddy grey that read as *almost available*. It is now an empty
+  capsule with dim text — a placeholder, which is what it is. Whatever disabled it is named right
+  next to it ("Choose a connection…"), so the button does not have to explain itself.
+- **Every secondary button carries a glyph.** One grey pill whose only variable was `tint` made
+  "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
+  without reading it.
 
 ### Spacing
 

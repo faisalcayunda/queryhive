@@ -205,11 +205,9 @@ struct ConnectionEditorSheet: View {
             Spacer()
             Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
             HStack(spacing: 10) {
-                Button("New Connection with URI…") { step = .url }
-                    .buttonStyle(.pill)
+                PillButton(title: "New Connection with URI…", symbol: "link") { step = .url }
                 Spacer()
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(.pill)
+                PillButton(title: "Cancel", role: .quiet) { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 20)
@@ -248,8 +246,7 @@ struct ConnectionEditorSheet: View {
             Spacer()
             Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
             HStack(spacing: 10) {
-                Button("Back") { step = .typePicker }
-                    .buttonStyle(.pill)
+                PillButton(title: "Back", symbol: "chevron.left", role: .quiet) { step = .typePicker }
                 Spacer()
                 HubButton(title: "Continue", symbol: "arrow.right", hue: .connection) { applyURL() }
                     .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -319,8 +316,7 @@ struct ConnectionEditorSheet: View {
                     .foregroundStyle(Tone.amber)
                     .labelStyle(.titleAndIcon)
             }
-            Button("Change Type…") { step = .typePicker }
-                .buttonStyle(.pill)
+            PillButton(title: "Change Type…", symbol: "arrow.triangle.2.circlepath", compact: true) { step = .typePicker }
                 .help("Pick a different driver — this clears the fields that only applied to \(kind.label)")
         }
         .padding(.horizontal, 20)
@@ -435,27 +431,30 @@ struct ConnectionEditorSheet: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Button {
-                if case .running = testState { return }
-                runTest()
-            } label: {
-                if case .running = testState {
+            // The running state keeps the capsule's shape so the footer does not reflow the
+            // moment a test starts — it is the same button, mid-press.
+            if case .running = testState {
+                HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
-                } else {
-                    Text("Test Connection")
+                    Text("Testing…").font(.system(size: 12.5, weight: .medium))
                 }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 13)
+                .frame(height: 28)
+                .background(Color.white.opacity(0.10), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.14)))
+            } else {
+                PillButton(title: "Test Connection", symbol: "bolt") { runTest() }
+                    .keyboardShortcut("t", modifiers: .command)
+                    .help("Test Connection (⌘T)")
             }
-            .buttonStyle(.pill)
-            .keyboardShortcut("t", modifiers: .command)
-            .help("Test Connection (⌘T)")
 
             Spacer()
 
             if editingID != nil {
-                Button("Delete") { confirmDelete = true }.buttonStyle(.coralPill)
+                PillButton(title: "Delete", symbol: "trash", role: .destructive) { confirmDelete = true }
             }
-            Button("Cancel") { dismiss() }
-                .buttonStyle(.pill)
+            PillButton(title: "Cancel", role: .quiet) { dismiss() }
                 .keyboardShortcut(.cancelAction)
             HubButton(title: "Save", symbol: "checkmark", hue: .connection) { save() }
                 .disabled(!isDirty)

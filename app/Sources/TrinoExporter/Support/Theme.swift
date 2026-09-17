@@ -166,16 +166,22 @@ struct HubButton: View {
                 if let symbol { Image(systemName: symbol).font(.system(size: 11, weight: .bold)) }
                 Text(title).font(.system(size: 13, weight: .semibold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(enabled ? .white : .white.opacity(0.42))
             .padding(.horizontal, 14)
             .frame(height: 28)
             .background {
-                Capsule().fill(hue.gradient)
-                Capsule().fill(LinearGradient(colors: [.white.opacity(0.28), .clear], startPoint: .top, endPoint: .center))
+                // A disabled primary keeps its shape and drops its colour entirely. Fading the
+                // gradient (opacity + desaturate) produced a muddy grey that read as "almost
+                // available"; an empty capsule with dim text reads as "not yet", which is true.
+                if enabled {
+                    Capsule().fill(hue.gradient)
+                    Capsule().fill(LinearGradient(colors: [.white.opacity(0.28), .clear],
+                                                  startPoint: .top, endPoint: .center))
+                } else {
+                    Capsule().fill(Color.white.opacity(0.05))
+                }
             }
-            .overlay(Capsule().strokeBorder(.white.opacity(0.25)))
-            .opacity(enabled ? 1 : 0.4)
-            .saturation(enabled ? 1 : 0.2)
+            .overlay(Capsule().strokeBorder(enabled ? .white.opacity(0.25) : .white.opacity(0.10)))
             .shadow(color: hue.accent.opacity(enabled ? (hovering ? 0.65 : 0.45) : 0), radius: hovering ? 14 : 9, y: 3)
             .contentShape(Capsule())
         }
@@ -222,25 +228,76 @@ struct PressScale: ButtonStyle {
     }
 }
 
-struct PillButtonStyle: ButtonStyle {
-    var tint: Color = .white
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(Color.white.opacity(configuration.isPressed ? 0.22 : 0.11), in: Capsule())
-            .overlay(Capsule().strokeBorder(tint.opacity(tint == .white ? 0.12 : 0.4)))
-            .contentShape(Capsule())
+/// A secondary action: a glyph and a label on an outlined capsule.
+///
+/// These used to be one grey pill whose only variable was `tint`, which is why a header holding
+/// "Load File…" and "Clear" read as two identical blobs with no way to tell which one mattered.
+/// `role` supplies that hierarchy and the glyph makes each button scannable without reading it.
+struct PillButton: View {
+    enum Role {
+        /// Next to a primary, or the committing half of a pair: Load File…, Cancel, Copy Name.
+        case secondary
+        /// An action with nothing at stake: Clear, Back. No fill until the pointer is on it.
+        case quiet
+        /// Removes something. Coral, always.
+        case destructive
     }
-}
 
-extension ButtonStyle where Self == PillButtonStyle {
-    static var pill: PillButtonStyle { PillButtonStyle() }
-    /// Destructive pill: coral text on a coral 0.4 stroke, used by Delete.
-    static var coralPill: PillButtonStyle { PillButtonStyle(tint: Tone.coral) }
+    let title: String
+    var symbol: String?
+    var role: Role = .secondary
+    /// For a 32pt header row, where a 28pt capsule would touch both edges.
+    var compact = false
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+
+    private var tint: Color {
+        switch role {
+        case .secondary, .quiet: .white
+        case .destructive: Tone.coral
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: compact ? 9 : 10, weight: .semibold))
+                        .opacity(0.8)
+                }
+                Text(title).font(.system(size: compact ? 11.5 : 12.5, weight: .medium))
+            }
+            .foregroundStyle(tint.opacity(enabled ? 1 : 0.4))
+            .padding(.horizontal, compact ? 10 : 13)
+            .frame(height: compact ? 24 : 28)
+            .background(fill, in: Capsule())
+            .overlay(Capsule().strokeBorder(border))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private var fill: Color {
+        switch role {
+        case .secondary: Color.white.opacity(hovering && enabled ? 0.16 : 0.10)
+        case .quiet: Color.white.opacity(hovering && enabled ? 0.09 : 0)
+        case .destructive: Tone.coral.opacity(hovering && enabled ? 0.18 : 0.09)
+        }
+    }
+
+    private var border: Color {
+        switch role {
+        case .secondary: .white.opacity(0.14)
+        case .quiet: .white.opacity(hovering && enabled ? 0.10 : 0.06)
+        case .destructive: Tone.coral.opacity(0.45)
+        }
+    }
 }
 
 /// Vertical hairline between toolbar groups.

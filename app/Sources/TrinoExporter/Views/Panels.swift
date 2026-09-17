@@ -204,11 +204,10 @@ struct TablePanel: View {
                     .foregroundStyle(tab.isDestructive && tab.stage != .done ? Tone.coral : Tone.secondary)
                     .lineLimit(1)
                 Spacer()
-                Button("Copy Name") {
+                PillButton(title: "Copy Name", symbol: "doc.on.doc", compact: true) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(tab.writtenTable ?? tab.target(for: driverKind), forType: .string)
                 }
-                .buttonStyle(.pill)
                 .disabled(tab.trimmedTable.isEmpty)
             }
             .padding(.horizontal, Metrics.gutter)
@@ -351,8 +350,7 @@ struct FilesPanel: View {
                         .font(.system(size: 10.5))
                         .foregroundStyle(Tone.secondary)
                     Spacer()
-                    Button("Reveal in Finder") { tab.revealFiles() }
-                        .buttonStyle(.pill)
+                    PillButton(title: "Reveal in Finder", symbol: "magnifyingglass", compact: true) { tab.revealFiles() }
                         .keyboardShortcut("r", modifiers: [.command, .shift])
                 }
                 .padding(.horizontal, Metrics.gutter)
