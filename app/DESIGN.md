@@ -108,6 +108,23 @@ Two rules that came out of looking at the result rather than the code:
   "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
   without reading it.
 
+### Where controls sit
+
+The rule, learned from getting it wrong: **an action belongs next to what it acts on.** The editor
+header used to hold `QUERY · 4 lines` at the far left and `Load File…` / `Clear` at the far right
+of a 1240pt window — an 800pt journey to reach a button that edits the text directly beneath it,
+and a row whose two ends did not look related. They are now one group on the left. The same
+mistake put the run spinner at the right end of the panel bar, away from the tabs it describes.
+
+**Headers group left; footers commit right.** Those are different conventions on purpose. A header
+is a label plus its actions, so they sit together at the start. A footer ends a panel or a dialog,
+and its action belongs in the corner where the pointer already is — `Reveal in Finder`,
+`Copy Name`, and the connection editor's `Cancel` / `Save` stay where they are.
+
+What stays on the right of a header is the control that acts on the *pane* rather than its
+contents: the panel's collapse chevron, the window's connection chip. That is a window control,
+not an action, and the corner is where you look for it.
+
 ### Spacing
 
 `Metrics` in `Theme.swift` is the only place these numbers exist. Every pane measures its

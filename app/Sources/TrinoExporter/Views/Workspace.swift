@@ -457,20 +457,26 @@ struct EditorPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Everything on the left, together. These two act on the text directly below them, so
+            // parking them at the far edge of a 1240pt window meant an 800pt mouse journey to
+            // reach "Clear" — and left a row whose two ends did not look related to each other.
+            // A header that is empty on the right reads as calm; a header with a label at one end
+            // and its actions at the other reads as broken.
             HStack(spacing: 8) {
                 SectionLabel(text: "Query")
                 Text("·").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.25))
                 Text(pluralized(lineCount, "line"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(Tone.secondary)
-                Spacer()
                 PillButton(title: "Load File…", symbol: "folder", compact: true) { tab.loadSQLFromFile() }
                     .keyboardShortcut("o", modifiers: .command)
                     .help("Load SQL from a file (⌘O)")
+                    .padding(.leading, 6)
                 // Quiet: clearing is not a commitment, and giving it the same weight as
                 // "Load File…" made the pair read as two equal choices.
                 PillButton(title: "Clear", symbol: "xmark", role: .quiet, compact: true) { tab.sql = "" }
                     .disabled(tab.sql.isEmpty)
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, Metrics.gutter)
             .frame(height: Metrics.paneHeader)

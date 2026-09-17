@@ -41,10 +41,12 @@ struct BottomPanel: View {
                     model.panelCollapsed = false
                 }
             }
-            Spacer()
+            // The spinner belongs with the tabs it describes, not marooned on the far side of
+            // the bar next to the collapse control — those are two unrelated things.
             if tab.stage == .running {
-                ProgressView().controlSize(.mini).padding(.trailing, 6)
+                ProgressView().controlSize(.mini).padding(.leading, 6)
             }
+            Spacer()
             IconButton(symbol: model.panelCollapsed ? "chevron.up" : "chevron.down",
                        help: model.panelCollapsed ? "Show the panel" : "Hide the panel", diameter: 20) {
                 model.panelCollapsed.toggle()
