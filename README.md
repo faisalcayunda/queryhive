@@ -263,3 +263,17 @@ app/
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code
 app.py         launcher used by both run_local.sh and the pywebview .app bundle
 ```
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). Bundled dependencies carry their own licences (Trino client:
+Apache 2.0; psycopg: PostgreSQL License; PyMySQL, openpyxl and XlsxWriter: MIT), all of which are
+compatible with redistributing this under MIT.
+
+Two things the licence does **not** cover, both worth knowing before you rebrand or redistribute:
+
+- The Trino, PostgreSQL and MySQL marks in `assets/drivers/` are trademarks of their respective
+  projects, used only to say which database a connection talks to. MIT does not grant rights to
+  them.
+- A DMG built here is ad-hoc signed, so it is notarised nowhere. Nothing in this licence obliges
+  anyone to distribute a signed build.
