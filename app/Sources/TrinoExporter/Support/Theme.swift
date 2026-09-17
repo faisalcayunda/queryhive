@@ -415,6 +415,9 @@ struct ComboField: View {
     let options: [String]
     var width: CGFloat = 116
     var monospaced = true
+    /// A fetch is in flight for this field's options. Shown in place of the chevron so the field
+    /// says "asking" rather than "there is nothing to choose from".
+    var loading = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -422,7 +425,9 @@ struct ComboField: View {
                 .textFieldStyle(.plain)
                 .font(monospaced ? .system(size: 12, design: .monospaced) : .system(size: 12))
                 .padding(.horizontal, 9)
-            if !options.isEmpty {
+            if loading {
+                ProgressView().controlSize(.mini).frame(width: 20)
+            } else if !options.isEmpty {
                 Menu {
                     ForEach(options, id: \.self) { option in
                         Button(option) { text = option }

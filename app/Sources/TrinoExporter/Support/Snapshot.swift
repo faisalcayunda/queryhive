@@ -71,8 +71,16 @@ enum Snapshot {
             if scene == "suggest" { typeIntoEditor(in: window) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            // A sheet is its own window; capture that when the scene opened one.
-            capture(window: NSApp.windows.first { $0.isSheet } ?? window, to: path)
+            // Sheets and popovers are windows of their own, and a scene that opened one means
+            // that one, not the window behind it. Without this the format and target popovers
+            // were the only surfaces in the app nobody ever looked at.
+            let overlay = NSApp.windows.first { $0.isSheet }
+                ?? NSApp.windows.first { String(describing: type(of: $0)).contains("Popover") }
+            // A sheet or popover draws its own chrome as a system material, which
+            // `cacheDisplay` cannot sample — the capture comes back transparent where the
+            // background should be, and white text on it is invisible. Compositing over the
+            // canvas colour shows what the eye sees.
+            capture(window: overlay ?? window, to: path, over: overlay == nil ? nil : Tone.canvas)
             exit(0)
         }
         app.run()
@@ -80,20 +88,34 @@ enum Snapshot {
     }
 
     @MainActor
-    private static func capture(window: NSWindow, to path: String) {
+    private static func capture(window: NSWindow, to path: String, over background: Color? = nil) {
         guard let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             FileHandle.standardError.write(Data("snapshot: no drawable content view\n".utf8))
             return
         }
         view.cacheDisplay(in: view.bounds, to: rep)
-        guard let png = rep.representation(using: .png, properties: [:]) else {
+
+        var image = NSImage(size: view.bounds.size)
+        image.addRepresentation(rep)
+        if let background {
+            let flattened = NSImage(size: view.bounds.size)
+            flattened.lockFocus()
+            NSColor(background).setFill()
+            NSRect(origin: .zero, size: view.bounds.size).fill()
+            image.draw(in: NSRect(origin: .zero, size: view.bounds.size))
+            flattened.unlockFocus()
+            image = flattened
+        }
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
             FileHandle.standardError.write(Data("snapshot: PNG encoding failed\n".utf8))
             return
         }
         do {
             try png.write(to: URL(fileURLWithPath: path))
-            print("snapshot: wrote \(path) (\(rep.pixelsWide)x\(rep.pixelsHigh), \(png.count) bytes)")
+            print("snapshot: wrote \(path) (\(bitmap.pixelsWide)x\(bitmap.pixelsHigh), \(png.count) bytes)")
         } catch {
             FileHandle.standardError.write(Data("snapshot: \(error.localizedDescription)\n".utf8))
         }
@@ -209,6 +231,13 @@ enum Snapshot {
             tab.startedAt = Date(timeIntervalSinceNow: -18)
         case "connection":
             model.presentConnectionEditor(primary.id)
+        case "table-target":
+            // The target popover, which cannot be reached from a plain snapshot otherwise.
+            tab.destination = .table
+            tab.targetCatalog = "hive"
+            tab.targetSchema = "analytics"
+            tab.targetTable = "penerima_manfaat_2026"
+            model.targetPopoverOpen = true
         case "disabled":
             // No connection and no SQL: the primary action in its "not yet" state, which is what
             // a user sees the moment the app opens.

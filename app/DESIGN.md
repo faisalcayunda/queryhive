@@ -219,6 +219,23 @@ rather than inventing a row of dots that only works in one menu.
 Delete asks before it acts, and the question lives on `AppModel.pendingDeletion` rather than in
 the row, so the tree and the editor's Delete button ask the same one.
 
+### Popovers, and seeing them
+
+Two surfaces — the format picker and the target table — live in popovers rather than in the
+toolbar. Both were **unreviewable for a long time**, because a popover is a window of its own and
+`cacheDisplay` on the main window simply does not contain it. `--scene table-target` captures the
+popover window instead (`Snapshot` prefers a sheet, then a popover, then the window), and
+flattens it over the canvas colour first: a popover draws its own chrome as a system material,
+which `cacheDisplay` cannot sample, so an unflattened capture is white-on-transparent and the
+white text in it is invisible.
+
+That blind spot cost a real bug. The target fields offer **everything the object tree has loaded
+plus everything fetched on demand** (`AppModel.targetChoices`). They used to offer only the tree's
+knowledge, so a user who had never expanded that connection saw a plain text field where a
+dropdown belongs — a chevron only appears once there is something behind it. Opening the popover
+now fetches the catalogs, and choosing one fetches its schemas; the field shows a spinner while
+that is in flight rather than looking empty.
+
 ### The SQL editor and its suggestions
 
 The editor is an `NSTextView` (`SQLEditor`), not SwiftUI's `TextEditor`. That is forced:

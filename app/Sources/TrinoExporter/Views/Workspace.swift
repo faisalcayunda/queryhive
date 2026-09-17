@@ -223,7 +223,10 @@ struct QueryToolbar: View {
 struct TableTargetButton: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
-    @State private var showing = false
+
+    private var showing: Binding<Bool> {
+        Binding(get: { model.targetPopoverOpen }, set: { model.targetPopoverOpen = $0 })
+    }
 
     private var driverKind: ConnectionKind { model.connection(for: tab)?.kind ?? .trino }
 
@@ -232,16 +235,19 @@ struct TableTargetButton: View {
         return target.isEmpty ? "Choose a target…" : target
     }
 
+    /// The tree's own knowledge plus whatever this popover has fetched; see
+    /// `AppModel.targetChoices`. Fetched on appear, because a dropdown that is only populated
+    /// once you have browsed the tree elsewhere is a text field wearing a chevron.
     private var catalogs: [String] {
-        model.loadedNames(for: tab.connectionID, kind: driverKind == .mysql ? .database : .catalog)
+        model.targetChoices(for: tab.connectionID, kind: driverKind == .mysql ? .database : .catalog)
     }
 
     private var schemas: [String] {
-        model.loadedNames(for: tab.connectionID, kind: .schema, database: tab.trimmedCatalog)
+        model.targetChoices(for: tab.connectionID, kind: .schema, database: tab.trimmedCatalog)
     }
 
     var body: some View {
-        Button { showing.toggle() } label: {
+        Button { showing.wrappedValue.toggle() } label: {
             HStack(spacing: 7) {
                 Image(systemName: "tablecells")
                     .font(.system(size: 11, weight: .semibold))
@@ -265,7 +271,7 @@ struct TableTargetButton: View {
         }
         .buttonStyle(.plain)
         .help("Where \(driverKind.label) writes the query's rows")
-        .popover(isPresented: $showing, arrowEdge: .bottom) { panel }
+        .popover(isPresented: showing, arrowEdge: .bottom) { panel }
     }
 
     private var panel: some View {
@@ -276,18 +282,22 @@ struct TableTargetButton: View {
             switch driverKind {
             case .trino:
                 LabeledField("Catalog") {
-                    ComboField(placeholder: "hive", text: $tab.targetCatalog, options: catalogs, width: 332)
+                    ComboField(placeholder: "hive", text: $tab.targetCatalog, options: catalogs, width: 332,
+                               loading: model.isLoadingOptions(for: tab.connectionID))
                 }
                 LabeledField("Schema") {
-                    ComboField(placeholder: "analytics", text: $tab.targetSchema, options: schemas, width: 332)
+                    ComboField(placeholder: "analytics", text: $tab.targetSchema, options: schemas, width: 332,
+                               loading: model.isLoadingOptions(for: tab.connectionID, catalog: tab.trimmedCatalog))
                 }
             case .postgres:
                 LabeledField("Schema") {
-                    ComboField(placeholder: "public", text: $tab.targetSchema, options: schemas, width: 332)
+                    ComboField(placeholder: "public", text: $tab.targetSchema, options: schemas, width: 332,
+                               loading: model.isLoadingOptions(for: tab.connectionID))
                 }
             case .mysql:
                 LabeledField("Database") {
-                    ComboField(placeholder: "mydb", text: $tab.targetCatalog, options: catalogs, width: 332)
+                    ComboField(placeholder: "mydb", text: $tab.targetCatalog, options: catalogs, width: 332,
+                               loading: model.isLoadingOptions(for: tab.connectionID))
                 }
             }
             LabeledField("Table") {
@@ -320,6 +330,13 @@ struct TableTargetButton: View {
         }
         .padding(14)
         .frame(width: 360)
+        .onAppear {
+            model.loadCatalogs(for: tab.connectionID)
+            model.loadSchemas(for: tab.connectionID, catalog: tab.trimmedCatalog)
+        }
+        .onChange(of: tab.targetCatalog) { _, catalog in
+            model.loadSchemas(for: tab.connectionID, catalog: catalog.trimmingCharacters(in: .whitespaces))
+        }
     }
 }
 

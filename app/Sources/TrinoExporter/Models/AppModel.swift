@@ -125,6 +125,10 @@ final class AppModel {
         editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL)
     }
 
+    /// Whether the target popover is open. On the model rather than in the view so the snapshot
+    /// tool can open it — it is otherwise unreachable, and it went a long time unseen.
+    var targetPopoverOpen = false
+
     /// Set while a delete is waiting for the user to confirm. Held on the model rather than in a
     /// row so the tree's context menu and the editor's Delete button ask the same question.
     var pendingDeletion: UUID?
@@ -353,6 +357,81 @@ final class AppModel {
         guard let text = node.insertableText else { return }
         if selectedTab == nil { newTab(connectionID: node.connectionID) }
         selectedTab?.insertIntoSQL(text)
+    }
+
+    // MARK: Target options, fetched on demand
+
+    /// Catalogs (MySQL: databases) fetched for a connection, keyed by connection id.
+    private var catalogOptions: [UUID: [String]] = [:]
+    /// Schemas fetched for one catalog, keyed by "connection|catalog". Postgres has no catalog
+    /// level, so its key ends in an empty catalog.
+    private var schemaOptions: [String: [String]] = [:]
+    /// Keys with a fetch in flight, so a field can say it is working instead of looking empty.
+    private(set) var loadingOptions: Set<String> = []
+
+    /// Fetches the catalogs a connection can see.
+    ///
+    /// The target fields used to offer only what the object tree had already loaded, which meant
+    /// a user who had never expanded the connection got a plain text field where a dropdown
+    /// belongs — the chevron only appears when there is something behind it. Asking the server
+    /// when the popover opens is one round trip and makes the field what it looks like.
+    func loadCatalogs(for connectionID: UUID?) {
+        guard let connectionID, let connection = connections.first(where: { $0.id == connectionID }),
+              connection.kind != .postgres   // Postgres has no catalog level; it would be a usage error
+        else { return }
+        let key = optionKey(connectionID, "")
+        guard catalogOptions[connectionID] == nil, !loadingOptions.contains(key) else { return }
+        guard var env = try? connectionEnvironment(connection) else { return }
+        env["RETRIES"] = "2"
+        loadingOptions.insert(key)
+        Engine.run("catalogs", env: env, onEvent: { [weak self] event in
+            guard event.event == "catalogs" else { return }
+            self?.catalogOptions[connectionID] = event.names ?? []
+        }, onExit: { [weak self] _, _ in
+            // Left nil on failure on purpose: reopening the popover then retries, which is what
+            // someone staring at an empty dropdown will do.
+            self?.loadingOptions.remove(key)
+        })
+    }
+
+    func loadSchemas(for connectionID: UUID?, catalog: String) {
+        guard let connectionID, let connection = connections.first(where: { $0.id == connectionID }) else { return }
+        let key = optionKey(connectionID, catalog)
+        guard schemaOptions[key] == nil, !loadingOptions.contains(key) else { return }
+        guard var env = try? connectionEnvironment(connection) else { return }
+        env["RETRIES"] = "2"
+        // Blank means "the connection's own database", which is the Postgres case.
+        if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
+        loadingOptions.insert(key)
+        Engine.run("schemas", env: env, onEvent: { [weak self] event in
+            guard event.event == "schemas" else { return }
+            self?.schemaOptions[key] = event.names ?? []
+        }, onExit: { [weak self] _, _ in
+            self?.loadingOptions.remove(key)
+        })
+    }
+
+    private func optionKey(_ connectionID: UUID, _ catalog: String) -> String {
+        "\(connectionID.uuidString)|\(catalog)"
+    }
+
+    func isLoadingOptions(for connectionID: UUID?, catalog: String = "") -> Bool {
+        guard let connectionID else { return false }
+        return loadingOptions.contains(optionKey(connectionID, catalog))
+    }
+
+    /// What a target field offers: everything the tree has loaded **plus** everything fetched on
+    /// demand. Neither source alone is enough — the tree can be untouched, and a fetch can fail.
+    func targetChoices(for connectionID: UUID?, kind: TreeNode.Kind, database: String = "") -> [String] {
+        var names = Set(loadedNames(for: connectionID, kind: kind, database: database))
+        if let connectionID {
+            switch kind {
+            case .catalog, .database: names.formUnion(catalogOptions[connectionID] ?? [])
+            case .schema: names.formUnion(schemaOptions[optionKey(connectionID, database)] ?? [])
+            case .connection, .table: break
+            }
+        }
+        return names.sorted()
     }
 
     /// Names the tree has already loaded at one level. These are the options behind the target
@@ -626,6 +705,18 @@ final class AppModel {
                               database: connection.database, schema: connection.schema,
                               scheme: connection.scheme, sslmode: connection.sslmode,
                               verify: connection.verify)
+    }
+
+    /// The connection variables for a saved connection, Keychain read included. Shared by `run`
+    /// and the target-option fetches so those cannot drift from what a run actually sends.
+    private func connectionEnvironment(_ connection: Connection) throws -> [String: String] {
+        let password: String?
+        do {
+            password = try ConnectionKeychain.get(for: connection.id)
+        } catch {
+            throw EngineLaunchError(message: "Couldn't read the password for \(connection.name) from Keychain: \(error.localizedDescription)")
+        }
+        return Self.connectionEnvironment(connection, password: password)
     }
 
     /// Full environment for one export run: the connection plus the query, the destination and
