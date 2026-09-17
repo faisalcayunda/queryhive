@@ -145,7 +145,7 @@ struct QueryToolbar: View {
 
             ToolbarSeparator()
 
-            ExportSettingsButton(tab: tab)
+            DestinationPopover(tab: tab)
             Spacer(minLength: 8)
         }
         .padding(.horizontal, Metrics.gutter)
@@ -174,7 +174,15 @@ struct QueryToolbar: View {
 
             Menu {
                 Button("Run") { model.preview(tab) }
-                Button("Run Current Statement") { model.preview(tab, statementOnly: true) }
+                Button("Run Current Statement") { model.preview(tab, from: .statement) }
+                Button("Run the Whole Editor") { model.preview(tab, from: .all) }
+                Divider()
+                // Export lives here rather than in a button of its own: the toolbar had a
+                // destination's worth of controls in it, and the one thing that was really a
+                // command — write this out — belongs with the other commands.
+                Button(tab.destination == .table ? "Save to Table" : "Export") { model.run(tab) }
+                    .disabled(model.runBlockedReason(for: tab) != nil)
+                Button("Export Settings…") { model.exportSettingsOpen = true }
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
@@ -280,7 +288,8 @@ struct EditorPane: View {
             .padding(.horizontal, Metrics.gutter)
             .frame(height: Metrics.paneHeader)
 
-            SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, completion: model.completion,
+            SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
+                      completion: model.completion,
                       candidates: { prefix, qualified in
                           model.suggestions(for: tab, prefix: prefix, qualified: qualified)
                       })

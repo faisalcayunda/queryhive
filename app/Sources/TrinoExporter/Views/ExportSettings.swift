@@ -7,59 +7,25 @@ import SwiftUI
 /// folder chip, a name field — which made the toolbar a settings panel that happened to have a Run
 /// button on it, and left the export action itself nowhere in particular. Navicat puts the same
 /// choices in the wizard its Export command opens; this is that wizard, sized for a popover.
-struct ExportSettingsButton: View {
+/// The destination, as a popover with no button of its own.
+///
+/// It used to own a toolbar button; that button's command moved into Run's menu, and all that is
+/// left here is where the settings show. The chevron beside Run opens it, and so does
+/// "Export Settings…".
+struct DestinationPopover: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
-    @State private var confirmReplace = false
 
     private var showing: Binding<Bool> {
         Binding(get: { model.exportSettingsOpen }, set: { model.exportSettingsOpen = $0 })
     }
 
-    private var blocked: String? { model.runBlockedReason(for: tab) }
-    private var disabled: Bool { blocked != nil || tab.stage == .running }
-
     var body: some View {
-        HStack(spacing: 2) {
-            HubButton(title: tab.destination == .table ? "Save" : "Export",
-                      symbol: tab.destination == .table ? "square.and.arrow.down" : "arrow.down.doc",
-                      hue: tab.isDestructive ? .failure : .exporter) {
-                if tab.isDestructive { confirmReplace = true } else { model.run(tab) }
-            }
-            .disabled(disabled)
-            .keyboardShortcut("e", modifiers: .command)
-            .help(blocked ?? summary)
-
-            Button { showing.wrappedValue.toggle() } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(disabled ? .white.opacity(0.3) : .white.opacity(0.75))
-                    .frame(width: 18, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .frame(width: 18)
-            .help("Where it goes, and in what format")
+        // A zero-size anchor: the popover has to hang off something, and the Run group is what it
+        // describes.
+        Color.clear
+            .frame(width: 1, height: 1)
             .popover(isPresented: showing, arrowEdge: .bottom) { panel }
-        }
-        .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?",
-                            isPresented: $confirmReplace) {
-            Button("Drop and Recreate", role: .destructive) { model.run(tab) }
-        } message: {
-            Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
-        }
-    }
-
-    /// One line naming what pressing Export will do, used as the tooltip and as the popover's
-    /// heading — so the button never has to be pressed to find out.
-    private var summary: String {
-        switch tab.destination {
-        case .file:
-            let folder = tab.outputDirectory?.lastPathComponent ?? "no folder"
-            return "\(tab.format.label) → \(folder)/\(tab.trimmedName)"
-        case .table:
-            return "\(tab.writeMode.statement) \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))"
-        }
     }
 
     private var panel: some View {
@@ -72,9 +38,7 @@ struct ExportSettingsButton: View {
                 .foregroundStyle(Tone.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
-
             Divider().overlay(.white.opacity(0.08))
-
             switch tab.destination {
             case .file:
                 FormatGrid(selection: $tab.format)
@@ -94,9 +58,7 @@ struct ExportSettingsButton: View {
                         PillButton(title: "Choose…", symbol: "folder", compact: true) { chooseFolder() }
                     }
                 }
-                LabeledField("File name") {
-                    TextField("export", text: $tab.outputName).field()
-                }
+                LabeledField("File name") { TextField("export", text: $tab.outputName).field() }
             case .table:
                 TableTargetFields(tab: tab)
             }
@@ -106,6 +68,16 @@ struct ExportSettingsButton: View {
         .onAppear {
             model.loadCatalogs(for: tab.connectionID)
             model.loadSchemas(for: tab.connectionID, catalog: tab.trimmedCatalog)
+        }
+    }
+
+    private var summary: String {
+        switch tab.destination {
+        case .file:
+            let folder = tab.outputDirectory?.lastPathComponent ?? "no folder"
+            return "\(tab.format.label) → \(folder)/\(tab.trimmedName)"
+        case .table:
+            return "\(tab.writeMode.statement) \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))"
         }
     }
 

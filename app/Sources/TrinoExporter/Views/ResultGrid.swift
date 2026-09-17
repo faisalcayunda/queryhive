@@ -7,6 +7,7 @@ struct ResultGrid: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
     @State private var confirmReplace = false
+    @State private var filteringColumn: Int?
 
     /// Per-column pixel width, computed once per result rather than per cell: at 1000 rows the
     /// per-cell version is O(rows × columns) work on every render pass.
@@ -22,7 +23,8 @@ struct ResultGrid: View {
                 guard index < row.count, let value = row[index] else { return 4 }
                 return value.count
             }.max() ?? 0
-            return min(max(CGFloat(max(header, longest)) * 7.2 + 20, 84), 320)
+            // The funnel lives in the header cell, so every column pays for it.
+            return min(max(CGFloat(max(header, longest)) * 7.2 + 20, 84), 320) + 22
         }
     }
 
@@ -46,6 +48,19 @@ struct ResultGrid: View {
         VStack(spacing: 0) {
             content
             footer
+        }
+    }
+
+    /// The rows the grid draws: everything fetched, narrowed by whatever filters are set.
+    /// Filtering happens here and nowhere else — it never reaches the server and never rewrites the
+    /// statement, which is why the footer says how many rows it had to work with.
+    private var filteredRows: [[String?]] {
+        guard let preview = tab.preview else { return [] }
+        guard !tab.columnFilters.isEmpty else { return preview.rows }
+        return preview.rows.filter { row in
+            tab.columnFilters.allSatisfy { index, filter in
+                ColumnFilter.matches(index < row.count ? row[index] : nil, filter)
+            }
         }
     }
 
@@ -86,14 +101,16 @@ struct ResultGrid: View {
             ScrollView([.horizontal, .vertical]) {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     Section {
-                        ForEach(Array(preview.rows.enumerated()), id: \.offset) { index, row in
+                        ForEach(Array(filteredRows.enumerated()), id: \.offset) { index, row in
                             rowView(row, index: index, columns: preview.columns, widths: widths)
                         }
                     } header: {
                         headerRow(preview.columns, widths: widths)
                     }
                 }
-                .frame(minWidth: geometry.size.width, alignment: .topLeading)
+                // maxHeight as well as minWidth: a short result was centred in the scroller and
+                // floated in the middle of the panel instead of sitting under its header.
+                .frame(minWidth: geometry.size.width, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -114,6 +131,7 @@ struct ResultGrid: View {
                        alignment: isNumeric(column.type) ? .trailing : .leading)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+                .overlay(alignment: .topTrailing) { filterButton(index) }
                 .overlay(Rectangle().fill(.white.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
@@ -166,6 +184,50 @@ struct ResultGrid: View {
         }
     }
 
+    /// A funnel per column, always visible and dim until it has something to say: a filter that
+    /// only appears on hover is a filter nobody finds.
+    private func filterButton(_ index: Int) -> some View {
+        let active = !(tab.columnFilters[index] ?? "").isEmpty
+        return Button { filteringColumn = index } label: {
+            Image(systemName: active ? "line.3.horizontal.decrease.circle.fill"
+                                     : "line.3.horizontal.decrease.circle")
+                .font(.system(size: 10))
+                .foregroundStyle(active ? Tone.ice : .white.opacity(0.30))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, 6)
+        .padding(.top, 4)
+        .help(active ? "Filtered by \((tab.columnFilters[index] ?? ""))" : "Filter this column")
+        .popover(isPresented: Binding(get: { filteringColumn == index },
+                                      set: { if !$0 { filteringColumn = nil } })) {
+            filterEditor(index)
+        }
+    }
+
+    private func filterEditor(_ index: Int) -> some View {
+        let column = tab.preview.flatMap { index < $0.columns.count ? $0.columns[index] : nil }
+        let binding = Binding<String>(
+            get: { tab.columnFilters[index] ?? "" },
+            set: { tab.columnFilters[index] = $0.isEmpty ? nil : $0 })
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(text: "Filter \(column?.name ?? "column")")
+            TextField("contains…", text: binding).field()
+            Text("Prefix with =, >, <, >= or <= to compare rather than match. This narrows the "
+                 + "\((tab.preview?.rows.count ?? 0).formatted()) rows already fetched — it does "
+                 + "not re-run the query, so a row outside the limit is not searched.")
+                .font(.system(size: 11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                PillButton(title: "Clear", role: .quiet, compact: true) { tab.columnFilters[index] = nil }
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+    }
+
     private func isNumeric(_ type: String) -> Bool {
         let lowered = type.lowercased()
         return ["int", "long", "double", "decimal", "real", "bigint", "smallint", "tinyint", "numeric", "float"]
@@ -187,9 +249,13 @@ struct ResultGrid: View {
         @Bindable var tab = tab
         return HStack(spacing: 10) {
             if let preview = tab.preview {
-                Text(preview.summary)
+                // Never "N rows" while a filter is on: that reads as the size of the result
+                // rather than the size of what survived the filter.
+                Text(tab.columnFilters.isEmpty
+                     ? preview.summary
+                     : "\(filteredRows.count.formatted()) of \(preview.rows.count.formatted()) rows")
                     .font(.system(size: 11))
-                    .foregroundStyle(preview.truncated ? Tone.amber : Tone.secondary)
+                    .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty ? Tone.amber : Tone.secondary)
                 if preview.elapsedMS > 0 {
                     Text("· \(preview.elapsedMS) ms").font(.system(size: 11)).foregroundStyle(Tone.secondary)
                 }

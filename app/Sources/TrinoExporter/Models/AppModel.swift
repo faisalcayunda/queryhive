@@ -564,14 +564,11 @@ final class AppModel {
         preview(tab)
     }
 
-    /// `statementOnly` is "Run Current Statement": the statement the caret sits in, for a file
-    /// holding several. It falls back to the whole editor when the scanner finds nothing.
-    func preview(_ tab: QueryTab, statementOnly: Bool = false) {
+    /// `source` decides what is sent: the selection, the statement under the caret, or everything.
+    func preview(_ tab: QueryTab, from source: QuerySource = .selection) {
         guard !tab.previewing, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
-        let sql = statementOnly
-            ? (sqlStatement(in: tab.sql, atUTF16Offset: tab.caret) ?? tab.sql)
-            : tab.sql
+        let sql = tab.sql(for: source)
         let env: [String: String]
         do {
             env = try previewEnvironment(for: tab, connection: connection, sql: sql)
@@ -582,6 +579,8 @@ final class AppModel {
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
+        // The filters described rows that are about to be replaced.
+        tab.columnFilters = [:]
         tab.panel = .result
         panelCollapsed = false
 
@@ -661,12 +660,12 @@ final class AppModel {
 
     /// Writes the result out. Separate from `preview` so the toolbar can offer both without one
     /// standing in for the other.
-    func run(_ tab: QueryTab) {
+    func run(_ tab: QueryTab, from source: QuerySource = .selection) {
         guard tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
         let env: [String: String]
         do {
-            env = try overrides(for: tab, connection: connection)
+            env = try overrides(for: tab, connection: connection, sql: tab.sql(for: source))
         } catch {
             let message = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             tab.stage = .failed
@@ -827,15 +826,10 @@ final class AppModel {
     /// Full environment for one export run: the connection plus the query, the destination and
     /// the per-format options. Throws rather than launching with a password the Keychain refused
     /// to hand over, which would silently export as the wrong identity.
-    private func overrides(for tab: QueryTab, connection: Connection) throws -> [String: String] {
-        let password: String?
-        do {
-            password = try ConnectionKeychain.get(for: connection.id)
-        } catch {
-            throw EngineLaunchError(message: "Couldn't read the password for \(connection.name) from Keychain: \(error.localizedDescription)")
-        }
-        var env = Self.connectionEnvironment(connection, password: password)
-        env["SQL"] = tab.sql
+    private func overrides(for tab: QueryTab, connection: Connection,
+                           sql: String) throws -> [String: String] {
+        var env = try connectionEnvironment(connection)
+        env["SQL"] = sql
         env["RETRIES"] = String(tab.retries)
         switch tab.destination {
         case .file:

@@ -271,6 +271,30 @@ enum Snapshot {
                 elapsedMS: 412)
             tab.stage = .done
             tab.panel = .result
+        case "grid-filtered":
+            // A filter narrows what was fetched; the footer has to say so rather than claim the
+            // result is this small.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat"
+            tab.columns = [
+                Event.Column(name: "kode_wilayah", type: "varchar"),
+                Event.Column(name: "nama", type: "varchar"),
+                Event.Column(name: "jumlah_jiwa", type: "bigint"),
+                Event.Column(name: "aktif", type: "boolean"),
+            ]
+            tab.preview = PreviewResult(
+                columns: tab.columns,
+                rows: [
+                    ["32.01.01.2001", "KPM Sukamaju", "4", "true"],
+                    ["32.01.01.2002", "KPM Cibadak", "2", "true"],
+                    ["32.01.02.1004", "KPM Sukajadi", "1", "true"],
+                    ["32.01.03.2010", "KPM Rancamanyar", "3", "false"],
+                    ["32.02.01.3001", "KPM Dayeuhkolot", "6", "true"],
+                ],
+                truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 388)
+            tab.columnFilters = [0: "32.01", 3: "=true"]
+            tab.stage = .done
+            tab.panel = .result
         case "export-settings":
             // The one popover that now holds every destination choice.
             tab.destination = .file

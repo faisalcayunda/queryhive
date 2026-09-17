@@ -171,6 +171,54 @@ struct LogLine: Identifiable {
     let text: String
 }
 
+/// What a Run or an Export actually sends.
+///
+/// "Run the query" means the selection when there is one, because that is what every SQL client
+/// does and what someone who has just highlighted three lines expects.
+enum QuerySource {
+    case selection
+    case statement
+    case all
+}
+
+/// One column's filter.
+///
+/// Contains by default, because that is what someone typing a fragment of an id expects. A leading
+/// `=`, `>`, `<`, `>=` or `<=` switches to a comparison, which is what a numeric column wants. It
+/// filters the rows the preview already holds — it never reaches the server and never touches the
+/// statement — so the grid's footer has to say so.
+enum ColumnFilter {
+    static func matches(_ value: String?, _ filter: String) -> Bool {
+        let needle = filter.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return true }
+        // A NULL is not a value that can contain anything, and it is not the empty string either.
+        guard let value else { return false }
+
+        for op in [">=", "<=", ">", "<", "="] where needle.hasPrefix(op) {
+            let operand = String(needle.dropFirst(op.count)).trimmingCharacters(in: .whitespaces)
+            guard !operand.isEmpty else { break }
+            if op == "=" { return value.localizedCaseInsensitiveCompare(operand) == .orderedSame }
+            // Text ordering when either side is not a number, so a filter on a date column still
+            // does something instead of matching nothing.
+            if let left = Double(value), let right = Double(operand) {
+                switch op {
+                case ">=": return left >= right
+                case "<=": return left <= right
+                case ">": return left > right
+                default: return left < right
+                }
+            }
+            switch op {
+            case ">=": return value >= operand
+            case "<=": return value <= operand
+            case ">": return value > operand
+            default: return value < operand
+            }
+        }
+        return value.localizedCaseInsensitiveContains(needle)
+    }
+}
+
 /// The rows a Run fetched, rendered by the grid.
 struct PreviewResult {
     var columns: [Event.Column]
@@ -275,6 +323,30 @@ final class QueryTab: Identifiable {
     var previewing = false
     var preview: PreviewResult?
     var previewError: String?
+
+    /// The editor's selection, in UTF-16 units, republished whenever it changes. Length 0 means
+    /// nothing is highlighted.
+    var selection = NSRange(location: 0, length: 0)
+
+    /// Filters by column index: a result may repeat a name and the grid draws by position.
+    /// Cleared whenever new rows arrive, because the ones they described are gone.
+    var columnFilters: [Int: String] = [:]
+
+    /// The SQL one source resolves to. Every path out of the editor goes through this, so
+    /// "the selected query" means the same thing to Run and to Export.
+    func sql(for source: QuerySource) -> String {
+        switch source {
+        case .all:
+            return sql
+        case .selection:
+            let text = sql as NSString
+            guard selection.length > 0, selection.location >= 0,
+                  NSMaxRange(selection) <= text.length else { return sql }
+            return text.substring(with: selection)
+        case .statement:
+            return sqlStatement(in: sql, atUTF16Offset: selection.location) ?? sql
+        }
+    }
 
     // MARK: Run state
 
