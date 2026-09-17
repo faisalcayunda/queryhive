@@ -1,0 +1,2 @@
+# Installed with --no-deps. See the header of requirements.txt for why.
+trino>=0.330

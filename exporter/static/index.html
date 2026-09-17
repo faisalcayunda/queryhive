@@ -1,0 +1,1782 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QueryHive</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+:root {
+  --bg:       #16181d;
+  --sb:       #1c1f26;
+  --panel:    #20232c;
+  --panel2:   #272b36;
+  --hover:    #2c3040;
+  --selected: #2d3550;
+  --line:     #2e3340;
+  --text:     #dde1ea;
+  --muted:    #7a849a;
+  --dim:      #4e5668;
+  --accent:   #3d8ef0;
+  --accent2:  #5ba3ff;
+  --ok:       #4ec98b;
+  --warn:     #f0a84a;
+  --err:      #f06a6a;
+  --mono:     "SF Mono","Cascadia Code",Menlo,monospace;
+  --sans:     "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --r:        6px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+       font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+
+/* ═══════════ HEADER ═══════════ */
+.header { height: 40px; background: var(--sb); border-bottom: 1px solid var(--line);
+          display: flex; align-items: center; padding: 0 14px; gap: 12px; flex-shrink: 0;
+          -webkit-app-region: drag; user-select: none; }
+.header-logo { display: flex; align-items: center; gap: 8px; font-weight: 600;
+               font-size: 13.5px; -webkit-app-region: no-drag; }
+.header-logo svg { flex-shrink: 0; }
+.header-spacer { flex: 1; }
+.header-btn { -webkit-app-region: no-drag; background: none; border: 1px solid var(--line);
+              color: var(--muted); border-radius: 5px; padding: 4px 10px; font: 12px var(--sans);
+              cursor: pointer; transition: .12s; }
+.header-btn:hover { color: var(--text); border-color: #4e5668; }
+
+/* ═══════════ LAYOUT ═══════════ */
+.layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+/* ═══════════ SIDEBAR ═══════════ */
+.sidebar { width: 240px; background: var(--sb);
+           display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+           min-width: 160px; max-width: 600px; }
+.sidebar-head { padding: 10px 12px 6px; display: flex; align-items: center; }
+.sidebar-head-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px;
+                      color: var(--muted); font-weight: 600; flex: 1; }
+.sb-icon-btn { background: none; border: none; color: var(--muted); cursor: pointer;
+               padding: 3px; border-radius: 4px; display: flex; align-items: center;
+               transition: .12s; line-height: 1; }
+.sb-icon-btn:hover { color: var(--text); background: var(--hover); }
+.sb-icon-btn svg { width: 14px; height: 14px; }
+
+.sidebar-resizer { width: 4px; background: transparent; cursor: ew-resize;
+                   position: relative; flex-shrink: 0; z-index: 10; margin-left: -2px; margin-right: -2px;}
+.sidebar-resizer::after { content:''; position:absolute; top:0; bottom:0; left:1px; width:2px;
+                          background: var(--line); transition:.12s; }
+.sidebar-resizer:hover::after, .sidebar-resizer.dragging::after { background: var(--accent); }
+
+.sidebar-tree { flex: 1; overflow-y: auto; padding: 0 0 4px; }
+.sidebar-tree::-webkit-scrollbar { width: 4px; }
+.sidebar-tree::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+
+.conn-group { }
+.conn-row { display: flex; align-items: center; gap: 0; padding: 5px 10px 5px 8px;
+            cursor: pointer; transition: background .1s; border-radius: 0; position: relative; }
+.conn-row:hover { background: var(--hover); }
+.conn-row.selected { background: var(--selected); }
+.conn-row.selected::before { content:''; position:absolute; left:0; top:0; bottom:0;
+                              width:2px; background: var(--accent); border-radius:0 1px 1px 0; }
+.conn-toggle { width: 18px; height: 18px; display:flex; align-items:center; justify-content:center;
+               color: var(--muted); flex-shrink:0; transition: transform .15s; }
+.conn-toggle.open { transform: rotate(90deg); }
+.conn-icon { width: 16px; height: 16px; flex-shrink: 0; margin-right: 7px;
+             color: var(--accent); }
+.conn-name { flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conn-actions { display: none; gap: 2px; }
+.conn-row:hover .conn-actions, .conn-row.selected .conn-actions { display: flex; }
+.conn-action { background: none; border: none; color: var(--muted); cursor: pointer;
+               padding: 2px 3px; border-radius: 3px; font-size: 11px; transition: .1s;
+               display: flex; align-items: center; }
+.conn-action:hover { color: var(--text); background: var(--panel2); }
+
+.queries-list { padding-left: 26px; }
+.query-row { display: flex; align-items: center; gap: 7px; padding: 4px 10px 4px 6px;
+             cursor: pointer; transition: background .1s; border-radius: 0; position: relative; }
+.query-row:hover { background: var(--hover); }
+.query-row.active { background: var(--selected); color: var(--accent2); }
+.query-icon { color: var(--dim); flex-shrink: 0; }
+.query-name { flex: 1; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.query-del { display: none; background: none; border: none; color: var(--muted); cursor: pointer;
+             padding: 1px 3px; border-radius: 3px; transition: .1s; font-size: 11px; }
+.query-row:hover .query-del { display: flex; align-items: center; }
+.query-del:hover { color: var(--err); }
+.new-query-btn { display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 10px;
+                 cursor: pointer; color: var(--dim); font-size: 12px; transition: .1s;
+                 margin-top: 1px; }
+.new-query-btn:hover { color: var(--accent); background: var(--hover); }
+
+.sidebar-footer { border-top: 1px solid var(--line); padding: 7px 10px; display: flex; gap: 6px; }
+
+/* ═══════════ MAIN CONTENT ═══════════ */
+.content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+/* TOOLBAR */
+.toolbar { height: 38px; background: var(--panel); border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; padding: 0 14px; gap: 8px; flex-shrink: 0; }
+.toolbar-conn { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.toolbar-conn-name { color: var(--text); font-weight: 500; }
+.toolbar-sep { width: 1px; height: 20px; background: var(--line); }
+.query-title-input { background: none; border: none; font: 500 13px var(--sans); color: var(--text);
+                     outline: none; min-width: 80px; max-width: 200px; }
+.query-title-input:focus { color: var(--accent2); }
+
+.tb-btn { display: flex; align-items: center; gap: 5px; background: var(--panel2); border: 1px solid var(--line);
+          color: var(--text); border-radius: var(--r); padding: 5px 11px; font: 12.5px var(--sans);
+          cursor: pointer; transition: .12s; white-space: nowrap; }
+.tb-btn:hover:not(:disabled) { border-color: #4a5268; background: var(--hover); }
+.tb-btn:disabled { opacity: .4; cursor: not-allowed; }
+.tb-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+.tb-btn.primary:hover:not(:disabled) { background: var(--accent2); border-color: var(--accent2); }
+.tb-btn.green { background: #1e5738; border-color: #2a7a4f; color: #4ec98b; }
+.tb-btn.green:hover:not(:disabled) { background: #255e40; }
+.tb-btn svg { width: 13px; height: 13px; }
+.toolbar-spacer { flex: 1; }
+
+/* FORMAT SELECTOR */
+.fmt-select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+              border-radius: var(--r); padding: 4px 8px; font: 12.5px var(--sans);
+              outline: none; cursor: pointer; }
+.fmt-select:focus { border-color: var(--accent); }
+
+/* EDITOR + RESULTS SPLIT */
+.center { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+
+/* EDITOR */
+.editor-wrap { display: flex; flex-direction: column; border-bottom: 1px solid var(--line);
+               flex-shrink: 0; min-height: 120px; }
+.editor-resizer { height: 4px; background: transparent; cursor: ns-resize;
+                  position: relative; flex-shrink: 0; }
+.editor-resizer::after { content:''; position:absolute; left:0; right:0; top:1px; height:2px;
+                         background: var(--line); border-radius:1px; transition:.12s; }
+.editor-resizer:hover::after, .editor-resizer.dragging::after { background: var(--accent); }
+#editor { flex: 1; background: var(--panel); color: var(--text); border: none; outline: none;
+          font: 13px/1.65 var(--mono); padding: 12px 14px; resize: none; width: 100%;
+          tab-size: 2; min-height: 0; }
+#editor::placeholder { color: var(--dim); }
+
+/* RESULTS */
+.results-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; background: var(--panel); }
+.results-toolbar { height: 32px; background: var(--panel2); border-bottom: 1px solid var(--line);
+                   display: flex; align-items: center; padding: 0 12px; gap: 10px; flex-shrink: 0; }
+.results-label { font-size: 11px; text-transform: uppercase; letter-spacing: .7px;
+                 color: var(--muted); font-weight: 600; }
+.results-count { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+.results-scroll { flex: 1; overflow: auto; min-height: 0; display: flex; flex-direction: column; }
+.results-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.results-scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; height: 100%; }
+thead th { background: var(--panel2); color: var(--muted); font-weight: 600;
+           font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+           padding: 7px 12px; text-align: left; white-space: nowrap;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; }
+thead th .col-type { font-weight: 400; color: var(--dim); font-size: 10.5px;
+                     display: block; letter-spacing: 0; text-transform: none; }
+tbody td { padding: 5px 12px; border-bottom: 1px solid #1f2330; white-space: nowrap;
+           max-width: 320px; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+tbody tr:hover td { background: var(--hover); }
+.null-cell { color: var(--dim); font-style: italic; }
+.empty-state { padding: 60px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+.empty-state p { margin-top: 6px; font-size: 12px; color: var(--dim); }
+
+/* STATUS BAR */
+.statusbar { height: 26px; background: var(--sb); border-top: 1px solid var(--line);
+             display: flex; align-items: center; padding: 0 12px; gap: 14px; flex-shrink: 0;
+             font-size: 11.5px; color: var(--muted); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+.status-dot.ok { background: var(--ok); }
+.status-dot.err { background: var(--err); }
+.status-dot.running { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+.status-text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.progress-bar { width: 120px; height: 3px; background: var(--panel2); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent); width: 40%;
+                 border-radius: 2px; animation: bar-slide 1.2s ease-in-out infinite; }
+@keyframes bar-slide { 0% { transform: translateX(-100%) } 100% { transform: translateX(300%) } }
+
+/* EXPORT OPTIONS PANEL (slide-up drawer above status bar) */
+.export-panel { background: var(--panel); border-top: 1px solid var(--line);
+                padding: 10px 14px; display: none; flex-direction: column; gap: 10px;
+                flex-shrink: 0; }
+.export-panel.open { display: flex; }
+.export-panel-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.ep-field { display: flex; flex-direction: column; gap: 4px; }
+.ep-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.ep-input { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+            border-radius: 5px; padding: 5px 8px; font: 12.5px var(--sans); outline: none;
+            min-width: 80px; }
+.ep-input:focus { border-color: var(--accent); }
+.ep-row { display: flex; align-items: center; gap: 6px; }
+.ep-row label { font-size: 12.5px; color: var(--text); cursor: pointer; }
+input[type=checkbox] { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
+
+/* ═══════════ MODAL ═══════════ */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65);
+                 display: none; place-items: center; z-index: 100; backdrop-filter: blur(4px); }
+.modal-overlay.open { display: grid; }
+.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+         width: 520px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
+         overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+.modal-head { display: flex; align-items: center; padding: 16px 20px;
+              border-bottom: 1px solid var(--line); }
+.modal-title { font-size: 14px; font-weight: 600; flex: 1; }
+.modal-close { background: none; border: none; color: var(--muted); cursor: pointer;
+               padding: 4px; border-radius: 4px; font-size: 18px; line-height: 1;
+               transition: .12s; }
+.modal-close:hover { color: var(--text); background: var(--hover); }
+.modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal-footer { padding: 14px 20px; border-top: 1px solid var(--line);
+                display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.modal-footer-left { flex: 1; }
+
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+.field input, .field select { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+                 border-radius: 5px; padding: 7px 9px; font: 13px var(--sans); outline: none; width: 100%; }
+.field input:focus, .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(61,142,240,.12); }
+.field-hint { font-size: 11.5px; color: var(--dim); margin-top: -2px; }
+.field-row { display: grid; gap: 10px; }
+.field-row.g2 { grid-template-columns: 1fr 1fr; }
+.field-row.g3 { grid-template-columns: 2fr 1fr 1fr; }
+.field-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+
+.btn { display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px;
+       border-radius: var(--r); font: 13px var(--sans); cursor: pointer; border: 1px solid var(--line);
+       background: var(--panel2); color: var(--text); transition: .12s; }
+.btn:hover:not(:disabled) { border-color: #4a5268; background: var(--hover); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+.btn.primary:hover:not(:disabled) { background: var(--accent2); border-color: var(--accent2); }
+.btn.danger { color: var(--err); border-color: #4a2828; }
+.btn.danger:hover:not(:disabled) { background: #3a1a1a; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.test-status { font-size: 12px; }
+.test-status.ok { color: var(--ok); }
+.test-status.err { color: var(--err); }
+
+/* Notification toast */
+.toast { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%) translateY(20px);
+         background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+         padding: 9px 16px; font-size: 12.5px; opacity: 0; transition: .2s;
+         pointer-events: none; z-index: 200; white-space: nowrap; }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.ok { border-color: #2a5a3a; color: var(--ok); }
+.toast.err { border-color: #5a2a2a; color: var(--err); }
+
+/* ═══════════ EXPORT WIZARD ═══════════ */
+.wizard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+          width: 740px; max-width: calc(100vw - 32px); height: 580px; display: flex;
+          flex-direction: column; box-shadow: 0 32px 80px rgba(0,0,0,.65); overflow: hidden; }
+.wizard-header { display: flex; align-items: center; padding: 14px 20px;
+                 border-bottom: 1px solid var(--line); flex-shrink: 0; gap: 12px; }
+.wizard-title { font-size: 14px; font-weight: 600; flex: 1; }
+.wz-steps { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.wz-step-pill { padding: 3px 12px; border-radius: 20px; font-size: 11px; font-weight: 500;
+                color: var(--muted); background: var(--panel2); transition: .15s; }
+.wz-step-pill.active { background: var(--accent); color: #fff; }
+.wz-step-pill.done { background: var(--ok); color: #fff; opacity: .7; }
+.wz-sep { color: var(--dim); font-size: 11px; }
+.wizard-body { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
+.wizard-body::-webkit-scrollbar { width: 4px; }
+.wizard-body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+.wizard-footer { padding: 14px 20px; border-top: 1px solid var(--line); display: flex;
+                 align-items: center; gap: 8px; flex-shrink: 0; }
+.wz-footer-left { flex: 1; display: flex; align-items: center; gap: 10px; }
+.wz-intro { font-size: 13.5px; color: var(--text); line-height: 1.6;
+            padding-bottom: 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.wz-label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+             color: var(--muted); font-weight: 600; margin-bottom: 6px; display: block; }
+
+/* Step 1 - Format list */
+.format-list { display: flex; flex-direction: column; gap: 2px; }
+.format-opt { display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+              border-radius: 6px; cursor: pointer; transition: background .1s; }
+.format-opt:hover { background: var(--hover); }
+.format-opt input[type=radio] { accent-color: var(--accent); width: 14px; height: 14px; flex-shrink: 0; cursor: pointer; }
+.format-opt label { font-size: 13px; color: var(--text); cursor: pointer; }
+
+/* Step 2 - Location */
+.wz-folder-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wz-folder-path { font-size: 13px; font-family: var(--mono); color: var(--text); flex: 1;
+                  background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+                  padding: 5px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dir-browser { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-top: 2px; }
+.dir-browser-nav { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+                   background: var(--panel2); border-bottom: 1px solid var(--line); }
+.dir-crumb { font-size: 12px; font-family: var(--mono); color: var(--muted);
+             flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dir-browser-list { height: 180px; overflow-y: auto; background: var(--bg); }
+.dir-browser-list::-webkit-scrollbar { width: 4px; }
+.dir-browser-list::-webkit-scrollbar-thumb { background: var(--line); }
+.dir-entry { display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+             cursor: pointer; font-size: 12.5px; transition: background .1s; }
+.dir-entry:hover { background: var(--hover); }
+.dir-entry.selected { background: var(--selected); color: var(--accent2); }
+.dir-entry svg { flex-shrink: 0; color: var(--accent); }
+.wz-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.wz-field label { display: block; font-size: 11px; text-transform: uppercase;
+                  letter-spacing: .5px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+.wz-field input, .wz-field select { width: 100%; background: var(--bg); border: 1px solid var(--line);
+                      color: var(--text); border-radius: 5px; padding: 6px 8px;
+                      font: 13px var(--sans); outline: none; }
+.wz-field input:focus, .wz-field select:focus { border-color: var(--accent); }
+.wz-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+.wz-check input { accent-color: var(--accent); }
+
+/* Step 3 - Columns */
+.col-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.col-list { border: 1px solid var(--line); border-radius: 7px; overflow-y: auto;
+            flex: 1; min-height: 0; background: var(--bg); }
+.col-list::-webkit-scrollbar { width: 4px; }
+.col-list::-webkit-scrollbar-thumb { background: var(--line); }
+.col-item { display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+            border-bottom: 1px solid #1c202a; cursor: pointer; transition: background .1s; }
+.col-item:last-child { border-bottom: none; }
+.col-item:hover { background: var(--hover); }
+.col-item input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+.col-item label { font-size: 13px; font-family: var(--mono); cursor: pointer; color: var(--text); }
+
+/* Step 4 - Options */
+.wz-opts-grid { display: grid; gap: 12px; }
+.wz-opt-row { display: flex; align-items: center; gap: 10px; }
+.wz-opt-row label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+                    color: var(--muted); font-weight: 600; min-width: 120px; }
+.wz-opt-row input[type=text], .wz-opt-row input[type=number] {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 5px; padding: 6px 8px; font: 13px var(--sans); outline: none; width: 160px; }
+.wz-opt-row input:focus { border-color: var(--accent); }
+
+/* Step 5 - Progress */
+.wz-progress { display: flex; flex-direction: column; gap: 14px; }
+.wz-progress-bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+.wz-progress-fill { height: 100%; background: var(--accent); width: 40%;
+                     animation: bar-slide 1.2s ease-in-out infinite; border-radius: 3px; }
+.wz-progress-fill.done { width: 100% !important; animation: none; background: var(--ok); }
+.wz-stat { font-size: 13px; display: flex; gap: 10px; }
+.wz-stat-key { color: var(--muted); min-width: 90px; }
+.wz-stat-val { font-family: var(--mono); color: var(--text); }
+.wz-log { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+          padding: 10px 12px; font: 12px/1.7 var(--mono); color: var(--muted);
+          max-height: 140px; overflow-y: auto; }
+</style>
+</head>
+<body>
+
+
+<!-- MAIN LAYOUT -->
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <span class="sidebar-head-label">My Connections</span>
+      <button class="sb-icon-btn" id="btnNewConn" title="Add connection">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/>
+        </svg>
+      </button>
+    </div>
+    <div class="sidebar-tree" id="sidebarTree">
+      <div class="empty-state" style="padding:30px 16px">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--dim)" stroke-width="1.5" style="margin:0 auto 8px;display:block">
+          <path d="M21 5c0 1.657-4.03 3-9 3S3 6.657 3 5s4.03-3 9-3 9 1.343 9 3z"/>
+          <path d="M3 5v6c0 1.657 4.03 3 9 3s9-1.343 9-3V5"/>
+          <path d="M3 11v6c0 1.657 4.03 3 9 3s9-1.343 9-3v-6"/>
+        </svg>
+        <p>No connections yet.<br>Click + to add one.</p>
+      </div>
+    </div>
+  </aside>
+
+  <div class="sidebar-resizer" id="sidebarResizer"></div>
+
+  <!-- CONTENT -->
+  <div class="content">
+
+    <!-- TOOLBAR -->
+    <div class="toolbar">
+      <div class="toolbar-conn" id="toolbarConn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 5c0 1.657-4.03 3-9 3S3 6.657 3 5s4.03-3 9-3 9 1.343 9 3z"/>
+          <path d="M3 5v6c0 1.657 4.03 3 9 3s9-1.343 9-3V5"/>
+        </svg>
+        <span id="toolbarConnName" class="toolbar-conn-name" style="color:var(--dim)">No connection</span>
+      </div>
+      <div class="toolbar-sep"></div>
+      <input class="query-title-input" id="queryTitleInput" value="New Query" placeholder="Query name" title="Click to rename">
+      <div class="toolbar-spacer"></div>
+      <button class="tb-btn" id="btnSaveQuery" title="Save query (Ctrl+S)">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M3 2h8l3 3v9H2V2z"/><rect x="5" y="10" width="6" height="4" rx=".5"/>
+          <rect x="5" y="2" width="5" height="3" rx=".5"/>
+        </svg>
+        Save
+      </button>
+      <button class="tb-btn primary" id="btnPreview" title="Run query and preview results (Ctrl+Enter)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><polygon points="5,3 13,8 5,13"/></svg>
+        Run
+      </button>
+      <div class="toolbar-sep"></div>
+      <select class="fmt-select" id="fmtSelect"></select>
+      <button class="tb-btn green" id="btnExport">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M8 2v8M5 7l3 3 3-3"/><path d="M3 12h10"/>
+        </svg>
+        Export
+      </button>
+      <button class="tb-btn" id="btnExportOpts" title="Export options">⚙</button>
+    </div>
+
+    <!-- EXPORT OPTIONS DRAWER -->
+    <div class="export-panel" id="exportPanel">
+      <div class="export-panel-row">
+        <div class="ep-field">
+          <div class="ep-label">Save to folder</div>
+          <input type="text" class="ep-input" id="epOutdir" placeholder="~/Downloads" style="width:220px">
+        </div>
+        <div class="ep-field">
+          <div class="ep-label">File name</div>
+          <input type="text" class="ep-input" id="epName" value="export" style="width:120px">
+        </div>
+        <div class="ep-field">
+          <div class="ep-label">Rows / file</div>
+          <input type="number" class="ep-input" id="epSplit" placeholder="no split" min="1" style="width:90px">
+        </div>
+        <div class="ep-field">
+          <div class="ep-label">Batch size</div>
+          <input type="number" class="ep-input" id="epBatch" value="10000" min="1" style="width:90px">
+        </div>
+        <div class="ep-field">
+          <div class="ep-label">Retries</div>
+          <input type="number" class="ep-input" id="epRetries" value="5" min="0" style="width:60px">
+        </div>
+      </div>
+      <div id="fmtOpts" class="export-panel-row"></div>
+    </div>
+
+    <!-- EDITOR + RESULTS -->
+    <div class="center" id="center">
+      <div class="editor-wrap" id="editorWrap" style="height:240px">
+        <textarea id="editor" spellcheck="false" placeholder="SELECT * FROM catalog.schema.table LIMIT 100"></textarea>
+        <div class="editor-resizer" id="editorResizer"></div>
+      </div>
+      <div class="results-wrap">
+        <div class="results-toolbar">
+          <span class="results-label">Results</span>
+          <span class="results-count" id="resultsCount"></span>
+          <button class="tb-btn" id="btnWizard" style="margin-left:auto;height:24px;padding:2px 10px;font-size:11.5px" disabled title="Export results with wizard">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" style="width:12px;height:12px">
+              <path d="M8 2v8M5 7l3 3 3-3"/><path d="M3 12h10"/>
+            </svg>
+            Export
+          </button>
+        </div>
+        <div class="results-scroll">
+          <table>
+            <thead id="previewHead"></thead>
+            <tbody id="previewBody">
+              <tr><td colspan="99">
+                <div class="empty-state">
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--dim)" stroke-width="1.5" style="margin:0 auto 10px;display:block">
+                    <polygon points="12,2 22,8.5 22,15.5 12,22 2,15.5 2,8.5"/>
+                    <polygon points="12,7 17,10 17,14 12,17 7,14 7,10"/>
+                  </svg>
+                  <p>Run a query to see results here.</p>
+                </div>
+              </td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATUS BAR -->
+    <div class="statusbar">
+      <div class="status-dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">Ready</span>
+      <div class="progress-bar" id="progressBar" style="display:none"><div class="progress-fill"></div></div>
+      <span id="statusRows" style="font-size:11px;color:var(--dim)"></span>
+    </div>
+
+  </div>
+</div>
+
+<!-- ADD / EDIT CONNECTION MODAL -->
+<div class="modal-overlay" id="connModal">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="modal-title" id="connModalTitle">New Connection</span>
+      <button class="modal-close" id="connModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Connection name <span style="color:var(--err)">*</span></label>
+        <input type="text" id="mName" placeholder="e.g. BGN Trino Production">
+      </div>
+      <div class="field">
+        <label>Trino URL</label>
+        <input type="text" id="mUrl" spellcheck="false" placeholder="https://user@trino.example.com:8443/hive/analytics">
+        <span class="field-hint">Paste full URL — fields below sync automatically.</span>
+      </div>
+      <div class="field-row g3">
+        <div class="field"><label>Host</label><input type="text" id="mHost" placeholder="trino.example.com"></div>
+        <div class="field"><label>Port</label><input type="number" id="mPort" value="8443"></div>
+        <div class="field"><label>Scheme</label>
+          <select id="mScheme"><option value="https">https</option><option value="http">http</option></select>
+        </div>
+      </div>
+      <div class="field-row g3">
+        <div class="field"><label>User</label><input type="text" id="mUser" placeholder="username"></div>
+        <div class="field"><label>Catalog</label><input type="text" id="mCatalog" placeholder="hive"></div>
+        <div class="field"><label>Schema</label><input type="text" id="mSchema" placeholder="default"></div>
+      </div>
+      <div class="field">
+        <label>Password <span style="text-transform:none;font-weight:400;color:var(--dim)">(stored in macOS Keychain)</span></label>
+        <input type="password" id="mPassword" autocomplete="off">
+      </div>
+      <label class="field-check"><input type="checkbox" id="mInsecure"> Skip TLS verification</label>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-footer-left">
+        <button class="btn btn-sm" id="btnTestConn">Test connection</button>
+        <span class="test-status" id="testStatus"></span>
+      </div>
+      <button class="btn btn-sm" id="connModalCancel">Cancel</button>
+      <button class="btn btn-sm primary" id="btnSaveConn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- EXPORT WIZARD -->
+<div class="modal-overlay" id="wizardModal">
+  <div class="wizard">
+    <div class="wizard-header">
+      <span class="wizard-title">Export Wizard</span>
+      <div class="wz-steps">
+        <span class="wz-step-pill active" id="wsp1">1 Format</span>
+        <span class="wz-sep">›</span>
+        <span class="wz-step-pill" id="wsp2">2 Location</span>
+        <span class="wz-sep">›</span>
+        <span class="wz-step-pill" id="wsp3">3 Columns</span>
+        <span class="wz-sep">›</span>
+        <span class="wz-step-pill" id="wsp4">4 Options</span>
+      </div>
+      <button class="modal-close" id="wClose" style="margin-left:12px">✕</button>
+    </div>
+
+    <!-- STEP 1: FORMAT -->
+    <div class="wizard-body" id="wc1">
+      <p class="wz-intro">This wizard allows you to specify details of how to export your data. Which export format would you like?</p>
+      <span class="wz-label">Export Format:</span>
+      <div class="format-list" id="wFormatList"></div>
+    </div>
+
+    <!-- STEP 2: LOCATION -->
+    <div class="wizard-body" id="wc2" style="display:none">
+      <p class="wz-intro">You can select the export file and define some additional options.</p>
+      <div class="wz-folder-row">
+        <span class="wz-label" style="margin:0;white-space:nowrap">Default Folder:</span>
+        <span class="wz-folder-path" id="wFolderDisplay"></span>
+        <button class="btn btn-sm" id="wBtnBrowse">Change…</button>
+      </div>
+      <div class="dir-browser" id="dirBrowser" style="display:none">
+        <div class="dir-browser-nav">
+          <button class="btn btn-sm" id="wDirUp" style="padding:3px 8px;font-size:11px">↑ Up</button>
+          <span class="dir-crumb" id="wDirCrumb"></span>
+        </div>
+        <div class="dir-browser-list" id="wDirList"></div>
+      </div>
+      <div class="wz-fields">
+        <div class="wz-field"><label>File name</label><input type="text" id="wFilename" value="export"></div>
+        <div class="wz-field"><label>Encoding</label>
+          <select id="wEncoding">
+            <option value="utf-8">65001 – UTF-8 Unicode</option>
+            <option value="utf-8-sig">UTF-8 with BOM</option>
+            <option value="cp1252">1252 – Western European</option>
+            <option value="ascii">ASCII</option>
+          </select>
+        </div>
+      </div>
+      <div class="wz-check">
+        <input type="checkbox" id="wAddTs">
+        <label for="wAddTs">Add timestamp:</label>
+        <select id="wTsFormat" style="background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:5px;padding:4px 8px;font:12.5px var(--sans);outline:none;">
+          <option>YYYYMMDD</option><option>YYYYMMDD_HHmmss</option><option>YYYY-MM-DD</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- STEP 3: COLUMNS -->
+    <div class="wizard-body" id="wc3" style="display:none;">
+      <p class="wz-intro">You can select the fields to export.</p>
+      <div class="col-toolbar">
+        <button class="btn btn-sm" id="wSelAll">Select All</button>
+        <button class="btn btn-sm" id="wDeselAll">Deselect All</button>
+        <label class="wz-check" style="margin-left:auto">
+          <input type="checkbox" id="wAllFields" checked> All fields
+        </label>
+      </div>
+      <div class="col-list" id="wColList"></div>
+    </div>
+
+    <!-- STEP 4: OPTIONS -->
+    <div class="wizard-body" id="wc4" style="display:none">
+      <p class="wz-intro">Additional options for the selected format.</p>
+      <div class="wz-opts-grid" id="wFmtOptsGrid"></div>
+    </div>
+
+    <!-- STEP 5: PROGRESS -->
+    <div class="wizard-body" id="wc5" style="display:none">
+      <p class="wz-intro" id="wProgressTitle">Starting export…</p>
+      <div class="wz-progress">
+        <div class="wz-progress-bar"><div class="wz-progress-fill" id="wProgressFill"></div></div>
+        <div id="wStats"></div>
+        <div class="wz-log" id="wLog"></div>
+      </div>
+    </div>
+
+    <!-- FOOTER -->
+    <div class="wizard-footer">
+      <div class="wz-footer-left">
+        <button class="btn" id="wBtnDownload" style="display:none">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px">
+            <path d="M8 2v8M5 7l3 3 3-3"/><path d="M3 12h10"/>
+          </svg>
+          Download file
+        </button>
+      </div>
+      <button class="btn" id="wBtnBack">Back</button>
+      <button class="btn primary" id="wBtnNext">Next</button>
+      <button class="btn" style="background:#1e5738;border-color:#2a7a4f;color:#4ec98b" id="wBtnStart" disabled>Start</button>
+      <button class="btn" id="wBtnClose2" style="display:none">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal-box" style="width: 400px">
+    <div class="modal-header">
+      <span class="modal-title">Settings</span>
+      <button class="modal-close" id="settingsModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Table Select Limit</label>
+        <input type="number" id="sTableLimit" placeholder="100">
+        <div style="font-size:11px; color:var(--dim); margin-top:4px;">
+          Maximum number of rows to fetch when clicking a table in the sidebar.
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" id="settingsModalCancel">Cancel</button>
+      <button class="btn btn-sm primary" id="btnSaveSettings">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+const $ = id => document.getElementById(id);
+
+// ─────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────
+const S = {
+  connections: [],   // [{name, host, url, ...}]
+  queries: [],       // [{id, name, connection_name, sql, format, output_dir}]
+  formats: [],       // [{id, label}]
+  activeConn: null,  // name string
+  connData: null,    // full conn obj with password
+  activeQuery: {id:'', name:'New Query', connection_name:'', sql:'', format:'csv', output_dir:''},
+  expanded: new Set(), // Set of "conn:...", "conn:...|cat:...", "conn:...|cat:...|sch:..."
+  catalogs: {},      // { connectionName: ["catalog1", "catalog2"] }
+  schemas: {},       // { "connName|catalog": ["schema1", "schema2"] }
+  tables: {},        // { "connName|catalog|schema": ["table1", "table2"] }
+  tableLimit: parseInt(localStorage.getItem('queryhive_table_limit')) || 100,
+  job: null,
+  jobTimer: null,
+  editingConn: null, // name of conn being edited, null for new
+};
+
+// ─────────────────────────────────────────────
+// API helpers
+// ─────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = {method, headers: {'Content-Type':'application/json'}};
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(txt.slice(0, 300) || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// ─────────────────────────────────────────────
+// Toast
+// ─────────────────────────────────────────────
+let toastTimer;
+function toast(msg, type='') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast'; }, 3000);
+}
+
+// ─────────────────────────────────────────────
+// Status bar
+// ─────────────────────────────────────────────
+function setStatus(text, type='') {
+  $('statusText').textContent = text;
+  const dot = $('statusDot');
+  dot.className = 'status-dot ' + type;
+  $('progressBar').style.display = type === 'running' ? '' : 'none';
+}
+
+// ─────────────────────────────────────────────
+// SIDEBAR render
+// ─────────────────────────────────────────────
+function renderSidebar() {
+  const tree = $('sidebarTree');
+  if (!S.connections.length) {
+    tree.innerHTML = `<div class="empty-state" style="padding:30px 16px">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--dim)" stroke-width="1.5" style="margin:0 auto 8px;display:block">
+        <path d="M21 5c0 1.657-4.03 3-9 3S3 6.657 3 5s4.03-3 9-3 9 1.343 9 3z"/>
+        <path d="M3 5v6c0 1.657 4.03 3 9 3s9-1.343 9-3V5"/>
+        <path d="M3 11v6c0 1.657 4.03 3 9 3s9-1.343 9-3v-6"/>
+      </svg><p>No connections yet.<br>Click + to add one.</p></div>`;
+    return;
+  }
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = '';
+  for (const conn of S.connections) {
+    const isSelected = S.activeConn === conn.name;
+    const isExpanded = S.expanded.has(conn.name);
+    const myQueries = S.queries.filter(q => q.connection_name === conn.name);
+    html += `<div class="conn-group">
+      <div class="conn-row${isSelected ? ' selected' : ''}" data-conn="${esc(conn.name)}">
+        <span class="conn-toggle${isExpanded ? ' open' : ''}">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,2 8,5 2,8"/></svg>
+        </span>
+        <svg class="conn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="12,2 22,8.5 22,15.5 12,22 2,15.5 2,8.5"/>
+          <polygon points="12,7 17,10 17,14 12,17 7,14 7,10"/>
+        </svg>
+        <span class="conn-name" title="${esc(conn.name)}">${esc(conn.name)}</span>
+        <span class="conn-actions">
+          <button class="conn-action" data-edit="${esc(conn.name)}" title="Edit connection">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M11 2l3 3L5 14H2v-3L11 2z"/>
+            </svg>
+          </button>
+          <button class="conn-action" data-del="${esc(conn.name)}" title="Delete connection" style="color:var(--err)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+              <polyline points="2,4 14,4"/><path d="M5 4V2h6v2"/>
+              <path d="M12 4l-1 10H5L4 4"/>
+            </svg>
+          </button>
+        </span>
+      </div>`;
+
+    if (isExpanded) {
+      html += '<div class="queries-list">';
+      
+      // Render Catalogs, Schemas, Tables
+      if (S.catalogs[conn.name]) {
+        for (const cat of S.catalogs[conn.name]) {
+          const catId = `conn:${conn.name}|cat:${cat}`;
+          const catExpanded = S.expanded.has(catId);
+          html += `<div class="query-row" style="cursor:pointer; padding-left:8px" data-node="${esc(catId)}">
+            <span class="conn-toggle${catExpanded ? ' open' : ''}" style="margin-right:4px">
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,2 8,5 2,8"/></svg>
+            </span>
+            <svg class="query-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+            </svg>
+            <span class="query-name" title="${esc(cat)}">${esc(cat)}</span>
+          </div>`;
+          
+          if (catExpanded) {
+            if (S.schemas[catId]) {
+              for (const sch of S.schemas[catId]) {
+                const schId = `${catId}|sch:${sch}`;
+                const schExpanded = S.expanded.has(schId);
+                html += `<div class="query-row" style="cursor:pointer; padding-left:24px" data-node="${esc(schId)}">
+                  <span class="conn-toggle${schExpanded ? ' open' : ''}" style="margin-right:4px">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,2 8,5 2,8"/></svg>
+                  </span>
+                  <svg class="query-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                  </svg>
+                  <span class="query-name" title="${esc(sch)}">${esc(sch)}</span>
+                </div>`;
+                
+                if (schExpanded) {
+                  if (S.tables[schId]) {
+                    for (const tbl of S.tables[schId]) {
+                      const tblId = `${schId}|tbl:${tbl}`;
+                      html += `<div class="query-row" style="cursor:pointer; padding-left:42px" data-node="${esc(tblId)}">
+                        <svg class="query-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-left:14px; opacity:0.8">
+                          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                          <line x1="3" y1="9" x2="21" y2="9"></line>
+                          <line x1="9" y1="21" x2="9" y2="9"></line>
+                        </svg>
+                        <span class="query-name" title="${esc(tbl)}">${esc(tbl)}</span>
+                      </div>`;
+                    }
+                  } else {
+                    html += `<div class="query-row" style="cursor:default;color:var(--dim);padding-left:56px">
+                      <span style="font-size:11px">Loading tables...</span>
+                    </div>`;
+                  }
+                }
+              }
+            } else {
+              html += `<div class="query-row" style="cursor:default;color:var(--dim);padding-left:38px">
+                <span style="font-size:11px">Loading schemas...</span>
+              </div>`;
+            }
+          }
+        }
+      } else {
+        html += `<div class="query-row" style="cursor:default;color:var(--dim)">
+          <span style="padding-left:22px;font-size:11px">Loading catalogs...</span>
+        </div>`;
+      }
+
+      // Render Queries
+      html += '<div style="margin: 8px 12px 4px; font-size: 10px; font-weight: 600; color: var(--dim); letter-spacing: 0.5px; text-transform: uppercase;">Saved Queries</div>';
+      
+      for (const q of myQueries) {
+        const isActive = S.activeQuery.id === q.id;
+        html += `<div class="query-row${isActive ? ' active' : ''}" data-query="${esc(q.id)}">
+          <svg class="query-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="2" y="2" width="12" height="12" rx="1"/>
+            <line x1="5" y1="6" x2="11" y2="6"/><line x1="5" y1="9" x2="9" y2="9"/>
+          </svg>
+          <span class="query-name" title="${esc(q.name)}">${esc(q.name)}</span>
+          <button class="query-del" data-qdel="${esc(q.id)}" title="Delete query">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>
+            </svg>
+          </button>
+        </div>`;
+      }
+      html += `<div class="new-query-btn" data-newquery="${esc(conn.name)}">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/>
+        </svg> New Query
+      </div></div>`;
+    }
+    html += '</div>';
+  }
+  tree.innerHTML = html;
+}
+
+// The catalog/schema/table endpoints report trouble as {ok:false, error} with
+// an HTTP 200, so `if (res.ok)` on its own leaves the tree silently empty and
+// the user with nothing to go on. Surface the reason instead.
+async function listTree(url, key, what) {
+  let reason;
+  try {
+    const res = await api('GET', url);
+    if (res.ok) return res[key];
+    reason = res.error || 'unknown error';
+  } catch (e) {
+    reason = e.message;
+  }
+  console.warn(`listing ${what} failed:`, reason);
+  setStatus(`Cannot list ${what}: ${reason}`, 'err');
+  toast(`Cannot list ${what}`, 'err');
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// Sidebar click delegation
+// ─────────────────────────────────────────────
+$('sidebarTree').addEventListener('click', async e => {
+  const connRow = e.target.closest('[data-conn]');
+  const editBtn = e.target.closest('[data-edit]');
+  const delBtn  = e.target.closest('[data-del]');
+  const qRow    = e.target.closest('[data-query]');
+  const qDel    = e.target.closest('[data-qdel]');
+  const newQ    = e.target.closest('[data-newquery]');
+  const nodeRow = e.target.closest('[data-node]');
+
+  if (editBtn) { e.stopPropagation(); openConnModal(editBtn.dataset.edit); return; }
+  if (delBtn)  { e.stopPropagation(); await deleteConn(delBtn.dataset.del); return; }
+  if (qDel)    { e.stopPropagation(); await deleteQuery(qDel.dataset.qdel); return; }
+  if (qRow)    { loadQuery(qRow.dataset.query); return; }
+  if (newQ)    { newQueryFor(newQ.dataset.newquery); return; }
+  if (nodeRow) { e.stopPropagation(); await toggleNode(nodeRow.dataset.node); return; }
+  if (connRow) { await selectConn(connRow.dataset.conn); }
+});
+
+async function toggleNode(nodeId) {
+  if (S.expanded.has(nodeId)) {
+    S.expanded.delete(nodeId);
+    renderSidebar();
+    return;
+  }
+  
+  S.expanded.add(nodeId);
+  renderSidebar(); // show loading state immediately
+  
+  const parts = nodeId.split('|');
+  const connName = parts[0].split(':')[1];
+  
+  if (parts.length === 2) { // Catalog expanded -> fetch schemas
+    const cat = parts[1].split(':')[1];
+    if (!S.schemas[nodeId]) {
+      const schemas = await listTree(
+        `/api/connections/${encodeURIComponent(connName)}/schemas?catalog=${encodeURIComponent(cat)}`,
+        'schemas', `schemas in ${cat}`);
+      if (schemas) S.schemas[nodeId] = schemas;
+      renderSidebar();
+    }
+  } else if (parts.length === 3) { // Schema expanded -> fetch tables
+    const cat = parts[1].split(':')[1];
+    const sch = parts[2].split(':')[1];
+    if (!S.tables[nodeId]) {
+      const tables = await listTree(
+        `/api/connections/${encodeURIComponent(connName)}/tables?catalog=${encodeURIComponent(cat)}&schema=${encodeURIComponent(sch)}`,
+        'tables', `tables in ${cat}.${sch}`);
+      if (tables) S.tables[nodeId] = tables;
+      renderSidebar();
+    }
+  } else if (parts.length === 4) { // Table clicked
+    const cat = parts[1].split(':')[1];
+    const sch = parts[2].split(':')[1];
+    const tbl = parts[3].split(':')[1];
+    
+    // Auto-execute query
+    S.expanded.delete(nodeId); // Tables don't expand, they execute
+    
+    // Make sure we have the active connection correctly set if not already
+    if (S.activeConn !== connName) {
+      await selectConn(connName);
+    }
+    
+    const limit = S.tableLimit || 100;
+    const sql = `SELECT * FROM "${cat}"."${sch}"."${tbl}" LIMIT ${limit}`;
+    
+    // If there is an active query that is empty or "New Query", use it, otherwise create one or overwrite
+    S.activeQuery.sql = sql;
+    $('editor').value = sql;
+    
+    // Focus and select all
+    $('editor').focus();
+    $('editor').select();
+    
+    // Automatically run the query
+    runPreview();
+  }
+}
+
+// ─────────────────────────────────────────────
+// Connection selection
+// ─────────────────────────────────────────────
+async function selectConn(name) {
+  if (S.activeConn === name) {
+    S.expanded.has(name) ? S.expanded.delete(name) : S.expanded.add(name);
+  } else {
+    S.activeConn = name;
+    S.expanded.add(name);
+    S.connData = null;
+    try {
+      S.connData = await api('GET', `/api/connections/${encodeURIComponent(name)}`);
+    } catch(e) {
+      S.connData = S.connections.find(c => c.name === name) || {};
+    }
+    $('toolbarConnName').textContent = name;
+    $('toolbarConnName').style.color = '';
+    // Update active query connection if it's new
+    if (!S.activeQuery.connection_name) {
+      S.activeQuery.connection_name = name;
+    }
+  }
+  
+  if (S.expanded.has(name) && !S.catalogs[name]) {
+    const cats = await listTree(
+      `/api/connections/${encodeURIComponent(name)}/catalogs`, 'catalogs', 'catalogs');
+    if (cats) S.catalogs[name] = cats;
+  }
+
+  renderSidebar();
+}
+
+// ─────────────────────────────────────────────
+// Query management
+// ─────────────────────────────────────────────
+function loadQuery(id) {
+  const q = S.queries.find(q => q.id === id);
+  if (!q) return;
+  S.activeQuery = {...q};
+  $('editor').value = q.sql || '';
+  $('queryTitleInput').value = q.name;
+  // Select format
+  const fmtEl = $('fmtSelect');
+  if (q.format) fmtEl.value = q.format;
+  renderSidebar();
+}
+
+function newQueryFor(connName) {
+  S.activeQuery = {id:'', name:'New Query', connection_name: connName, sql:'', format: $('fmtSelect').value || 'csv', output_dir: ''};
+  $('editor').value = '';
+  $('queryTitleInput').value = 'New Query';
+  if (S.activeConn !== connName) selectConn(connName);
+  else renderSidebar();
+}
+
+async function saveCurrentQuery() {
+  const connName = S.activeConn || S.activeQuery.connection_name;
+  if (!connName) { toast('Select a connection first', 'err'); return; }
+  S.activeQuery.sql = $('editor').value;
+  S.activeQuery.name = $('queryTitleInput').value.trim() || 'New Query';
+  S.activeQuery.connection_name = connName;
+  S.activeQuery.format = $('fmtSelect').value;
+  try {
+    const res = await api('POST', '/api/queries', S.activeQuery);
+    S.activeQuery.id = res.id;
+    S.queries = await api('GET', '/api/queries');
+    renderSidebar();
+    toast('Query saved', 'ok');
+  } catch(e) { toast('Save failed: ' + e.message, 'err'); }
+}
+
+async function deleteQuery(id) {
+  if (!confirm('Delete this query?')) return;
+  await api('DELETE', `/api/queries/${id}`);
+  if (S.activeQuery.id === id) {
+    S.activeQuery = {id:'', name:'New Query', connection_name: S.activeConn||'', sql:'', format:'csv', output_dir:''};
+    $('editor').value = '';
+    $('queryTitleInput').value = 'New Query';
+  }
+  S.queries = await api('GET', '/api/queries');
+  renderSidebar();
+  toast('Query deleted');
+}
+
+// ─────────────────────────────────────────────
+// Connection modal
+// ─────────────────────────────────────────────
+function openConnModal(editName) {
+  S.editingConn = editName || null;
+  $('connModalTitle').textContent = editName ? `Edit: ${editName}` : 'New Connection';
+  $('testStatus').textContent = '';
+
+  if (editName) {
+    const conn = S.connections.find(c => c.name === editName) || {};
+    $('mName').value = conn.name || '';
+    $('mUrl').value  = conn.url  || '';
+    $('mHost').value = conn.host || '';
+    $('mPort').value = conn.port || 8443;
+    $('mScheme').value = conn.http_scheme || 'https';
+    $('mUser').value = conn.user || '';
+    $('mCatalog').value = conn.catalog || '';
+    $('mSchema').value = conn.schema || '';
+    $('mInsecure').checked = conn.verify === false;
+    $('mPassword').value = '';
+    // Load password from backend
+    api('GET', `/api/connections/${encodeURIComponent(editName)}`)
+      .then(d => { if (d.password) $('mPassword').value = d.password; })
+      .catch(() => {});
+  } else {
+    ['mName','mUrl','mHost','mUser','mCatalog','mSchema','mPassword'].forEach(id => $(id).value = '');
+    $('mPort').value = 8443;
+    $('mScheme').value = 'https';
+    $('mInsecure').checked = false;
+  }
+  $('connModal').classList.add('open');
+  setTimeout(() => $('mName').focus(), 50);
+}
+
+function closeConnModal() { $('connModal').classList.remove('open'); }
+
+function modalPayload() {
+  return {
+    name: $('mName').value.trim(),
+    url:  $('mUrl').value.trim(),
+    host: $('mHost').value.trim(),
+    port: parseInt($('mPort').value) || null,
+    user: $('mUser').value.trim(),
+    password: $('mPassword').value,
+    catalog: $('mCatalog').value.trim(),
+    schema: $('mSchema').value.trim(),
+    http_scheme: $('mScheme').value,
+    verify: !$('mInsecure').checked,
+    sql: 'SELECT 1',
+  };
+}
+
+$('btnNewConn').onclick = () => openConnModal(null);
+$('connModalClose').onclick = closeConnModal;
+$('connModalCancel').onclick = closeConnModal;
+$('connModal').addEventListener('click', e => { if (e.target === $('connModal')) closeConnModal(); });
+
+$('btnTestConn').onclick = async () => {
+  const p = modalPayload();
+  $('testStatus').textContent = 'Testing…';
+  $('testStatus').className = 'test-status';
+  try {
+    const r = await api('POST', '/api/test', p);
+    $('testStatus').textContent = r.ok ? '✓ Connected' : '✗ ' + r.error;
+    $('testStatus').className = 'test-status ' + (r.ok ? 'ok' : 'err');
+  } catch(e) {
+    $('testStatus').textContent = '✗ ' + e.message;
+    $('testStatus').className = 'test-status err';
+  }
+};
+
+$('btnSaveConn').onclick = async () => {
+  const name = $('mName').value.trim();
+  if (!name) { $('mName').focus(); return; }
+  try {
+    await api('POST', '/api/connections', modalPayload());
+    S.connections = await api('GET', '/api/connections');
+    renderSidebar();
+    closeConnModal();
+    toast(`Connection "${name}" saved`, 'ok');
+    // Auto-select the saved connection
+    if (!S.activeConn) selectConn(name);
+  } catch(e) { toast('Save failed: ' + e.message, 'err'); }
+};
+
+async function deleteConn(name) {
+  if (!confirm(`Delete connection "${name}"? Saved queries for this connection will remain.`)) return;
+  await api('DELETE', `/api/connections/${encodeURIComponent(name)}`);
+  if (S.activeConn === name) {
+    S.activeConn = null; S.connData = null;
+    $('toolbarConnName').textContent = 'No connection';
+    $('toolbarConnName').style.color = 'var(--dim)';
+  }
+  S.expanded.delete(name);
+  S.connections = await api('GET', '/api/connections');
+  renderSidebar();
+  toast(`Connection "${name}" deleted`);
+}
+
+// URL ↔ field sync in modal
+$('mUrl').addEventListener('blur', () => {
+  const raw = $('mUrl').value.trim();
+  if (!raw) return;
+  try {
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : 'https://' + raw);
+    $('mScheme').value = u.protocol.replace(':','');
+    $('mHost').value = u.hostname;
+    $('mPort').value = u.port || (u.protocol === 'https:' ? 8443 : 8080);
+    if (u.username) $('mUser').value = decodeURIComponent(u.username);
+    if (u.password) $('mPassword').value = decodeURIComponent(u.password);
+    const seg = u.pathname.split('/').filter(Boolean);
+    if (seg[0]) $('mCatalog').value = seg[0];
+    if (seg[1]) $('mSchema').value = seg[1];
+  } catch {}
+});
+
+['mHost','mPort','mScheme'].forEach(id => $(id).addEventListener('change', () => {
+  const h = $('mHost').value.trim();
+  if (!h) return;
+  const s = $('mScheme').value, p = $('mPort').value;
+  $('mUrl').value = `${s}://${h}:${p}` +
+    ($('mUser').value ? '' : '');
+}));
+
+// ─────────────────────────────────────────────
+// Format + export options
+// ─────────────────────────────────────────────
+const FORMAT_OPTS = {
+  txt:  [['delimiter','Delimiter','text','\\t'],['null_text','NULL as','text',''],['header','Header row','check',true]],
+  csv:  [['delimiter','Delimiter','text',','],['null_text','NULL as','text',''],['header','Header row','check',true],['bom','UTF-8 BOM','check',false]],
+  json: [['jsonl','Newline-delimited (jsonl)','check',false]],
+  xml:  [], html: [],
+  sql:  [['sql_table','Target table','text','']],
+  xls:  [['sheet','Sheet name','text','Sheet1']],
+  xlsx: [['sheet','Sheet name','text','Sheet1']],
+  dbf:  [['dbf_char_width','Max char width','number',254]],
+};
+
+function renderFmtOpts() {
+  const fmt = $('fmtSelect').value;
+  const body = $('fmtOpts'); body.innerHTML = '';
+  for (const [id,label,type,def] of (FORMAT_OPTS[fmt]||[])) {
+    const w = document.createElement('div');
+    w.className = 'ep-field';
+    if (type === 'check') {
+      w.innerHTML = `<div class="ep-row"><input type="checkbox" id="fo_${id}" ${def?'checked':''}><label for="fo_${id}" style="font-size:12.5px;color:var(--text)">${label}</label></div>`;
+    } else {
+      w.innerHTML = `<div class="ep-label">${label}</div><input type="${type}" class="ep-input" id="fo_${id}" value="${def}" style="width:${type==='number'?'80':'130'}px">`;
+    }
+    body.appendChild(w);
+  }
+}
+
+$('fmtSelect').addEventListener('change', renderFmtOpts);
+
+function getFormatOpts() {
+  const fmt = $('fmtSelect').value;
+  const opts = {};
+  for (const [id,,type] of (FORMAT_OPTS[fmt]||[])) {
+    const el = $('fo_' + id);
+    if (!el) continue;
+    opts[id] = type === 'check' ? el.checked : (type === 'number' ? +el.value : el.value);
+  }
+  if (opts.delimiter === '\\t') opts.delimiter = '\t';
+  return opts;
+}
+
+$('btnExportOpts').onclick = () => {
+  const panel = $('exportPanel');
+  panel.classList.toggle('open');
+};
+
+// ─────────────────────────────────────────────
+// Build request payload
+// ─────────────────────────────────────────────
+function buildPayload(sql) {
+  const conn = S.connData || {};
+  const fmtOpts = getFormatOpts();
+  return {
+    url: conn.url || '',
+    host: conn.host || '',
+    port: conn.port || null,
+    user: conn.user || '',
+    password: conn.password || '',
+    catalog: conn.catalog || '',
+    schema: conn.schema || '',
+    http_scheme: conn.http_scheme || 'https',
+    verify: conn.verify !== false,
+    sql: sql,
+    format: $('fmtSelect').value,
+    name: $('epName').value.trim() || $('queryTitleInput').value.trim() || 'export',
+    output_dir: $('epOutdir').value.trim(),
+    batch_size: +$('epBatch').value || 10000,
+    rows_per_file: $('epSplit').value ? +$('epSplit').value : null,
+    retries: +$('epRetries').value || 5,
+    ...fmtOpts,
+  };
+}
+
+// ─────────────────────────────────────────────
+// Run / Preview
+// ─────────────────────────────────────────────
+$('btnPreview').onclick = runPreview;
+
+async function runPreview() {
+  if (!S.connData) { toast('Select a connection first', 'err'); return; }
+  const sql = $('editor').value.trim();
+  if (!sql) { toast('Write a query first', 'err'); return; }
+
+  $('btnPreview').disabled = true;
+  setStatus('Running query…', 'running');
+  $('resultsCount').textContent = '';
+  $('previewHead').innerHTML = '';
+  $('previewBody').innerHTML = '<tr><td colspan="99"><div class="empty-state">Running…</div></td></tr>';
+
+  try {
+    const res = await api('POST', '/api/preview', buildPayload(sql));
+    if (res.ok) {
+      renderPreview(res.columns, res.rows);
+      const n = res.rows.length;
+      $('resultsCount').textContent = `${n.toLocaleString()} rows${n >= 500 ? ' (first 500)' : ''}`;
+      setStatus(`Preview: ${n.toLocaleString()} rows`, 'ok');
+    } else {
+      $('previewBody').innerHTML = `<tr><td colspan="99"><div class="empty-state" style="color:var(--err)">${esc(res.error)}</div></td></tr>`;
+      setStatus(res.error, 'err');
+    }
+  } catch(e) {
+    $('previewBody').innerHTML = `<tr><td colspan="99"><div class="empty-state" style="color:var(--err)">${esc(e.message)}</div></td></tr>`;
+    setStatus(e.message, 'err');
+  } finally {
+    $('btnPreview').disabled = false;
+  }
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderPreview(columns, rows) {
+  $('previewHead').innerHTML = '<tr>' + columns.map(c => `<th>${esc(c)}</th>`).join('') + '</tr>';
+  $('previewBody').innerHTML = rows.length
+    ? rows.map(r => '<tr>' + r.map(v => v === null
+        ? '<td class="null-cell">NULL</td>'
+        : `<td title="${esc(v)}">${esc(v)}</td>`).join('') + '</tr>').join('')
+    : '<tr><td colspan="99"><div class="empty-state">Query returned no rows.</div></td></tr>';
+}
+
+// ─────────────────────────────────────────────
+// Export
+// ─────────────────────────────────────────────
+$('btnExport').onclick = () => {
+  if (!S.connData) { toast('Select a connection first', 'err'); return; }
+  if (!$('editor').value.trim()) { toast('Write a query first', 'err'); return; }
+  wOpen();
+};
+
+
+// ─────────────────────────────────────────────
+// Toolbar: save query
+// ─────────────────────────────────────────────
+$('btnSaveQuery').onclick = saveCurrentQuery;
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); saveCurrentQuery(); }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runPreview(); }
+});
+
+// ─────────────────────────────────────────────
+// Editor resize handle
+// ─────────────────────────────────────────────
+{
+  const resizer = $('editorResizer');
+  const wrap = $('editorWrap');
+  let startY, startH;
+  resizer.addEventListener('mousedown', e => {
+    startY = e.clientY; startH = wrap.offsetHeight;
+    resizer.classList.add('dragging');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+  function onMove(e) {
+    const h = Math.max(80, Math.min(startH + e.clientY - startY, window.innerHeight * .8));
+    wrap.style.height = h + 'px';
+  }
+  function onUp() {
+    resizer.classList.remove('dragging');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Sidebar resize handle
+// ─────────────────────────────────────────────
+{
+  const resizer = $('sidebarResizer');
+  const sidebar = document.querySelector('.sidebar');
+  let startX, startW;
+  resizer.addEventListener('mousedown', e => {
+    startX = e.clientX; startW = sidebar.offsetWidth;
+    resizer.classList.add('dragging');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+  function onMove(e) {
+    const w = Math.max(160, Math.min(startW + e.clientX - startX, window.innerWidth * 0.6));
+    sidebar.style.width = w + 'px';
+  }
+  function onUp() {
+    resizer.classList.remove('dragging');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Quit
+// ─────────────────────────────────────────────
+// Quit functionality removed from UI, handled by native menu
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+(async function init() {
+  // Load formats
+  try {
+    S.formats = await api('GET', '/api/formats');
+    $('fmtSelect').innerHTML = S.formats.map(f =>
+      `<option value="${f.id}">${f.label.replace(/\s*\(\*.*\)$/,'')}</option>`
+    ).join('');
+    renderFmtOpts();
+  } catch {}
+
+  // Load default output dir
+  try {
+    const d = await api('GET', '/api/defaults');
+    $('epOutdir').value = d.output_dir || '';
+  } catch {}
+
+  // Load connections
+  try { S.connections = await api('GET', '/api/connections'); } catch {}
+
+  // Load queries
+  try { S.queries = await api('GET', '/api/queries'); } catch {}
+
+  renderSidebar();
+})();
+
+// ═══════════════════════════════════════════════════════
+// EXPORT WIZARD
+// ═══════════════════════════════════════════════════════
+const FORMAT_LIST = [
+  {id:'txt',  label:'Text file (*.txt)'},
+  {id:'csv',  label:'CSV file (*.csv)'},
+  {id:'json', label:'JSON file (*.json)'},
+  {id:'xml',  label:'XML file (*.xml)'},
+  {id:'html', label:'HTML file (*.htm;*.html)'},
+  {id:'sql',  label:'SQL script file (*.sql)'},
+  {id:'xls',  label:'Excel file (*.xls)'},
+  {id:'xlsx', label:'Excel file (2007 or later) (*.xlsx)'},
+  {id:'dbf',  label:'DBase file (*.dbf)'},
+];
+
+const WZ_OPTS = {
+  txt:  [{id:'delimiter',label:'Delimiter',type:'text',def:'\t'},{id:'null_text',label:'NULL as',type:'text',def:''},{id:'header',label:'Header row',type:'check',def:true}],
+  csv:  [{id:'delimiter',label:'Delimiter',type:'text',def:','},{id:'null_text',label:'NULL as',type:'text',def:''},{id:'header',label:'Header row',type:'check',def:true},{id:'bom',label:'UTF-8 BOM',type:'check',def:false}],
+  json: [{id:'jsonl',label:'Newline-delimited (jsonl)',type:'check',def:false}],
+  xml:  [],html:[],
+  sql:  [{id:'sql_table',label:'Target table',type:'text',def:''}],
+  xls:  [{id:'sheet',label:'Sheet name',type:'text',def:'Sheet1'}],
+  xlsx: [{id:'sheet',label:'Sheet name',type:'text',def:'Sheet1'}],
+  dbf:  [{id:'dbf_char_width',label:'Max char width',type:'number',def:254}],
+};
+
+const WZ = {
+  step: 1, format: 'csv',
+  folder: '', filename: 'export', encoding: 'utf-8', addTs: false, tsFormat: 'YYYYMMDD',
+  columns: null,   // null = all; string[] = selected
+  job: null, jobTimer: null,
+};
+
+function wOpen() {
+  // Build format list
+  $('wFormatList').innerHTML = FORMAT_LIST.map(f =>
+    `<label class="format-opt">
+      <input type="radio" name="wFmt" value="${f.id}" ${f.id===WZ.format?'checked':''}>
+      <label>${f.label}</label>
+    </label>`
+  ).join('');
+
+  // Pre-fill filename from query title
+  const name = ($('queryTitleInput').value||'export').replace(/[^\w\-]/g,'_').toLowerCase();
+  $('wFilename').value = name;
+  WZ.filename = name;
+
+  // Set default folder
+  WZ.folder = $('epOutdir').value || '';
+  if (!WZ.folder) {
+    api('GET','/api/defaults').then(d => { WZ.folder = d.output_dir||''; $('wFolderDisplay').textContent = WZ.folder; }).catch(()=>{});
+  } else {
+    $('wFolderDisplay').textContent = WZ.folder;
+  }
+
+  wGoTo(1);
+  $('wizardModal').classList.add('open');
+}
+
+function wClose() {
+  clearTimeout(WZ.jobTimer);
+  $('wizardModal').classList.remove('open');
+}
+
+$('wClose').onclick = wClose;
+$('wizardModal').addEventListener('click', e => { if (e.target === $('wizardModal')) wClose(); });
+
+function wGoTo(step) {
+  WZ.step = step;
+  for (let i=1;i<=5;i++) {
+    const c = $('wc'+i);
+    if (c) c.style.display = i===step ? '' : 'none';
+    const p = $('wsp'+i);
+    if (p) p.className = 'wz-step-pill' + (i<step?' done':i===step?' active':'');
+  }
+  // Buttons
+  $('wBtnBack').style.display  = step>1 && step<5 ? '' : 'none';
+  $('wBtnNext').style.display  = step<4 ? '' : 'none';
+  $('wBtnStart').style.display = step===4 ? '' : 'none';
+  $('wBtnClose2').style.display= step===5 ? '' : 'none';
+  $('wBtnDownload').style.display = 'none';
+
+  if (step===3) wBuildColList();
+  if (step===4) wBuildOpts();
+}
+
+$('wBtnBack').onclick = () => wGoTo(WZ.step-1);
+$('wBtnNext').onclick = () => {
+  if (WZ.step===1) {
+    const r = document.querySelector('input[name=wFmt]:checked');
+    if (r) WZ.format = r.value;
+  }
+  if (WZ.step===2) {
+    WZ.folder = $('wFolderDisplay').textContent.trim();
+    WZ.filename = $('wFilename').value.trim() || 'export';
+    WZ.encoding = $('wEncoding').value;
+    WZ.addTs = $('wAddTs').checked;
+    WZ.tsFormat = $('wTsFormat').value;
+  }
+  wGoTo(WZ.step+1);
+};
+
+// ─── STEP 2 FOLDER BROWSER ───────────────────────
+let dirBrowserOpen = false;
+
+$('wBtnBrowse').onclick = async () => {
+  dirBrowserOpen = !dirBrowserOpen;
+  $('dirBrowser').style.display = dirBrowserOpen ? '' : 'none';
+  if (dirBrowserOpen) await wDirLoad(WZ.folder || '');
+};
+
+$('wDirUp').onclick = async () => {
+  const cur = $('wDirCrumb').dataset.path || '';
+  if (!cur) return;
+  // Get parent from backend
+  const r = await api('GET', `/api/browse?path=${encodeURIComponent(cur)}`).catch(()=>null);
+  if (r && r.parent) await wDirLoad(r.parent);
+};
+
+async function wDirLoad(path) {
+  $('wDirList').innerHTML = '<div class="dir-entry" style="color:var(--muted)">Loading…</div>';
+  try {
+    const r = await api('GET', `/api/browse?path=${encodeURIComponent(path)}`);
+    $('wDirCrumb').textContent = r.path;
+    $('wDirCrumb').dataset.path = r.path;
+    $('wDirList').innerHTML = r.entries.length
+      ? r.entries.filter(e=>e.is_dir).map(e =>
+          `<div class="dir-entry" data-dpath="${esc(e.path)}" title="${esc(e.path)}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="#3d8ef0" opacity=".8">
+              <path d="M20 6H12l-2-2H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2z"/>
+            </svg>${esc(e.name)}</div>`
+        ).join('')
+      : '<div class="dir-entry" style="color:var(--muted)">No sub-folders</div>';
+
+    // Click folder to navigate
+    $('wDirList').querySelectorAll('[data-dpath]').forEach(el =>
+      el.addEventListener('dblclick', () => wDirLoad(el.dataset.dpath))
+    );
+    // Single click selects folder
+    $('wDirList').querySelectorAll('[data-dpath]').forEach(el =>
+      el.addEventListener('click', () => {
+        $('wDirList').querySelectorAll('.selected').forEach(x=>x.classList.remove('selected'));
+        el.classList.add('selected');
+        $('wFolderDisplay').textContent = el.dataset.dpath;
+      })
+    );
+  } catch(e) {
+    $('wDirList').innerHTML = `<div class="dir-entry" style="color:var(--err)">${esc(e.message)}</div>`;
+  }
+}
+
+// ─── STEP 3 COLUMN LIST ───────────────────────────
+function wBuildColList() {
+  const cols = (S.previewData && S.previewData.columns) || [];
+  const list = $('wColList');
+  if (!cols.length) {
+    list.innerHTML = '<div class="dir-entry" style="color:var(--muted);padding:20px">Run query first to see column list. All columns will be exported.</div>';
+    WZ.columns = null;
+    return;
+  }
+  // Init selection
+  if (!WZ.columns) WZ.columns = [...cols];
+  list.innerHTML = cols.map((c,i) =>
+    `<div class="col-item">
+      <input type="checkbox" id="wc_${i}" value="${esc(c)}" ${WZ.columns.includes(c)?'checked':''}>
+      <label for="wc_${i}">${esc(c)}</label>
+    </div>`
+  ).join('');
+  // All-fields checkbox sync
+  $('wAllFields').checked = WZ.columns.length === cols.length;
+}
+
+$('wSelAll').onclick = () => {
+  const cols = (S.previewData&&S.previewData.columns)||[];
+  WZ.columns = [...cols];
+  document.querySelectorAll('#wColList input[type=checkbox]').forEach(cb=>cb.checked=true);
+  $('wAllFields').checked = true;
+};
+$('wDeselAll').onclick = () => {
+  WZ.columns = [];
+  document.querySelectorAll('#wColList input[type=checkbox]').forEach(cb=>cb.checked=false);
+  $('wAllFields').checked = false;
+};
+$('wAllFields').onchange = e => {
+  if (e.target.checked) $('wSelAll').click();
+  else $('wDeselAll').click();
+};
+$('wColList').addEventListener('change', () => {
+  const cols = (S.previewData&&S.previewData.columns)||[];
+  WZ.columns = cols.filter((_,i) => {
+    const cb = $('wc_'+i);
+    return cb && cb.checked;
+  });
+  $('wAllFields').checked = WZ.columns.length===cols.length;
+});
+
+// ─── STEP 4 FORMAT OPTIONS ────────────────────────
+function wBuildOpts() {
+  const opts = WZ_OPTS[WZ.format]||[];
+  $('wFmtOptsGrid').innerHTML = opts.length
+    ? opts.map(o => {
+        if (o.type==='check')
+          return `<div class="wz-opt-row">
+            <label>${o.label}</label>
+            <label class="wz-check"><input type="checkbox" id="wo_${o.id}" ${o.def?'checked':''}></label>
+          </div>`;
+        return `<div class="wz-opt-row">
+          <label>${o.label}</label>
+          <input type="${o.type}" id="wo_${o.id}" value="${o.def}">
+        </div>`;
+      }).join('')
+    : '<p style="color:var(--muted);font-size:13px">No additional options for this format.</p>';
+  $('wBtnStart').disabled = false;
+}
+
+function wGetOpts() {
+  const out = {};
+  for (const o of (WZ_OPTS[WZ.format]||[])) {
+    const el = $('wo_'+o.id);
+    if (!el) continue;
+    let v = o.type==='check' ? el.checked : (o.type==='number' ? +el.value : el.value);
+    if (o.id==='delimiter' && v==='\\t') v = '\t';
+    out[o.id] = v;
+  }
+  return out;
+}
+
+// ─── STEP 5 PROGRESS ─────────────────────────────
+$('wBtnStart').onclick = async () => {
+  wGoTo(5);
+  $('wProgressFill').classList.remove('done');
+  $('wBtnDownload').style.display = 'none';
+
+  // Build the effective filename with optional timestamp
+  let fname = WZ.filename;
+  if (WZ.addTs) {
+    const now = new Date();
+    const ts = WZ.tsFormat
+      .replace('YYYY', now.getFullYear())
+      .replace('MM', String(now.getMonth()+1).padStart(2,'0'))
+      .replace('DD', String(now.getDate()).padStart(2,'0'))
+      .replace('HH', String(now.getHours()).padStart(2,'0'))
+      .replace('mm', String(now.getMinutes()).padStart(2,'0'))
+      .replace('ss', String(now.getSeconds()).padStart(2,'0'));
+    fname = fname + '_' + ts;
+  }
+
+  // Determine which columns
+  const allCols = (S.previewData&&S.previewData.columns)||[];
+  const selCols = WZ.columns && WZ.columns.length && WZ.columns.length!==allCols.length
+    ? WZ.columns : [];
+
+  const conn = S.connData||{};
+  const payload = {
+    url: conn.url||'', host: conn.host||'', port: conn.port||null,
+    user: conn.user||'', password: conn.password||'',
+    catalog: conn.catalog||'', schema: conn.schema||'',
+    http_scheme: conn.http_scheme||'https', verify: conn.verify!==false,
+    sql: $('editor').value.trim(),
+    format: WZ.format, name: fname,
+    output_dir: WZ.folder,
+    encoding: WZ.encoding,
+    columns: selCols,
+    batch_size: +($('epBatch').value||10000),
+    retries: +($('epRetries').value||5),
+    ...wGetOpts(),
+  };
+
+  $('wProgressTitle').textContent = 'Exporting…';
+  wLog('Starting export to ' + (WZ.folder||'temp folder') + '…');
+  wStats({rows:0, status:'running'});
+
+  try {
+    const r = await api('POST','/api/export', payload);
+    WZ.job = r.id;
+    wPoll();
+  } catch(e) {
+    $('wProgressTitle').textContent = 'Export failed';
+    wLog('Error: '+e.message);
+    $('wProgressFill').style.width='100%';
+    $('wProgressFill').style.background='var(--err)';
+    $('wProgressFill').classList.remove('done');
+    $('wBtnClose2').style.display='';
+  }
+};
+
+function wLog(msg) {
+  const el = $('wLog');
+  el.textContent += (el.textContent?'\n':'') + msg;
+  el.scrollTop = el.scrollHeight;
+}
+function wStats({rows, status, qid}) {
+  $('wStats').innerHTML = [
+    qid ? `<div class="wz-stat"><span class="wz-stat-key">Query ID</span><span class="wz-stat-val">${esc(qid)}</span></div>` : '',
+    `<div class="wz-stat"><span class="wz-stat-key">Rows exported</span><span class="wz-stat-val">${(rows||0).toLocaleString()}</span></div>`,
+    `<div class="wz-stat"><span class="wz-stat-key">Status</span><span class="wz-stat-val">${esc(status)}</span></div>`,
+  ].join('');
+}
+
+async function wPoll() {
+  if (!WZ.job) return;
+  const s = await api('GET',`/api/jobs/${WZ.job}`).catch(()=>null);
+  if (!s) { wLog('Lost contact with server.'); return; }
+  wStats({rows:s.rows, status:s.status, qid:s.query_id});
+  if (s.status==='running') { WZ.jobTimer=setTimeout(wPoll,500); return; }
+  // Finished
+  $('wProgressFill').classList.add('done');
+  if (s.status==='error') {
+    $('wProgressTitle').textContent = 'Export failed';
+    wLog('Error: '+s.error);
+    $('wProgressFill').style.background='var(--err)';
+  } else {
+    $('wProgressTitle').textContent = s.status==='cancelled' ? 'Export cancelled (partial)' : 'Export complete!';
+    wLog(`Done — ${(s.rows||0).toLocaleString()} rows exported.`);
+    if (s.warnings&&s.warnings.length) s.warnings.forEach(w=>wLog('Warning: '+w));
+    if (s.download) { $('wBtnDownload').style.display=''; WZ.lastJobId=WZ.job; }
+  }
+  $('wBtnClose2').style.display='';
+}
+
+$('wBtnClose2').onclick = wClose;
+$('wBtnDownload').onclick = () => {
+  if (WZ.lastJobId) location.href=`/api/jobs/${WZ.lastJobId}/download`;
+};
+
+// Open wizard from results toolbar
+$('btnWizard').onclick = wOpen;
+
+// Preload preview data reference into WZ
+const _origRenderPreview = renderPreview;
+renderPreview = function(columns, rows) {
+  _origRenderPreview(columns, rows);
+  S.previewData = {columns, rows};
+  $('btnWizard').disabled = false;
+  WZ.columns = null; // reset column selection on new results
+};
+
+window.openSettingsModal = function() {
+  $('sTableLimit').value = S.tableLimit;
+  $('settingsModal').classList.add('open');
+};
+
+function closeSettingsModal() {
+  $('settingsModal').classList.remove('open');
+}
+
+$('settingsModalClose').onclick = closeSettingsModal;
+$('settingsModalCancel').onclick = closeSettingsModal;
+$('settingsModal').addEventListener('click', e => { if (e.target === $('settingsModal')) closeSettingsModal(); });
+
+$('btnSaveSettings').onclick = () => {
+  const limit = parseInt($('sTableLimit').value) || 100;
+  S.tableLimit = limit;
+  localStorage.setItem('queryhive_table_limit', limit.toString());
+  closeSettingsModal();
+  toast('Settings saved', 'ok');
+};
+
+</script>
+</body>
+</html>

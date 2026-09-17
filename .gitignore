@@ -1,0 +1,21 @@
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+
+# Native app build artifacts. app/engine-requirements.txt is NOT ignored: it is the
+# committed, fully pinned lockfile build-engine.sh reuses instead of re-resolving.
+app/.build/
+app/.engine/
+
+# macOS and archive cruft that arrived with the checkout.
+.DS_Store
+__MACOSX/
+backup.zip
+
+# pywebview spikes, not tests: they are named test_* so pytest would collect them, and each
+# one opens a GUI window when it runs.
+/test_mac.py
+/test_menu.py
