@@ -280,11 +280,11 @@ struct ResultGrid: View {
             .help("How many rows Run fetches. It does not change the query; the engine stops reading here.")
 
             let reason = model.runBlockedReason(for: tab)
+            // Opens the same wizard the Run menu does: one rule for every Export in the app —
+            // you see where it is going before it goes.
             PillButton(title: tab.destination == .table ? "Save to Table" : "Export",
                        symbol: tab.destination == .table ? "square.and.arrow.down" : "arrow.down.doc") {
-                // Replace drops the old table before the query runs; that is worth a question,
-                // and the question belongs beside the button that asks it.
-                if tab.isDestructive { confirmReplace = true } else { model.run(tab) }
+                model.exportSettingsOpen = true
             }
             .disabled(reason != nil || tab.stage == .running)
             .help(reason ?? (tab.destination == .table

@@ -180,9 +180,12 @@ struct QueryToolbar: View {
                 // Export lives here rather than in a button of its own: the toolbar had a
                 // destination's worth of controls in it, and the one thing that was really a
                 // command — write this out — belongs with the other commands.
-                Button(tab.destination == .table ? "Save to Table" : "Export") { model.run(tab) }
-                    .disabled(model.runBlockedReason(for: tab) != nil)
-                Button("Export Settings…") { model.exportSettingsOpen = true }
+                // Opens the wizard rather than running blind. Where an export goes is a decision
+                // worth seeing every time — it can drop a table — and the settings belong to the
+                // moment of exporting, not to a menu item of their own.
+                Button(tab.destination == .table ? "Save to Table…" : "Export…") {
+                    model.exportSettingsOpen = true
+                }
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))

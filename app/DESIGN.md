@@ -108,15 +108,24 @@ Two rules that came out of looking at the result rather than the code:
   "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
   without reading it.
 
+### The export wizard
+
+Choosing Export — from Run's menu or from the grid's footer — opens the destination rather than
+running blind. Where an export goes is a decision worth seeing every time, since `Replace` can drop
+a table, and the settings belong to the moment of exporting rather than to a menu item of their
+own; there is no separate "Export Settings…" entry. The wizard's own button commits and closes it,
+so a finished export does not leave a panel over the result it just produced.
+
+One rule for every Export in the app: you see where it is going before it goes.
+
 ### One toolbar, one Export button
 
 The toolbar had become a settings panel with a Run button on it: a File/Table switch, a format
 menu, a folder chip and a name field, all sitting in a row at the same weight as Run. Every one of
 those choices now lives behind the **Export** button's chevron, which opens the destination — File
 or Table, format and its options, folder and name, or the target table and its write mode — and
-names what pressing the button will do before you press it. The grid's footer keeps a contextual
-Export, because that is where the result is; the toolbar keeps one, because that is where you are
-when you decide.
+names what pressing the button will do before you press it. Both the Run menu and the grid's footer
+open the same wizard.
 
 The object pickers are **gone**. The tree already inserts a qualified, quoted name on a double
 click, it is always on screen, and it knows each driver's levels for real. A second way to do the

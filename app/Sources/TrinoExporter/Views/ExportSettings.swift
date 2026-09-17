@@ -15,10 +15,15 @@ import SwiftUI
 struct DestinationPopover: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
+    @State private var confirmReplace = false
 
     private var showing: Binding<Bool> {
         Binding(get: { model.exportSettingsOpen }, set: { model.exportSettingsOpen = $0 })
     }
+
+    /// Why the wizard's own button is dim — the same reason the old toolbar button was, now that
+    /// this is where the decision is confirmed.
+    private var blocked: String? { model.runBlockedReason(for: tab) }
 
     var body: some View {
         // A zero-size anchor: the popover has to hang off something, and the Run group is what it
@@ -26,6 +31,19 @@ struct DestinationPopover: View {
         Color.clear
             .frame(width: 1, height: 1)
             .popover(isPresented: showing, arrowEdge: .bottom) { panel }
+            .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?",
+                                isPresented: $confirmReplace) {
+                Button("Drop and Recreate", role: .destructive) { commit() }
+            } message: {
+                Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
+            }
+    }
+
+    /// Runs it and closes the wizard, so a successful export does not leave a panel sitting over
+    /// the result it just produced.
+    private func commit() {
+        model.exportSettingsOpen = false
+        model.run(tab)
     }
 
     private var panel: some View {
@@ -61,6 +79,20 @@ struct DestinationPopover: View {
                 LabeledField("File name") { TextField("export", text: $tab.outputName).field() }
             case .table:
                 TableTargetFields(tab: tab)
+            }
+            Divider().overlay(.white.opacity(0.08))
+            HStack(spacing: 8) {
+                if let blocked {
+                    Text(blocked).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                }
+                Spacer(minLength: 0)
+                PillButton(title: "Cancel", role: .quiet) { model.exportSettingsOpen = false }
+                HubButton(title: tab.destination == .table ? "Save to Table" : "Export",
+                          symbol: tab.destination == .table ? "square.and.arrow.down" : "arrow.down.doc",
+                          hue: tab.isDestructive ? .failure : .exporter) {
+                    if tab.isDestructive { confirmReplace = true } else { commit() }
+                }
+                .disabled(blocked != nil || tab.stage == .running)
             }
         }
         .padding(14)
