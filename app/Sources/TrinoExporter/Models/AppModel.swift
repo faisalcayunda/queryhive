@@ -28,7 +28,9 @@ final class AppModel {
     // MARK: Layout
 
     var sidebarWidth: CGFloat = 252
-    var panelHeight: CGFloat = 232
+    /// Taller than it was. Run now puts rows in the panel rather than writing a file, so the
+    /// panel is the main event instead of a message strip — 232pt showed four rows of it.
+    var panelHeight: CGFloat = 344
     var panelCollapsed = false
 
     // MARK: Sheets and alerts
@@ -524,6 +526,17 @@ final class AppModel {
 
     // MARK: Running a tab
 
+    /// Why Run is dim. Only a connection and a statement — Run does not write anything, so a
+    /// destination it has not been given yet is none of its business.
+    var runBlockedReason: String? {
+        if connections.isEmpty { return "Add a connection first" }
+        guard let tab = selectedTab else { return nil }
+        if connection(for: tab) == nil { return "Choose a connection" }
+        if !tab.hasSQL { return "Write a query" }
+        return nil
+    }
+
+    /// Why Export is dim. Everything Run needs, plus somewhere to put the result.
     func runBlockedReason(for tab: QueryTab) -> String? {
         if connections.isEmpty { return "Add a connection first" }
         if connection(for: tab) == nil { return "Choose a connection" }
@@ -540,9 +553,88 @@ final class AppModel {
         return nil
     }
 
+    /// Navicat's split, and the reason this app is a query editor rather than a one-way pipe:
+    /// **Run looks at the rows; Export writes them.** Run fetches the row limit and stops, so
+    /// looking is cheap and reversible; Export streams the whole result to the destination.
     func runSelectedTab() {
         guard let tab = selectedTab else { return }
-        run(tab)
+        preview(tab)
+    }
+
+    func preview(_ tab: QueryTab) {
+        guard !tab.previewing, tab.stage != .running else { return }
+        guard let connection = connection(for: tab) else { return }
+        let env: [String: String]
+        do {
+            env = try previewEnvironment(for: tab, connection: connection)
+        } catch {
+            tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        tab.previewing = true
+        tab.previewError = nil
+        tab.preview = nil
+        tab.panel = .result
+        panelCollapsed = false
+
+        let run = UUID()
+        tab.previewToken = run
+        var message: String?
+        var columns: [Event.Column] = []
+        var rows: [[String?]] = []
+        var truncated = false
+        var finished = false
+        tab.previewProcess = Engine.run("preview", env: env, onEvent: { event in
+            guard tab.previewToken == run else { return }
+            switch event.event {
+            case "error":
+                message = event.message
+            case "columns":
+                columns = event.columns ?? []
+                // Paint the header as soon as it is known rather than after the first batch.
+                tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
+                                            queryID: nil, elapsedMS: 0)
+            case "rows":
+                rows.append(contentsOf: event.data ?? [])
+                // A partial grid while the rest arrives: the point of batching.
+                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+                                            queryID: tab.preview?.queryID, elapsedMS: 0)
+            case "done":
+                truncated = event.truncated ?? false
+                finished = true
+                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
+                                            queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0)
+                tab.note(.success, "\(pluralized(rows.count, "row")) returned\(truncated ? " (limit reached)" : "")")
+            default:
+                break
+            }
+        }, onExit: { status, log in
+            guard tab.previewToken == run else { return }
+            tab.previewProcess = nil
+            tab.previewing = false
+            guard status == 0, finished else {
+                tab.previewError = message ?? log.split(separator: "\n").last.map(String.init)
+                    ?? "The engine exited with status \(status)."
+                tab.preview = nil
+                tab.note(.error, tab.previewError ?? "Preview failed")
+                tab.panel = .log
+                return
+            }
+        })
+    }
+
+    func cancelPreview(_ tab: QueryTab) {
+        tab.previewProcess?.terminate()
+    }
+
+    /// The environment for a preview: the connection plus the statement and the row cap. Deliberately
+    /// *not* the destination — looking at rows must not depend on having picked a file or a table.
+    private func previewEnvironment(for tab: QueryTab, connection: Connection) throws -> [String: String] {
+        var env = try connectionEnvironment(connection)
+        env["SQL"] = tab.sql
+        env["LIMIT"] = String(max(1, tab.rowLimit))
+        env["RETRIES"] = String(tab.retries)
+        return env
     }
 
     func stopSelectedTab() {
@@ -558,6 +650,8 @@ final class AppModel {
         tab.process?.terminate()
     }
 
+    /// Writes the result out. Separate from `preview` so the toolbar can offer both without one
+    /// standing in for the other.
     func run(_ tab: QueryTab) {
         guard tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }

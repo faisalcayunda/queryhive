@@ -171,9 +171,29 @@ struct LogLine: Identifiable {
     let text: String
 }
 
+/// The rows a Run fetched, rendered by the grid.
+struct PreviewResult {
+    var columns: [Event.Column]
+    var rows: [[String?]]
+    /// The row limit stopped it short, so what is on screen is not the whole result.
+    var truncated: Bool
+    var queryID: String?
+    var elapsedMS: Int
+
+    /// What the grid's footer says it is showing. It must never imply the grid holds everything.
+    var summary: String {
+        truncated
+            ? "First \(rows.count.formatted()) rows · limit reached"
+            : pluralized(rows.count, "row")
+    }
+}
+
 /// Which panel is showing under the SQL editor.
+///
+/// No longer includes Columns: the grid's own header carries every column name and its type chip,
+/// so a separate list of them was the same information twice.
 enum PanelTab: String, CaseIterable, Identifiable {
-    case log, columns, files
+    case result, log, files
 
     var id: Self { self }
 
@@ -181,8 +201,8 @@ enum PanelTab: String, CaseIterable, Identifiable {
     /// it "Files" while a CTAS is running would just be wrong.
     func label(for destination: Destination) -> String {
         switch self {
+        case .result: "Result"
         case .log: "Log"
-        case .columns: "Columns"
         case .files: destination == .table ? "Table" : "Files"
         }
     }
@@ -242,6 +262,16 @@ final class QueryTab: Identifiable {
     var sheet = "Sheet1"
     var dbfCharWidth = 254
 
+    // MARK: Preview
+
+    /// How many rows a Run fetches. Navicat calls this the row limit and keeps it with the grid;
+    /// it is a property of looking, not of the query, so it is not part of the statement.
+    var rowLimit = 1000
+
+    var previewing = false
+    var preview: PreviewResult?
+    var previewError: String?
+
     // MARK: Run state
 
     var stage = Stage.idle
@@ -260,6 +290,10 @@ final class QueryTab: Identifiable {
 
     var process: Process?
     var runToken = UUID()
+    /// A preview is its own process and its own token: pressing Run while an export is in flight
+    /// must not be able to cancel the export, or vice versa.
+    var previewProcess: Process?
+    var previewToken = UUID()
     var cancelled = false
     /// Set while the debounced... no: set when the user has asked to stop but the engine has
     /// not exited yet, so the toolbar can disable Stop instead of queueing more signals.

@@ -108,6 +108,30 @@ Two rules that came out of looking at the result rather than the code:
   "Load File…" and "Clear" indistinguishable at a glance; the icon is what makes each readable
   without reading it.
 
+### Run looks, Export writes
+
+Navicat's split, and the thing that makes this a query editor rather than a one-way pipe. The
+toolbar's primary action is **Run**: it fetches the first `rowLimit` rows (default 1000) and paints
+them in the Result panel's grid, and it writes nothing. **Export** — or **Save to Table**, when
+that is the destination — lives in that grid's footer, because it acts on the result the grid is
+showing, and because the toolbar had no room left for a second primary.
+
+That split is also why `runBlockedReason` exists twice. Run needs a connection and a statement and
+nothing else: a destination it has not been given yet is none of its business. Export needs the
+destination too. Before the split there was one check and one button, and pressing it wrote a file
+before you had seen a single row.
+
+The grid is the panel's first tab and the default one after a run, so the panel is now 344pt tall —
+232pt showed four rows of the thing the user just asked for. Panel tabs are **Result / Log /
+Files**; the old Columns tab is gone, because the grid's own header carries every column name and
+its type chip and a second list of them was the same information twice.
+
+The grid itself: a `#` gutter shared by the header and the rows so they cannot drift apart, a
+pinned header with per-column type chips tinted by kind, numbers right-aligned and everything else
+left, alternating rows, `null` in italic dim rather than an empty cell (which is a different
+thing), and a footer that never overstates what is on screen — `First N rows · limit reached` in
+amber when the cap stopped it, `N rows` otherwise.
+
 ### Where controls sit
 
 The rule, learned from getting it wrong: **an action belongs next to what it acts on.** The editor

@@ -7,6 +7,7 @@
     python3 -s -u queryhive_engine.py tables    list tables of the level above
     python3 -s -u queryhive_engine.py export    stream SQL into one of nine formats
     python3 -s -u queryhive_engine.py to_table  let the database write SQL into a table
+    python3 -s -u queryhive_engine.py preview   run SQL and show the first rows as JSON
 
 The desktop app runs this script as a child process and reads the protocol off
 its stdout: every stdout line is exactly one compact JSON object and nothing
@@ -26,6 +27,8 @@ name, so a secret never shows up in a process listing. The events:
     export   step connect, step write, start, progress..., done
              (or a single error event and exit 1)
     to_table step connect, step write, progress..., done
+             (or a single error event and exit 1)
+    preview  step connect, columns, rows:data..., done
              (or a single error event and exit 1)
 
 Three drivers sit behind one protocol: `trino` (the default), `postgres` and
@@ -84,6 +87,32 @@ exits 0. A real failure is one `error` event and exit 1, and it carries a
 `warnings` array whenever there is something the caller must still hear -- a
 failed `replace` has already dropped the old table by then.
 
+`preview` answers the query editor's "what would this return?" before anything
+is written. It runs the statement exactly as the user wrote it -- no wrapping in
+a subquery and no appended LIMIT, because a rewritten statement can behave
+differently: a trailing LIMIT on SQL that already has one is a syntax error, and
+wrapping changes how ORDER BY and column names resolve. Instead it fetches at
+most LIMIT rows (default 1000, floored at 1) and then lets the stream close,
+which cancels the query on the coordinator; the cap is what bounds the run, so
+there is nothing to poll and no cancel flag to read. The events are `step
+connect`, one `columns` as soon as the cursor's description is known, zero or
+more `rows` batches carrying the array under `data`, and one `done`:
+
+    {"event": "rows", "data": [["32.01", null, "1234"], ...]}
+
+`data` is not `rows`: `rows` is the integer count `progress` and `done` carry,
+and one key cannot be two types. A batch is PREVIEW_BATCH rows so the grid can
+paint progressively, and every cell is the writers' own canonical text
+(`exporter.writers.to_text`), with a NULL staying JSON null rather than the
+string "None" or an empty string -- a Decimal or a datetime cell would otherwise
+be a second JSON type in the same column and the grid could not align it. The
+type chip comes from `columns`, whose `type` is always a string (Trino's type
+name, or whatever the postgres/mysql DBAPI description gives). `done` reports
+`rows` sent, whether the cap truncated the result, the query id and the elapsed
+milliseconds. A failure -- a bad setting, SQL that will not run, a missing SQL --
+is one `error` event and exit 1, exactly as `export`'s is, and `step connect`
+still precedes the network.
+
 The engine is a sibling of scripts/iceberg_importer/importer.py, which speaks
 the same protocol for imports; this follows its structure, its emit() helper
 and its exit-code discipline.
@@ -131,14 +160,14 @@ try:
         driver_of,
     )
     from exporter.export import bundle, run_export  # noqa: E402
-    from exporter.source import describe_error  # noqa: E402
+    from exporter.source import QueryStream, describe_error  # noqa: E402
     from exporter.to_table import (  # noqa: E402
         CANCEL_WARNING,
         PROGRESS_EVERY as TO_TABLE_PROGRESS_EVERY,
         TableExportError,
         export_to_table,
     )
-    from exporter.writers import WRITERS  # noqa: E402
+    from exporter.writers import WRITERS, to_text  # noqa: E402
 except Exception as _import_error:
     traceback.print_exc()
     emit("error", message=f"{type(_import_error).__name__}: {_import_error}")
@@ -146,6 +175,16 @@ except Exception as _import_error:
 
 
 PROGRESS_EVERY = 1_000  # rows: no time throttle may swallow a whole 1000 rows
+
+# Rows per `rows` event of `preview`: small enough that the grid paints before
+# the whole page set has arrived, large enough that a 1000-row preview is five
+# events rather than a thousand. It is also the fetch size, so a batch flushed
+# early never asks the coordinator for more rows than the cap will show.
+PREVIEW_BATCH = 200
+
+# Rows `preview` returns when LIMIT says nothing. The cap is a floor of one, so
+# LIMIT=0 asks for one row rather than none.
+PREVIEW_LIMIT = 1_000
 
 # One rule, two homes: the export path throttles in-process, to_table's lives
 # beside the stats reader it floors. They must stay the same number, so a change
@@ -544,6 +583,102 @@ def run_to_table_command(env):
     )
 
 
+def _preview_limit(env):
+    """LIMIT, floored at 1: asking for nothing still shows a row.
+
+    `_int` already folds an unset or blank value into the default, so LIMIT=0
+    and a blank LIMIT both land here as 0 and both become 1 -- a preview that
+    returned no rows at all would tell the caller nothing about the statement.
+    """
+    return max(1, _int(env, "LIMIT", PREVIEW_LIMIT))
+
+
+def _preview_stream(env, config, sql, limit):
+    """Send the query's first `limit` rows as `columns` and `rows` events.
+
+    Returns (how many rows were sent, whether the cap cut the result short, the
+    query id). The values are the writers' own canonical text (`to_text`), so a
+    cell is always a string or None: `None` becomes JSON null, which is how the
+    grid renders a NULL, and a Decimal or datetime never becomes a native JSON
+    number or a second JSON type in the same column. The batches go out under
+    `data`, never under `rows`: `rows` is the integer count `done` and `progress`
+    carry, and one key cannot be two types.
+
+    The cap is enforced while pulling, never by rewriting `sql` -- the statement
+    the cursor executes is the one the caller handed over, byte for byte. The
+    batch size is PREVIEW_BATCH so a flush that happens early never asks for more
+    rows than the cap will show.
+
+    `truncated` costs one row past the cap, pulled for the verdict and then
+    dropped: it is never emitted and never counted, so `rows` stays the number
+    actually sent. That row comes from a page already in flight, and it is the
+    only way the two real cases can be told apart -- a page that ends exactly on
+    the cap with more behind it is not the same result as one that ends there
+    because the query was done, and the grid's footer says "limit reached" for
+    one and "N rows" for the other. A preview may not tell the caller they are
+    looking at the whole result when they are not.
+    """
+    emitted = 0
+    truncated = False
+    with QueryStream(
+        config, sql,
+        batch_size=PREVIEW_BATCH,
+        retries=max(0, _int(env, "RETRIES", 5)),
+    ) as stream:
+        emit(
+            "columns",
+            columns=[{"name": c.name, "type": str(c.type)} for c in stream.columns],
+        )
+        iterator = stream.rows()
+        pending = []
+        while emitted < limit:
+            try:
+                row = next(iterator)
+            except StopIteration:
+                break
+            if emitted + len(pending) >= limit:
+                # One row past the cap: the query had more to give, so the cap
+                # is what stopped this, not the end of the result. The row is
+                # the whole point of the fetch and is then discarded.
+                truncated = True
+                break
+            pending.append([to_text(value) for value in row])
+            if len(pending) >= PREVIEW_BATCH:
+                emit("rows", data=pending)
+                emitted += len(pending)
+                pending = []
+        if pending:
+            emit("rows", data=pending)
+        emitted += len(pending)
+        return emitted, truncated, stream.query_id
+
+
+def run_preview_command(env):
+    """Send the first LIMIT rows of the caller's statement, as the caller wrote it.
+
+    The query editor's "look before you write": the SQL is resolved exactly as
+    `export`'s is, the cap is read from LIMIT (default 1000, floored at 1) and
+    the statement is run verbatim -- no wrapping, no appended LIMIT -- because a
+    rewritten statement can behave differently. The run is bounded by the cap,
+    so nothing polls for a cancel here; SIGTERM still routes through the process
+    handlers the other commands install. A failure is one `error` event and exit
+    1, with `step connect` already emitted before the network was touched.
+    """
+    sql = source_sql(env)  # a bad or missing SQL fails before the connect step
+    limit = _preview_limit(env)
+    config = build_config(env)
+    started = time.monotonic()  # the whole run: connect, fetch and emit
+    emit("step", step="connect")  # before the network is touched
+    rows, truncated, query_id = _preview_stream(env, config, sql, limit)
+    emit(
+        "done",
+        rows=rows,
+        truncated=truncated,
+        query_id=query_id,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
 class _WarnedExportError(Exception):
     """An error the caller must also report warnings for.
 
@@ -576,6 +711,7 @@ def main(argv=None):
         "tables": run_tables_command,
         "export": run_export_command,
         "to_table": run_to_table_command,
+        "preview": run_preview_command,
     }
     if len(argv) != 2 or argv[1] not in commands:
         emit("error", message=f"usage: {argv[0] if argv else __file__} {'|'.join(commands)}")

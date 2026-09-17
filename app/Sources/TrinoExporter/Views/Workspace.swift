@@ -131,7 +131,6 @@ struct TabChip: View {
 struct QueryToolbar: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
-    @State private var confirmReplace = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -164,34 +163,28 @@ struct QueryToolbar: View {
         .onChange(of: tab.destination) { _, destination in
             if destination == .table { model.prepareTableDestination(tab) }
         }
-        .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?", isPresented: $confirmReplace) {
-            Button("Drop and Recreate", role: .destructive) { model.run(tab) }
-        } message: {
-            Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
-        }
     }
 
-    /// Run for a file, Save for a table: a table run can drop something, and the label should not
-    /// hide that behind the same word as writing a CSV.
+    /// **Run looks; Export writes.** The toolbar's primary action is Run, because that is the one
+    /// you press over and over while working on a query; Export belongs to the result it exports
+    /// and lives in the grid's footer. A table run's destructive confirmation went with it.
     @ViewBuilder private var actionButton: some View {
-        if tab.stage == .running {
+        if tab.previewing {
+            HubButton(title: "Stop", symbol: "stop.fill", hue: .failure) { model.cancelPreview(tab) }
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Stop the query (⌘.)")
+        } else if tab.stage == .running {
             HubButton(title: tab.stopping ? "Stopping…" : "Stop", symbol: "stop.fill", hue: .failure) {
                 model.stop(tab)
             }
             .disabled(tab.stopping)
             .keyboardShortcut(".", modifiers: .command)
-            .help("Stop the run (⌘.)")
+            .help("Stop the export (⌘.)")
         } else {
-            HubButton(title: tab.destination == .table ? "Save" : "Run",
-                      symbol: tab.destination == .table ? "square.and.arrow.down" : "play.fill",
-                      hue: tab.isDestructive ? .failure : .exporter) {
-                if tab.isDestructive { confirmReplace = true } else { model.run(tab) }
-            }
-            .disabled(model.runBlockedReason(for: tab) != nil)
-            .keyboardShortcut("r", modifiers: .command)
-            .help(model.runBlockedReason(for: tab) ?? (tab.destination == .table
-                                                       ? "Run the query and save it as a table (⌘R)"
-                                                       : "Run the query and write the file (⌘R)"))
+            HubButton(title: "Run", symbol: "play.fill", hue: .exporter) { model.preview(tab) }
+                .disabled(model.runBlockedReason != nil)
+                .keyboardShortcut("r", modifiers: .command)
+                .help(model.runBlockedReason ?? "Run the query and show the rows (⌘R)")
         }
     }
 

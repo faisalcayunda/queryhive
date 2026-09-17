@@ -48,6 +48,10 @@ struct QueryHiveApp: App {
             CommandMenu("Query") {
                 Button("Run") { model.runSelectedTab() }
                     .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.selectedTab?.previewing == true)
+                Button("Export") { model.selectedTab.map { model.run($0) } }
+                    .keyboardShortcut("e", modifiers: .command)
+                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
                 Button("Stop") { model.stopSelectedTab() }
                     .keyboardShortcut(".", modifiers: .command)
                     .disabled(model.selectedTab?.stage != .running)
@@ -101,6 +105,11 @@ struct Event: Decodable {
     /// `catalogs` / `schemas` / `tables` commands: the listed identifiers, in the coordinator's
     /// own order.
     var names: [String]?
+    // `preview` command. Deliberately `data`, not `rows`: `rows` is the integer on `progress` and
+    // `done`, and one key cannot be two types.
+    var data: [[String?]]?
+    var truncated: Bool?
+    var elapsedMs: Int?
     var host: String?
     var user: String?
     // `to_table` command: what was written, and where.

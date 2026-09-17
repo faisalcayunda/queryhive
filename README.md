@@ -39,6 +39,12 @@ pins change), then bundles the app, the engine and the `exporter` package and ad
 result. The `.app` is unsigned, so Gatekeeper blocks the first launch: right-click → Open, or
 `xattr -dr com.apple.quarantine app/dist/QueryHive.app`.
 
+**Run shows you the rows; Export writes them.** Run fetches the first N (the `LIMIT` in the grid's
+footer, default 1000) and paints them in a result grid — row numbers, a pinned header with type
+chips, numbers right-aligned, `null` rendered as a null. Nothing is written until you press Export
+in that grid's footer, which re-runs the statement and streams the whole result. The row limit
+changes what you look at, never the query: the engine stops reading, it does not rewrite your SQL.
+
 A query can go to one of two destinations, switched in the toolbar. **File** streams the result
 into any of the nine formats. **Table** hands the query to Trino to write itself —
 `CREATE TABLE … AS`, `DROP TABLE IF EXISTS` + `CREATE`, or `INSERT INTO … SELECT` — so the rows

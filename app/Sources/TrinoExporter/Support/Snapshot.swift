@@ -218,7 +218,7 @@ enum Snapshot {
         case "files":
             tab.panel = .files
         case "columns":
-            tab.panel = .columns
+            tab.panel = .result
         case "empty":
             model.tabs = []
             model.selectedTabID = nil
@@ -234,6 +234,43 @@ enum Snapshot {
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
+        case "grid":
+            // Run's whole point: the rows, before anything is written. Deliberately mixed — a
+            // long text column, numbers that must right-align, a NULL, a timestamp, and a result
+            // the row limit cut short.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat"
+            tab.rowLimit = 1000
+            tab.columns = [
+                Event.Column(name: "kode_wilayah", type: "varchar"),
+                Event.Column(name: "nama", type: "varchar"),
+                Event.Column(name: "jumlah_jiwa", type: "bigint"),
+                Event.Column(name: "bobot", type: "double"),
+                Event.Column(name: "aktif", type: "boolean"),
+                Event.Column(name: "diperbarui", type: "timestamp(6)"),
+                Event.Column(name: "catatan", type: "varchar"),
+            ]
+            tab.preview = PreviewResult(
+                columns: tab.columns,
+                rows: [
+                    ["32.01.01.2001", "Keluarga Penerima Manfaat Desa Sukamaju", "4", "142.857", "true", "2026-07-25 15:30:06.233", nil],
+                    ["32.01.01.2002", "Keluarga Penerima Manfaat Desa Cibadak", "2", "97.321", "true", "2026-07-25 15:30:06.233", "verifikasi lapangan"],
+                    ["32.01.01.2003", "Keluarga Penerima Manfaat Desa Mekarsari", "7", "249.998", "false", "2026-07-25 15:30:06.233", nil],
+                    ["32.01.02.1004", "Keluarga Penerima Manfaat Kelurahan Sukajadi", "1", "12.004", "true", "2026-07-26 08:03:07.567", nil],
+                    ["32.01.02.1005", "Keluarga Penerima Manfaat Kelurahan Cipedes", "9", "318.442", "true", "2026-07-26 08:03:07.567", "pindah domisili"],
+                    ["32.01.03.2010", "Keluarga Penerima Manfaat Desa Rancamanyar", "3", "76.518", "false", "2026-07-27 09:14:22.101", nil],
+                    ["32.01.03.2011", "Keluarga Penerima Manfaat Desa Bojongsoang", "5", "188.930", "true", "2026-07-27 09:14:22.101", nil],
+                    ["32.01.04.3001", "Keluarga Penerima Manfaat Desa Dayeuhkolot", "6", "204.117", "true", "2026-08-01 07:45:59.880", "data ganda"],
+                    ["32.01.04.3002", "Keluarga Penerima Manfaat Desa Citeureup", "2", "66.204", "false", "2026-08-01 07:45:59.880", nil],
+                    ["32.01.05.4009", "Keluarga Penerima Manfaat Desa Cangkuang", "8", "271.555", "true", "2026-08-03 11:22:31.004", nil],
+                    ["32.01.05.4010", "Keluarga Penerima Manfaat Desa Banjaran", "4", "133.870", "true", "2026-08-03 11:22:31.004", nil],
+                    ["32.01.06.5001", "Keluarga Penerima Manfaat Desa Margahayu", "1", "8.412", "false", "2026-08-03 11:22:31.004", "menunggu verifikasi"],
+                ],
+                truncated: true,
+                queryID: "20260131_120412_00042_abcde",
+                elapsedMS: 412)
+            tab.stage = .done
+            tab.panel = .result
         case "table-target":
             // The target popover, which cannot be reached from a plain snapshot otherwise.
             tab.destination = .table

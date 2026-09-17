@@ -129,9 +129,12 @@ except ValueError:  # pragma: no cover - only reachable off the main thread
 class FakeCursor:
     """The slice of a DBAPI cursor that QueryStream and the engine touch."""
 
-    def __init__(self, rows=(), columns=None, query_id=QUERY_ID, rowcount=-1):
+    def __init__(self, rows=(), columns=None, query_id=QUERY_ID, rowcount=-1, page_limit=None):
         self._rows = [list(row) for row in rows]
         self._pos = 0
+        # A real coordinator hands back a page, not the whole result set; a
+        # check that watches over-fetching sets this so the fake does too.
+        self._page_limit = page_limit
         self._columns = columns
         self._query_id = query_id
         self.description = None  # trino only knows the columns once a page arrived
@@ -140,6 +143,7 @@ class FakeCursor:
         self.arraysize = 0
         self.statements = []
         self.fetches = 0
+        self.pages = []  # the rows each fetchmany actually handed back
         self.on_fetch = None
         self.on_execute = None  # a to_table check drives the client's stats callback
         self.raise_on_execute = None  # the failure SQL, as the coordinator would send it
@@ -161,8 +165,11 @@ class FakeCursor:
             self.description = self._columns  # trino only fills this in with the first page
         if self.on_fetch is not None:
             self.on_fetch(self)
+        if self._page_limit is not None:
+            size = min(size, self._page_limit)
         page = self._rows[self._pos:self._pos + size]
         self._pos += len(page)
+        self.pages.append(page)
         return page
 
     def fetchall(self):
@@ -292,7 +299,7 @@ ENGINE_KEYS = (
     "TRINO_SCHEMA", "TRINO_INSECURE", "SQL", "SQL_PATH", "FORMAT", "OUT_DIR", "NAME", "ZIP",
     "BATCH_SIZE", "ROWS_PER_FILE", "RETRIES", "DELIMITER", "ENCODING", "HEADER", "BOM",
     "NULL_TEXT", "JSONL", "SQL_TABLE", "SHEET", "DBF_CHAR_WIDTH", "DBF_ENCODING", "PROGRESS_MS",
-    "TARGET_CATALOG", "TARGET_SCHEMA", "TARGET_TABLE", "WRITE_MODE",
+    "TARGET_CATALOG", "TARGET_SCHEMA", "TARGET_TABLE", "WRITE_MODE", "LIMIT",
 )
 
 
@@ -1227,7 +1234,7 @@ def check_to_table_usage_line_lists_the_command():
         code = engine.main([ENGINE_PATH.name])
     assert code == 1, f"exit {code}"
     message = events_of(out.getvalue())[0]["message"]
-    assert message.endswith("test|catalogs|schemas|tables|export|to_table"), message
+    assert message.endswith("test|catalogs|schemas|tables|export|to_table|preview"), message
 
 
 def check_describe_error_survives_a_client_error_that_cannot_stringify():
@@ -1294,6 +1301,365 @@ def check_error_event_survives_an_unstringable_failure():
     events = events_of(out)
     assert event_names(events) == ["error"], events
     assert "the real message" in events[0]["message"], events
+
+
+# --------------------------------------------------------------------------- #
+# preview: run the caller's SQL and show the first rows, without rewriting it
+# --------------------------------------------------------------------------- #
+
+# What the fake coordinator says about the columns. A Trino description is
+# (name, type_code, display_size, internal_size, precision, scale, null_ok), so
+# the type arrives as the driver's own code/name and the engine stringifies it:
+# the grid's type chip is always a string, never null.
+PREVIEW_COLUMNS = [
+    ("kode_wilayah", "varchar", None, None, None, None, None),
+    ("nama", "varchar", None, None, None, None, None),
+    ("jumlah", "bigint", None, None, None, None, None),
+]
+PREVIEW_ROWS = [
+    ["32.01", "Jawa Barat", 1234],
+    ["32.02", "Jawa Tengah", 5678],
+    ["32.03", None, 90],
+]
+
+
+def preview_rows(events):
+    """Every `rows` batch's arrays, concatenated in the order they arrived."""
+    sent = []
+    for event in events:
+        if event["event"] == "rows":
+            sent.extend(event["data"])
+    return sent
+
+
+def preview_fake(rows, columns=PREVIEW_COLUMNS, **kwargs):
+    """(cursor, connect factory) for one preview run, with nothing shared."""
+    cursor = FakeCursor(rows, columns, **kwargs)
+    return cursor, (lambda **values: FakeConnection(cursor))
+
+
+def check_preview_reports_columns_batches_and_done():
+    """A three-row preview: connect, one columns, one rows batch, one done."""
+    cursor, connect = preview_fake(PREVIEW_ROWS)
+    with fake_connect(connect):
+        code, out, err = run_engine(
+            "preview", TRINO_HOST="trino.internal", TRINO_USER="analyst",
+            SQL="SELECT kode_wilayah, nama, jumlah FROM wilayah", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}, stderr={err!r}"
+    events = events_of(out)
+
+    assert events[0] == {"event": "step", "step": "connect"}, events[0]
+    assert event_names(events)[0] == "step", events  # before anything is fetched
+    assert events[1] == {
+        "event": "columns",
+        "columns": [
+            {"name": "kode_wilayah", "type": "varchar"},
+            {"name": "nama", "type": "varchar"},
+            {"name": "jumlah", "type": "bigint"},
+        ],
+    }, events[1]
+    assert all(isinstance(column["type"], str) for column in events[1]["columns"]), events[1]
+
+    batches = [event for event in events if event["event"] == "rows"]
+    assert len(batches) == 1, events
+    assert batches[0]["data"] == [
+        ["32.01", "Jawa Barat", "1234"],
+        ["32.02", "Jawa Tengah", "5678"],
+        ["32.03", None, "90"],
+    ], batches[0]
+
+    done = events[-1]
+    assert done["event"] == "done", events
+    assert done["rows"] == 3 and done["truncated"] is False, done
+    assert done["query_id"] == QUERY_ID, done
+    assert isinstance(done["elapsed_ms"], int) and done["elapsed_ms"] >= 0, done
+
+
+def check_preview_limit_caps_the_rows_without_over_fetching():
+    """LIMIT=2 over five fake rows sends two, says truncated, and stops there.
+
+    Deciding `truncated` costs exactly one row past the cap, never a page: the
+    fake hands over two-row pages, like a coordinator, and records every row it
+    gave away. QueryStream preloads one row to learn the columns (the fake only
+    fills `description` in with the first page), so page 1 is that row and page 2
+    carries the two the caller asked for plus the one the verdict needs. A third
+    page would be the over-fetch this pins down.
+    """
+    rows = [[f"row {i}"] for i in range(5)]
+    cursor, connect = preview_fake(
+        rows, columns=[("id", "varchar", None, None, None, None, None)], page_limit=2,
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT id FROM t", LIMIT="2", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert preview_rows(events) == [["row 0"], ["row 1"]], events
+    done = events[-1]
+    assert done["rows"] == 2 and done["truncated"] is True, done
+    assert cursor.fetches == 2, f"a five-row result was paged {cursor.fetches} times for LIMIT=2"
+    assert [len(page) for page in cursor.pages] == [1, 2], cursor.pages
+
+
+def check_preview_truncated_when_the_page_ends_on_the_cap():
+    """A page exactly LIMIT long with more behind it is truncated, not "N rows".
+
+    The case that motivated pulling a row past the cap: the fake page ends
+    precisely on the cap, so nothing already buffered reveals that the result
+    continues. The one-row probe is the only thing that can tell this apart from
+    a query that genuinely ended there, and the footer's "limit reached" depends
+    on it.
+    """
+    rows = [[f"row {i}"] for i in range(3)]
+    cursor, connect = preview_fake(
+        rows, columns=[("id", "varchar", None, None, None, None, None)], page_limit=2,
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT id FROM t", LIMIT="2", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert preview_rows(events) == [["row 0"], ["row 1"]], events
+    done = events[-1]
+    assert done["rows"] == 2, done  # the number sent, not the number fetched
+    assert done["truncated"] is True, done
+
+
+def check_preview_not_truncated_when_the_page_is_the_whole_result():
+    """A page exactly LIMIT long that exhausted the result is not truncated.
+
+    The other half of the pair: same shape, same cap, one row fewer behind it.
+    Both must be reported correctly, or "limit reached" means nothing.
+    """
+    rows = [[f"row {i}"] for i in range(2)]
+    cursor, connect = preview_fake(
+        rows, columns=[("id", "varchar", None, None, None, None, None)], page_limit=2,
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT id FROM t", LIMIT="2", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert preview_rows(events) == [["row 0"], ["row 1"]], events
+    done = events[-1]
+    assert done["rows"] == 2, done
+    assert done["truncated"] is False, done
+
+
+def check_preview_limit_defaults_and_floors_at_one():
+    """A blank or zero LIMIT falls back to the default; the floor is one row.
+
+    `_value` folds a blank into "unset", so a blank LIMIT is the documented
+    default rather than zero rows. LIMIT=0 is the same floor: a preview that
+    returned nothing would say nothing about the statement.
+    """
+    rows = [[str(i)] for i in range(5)]
+    columns = [("id", "varchar", None, None, None, None, None)]
+
+    for values, expected, truncated in (
+        ({}, 5, False),                       # unset: the documented default
+        ({"LIMIT": ""}, 5, False),            # blank: the default, never zero rows
+        ({"LIMIT": "0"}, 1, True),            # zero floors at one row
+        ({"LIMIT": "-3"}, 1, True),           # and so does anything below it
+        ({"LIMIT": "3"}, 3, True),            # a real cap stops short of five
+    ):
+        cursor, connect = preview_fake(rows, columns=columns)
+        with fake_connect(connect):
+            code, out, _err = run_engine(
+                "preview", TRINO_HOST="trino.internal", SQL="SELECT id FROM t",
+                RETRIES="0", **values,
+            )
+        assert code == 0, f"{values}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        done = events[-1]
+        assert len(preview_rows(events)) == expected, (values, events)
+        assert done["rows"] == expected, (values, done)
+        assert done["truncated"] is truncated, (values, done)
+
+
+def check_preview_batches_more_than_one_page():
+    """More than PREVIEW_BATCH rows arrive as several batches, in order."""
+    batch = engine.PREVIEW_BATCH
+    rows = [[f"row {i}"] for i in range(batch * 2 + 7)]
+    columns = [("id", "varchar", None, None, None, None, None)]
+    cursor, connect = preview_fake(rows, columns=columns)
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT id FROM t",
+            LIMIT=str(len(rows)), RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    batches = [event for event in events if event["event"] == "rows"]
+    assert len(batches) > 1, "a result larger than PREVIEW_BATCH arrived as one event"
+    assert all(len(event["data"]) <= batch for event in batches), [len(e["data"]) for e in batches]
+    assert preview_rows(events) == [[f"row {i}"] for i in range(len(rows))], "order or content changed"
+    done = events[-1]
+    assert done["rows"] == len(rows) and done["truncated"] is False, done
+
+
+def check_preview_null_stays_json_null():
+    """A NULL is JSON null: not "None", not an empty string."""
+    cursor, connect = preview_fake([["a", None, ""]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    lines = out.splitlines()
+    rows_lines = [line for line in lines if json.loads(line)["event"] == "rows"]
+    assert len(rows_lines) == 1, lines
+    assert "null" in rows_lines[0], rows_lines[0]  # the wire form, not just the parsed value
+    assert "None" not in rows_lines[0], rows_lines[0]
+    assert preview_rows(events_of(out)) == [["a", None, ""]], events_of(out)
+
+
+def check_preview_exotic_cells_become_strings():
+    """A Decimal and a datetime arrive as strings; every cell is str or null."""
+    from datetime import datetime
+    from decimal import Decimal
+
+    # The fake description only has to be close enough: the type chip is the
+    # column's, and the check is about the cells' JSON types.
+    columns = [
+        ("amount", "decimal(10,2)", None, None, None, None, None),
+        ("at", "timestamp(3)", None, None, None, None, None),
+        ("flag", "boolean", None, None, None, None, None),
+        ("raw", "varbinary", None, None, None, None, None),
+    ]
+    cursor, connect = preview_fake(
+        [[Decimal("12.50"), datetime(2026, 1, 31, 12, 0, 0), True, b"\x01\xff", None]],
+        columns=columns,
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    cells = preview_rows(events)[0]
+    assert all(cell is None or isinstance(cell, str) for cell in cells), cells
+    assert cells[0] == "12.50" and cells[1] == "2026-01-31 12:00:00", cells
+    assert cells[2] == "true" and cells[3] == "01ff", cells
+    # A native number in the column would need default=str on the way out and
+    # the grid would then hold two JSON types for one column.
+    paid = [line for line in out.splitlines() if json.loads(line)["event"] == "rows"][0]
+    assert '"12.50"' in paid, paid  # a JSON string, never the bare number
+
+
+def check_preview_does_not_rewrite_the_sql():
+    """The statement executed is byte-identical to SQL; nothing is appended.
+
+    LIMIT, wrapping and a trailing semicolon all change what the caller's
+    statement means, so the engine adds none of them: the cap is enforced by
+    fetching, not by rewriting.
+    """
+    statements = [
+        "SELECT * FROM wilayah ORDER BY kode_wilayah LIMIT 5",
+        "SELECT 1",
+        "SELECT * FROM t;",
+        "SELECT count(*) FROM t",
+    ]
+    columns = [("id", "varchar", None, None, None, None, None)]
+    for sql in statements:
+        cursor, connect = preview_fake([["x"]], columns=columns)
+        with fake_connect(connect):
+            code, out, _err = run_engine(
+                "preview", TRINO_HOST="trino.internal", SQL=sql, LIMIT="2", RETRIES="0",
+            )
+        assert code == 0, f"{sql!r}: exit {code}, stdout={out!r}"
+        assert len(cursor.statements) == 1, (sql, cursor.statements)
+        executed = cursor.statements[0]
+        assert "LIMIT" not in executed or "LIMIT" in sql, (sql, executed)
+        assert executed.strip() == sql.strip().rstrip(";"), (sql, executed)
+        assert executed.count("SELECT") == sql.count("SELECT"), (sql, executed)
+
+
+def check_preview_blank_sql_is_usage_error():
+    """A blank SQL is a usage error: one error event, exit 1, no network."""
+    calls = []
+    with fake_connect(lambda **kwargs: calls.append(kwargs)):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="", SQL_PATH="", LIMIT="5",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["error"], events
+    assert "SQL" in events[0]["message"], events[0]
+    assert not calls, "the engine connected despite a blank SQL"
+
+
+def check_preview_connection_failure():
+    """A connect that will not open: step connect, then one error, exit 1."""
+
+    def refuse(**kwargs):
+        raise OSError("connection refused")
+
+    with fake_connect(refuse):
+        code, out, err = run_engine(
+            "preview", TRINO_HOST="trino.invalid", SQL="SELECT 1", LIMIT="10", RETRIES="0",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["step", "error"], events
+    assert events[0] == {"event": "step", "step": "connect"}, events
+    assert "OSError" in events[-1]["message"] and "connection refused" in events[-1]["message"], events
+    assert "done" not in event_names(events), events
+    assert "Traceback" in err and "Traceback" not in out, (err, out)
+
+
+def check_preview_stdout_is_json_only():
+    """Every stdout line of a multi-batch preview is one compact JSON object."""
+    batch = engine.PREVIEW_BATCH
+    cursor, connect = preview_fake(
+        [[f"row {i}", i] for i in range(batch + 3)],
+        columns=[("id", "varchar", None, None, None, None, None),
+                 ("n", "bigint", None, None, None, None, None)],
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    lines = out.splitlines()
+    assert lines, "no stdout at all"
+    for line in lines:
+        assert line.strip() == line and line, f"padding or a blank line in {line!r}"
+        payload = json.loads(line)  # raises if any line is not exactly one JSON object
+        assert isinstance(payload, dict) and isinstance(payload.get("event"), str), payload
+    assert lines[-1].startswith('{"event": "done"'), lines[-1]
+
+
+def check_preview_batch_key_is_not_the_integer_rows():
+    """The batch array lives under `data`; `rows` is always the integer count.
+
+    One key cannot be two types: the Swift `Event` struct decodes `rows` as
+    `Int?` on `progress` and `done`, so a batch that reused the name would make
+    a decoder fail or mis-read. This is the catalogs-count trap again, and the
+    event name stays `rows` while the payload moves to `data`.
+    """
+    cursor, connect = preview_fake(PREVIEW_ROWS)
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "preview", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    batches = [event for event in events if event["event"] == "rows"]
+    assert batches, events
+    for event in batches:
+        assert "data" in event, event
+        assert "rows" not in event, f"the batch event reused the integer `rows` key: {event}"
+        assert isinstance(event["data"], list), event
+        assert all(isinstance(row, list) for row in event["data"]), event
+
+    done = only_event(events, "done")
+    assert isinstance(done["rows"], int) and not isinstance(done["rows"], bool), done
+    assert isinstance(done["truncated"], bool), done
 
 
 # --------------------------------------------------------------------------- #

@@ -15,7 +15,7 @@ struct BottomPanel: View {
                 Group {
                     switch tab.panel {
                     case .log: LogPanel(tab: tab)
-                    case .columns: ColumnsPanel(tab: tab)
+                    case .result: ResultGrid(tab: tab)
                     case .files:
                         if tab.destination == .table {
                             TablePanel(tab: tab)
@@ -61,7 +61,7 @@ struct BottomPanel: View {
     private func count(_ panel: PanelTab) -> Int? {
         switch panel {
         case .log: tab.logLines.isEmpty ? nil : tab.logLines.count
-        case .columns: tab.columns.isEmpty ? nil : tab.columns.count
+        case .result: tab.preview.map { $0.rows.count }
         case .files: tab.files.isEmpty ? nil : tab.files.count
         }
     }
@@ -232,60 +232,6 @@ struct TablePanel: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
-        }
-    }
-}
-
-// MARK: Columns
-
-/// The columns the coordinator reported, taken from the engine's `start` event — the result set
-/// the export is about to write, named before a single row lands.
-struct ColumnsPanel: View {
-    @Bindable var tab: QueryTab
-
-    var body: some View {
-        if tab.columns.isEmpty {
-            Text(tab.stage == .running
-                 ? "Waiting for the coordinator's first page…"
-                 : "Run the query to see its columns.")
-                .font(.system(size: 11))
-                .foregroundStyle(Tone.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(tab.columns.enumerated()), id: \.offset) { index, column in
-                        HStack(spacing: 10) {
-                            Text("\(index + 1)")
-                                .font(.mono12)
-                                .foregroundStyle(.white.opacity(0.4))
-                                .frame(width: 30, alignment: .trailing)
-                            Text(column.name)
-                                .font(.system(size: 12, design: .monospaced))
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Chip(text: column.type, tint: typeTint(column.type))
-                        }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, Metrics.gutter)
-                        .background(Color.white.opacity(index % 2 == 0 ? 0.03 : 0), in: Rectangle())
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-    }
-
-    /// DBAPI type codes, which is all the engine forwards. Grouped rather than named one by one:
-    /// the exact code for every Trino type is the coordinator's business, not the UI's.
-    private func typeTint(_ type: String) -> Color {
-        guard let code = Int(type) else { return .white.opacity(0.6) }
-        switch code {
-        case 1, 12, -1, -9, -15, -16: return Tone.ice        // strings
-        case -5, -6, 4, 5, 8, -7, 6, 7, 3: return Tone.mint  // numbers
-        case 16: return Tone.violet                          // boolean
-        case 91, 92, 93, -101, -102: return Tone.amber       // date/time
-        default: return .white.opacity(0.6)
         }
     }
 }
