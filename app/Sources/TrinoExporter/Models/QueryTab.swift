@@ -187,8 +187,77 @@ enum QuerySource {
 /// `=`, `>`, `<`, `>=` or `<=` switches to a comparison, which is what a numeric column wants. It
 /// filters the rows the preview already holds — it never reaches the server and never touches the
 /// statement — so the grid's footer has to say so.
-enum ColumnFilter {
-    static func matches(_ value: String?, _ filter: String) -> Bool {
+/// One column's filter.
+///
+/// Two modes, and which one a column gets is decided by its data rather than chosen by the user.
+/// A column with few distinct values is better served by picking them from a list — that is what
+/// someone filtering a `jenis_kelamin` column actually wants, and it cannot produce a no-match
+/// typo. Past `valuePickerLimit` distinct values a list stops being browsable, so the filter
+/// becomes free text instead: contains by default, with a leading `=`, `>`, `<`, `>=` or `<=` for
+/// a comparison.
+///
+/// Either way it filters the rows the preview already holds — it never reaches the server and never
+/// touches the statement — so the grid's footer has to say so.
+enum ColumnFilter: Equatable {
+    /// Exact matches against values picked from the column's own distinct list.
+    case values(Set<String>)
+    /// A comparison or a substring.
+    case text(String)
+
+    /// Past this many distinct values the picker becomes a search box.
+    static let valuePickerLimit = 10
+
+    /// The distinct values offered for a column, in a stable order: `nil` first because a NULL is
+    /// its own state and not a value, then the non-nulls sorted so the list does not reshuffle
+    /// between runs. Only the first `valuePickerLimit + 1` are needed to make the decision, but the
+    /// full set is cheap over at most a preview's worth of rows.
+    static func distinctValues(in rows: [[String?]], column: Int) -> [String?] {
+        var seen = Set<String>()
+        var hasNull = false
+        for row in rows {
+            guard column < row.count, let value = row[column] else {
+                hasNull = true
+                continue
+            }
+            seen.insert(value)
+        }
+        return (hasNull ? [nil] : []) + seen.sorted()
+    }
+
+    var isEmpty: Bool {
+        switch self {
+        case .values(let picked): picked.isEmpty
+        case .text(let needle): needle.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    /// A short description for the header's tooltip.
+    var label: String {
+        switch self {
+        case .values(let picked):
+            picked.count == 1 ? (picked.first ?? "") : "\(picked.count) values"
+        case .text(let needle):
+            needle
+        }
+    }
+
+    func matches(_ value: String?) -> Bool {
+        switch self {
+        case .values(let picked):
+            // A NULL is represented by a sentinel string, because a Set cannot hold nil and the
+            // picker has to be able to offer it: "show me the rows with no value here" is a real
+            // question about a column full of them.
+            guard let value else { return picked.contains(ColumnFilter.nullToken) }
+            return picked.contains(value)
+        case .text(let needle):
+            return ColumnFilter.matchesText(value, needle)
+        }
+    }
+
+    /// The picker's stand-in for SQL NULL.
+    static let nullToken = "\u{0}null"
+
+    static func matchesText(_ value: String?, _ filter: String) -> Bool {
         let needle = filter.trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return true }
         // A NULL is not a value that can contain anything, and it is not the empty string either.
@@ -341,7 +410,7 @@ final class QueryTab: Identifiable {
 
     /// Filters by column index: a result may repeat a name and the grid draws by position.
     /// Cleared whenever new rows arrive, because the ones they described are gone.
-    var columnFilters: [Int: String] = [:]
+    var columnFilters: [Int: ColumnFilter] = [:]
 
     /// The SQL one source resolves to. Every path out of the editor goes through this, so
     /// "the selected query" means the same thing to Run and to Export.

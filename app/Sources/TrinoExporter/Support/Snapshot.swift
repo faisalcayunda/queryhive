@@ -319,6 +319,47 @@ enum Snapshot {
                     ],
                     truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 233)
             }
+        case "filter-values":
+            // A column with few distinct values: the picker lists them, straight from the data.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.kasus_kesehatan"
+            tab.columns = [
+                Event.Column(name: "nama_provinsi", type: "varchar"),
+                Event.Column(name: "jenis_kelamin", type: "varchar"),
+                Event.Column(name: "jumlah_kasus_baru", type: "bigint"),
+            ]
+            tab.preview = PreviewResult(
+                columns: tab.columns,
+                rows: [
+                    ["JAWA BARAT", "LAKI-LAKI", "41"],
+                    ["JAWA BARAT", "PEREMPUAN", "22"],
+                    ["JAWA BARAT", "LAKI LAKI", "150"],
+                    ["DKI JAKARTA", "LAKI-LAKI", "88"],
+                    ["DKI JAKARTA", "PEREMPUAN", "97"],
+                    ["JAWA TIMUR", nil, "12"],
+                ],
+                truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 96)
+            tab.columnFilters = [1: .values(["LAKI-LAKI", "PEREMPUAN"])]
+            tab.stage = .done
+            tab.panel = .result
+            model.filterPopoverColumn = 1
+        case "filter-search":
+            // Past the picker's limit the same column becomes a search box instead — the mode is
+            // decided by the data, not by the user.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat"
+            tab.columns = [
+                Event.Column(name: "kode_wilayah", type: "varchar"),
+                Event.Column(name: "nama", type: "varchar"),
+            ]
+            tab.preview = PreviewResult(
+                columns: tab.columns,
+                rows: (1...14).map { ["32.01.\(String(format: "%02d", $0)).2001", "KPM Wilayah \($0)"] },
+                truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 210)
+            tab.columnFilters = [0: .text("32.01.0")]
+            tab.stage = .done
+            tab.panel = .result
+            model.filterPopoverColumn = 0
         case "grid-filtered":
             // A filter narrows what was fetched; the footer has to say so rather than claim the
             // result is this small.
@@ -340,7 +381,7 @@ enum Snapshot {
                     ["32.02.01.3001", "KPM Dayeuhkolot", "6", "true"],
                 ],
                 truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 388)
-            tab.columnFilters = [0: "32.01", 3: "=true"]
+            tab.columnFilters = [0: .text("32.01"), 3: .text("=true")]
             tab.stage = .done
             tab.panel = .result
         case "export-settings":

@@ -157,6 +157,10 @@ final class AppModel {
     /// The export settings popover, on the model for the same reason.
     var exportSettingsOpen = false
 
+    /// Which column's filter popover is open, by column index. On the model for the same reason as
+    /// the two above: a snapshot has no way to click a header funnel.
+    var filterPopoverColumn: Int?
+
     /// Set while a delete is waiting for the user to confirm. Held on the model rather than in a
     /// row so the tree's context menu and the editor's Delete button ask the same question.
     var pendingDeletion: UUID?

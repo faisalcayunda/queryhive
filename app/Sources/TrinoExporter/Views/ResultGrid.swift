@@ -7,7 +7,12 @@ struct ResultGrid: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
     @State private var confirmReplace = false
-    @State private var filteringColumn: Int?
+
+    /// Read through the model so the snapshot tool can open a filter popover; a header funnel
+    /// cannot be clicked from a scene.
+    private var filteringColumn: Binding<Int?> {
+        Binding(get: { model.filterPopoverColumn }, set: { model.filterPopoverColumn = $0 })
+    }
 
     /// Per-column pixel width, computed once per result rather than per cell: at 1000 rows the
     /// per-cell version is O(rows × columns) work on every render pass.
@@ -59,7 +64,7 @@ struct ResultGrid: View {
         guard !tab.columnFilters.isEmpty else { return preview.rows }
         return preview.rows.filter { row in
             tab.columnFilters.allSatisfy { index, filter in
-                ColumnFilter.matches(index < row.count ? row[index] : nil, filter)
+                filter.matches(index < row.count ? row[index] : nil)
             }
         }
     }
@@ -227,11 +232,22 @@ struct ResultGrid: View {
         }
     }
 
+    /// The distinct values a column actually holds in the fetched rows. Empty when the column has
+    /// too many to browse — that is the signal to fall back to a search box.
+    private func distinctValues(_ index: Int) -> [String?] {
+        guard let preview = tab.preview else { return [] }
+        return ColumnFilter.distinctValues(in: preview.rows, column: index)
+    }
+
     /// A funnel per column, always visible and dim until it has something to say: a filter that
     /// only appears on hover is a filter nobody finds.
     private func filterButton(_ index: Int) -> some View {
-        let active = !(tab.columnFilters[index] ?? "").isEmpty
-        return Button { filteringColumn = index } label: {
+        let filter = tab.columnFilters[index]
+        let active = !(filter?.isEmpty ?? true)
+        return Button { filteringColumn.wrappedValue = index } label: {
+            // A filled funnel means something is filtered; a half-filled one means the picker has a
+            // selection but the popover is closed. Both read as "this column is not showing
+            // everything", which is the only thing the header has to communicate.
             Image(systemName: active ? "line.3.horizontal.decrease.circle.fill"
                                      : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 10))
@@ -241,29 +257,39 @@ struct ResultGrid: View {
         .buttonStyle(.plain)
         .padding(.trailing, 6)
         .padding(.top, 4)
-        .help(active ? "Filtered by \((tab.columnFilters[index] ?? ""))" : "Filter this column")
-        .popover(isPresented: Binding(get: { filteringColumn == index },
-                                      set: { if !$0 { filteringColumn = nil } })) {
+        .help(active ? "Filtered by \(filter?.label ?? "")" : "Filter this column")
+        .popover(isPresented: Binding(get: { filteringColumn.wrappedValue == index },
+                                      set: { if !$0 { filteringColumn.wrappedValue = nil } })) {
             filterEditor(index)
         }
     }
 
-    private func filterEditor(_ index: Int) -> some View {
+    /// The filter popover, in whichever of its two shapes this column's data calls for.
+    @ViewBuilder private func filterEditor(_ index: Int) -> some View {
         let column = tab.preview.flatMap { index < $0.columns.count ? $0.columns[index] : nil }
-        let binding = Binding<String>(
-            get: { tab.columnFilters[index] ?? "" },
-            set: { tab.columnFilters[index] = $0.isEmpty ? nil : $0 })
-        return VStack(alignment: .leading, spacing: 10) {
+        let values = distinctValues(index)
+        let browsable = values.count <= ColumnFilter.valuePickerLimit
+
+        VStack(alignment: .leading, spacing: 10) {
             SectionLabel(text: "Filter \(column?.name ?? "column")")
-            TextField("contains…", text: binding).field()
-            Text("Prefix with =, >, <, >= or <= to compare rather than match. This narrows the "
-                 + "\((tab.preview?.rows.count ?? 0).formatted()) rows already fetched — it does "
-                 + "not re-run the query, so a row outside the limit is not searched.")
+            if browsable {
+                ValuePickerList(tab: tab, index: index, values: values)
+            } else {
+                SearchFilterField(tab: tab, index: index)
+            }
+            Text("This narrows the \((tab.preview?.rows.count ?? 0).formatted()) rows already "
+                 + "fetched — it does not re-run the query, so a row outside the limit is not "
+                 + "searched.")
                 .font(.system(size: 11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                Spacer()
+                if browsable {
+                    Text("\(values.count) distinct value\(values.count == 1 ? "" : "s")")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Tone.secondary)
+                }
+                Spacer(minLength: 0)
                 PillButton(title: "Clear", role: .quiet, compact: true) { tab.columnFilters[index] = nil }
             }
         }
@@ -343,6 +369,128 @@ struct ResultGrid: View {
             Button("Drop and Recreate", role: .destructive) { model.run(tab) }
         } message: {
             Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
+        }
+    }
+}
+
+/// The value list for a column with few enough distinct values to browse.
+///
+/// This is the shape that matters: the choices come from the column's own data, so the filter
+/// cannot be a typo and the user can see what is actually in there before choosing. `Cari` narrows
+/// the *list*, not the grid — it is how you find one value among ten, not another filter.
+private struct ValuePickerList: View {
+    @Bindable var tab: QueryTab
+    let index: Int
+    let values: [String?]
+
+    @State private var search = ""
+
+    private var picked: Set<String> {
+        if case .values(let set) = tab.columnFilters[index] { return set }
+        return []
+    }
+
+    private var shown: [String?] {
+        let needle = search.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return values }
+        return values.filter { display($0).localizedCaseInsensitiveContains(needle) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Cari", text: $search).field()
+
+            if values.isEmpty {
+                Text("No values in the rows fetched.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Tone.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        // "Select all" only earns its place once the list is long enough to be
+                        // tedious; over three values it is more clutter than help.
+                        if values.count > 3, search.isEmpty {
+                            row(title: picked.count == values.count ? "Clear" : "Select all",
+                                checked: picked.count == values.count) { toggleAll() }
+                            Divider().overlay(.white.opacity(0.08)).padding(.vertical, 3)
+                        }
+                        ForEach(shown, id: \.self) { value in
+                            row(title: display(value), checked: picked.contains(token(value))) {
+                                toggle(token(value))
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+        }
+        .onAppear {
+            // Opening the picker on a column that was filtered by text converts nothing: the user
+            // is choosing values from here on, so the old text is dropped rather than silently
+            // combined with a selection it does not describe.
+            if case .text = tab.columnFilters[index] { tab.columnFilters[index] = nil }
+        }
+    }
+
+    private func row(title: String, checked: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: checked ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 11))
+                    .foregroundStyle(checked ? Tone.ice : .white.opacity(0.35))
+                Text(title)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(title == "null" ? .white.opacity(0.45) : .white.opacity(0.92))
+                    .italic(title == "null")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(checked ? Color.white.opacity(0.05) : .clear,
+                    in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+
+    private func display(_ value: String?) -> String { value ?? "null" }
+    private func token(_ value: String?) -> String { value ?? ColumnFilter.nullToken }
+
+    private func toggle(_ token: String) {
+        var set = picked
+        if set.contains(token) { set.remove(token) } else { set.insert(token) }
+        tab.columnFilters[index] = set.isEmpty ? nil : .values(set)
+    }
+
+    private func toggleAll() {
+        tab.columnFilters[index] = picked.count == values.count
+            ? nil
+            : .values(Set(values.map(token)))
+    }
+}
+
+/// The free-text filter for a column with too many distinct values to list.
+private struct SearchFilterField: View {
+    @Bindable var tab: QueryTab
+    let index: Int
+
+    var body: some View {
+        let binding = Binding<String>(
+            get: {
+                if case .text(let needle) = tab.columnFilters[index] { return needle }
+                return ""
+            },
+            set: { tab.columnFilters[index] = $0.isEmpty ? nil : .text($0) })
+
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Cari", text: binding).field()
+            Text("Too many distinct values to list, so this matches text: contains by default. "
+                 + "Prefix with =, >, <, >= or <= to compare instead.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

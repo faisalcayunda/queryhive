@@ -170,6 +170,22 @@ is what a database client does with a table, and it is what the gesture is for. 
 into whatever editor happens to be in front is the same action as before, and it is still there —
 in the context menu, where a deliberate choice belongs.
 
+### The column filter has two shapes
+
+Which one you get is decided by the column's own data, not by a setting. Up to **ten distinct
+values** the funnel opens a picker: a `Cari` box that narrows the *list*, then the values the column
+actually holds, each a checkbox. Past ten it becomes a search box instead, because a list of fifty
+values is worse than typing three characters.
+
+The distinct list comes from the rows the preview fetched, which is the same set the filter narrows
+— so the two can never disagree about what is in the data. Values are compared exactly, which is why
+`LAKI LAKI` and `LAKI-LAKI` stay separate entries: collapsing them would be the filter inventing a
+data-cleaning rule nobody asked for. A NULL is offered as its own entry, rendered `null` in italic,
+because "show me the rows with nothing here" is a real question about a column full of them.
+
+Mode is decided once, when the popover opens: choosing values clears any text filter first, rather
+than silently combining a selection with a string that does not describe it.
+
 ### Counting, DBeaver's way
 
 `1.000 rows` was the fetched count wearing a total's clothes. The footer now says what it means —

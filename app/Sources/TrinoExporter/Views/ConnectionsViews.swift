@@ -117,6 +117,9 @@ struct ConnectionEditorSheet: View {
     @State private var database = ""
     @State private var schema = ""
     @State private var verifyTLS = true
+    /// Postgres only: list system schemas too. Meaningful nowhere else, so the field is shown
+    /// only for that driver, mirroring the tree's own context-menu toggle.
+    @State private var showAllSchemas = false
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
     @State private var testProcess: Process?
@@ -383,6 +386,19 @@ struct ConnectionEditorSheet: View {
             } else {
                 ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
             }
+            // Only Postgres hides system schemas, so only there does this mean anything. The tree's
+            // context menu toggles the same stored flag — this is the discoverable, set-up-time
+            // place, the menu is the while-browsing place.
+            if kind == .postgres {
+                LabeledField("Object tree") {
+                    ChipToggle(label: "List system schemas too", isOn: $showAllSchemas)
+                    Text("Off by default: pg_catalog, information_schema and pg_* schemas are not "
+                         + "levels you usually browse. Turn on to see every schema.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -497,6 +513,7 @@ struct ConnectionEditorSheet: View {
             port = ConnectionKind.trino.defaultPort; scheme = "https"
             sslmode = ConnectionKind.postgres.defaultSSLMode
             user = ""; database = ""; schema = ""; verifyTLS = true
+            showAllSchemas = false
             return
         }
         name = connection.name
@@ -510,6 +527,7 @@ struct ConnectionEditorSheet: View {
         database = connection.database
         schema = connection.schema
         verifyTLS = connection.verify
+        showAllSchemas = connection.showAllSchemas
     }
 
     private func save() {
@@ -527,7 +545,8 @@ struct ConnectionEditorSheet: View {
                                      user: user.trimmingCharacters(in: .whitespaces),
                                      database: database.trimmingCharacters(in: .whitespaces),
                                      schema: schema.trimmingCharacters(in: .whitespaces),
-                                     verify: verifyTLS)
+                                     verify: verifyTLS,
+                                     showAllSchemas: showAllSchemas)
         // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
         do {
             if !credential.isEmpty {
