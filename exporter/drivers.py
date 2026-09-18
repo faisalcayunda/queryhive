@@ -31,6 +31,7 @@ value means "unset" exactly as it always did.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import ClassVar
 from urllib.parse import parse_qs, unquote, urlparse
@@ -121,6 +122,88 @@ def _flag(raw, default=False):
 def _literal(value) -> str:
     """One single-quoted SQL string literal, with any embedded `'` doubled."""
     return "'" + str(value).replace("'", "''") + "'"
+
+
+# The characters a string literal or a quoted identifier may be opened with, and
+# the character that closes each. `''`, `""` and `` `` `` are doubled inside their
+# own literal, never an escape, so the scanner below has no backslash handling:
+# that is the SQL rule, and it is what keeps `SELECT 'a;b'` from being read as
+# two statements.
+_QUOTES = {"'": "'", '"': '"', "`": "`"}
+
+
+def statement_semicolons(body: str) -> list[int]:
+    """The offsets of the `;` that really separate statements in `body`.
+
+    A semicolon inside a string literal or a quoted identifier is text, and one
+    inside a `--` line comment or a `/* */` block comment is not a separator
+    either -- the comment is skipped whole. Only the last reported offset can be
+    the statement's terminator.
+
+    This is the one scanner in the codebase. It lives here, beside the drivers,
+    because `Driver.explain_sql` needs it and the engine's `count` needs it too
+    -- and the engine already imports this module, so the shared home has to be
+    on this side of that edge rather than in the engine.
+    """
+    found = []
+    i, n = 0, len(body)
+    while i < n:
+        char = body[i]
+        if char == "'" or char == '"' or char == "`":
+            closer = _QUOTES[char]
+            i += 1
+            while i < n:
+                if body[i] == closer:
+                    if i + 1 < n and body[i + 1] == closer:  # '' is an embedded quote
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == "-" and body.startswith("--", i):
+            newline = body.find("\n", i)
+            i = n if newline < 0 else newline + 1
+            continue
+        if char == "/" and body.startswith("/*", i):
+            end = body.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if char == ";":
+            found.append(i)
+        i += 1
+    return found
+
+
+# A line comment running to the end of the string, with the whitespace before it. `--` only:
+# a block comment can be followed by more statement, so it is never the last thing to remove.
+_TRAILING_LINE_COMMENT = re.compile(r"\s*--[^\n]*$", re.S)
+
+
+def strip_one_trailing_semicolon(sql: str) -> str:
+    """`sql` without its final `;` and the whitespace before and after it.
+
+    Only the last statement separator is removed, so `SELECT 1;  ` loses its
+    terminator while `SELECT 'a;b'` and `SELECT 1; SELECT 2` are left alone: a
+    `;` in the middle is not this function's business, and a `;` inside a
+    literal or a quoted identifier is the caller's own text.
+
+    The case the scanner is really here for is a trailing comment. `SELECT 1
+    -- note;` ends with a `;` that is comment text and not a separator, yet it
+    *is* the statement's terminator, because a comment runs to the end of its
+    line -- so a naive `rstrip(";")` and this rule agree on that input, while
+    both differ from a rule that only ever looks at characters. Conversely a
+    literal that ends the statement ends with its closing quote, never with the
+    `;` inside it, so a `;` inside a literal can never be the final character
+    and needs no special case to protect it.
+
+    EXPLAIN and the count wrap both need this: `EXPLAIN SELECT 1;` and
+    `SELECT COUNT(*) FROM (SELECT 1;)` are both syntax errors on Trino.
+    """
+    body = str(sql).strip()
+    if body.endswith(";") and len(body) - 1 in statement_semicolons(body):
+        body = body[:-1].rstrip()
+    return body
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +327,63 @@ class Driver:
     def append_sql(self, target: str, body: str) -> str:
         return f"INSERT INTO {target} {body}"
 
+    # -- explain ----------------------------------------------------------- #
+
+    def explain_sql(self, sql: str) -> str:
+        """The statement that asks this server for `sql`'s plan.
+
+        The spelling is per-driver, which is why the driver builds it and the
+        engine never does: all three happen to write `EXPLAIN <stmt>` today, but
+        that is a coincidence of these three, not a rule the engine may rely on.
+
+        The trailing semicolon is stripped first, and only the final one:
+        `EXPLAIN SELECT 1;` is a syntax error on Trino, while a `;` inside a
+        string literal or a comment is text and survives. The base class has no
+        statement for this, so it says so by name rather than guessing.
+        """
+        raise ValueError(f"{self.kind} has no explain statement")
+
+    def _explain(self, keyword: str, sql: str) -> str:
+        """`keyword` in front of the caller's statement, minus every terminator.
+
+        A wrapper needs something different from a statement, which is why this is not just
+        `strip_one_trailing_semicolon`: *no* `;` may survive, because everything after the keyword
+        goes inside one statement and a `;` anywhere in it ends that statement.
+
+        The awkward inputs are the ones where the terminator is not the last character:
+
+        * `SELECT 1; -- note` — the separator sits before a trailing comment. It goes, and the
+          comment stays: it is the caller's text, and a plan for a statement that is not
+          character-for-character theirs is a plan for something else.
+        * `SELECT 1 -- note;` — the `;` is *inside* the comment, but a comment runs to the end of
+          its line and so does the statement, which makes that `;` the terminator too. Only the
+          `;` goes; the comment keeps its words.
+        * `SELECT 'a;b;'` — untouched. A literal ends with its closing quote, so a `;` inside one
+          is never the final character.
+        """
+        body = sql.strip()
+        comment = _TRAILING_LINE_COMMENT.search(body)
+        if comment:
+            head = body[: comment.start()].rstrip()
+            tail = body[comment.start():].rstrip()
+            # `SELECT 1; -- note`: the separator is the last thing before the comment.
+            if head.endswith(";"):
+                head = head[:-1].rstrip()
+            # `SELECT 1 -- note;`: the terminator is the comment's own last character.
+            if tail.endswith(";"):
+                tail = tail[:-1].rstrip()
+            # One space, not a newline: a line comment is ended by the newline that terminates it,
+            # and substituting one would move the comment onto its own line and change the
+            # statement's shape for no reason. Regex already ate the original whitespace.
+            body = f"{head} {tail.strip()}".strip() if head else tail
+        else:
+            body = strip_one_trailing_semicolon(body).strip()
+            while body.endswith(";"):
+                body = body[:-1].rstrip()
+        if not body:
+            raise ValueError(f"SQL is required to {keyword.lower()}")
+        return f"{keyword} {body}"
+
 
 class TrinoDriver(Driver):
     kind = "trino"
@@ -315,6 +455,10 @@ class TrinoDriver(Driver):
         # the coordinator has, and there is no system set to hide.
         return "SHOW CATALOGS"
 
+    def explain_sql(self, sql):
+        # Trino's plan comes back as one text column, one row per plan line.
+        return self._explain("EXPLAIN", sql)
+
 
 class PostgresDriver(Driver):
     kind = "postgres"
@@ -322,8 +466,11 @@ class PostgresDriver(Driver):
     default_port = 5432
     levels = ("schema", "table")
     slots = ("schema", "table")
-    browse = ("schemas", "tables")
-    missing_level = {"catalogs": "the database is set on the connection"}
+    # `catalogs` is not an object-tree level for Postgres -- a connection cannot query across
+    # databases, so its database stays fixed and its first tree level is a schema. It is still a
+    # question worth answering: which databases exist on this server is exactly what a query needs
+    # to know before it is pointed at a different one.
+    browse = ("catalogs", "schemas", "tables")
     quote_char = '"'
 
     _SSLMODES = ("disable", "prefer", "require", "verify-ca", "verify-full")
@@ -368,6 +515,14 @@ class PostgresDriver(Driver):
             kwargs["options"] = f"-c search_path={schema}"
         return psycopg.connect(**kwargs)
 
+    def catalogs_sql(self, database="", schema="", include_system=False):
+        # A Postgres connection is bound to one database, but `pg_database` lists the others and
+        # that is what makes the context picker possible. Templates are not real databases and
+        # `datallowconn = false` ones refuse connections, so offering either would be a choice that
+        # cannot be taken.
+        where = "" if include_system else "WHERE NOT datistemplate AND datallowconn "
+        return "SELECT datname FROM pg_database " + where + "ORDER BY 1"
+
     def schemas_sql(self, database="", schema="", include_system=False):
         # By default the system schemas are hidden: they are not object-tree
         # levels a user browses, and the backslash escapes the underscore so
@@ -392,6 +547,10 @@ class PostgresDriver(Driver):
             f"WHERE table_schema = {_literal(schema)} "
             "AND table_type = 'BASE TABLE' ORDER BY 1"
         )
+
+    def explain_sql(self, sql):
+        # Postgres answers with a single `QUERY PLAN` text column.
+        return self._explain("EXPLAIN", sql)
 
 
 class MysqlDriver(Driver):
@@ -459,6 +618,12 @@ class MysqlDriver(Driver):
         if not database:
             raise ValueError(f"{setting_label('DB_DATABASE')} is required to list tables")
         return f"SHOW TABLES FROM {self.quote(database)}"
+
+    def explain_sql(self, sql):
+        # MySQL is the odd one out: EXPLAIN returns a real multi-column table
+        # (id, select_type, table, ...), not a single text column, so the grid
+        # renders more than one column for this driver.
+        return self._explain("EXPLAIN", sql)
 
 
 DRIVERS: dict[str, Driver] = {

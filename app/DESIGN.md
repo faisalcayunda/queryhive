@@ -186,6 +186,23 @@ because "show me the rows with nothing here" is a real question about a column f
 Mode is decided once, when the popover opens: choosing values clears any text filter first, rather
 than silently combining a selection with a string that does not describe it.
 
+### Explain
+
+**Explain** sits right of Stop, where Navicat puts it: the plan is something reached for while
+looking at a query, not a peer of Run. It sends the same statement a Run would, in the same context
+(`database(for:)` / `schema(for:)`), because a plan for a different context than the query would run
+in is worse than no plan — and it shares Run's blocked reasons for the same reason.
+
+The engine owns the spelling per driver (`EXPLAIN <sql>` on all three today), so the button never
+has to know. The reply lands in the **same grid**, because a plan *is* a result set — one text
+column on Trino and Postgres, a table on MySQL — so the grid already renders it and there is no
+second view to keep in step.
+
+What changes is the footer: `Query plan · 9 lines`, with the LIMIT field and Count all hidden,
+because neither means anything for a plan. There is no limit to set on an EXPLAIN and counting the
+lines of a plan is not a question anyone has. A Run clears the flag, so the footer goes back to
+reporting rows.
+
 ### Counting, DBeaver's way
 
 `1.000 rows` was the fetched count wearing a total's clothes. The footer now says what it means —
@@ -248,6 +265,41 @@ use. It was 344pt for a panel that was a message strip, and the strip is gone.
 survive being restored on a small one; without the cap, restoring 480pt onto a 700pt window leaves
 the editor 79pt tall. The cap is applied when drawing, never stored, so the user's own value is
 never overwritten by the window it happened to open in.
+
+### The context breadcrumb
+
+The toolbar's picker is a cascade, not a single connection menu: **connection, then that driver's
+own levels**. On Trino that is `[connection] [catalog] [schema]`; on Postgres `[connection] [database] [schema]`;
+on MySQL `[connection] [database]`, because a schema *is* a database there and offering both would
+list the same names twice.
+
+Those levels are `ConnectionKind.contextLevels`, which is deliberately **not** `levels` — the object
+tree's contract. They differ in exactly one place: the Postgres tree is schema-first, because a
+connection cannot query across databases and browsing one is not a thing you do; but pointing a
+query at another database is, so the breadcrumb offers one. That also made Postgres answer
+`catalogs` (`SELECT datname FROM pg_database`), which used to be a usage error — its `browse` list
+gained the command while `levels` stayed untouched, and the test that pinned the old refusal was
+rewritten rather than deleted.
+
+Every level is the **same fixed width**, not sized to its content. Fixed because the names are user
+data: a catalog called `aktivitas-produksi-harian` pushed the whole breadcrumb across the bar and
+into Run's corner. Equal because they are the same kind of thing — a row of pickers at different
+widths reads as though one of them matters more, which is not a claim this bar is making. Middle
+truncation is what keeps a long name usable, since the head and the tail are what tell one from
+another; the tooltip carries the full value.
+
+That is also what lets Run hold the trailing corner: with the breadcrumb's width independent of its
+contents, the button is in the same place on every tab.
+
+It is not decoration. Trino resolves a bare `SELECT * FROM wilayah` against the session's catalog
+and schema, so without this the query had to be written fully qualified. Choosing a level sets
+`QueryTab.contextDatabase` / `contextSchema`, which every run path reads through
+`AppModel.database(for:)` / `schema(for:)` — the tab's pick when it has one, otherwise the
+connection's configured default. Blank means "whatever the connection says", so a new tab starts
+from the connection and only records a deliberate deviation from it.
+
+Changing the connection clears both, because a schema from the old server does not exist on the new
+one. Changing the catalog clears the schema for the same reason.
 
 ### Showing every schema
 

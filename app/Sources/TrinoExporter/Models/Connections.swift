@@ -68,6 +68,21 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// The levels the toolbar's context breadcrumb offers, outermost first — which is *not*
+    /// `levels`, the object tree's contract.
+    ///
+    /// They differ in exactly one place, and deliberately. The tree for Postgres is schema-first
+    /// because a connection cannot query across databases, so its database is not a level you
+    /// browse. But it is a choice you make: every database on the server is reachable by pointing
+    /// the query at it, so the breadcrumb offers one.
+    var contextLevels: [TreeNode.Kind] {
+        switch self {
+        case .trino: [.catalog, .schema]
+        case .postgres: [.database, .schema]
+        case .mysql: [.database]
+        }
+    }
+
     /// What the connection's `database` field is called for this driver.
     var databaseLabel: String { self == .trino ? "Catalog" : "Database" }
 

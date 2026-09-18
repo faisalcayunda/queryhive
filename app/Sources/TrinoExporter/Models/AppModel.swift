@@ -65,6 +65,19 @@ final class AppModel {
         return connections.first { $0.id == id }
     }
 
+    /// What this tab should run against: its own cascade choice when it has one, otherwise the
+    /// connection's configured default. Every run path goes through these, so the toolbar cascade
+    /// and the export environment can never disagree about the context.
+    func database(for tab: QueryTab) -> String {
+        let picked = tab.contextDatabase.trimmingCharacters(in: .whitespaces)
+        return picked.isEmpty ? (connection(for: tab)?.database ?? "") : picked
+    }
+
+    func schema(for tab: QueryTab) -> String {
+        let picked = tab.contextSchema.trimmingCharacters(in: .whitespaces)
+        return picked.isEmpty ? (connection(for: tab)?.schema ?? "") : picked
+    }
+
     func connection(for tab: QueryTab) -> Connection? {
         guard let id = tab.connectionID else { return nil }
         return connections.first { $0.id == id }
@@ -628,6 +641,7 @@ final class AppModel {
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
+        tab.showingPlan = false
         tab.previewedSQL = sql
         // The filters and the last total described rows that are about to be replaced.
         tab.columnFilters = [:]
@@ -686,6 +700,74 @@ final class AppModel {
         tab.previewProcess?.terminate()
     }
 
+    /// Explains the query instead of running it, and shows the plan where the rows would go.
+    ///
+    /// EXPLAIN's spelling belongs to the driver, so the engine owns it; this sends the same
+    /// statement a Run would and lets the reply land in the grid. Deliberately the same context
+    /// (`database(for:)` / `schema(for:)`) and the same source resolution, because a plan for a
+    /// different context than the one the query would run in is worse than no plan.
+    func explain(_ tab: QueryTab, from source: QuerySource = .selection) {
+        guard !tab.previewing, !tab.explaining, tab.stage != .running else { return }
+        guard let connection = connection(for: tab) else { return }
+        let sql = tab.sql(for: source)
+        let env: [String: String]
+        do {
+            env = try previewEnvironment(for: tab, connection: connection, sql: sql)
+        } catch {
+            tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        tab.explaining = true
+        tab.previewError = nil
+        tab.preview = nil
+        tab.previewedSQL = sql
+        tab.showingPlan = true
+        tab.panel = .result
+        panelCollapsed = false
+
+        let run = UUID()
+        tab.previewToken = run
+        var message: String?
+        var columns: [Event.Column] = []
+        var rows: [[String?]] = []
+        var finished = false
+        tab.previewProcess = Engine.run("explain", env: env, onEvent: { event in
+            guard tab.previewToken == run else { return }
+            switch event.event {
+            case "error":
+                message = event.message
+            case "columns":
+                columns = event.columns ?? []
+                tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
+                                            queryID: nil, elapsedMS: 0)
+            case "rows":
+                rows.append(contentsOf: event.data ?? [])
+                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+                                            queryID: tab.preview?.queryID, elapsedMS: 0)
+            case "done":
+                finished = true
+                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+                                            queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0)
+                tab.note(.success, "Plan returned \(pluralized(rows.count, "line"))")
+            default:
+                break
+            }
+        }, onExit: { status, log in
+            guard tab.previewToken == run else { return }
+            tab.previewProcess = nil
+            tab.explaining = false
+            guard status == 0, finished else {
+                tab.previewError = message ?? log.split(separator: "\n").last.map(String.init)
+                    ?? "The engine exited with status \(status)."
+                tab.preview = nil
+                tab.showingPlan = false
+                tab.note(.error, tab.previewError ?? "Explain failed")
+                tab.panel = .log
+                return
+            }
+        })
+    }
+
     /// DBeaver's "fetch row count": asks the server how many rows the statement on screen really
     /// returns. Deliberately a button and not something the preview does — it is a second query
     /// over the whole result, which can be slow and which the user should choose to pay for.
@@ -727,6 +809,10 @@ final class AppModel {
     private func previewEnvironment(for tab: QueryTab, connection: Connection,
                                     sql: String) throws -> [String: String] {
         var env = try connectionEnvironment(connection)
+        // The cascade overrides the connection's own database/schema. Trino resolves an
+        // unqualified table against these, which is the whole point of picking them.
+        env["DB_DATABASE"] = database(for: tab)
+        env["DB_SCHEMA"] = schema(for: tab)
         env["SQL"] = sql
         env["LIMIT"] = String(max(1, tab.rowLimit))
         env["RETRIES"] = String(tab.retries)
@@ -917,6 +1003,9 @@ final class AppModel {
     private func overrides(for tab: QueryTab, connection: Connection,
                            sql: String) throws -> [String: String] {
         var env = try connectionEnvironment(connection)
+        // Same context rule as a preview: an export runs where the cascade says it runs.
+        env["DB_DATABASE"] = database(for: tab)
+        env["DB_SCHEMA"] = schema(for: tab)
         env["SQL"] = sql
         env["RETRIES"] = String(tab.retries)
         switch tab.destination {

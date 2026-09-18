@@ -35,7 +35,7 @@ from typing import Iterator
 import trino
 from trino import exceptions as trino_exc
 
-from .drivers import DRIVERS, DatabaseConfig
+from .drivers import DRIVERS, DatabaseConfig, strip_one_trailing_semicolon
 from .writers import Column
 
 log = logging.getLogger(__name__)
@@ -188,7 +188,11 @@ class QueryStream:
         retry_backoff: float = 2.0,
     ):
         self.config = config
-        self.sql = sql.strip().rstrip(";")
+        # Through the shared rule, not `rstrip(";")`. That one stripped *every* trailing
+        # semicolon, so `SELECT 1;;` lost both halves of its terminator, and it silently overrode
+        # the careful single-strip the drivers do for EXPLAIN and the count wrap -- two rules for
+        # one question, the stricter of them dead. There is now one.
+        self.sql = strip_one_trailing_semicolon(sql).strip()
         self.batch_size = max(1, int(batch_size))
         self.retries = max(0, int(retries))
         self.retry_backoff = retry_backoff

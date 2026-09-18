@@ -9,6 +9,7 @@
     python3 -s -u queryhive_engine.py to_table  let the database write SQL into a table
     python3 -s -u queryhive_engine.py preview   run SQL and show the first rows as JSON
     python3 -s -u queryhive_engine.py count     the true number of rows the statement returns
+    python3 -s -u queryhive_engine.py explain   the plan the server would use for SQL
 
 The desktop app runs this script as a child process and reads the protocol off
 its stdout: every stdout line is exactly one compact JSON object and nothing
@@ -32,6 +33,8 @@ name, so a secret never shows up in a process listing. The events:
     preview  step connect, columns, rows:data..., done
              (or a single error event and exit 1)
     count    step connect, count, done
+             (or a single error event and exit 1)
+    explain  step connect, columns, rows:data..., done
              (or a single error event and exit 1)
 
 Three drivers sit behind one protocol: `trino` (the default), `postgres` and
@@ -142,6 +145,29 @@ a Trino that did not say -- is never turned into a count. Counts are bigint on
 Trino and may exceed a 32-bit Int, so the value is emitted as a Python int and
 left to JSON.
 
+`explain` answers the Explain button beside Run: what plan would the server use
+for the statement on screen? The spelling of EXPLAIN is per-driver, so the
+driver builds the statement -- `Driver.explain_sql` -- and the engine never
+assumes it. All three here happen to write `EXPLAIN <sql>` today, which is a
+coincidence of these three rather than a rule to lean on. The caller's statement
+reaches the driver with its one trailing semicolon (and the whitespace around
+and after it) already stripped, because `EXPLAIN SELECT 1;` is a syntax error on
+Trino; only the final separator is removed, so a `;` inside a string literal or
+a comment survives. The one scanner behind that decision lives in
+exporter/drivers.py, beside the drivers that need it, and `count` shares it --
+one implementation, two commands, and the engine imports drivers rather than
+the other way round.
+
+The plan comes back as a result set on all three servers -- one text column on
+Trino, one `QUERY PLAN` text column on Postgres, a multi-column table on MySQL
+-- so `explain` emits exactly `preview`'s protocol and the grid renders it with
+no plan-specific event to decode. It differs in one way: a plan is not capped,
+so there is no LIMIT and `done` carries no `truncated`. A field that is always
+false is an invitation to branch on it. The events are `step connect`, one
+`columns`, zero or more `rows` batches carrying the array under `data`, and one
+`done` with `rows`, `query_id` and `elapsed_ms`; a blank SQL or a connection
+that will not open is one `error` event and exit 1.
+
 The engine is a sibling of scripts/iceberg_importer/importer.py, which speaks
 the same protocol for imports; this follows its structure, its emit() helper
 and its exit-code discipline.
@@ -188,6 +214,7 @@ try:
         KINDS,
         DatabaseConfig,
         driver_of,
+        statement_semicolons,
     )
     from exporter.export import bundle, run_export  # noqa: E402
     from exporter.source import QueryStream, describe_error  # noqa: E402
@@ -633,21 +660,27 @@ def _preview_limit(env):
     return max(1, _int(env, "LIMIT", PREVIEW_LIMIT))
 
 
-def _preview_stream(env, config, sql, limit):
-    """Send the query's first `limit` rows as `columns` and `rows` events.
+def _stream_rows(env, config, sql, limit=None):
+    """Send a result set as one `columns` event and batched `rows` events.
 
-    Returns (how many rows were sent, whether the cap cut the result short, the
-    query id). The values are the writers' own canonical text (`to_text`), so a
-    cell is always a string or None: `None` becomes JSON null, which is how the
-    grid renders a NULL, and a Decimal or datetime never becomes a native JSON
-    number or a second JSON type in the same column. The batches go out under
-    `data`, never under `rows`: `rows` is the integer count `done` and `progress`
-    carry, and one key cannot be two types.
+    Returns (how many rows were sent, whether a cap cut the result short, the
+    query id). Shared by `preview` and `explain`: both put a database result set
+    on the wire for the grid to paint, and neither may grow a second copy of the
+    batching rule. They differ only in the cap -- `preview` has one and `explain`
+    does not -- which is what `limit=None` means.
+
+    The values are the writers' own canonical text (`to_text`), so a cell is
+    always a string or None: `None` becomes JSON null, which is how the grid
+    renders a NULL, and a Decimal or datetime never becomes a native JSON number
+    or a second JSON type in the same column. The batches go out under `data`,
+    never under `rows`: `rows` is the integer count `done` carries, and one key
+    cannot be two types. A batch is PREVIEW_BATCH rows so the grid paints
+    progressively rather than waiting for the whole result.
 
     The cap is enforced while pulling, never by rewriting `sql` -- the statement
     the cursor executes is the one the caller handed over, byte for byte. The
-    batch size is PREVIEW_BATCH so a flush that happens early never asks for more
-    rows than the cap will show.
+    batch size is also the fetch size, so a flush that happens early never asks
+    the coordinator for more rows than the cap will show.
 
     `truncated` costs one row past the cap, pulled for the verdict and then
     dropped: it is never emitted and never counted, so `rows` stays the number
@@ -671,12 +704,12 @@ def _preview_stream(env, config, sql, limit):
         )
         iterator = stream.rows()
         pending = []
-        while emitted < limit:
+        while limit is None or emitted < limit:
             try:
                 row = next(iterator)
             except StopIteration:
                 break
-            if emitted + len(pending) >= limit:
+            if limit is not None and emitted + len(pending) >= limit:
                 # One row past the cap: the query had more to give, so the cap
                 # is what stopped this, not the end of the result. The row is
                 # the whole point of the fetch and is then discarded.
@@ -691,6 +724,11 @@ def _preview_stream(env, config, sql, limit):
             emit("rows", data=pending)
         emitted += len(pending)
         return emitted, truncated, stream.query_id
+
+
+def _preview_stream(env, config, sql, limit):
+    """`preview`'s capped view of a result set: see `_stream_rows`."""
+    return _stream_rows(env, config, sql, limit)
 
 
 def run_preview_command(env):
@@ -719,57 +757,44 @@ def run_preview_command(env):
     )
 
 
+def run_explain_command(env):
+    """Show the plan the server would use for the caller's statement.
+
+    The query editor's "what will this do?", beside Run. The statement is built
+    by the driver -- `explain_sql`, because EXPLAIN's spelling is per-driver --
+    and then emitted exactly as `preview` emits a result set, because all three
+    servers answer EXPLAIN with a result set: Trino and Postgres one text
+    column, MySQL a multi-column table. The grid renders it with no new event
+    and no plan-specific shape to decode.
+
+    There is no row cap and so no `truncated` in `done`: a plan is a handful of
+    rows and is never cut short, and a field that is always false only invites
+    someone to branch on it. Every other rule is `preview`'s -- `step connect`
+    before the network, one `columns` as soon as the description is known,
+    batched `rows`, one `done`, and any failure as one `error` event and exit 1.
+    """
+    sql = source_sql(env)  # a bad or missing SQL fails before the connect step
+    config = _with_retries(build_config(env), env)
+    driver = driver_of(config)
+    statement = driver.explain_sql(sql)  # the driver builds it, never the engine
+    started = time.monotonic()  # the whole run: connect, fetch and emit
+    emit("step", step="connect")  # before the network is touched
+    rows, _truncated, query_id = _stream_rows(env, config, statement)
+    emit(
+        "done",
+        rows=rows,
+        query_id=query_id,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
 # A leading `--` line comment or `/* */` block comment is not the statement's
 # first keyword, so it is skipped before the "is this a SELECT?" verdict is made.
 _COUNT_COMMENT = re.compile(r"\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/)", re.S)
 
-# The characters a string literal or a quoted identifier may be opened with, and
-# the character that closes each. `''`, `""` and ` `` ` are doubled inside their
-# own literal, never an escape, so the scanner below has no backslash handling:
-# that is the SQL rule, and it is what keeps `SELECT 'a;b'` from being read as
-# two statements.
-_COUNT_QUOTES = {"'": "'", '"': '"', "`": "`"}
-
 # What `count` wraps: the statement inside the parentheses, and the alias the
 # wrapper gives it. One rule, one home -- a check asserts the exact statement.
 COUNT_WRAPPER = "SELECT COUNT(*) FROM ({sql}) AS queryhive_count"
-
-
-def _count_semicolons(body):
-    """The offsets of the `;` that really separate statements in `body`.
-
-    A semicolon inside a string literal, a quoted identifier, a `--` line
-    comment or a `/* */` block comment is text, not a statement separator, and
-    only the last one may be the trailing terminator this command strips.
-    """
-    found = []
-    i, n = 0, len(body)
-    while i < n:
-        char = body[i]
-        if char == "'" or char == '"' or char == "`":
-            closer = _COUNT_QUOTES[char]
-            i += 1
-            while i < n:
-                if body[i] == closer:
-                    if i + 1 < n and body[i + 1] == closer:  # '' is an embedded quote
-                        i += 2
-                        continue
-                    i += 1
-                    break
-                i += 1
-            continue
-        if char == "-" and body.startswith("--", i):
-            newline = body.find("\n", i)
-            i = n if newline < 0 else newline + 1
-            continue
-        if char == "/" and body.startswith("/*", i):
-            end = body.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-            continue
-        if char == ";":
-            found.append(i)
-        i += 1
-    return found
 
 
 def count_statement(sql):
@@ -780,7 +805,14 @@ def count_statement(sql):
     inside the parentheses is a syntax error. Nothing else about the statement
     is touched: a LIMIT stays where the caller put it, so the count is of the
     limited set, which is what the grid is showing. A semicolon inside a string
-    literal, a quoted identifier or a comment is text and survives.
+    literal or a quoted identifier is text and survives.
+
+    The final `;` is removed here *unconditionally*, before the scanner runs,
+    rather than by asking where the separator is. That is the same rule the
+    driver's EXPLAIN wrapper arrives at by a different route, and it is
+    deliberately not "a comment's `;` survives": a trailing comment cannot hold
+    the statement separator, but its `;` still ends the statement on the wire, so
+    `SELECT 1 -- note;` must lose it or the wrap is a syntax error.
 
     An empty statement, a first keyword other than SELECT or WITH, or a second
     statement anywhere in the string, is a usage error made before the network
@@ -795,7 +827,7 @@ def count_statement(sql):
         body = body[:-1].rstrip()
     if not body:
         raise ValueError("SQL or SQL_PATH is required")
-    separators = _count_semicolons(body)
+    separators = statement_semicolons(body)
     if separators:
         raise ValueError(
             "count can only count a single SELECT statement; "
@@ -903,6 +935,7 @@ def main(argv=None):
         "to_table": run_to_table_command,
         "preview": run_preview_command,
         "count": run_count_command,
+        "explain": run_explain_command,
     }
     if len(argv) != 2 or argv[1] not in commands:
         emit("error", message=f"usage: {argv[0] if argv else __file__} {'|'.join(commands)}")

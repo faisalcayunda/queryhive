@@ -393,6 +393,21 @@ final class QueryTab: Identifiable {
     var preview: PreviewResult?
     var previewError: String?
 
+    /// The plan Explain last fetched, and whether the grid is showing it instead of rows.
+    ///
+    /// The plan lands in the same grid because it *is* a result set — one text column on Trino and
+    /// Postgres, a table on MySQL — so the grid already renders it correctly and there is no second
+    /// view to keep in step. `showingPlan` is what tells the footer not to quote row counts for it.
+    var explaining = false
+    var showingPlan = false
+
+    /// The catalog/schema (Trino) or database/schema (Postgres, MySQL) this tab runs *in*, picked
+    /// from the toolbar cascade. Blank means "whatever the connection says", which is the state a
+    /// new tab starts in — so the connection stays the single place a default is set, and the tab
+    /// only records a deliberate deviation from it.
+    var contextDatabase = ""
+    var contextSchema = ""
+
     /// The editor's selection, in UTF-16 units, republished whenever it changes. Length 0 means
     /// nothing is highlighted.
     var selection = NSRange(location: 0, length: 0)

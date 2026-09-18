@@ -192,6 +192,11 @@ struct ResultGrid: View {
     /// What the footer claims. Never "N rows" for a limited result without saying so, and once the
     /// server has been asked, the two numbers appear together.
     private func summaryText(_ preview: PreviewResult) -> String {
+        // A plan is not a row count. The grid draws it because a plan *is* a result set, but the
+        // footer must not report rows for it, and the total/limit controls below are meaningless.
+        if tab.showingPlan {
+            return "Query plan · \(pluralized(preview.rows.count, "line"))"
+        }
         let fetched = tab.columnFilters.isEmpty
             ? preview.rows.count
             : filteredRows.count
@@ -208,7 +213,7 @@ struct ResultGrid: View {
     /// DBeaver's count, as a button. Only offered once there is a result to count, and only while
     /// the statement on screen is the one that produced it.
     @ViewBuilder private var countControl: some View {
-        if tab.previewedSQL != nil, tab.preview != nil {
+        if tab.previewedSQL != nil, tab.preview != nil, !tab.showingPlan {
             if tab.countingRows {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.mini)
@@ -335,19 +340,23 @@ struct ResultGrid: View {
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 5) {
-                Text("LIMIT").font(.system(size: 10, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(Tone.secondary)
-                TextField("1000", value: $tab.rowLimit, format: .number.grouping(.never))
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(width: 52)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.10)))
+            // Neither control means anything for a plan: there is no limit to set on EXPLAIN, and
+            // counting the lines of a plan is not a question anyone has.
+            if !tab.showingPlan {
+                HStack(spacing: 5) {
+                    Text("LIMIT").font(.system(size: 10, weight: .semibold)).tracking(0.6)
+                        .foregroundStyle(Tone.secondary)
+                    TextField("1000", value: $tab.rowLimit, format: .number.grouping(.never))
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 52)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.10)))
+                }
+                .help("How many rows Run fetches. It does not change the query; the engine stops reading here.")
             }
-            .help("How many rows Run fetches. It does not change the query; the engine stops reading here.")
 
             let reason = model.runBlockedReason(for: tab)
             // Opens the same wizard the Run menu does: one rule for every Export in the app —

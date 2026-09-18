@@ -146,26 +146,23 @@ struct QueryToolbar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // Name only: the host and catalog are already on the title strip and the status
-            // bar, and repeating them here just truncated the name that identifies the choice.
-            ConnectionPickerButton(selection: $tab.connectionID)
-                .frame(minWidth: 128, idealWidth: 176, maxWidth: 176)
-
-            ToolbarSeparator()
-
-            DestinationPopover(tab: tab)
+            // Connection, then the driver's own levels: Navicat's breadcrumb, so a bare
+            // `SELECT * FROM wilayah` has somewhere to resolve.
+            ContextCascade(tab: tab)
 
             Spacer(minLength: 12)
 
-            // Run sits at the trailing corner: it is the button pressed over and over, and the
-            // corner is the largest, most repeatable target on the bar — the same reasoning a
-            // dialog footer uses for its committing action.
+            // Run holds the trailing corner, so it is in the same place on every tab regardless of
+            // how long the names in the breadcrumb are — which is what the fixed widths above buy.
             //
             // A little more inset than the bar's own gutter, because the Run capsule draws a
             // coloured glow: at a symmetric 12pt the halo ran into the window edge and the group
             // read as clipped even though its frame was not.
             actionButton
                 .padding(.trailing, 6)
+
+            // A zero-size popover anchor, so it costs the row nothing.
+            DestinationPopover(tab: tab)
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbar)
@@ -225,6 +222,18 @@ struct QueryToolbar: View {
             }
             .disabled(!running)
             .keyboardShortcut(".", modifiers: .command)
+
+            // Explain sits after Stop, where Navicat puts it: the plan is something you reach for
+            // while looking at a query, not a peer of Run. It shares Run's blocked reasons, since
+            // explaining needs exactly what running needs.
+            IconButton(symbol: "list.bullet.rectangle",
+                       tint: tab.explaining ? Tone.ice : Tone.secondary,
+                       help: tab.explaining ? "Explaining…"
+                            : (model.runBlockedReason ?? "Show the query plan without running it"),
+                       diameter: 28) {
+                model.explain(tab)
+            }
+            .disabled(running || tab.explaining || model.runBlockedReason != nil)
         }
     }
 

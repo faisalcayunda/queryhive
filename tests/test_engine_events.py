@@ -1235,7 +1235,9 @@ def check_to_table_usage_line_lists_the_command():
         code = engine.main([ENGINE_PATH.name])
     assert code == 1, f"exit {code}"
     message = events_of(out.getvalue())[0]["message"]
-    assert message.endswith("test|catalogs|schemas|tables|export|to_table|preview|count"), message
+    assert message.endswith(
+        "test|catalogs|schemas|tables|export|to_table|preview|count|explain"
+    ), message
 
 
 def check_describe_error_survives_a_client_error_that_cannot_stringify():
@@ -1901,6 +1903,479 @@ def check_count_stdout_is_json_only():
 
 
 # --------------------------------------------------------------------------- #
+# explain: the plan the server would use, built by the driver
+# --------------------------------------------------------------------------- #
+
+# A Trino plan arrives as one text column, one row per plan line.
+EXPLAIN_COLUMNS = [("Query Plan", "varchar", None, None, None, None, None)]
+EXPLAIN_ROWS = [
+    ["Output[kode_wilayah, nama]"],
+    ["  TableScan[table = hive:analytics:wilayah]"],
+]
+
+# MySQL is the one driver whose EXPLAIN is a real table rather than a text
+# column, so this is the shape that proves every column and every cell position
+# survives the trip.
+MYSQL_EXPLAIN_COLUMNS = [
+    ("id", "bigint", None, None, None, None, None),
+    ("select_type", "varchar", None, None, None, None, None),
+    ("table", "varchar", None, None, None, None, None),
+]
+
+
+def explain_fake(rows, columns=EXPLAIN_COLUMNS, **kwargs):
+    """(cursor, connect factory) for one Trino explain run."""
+    cursor = FakeCursor(rows, columns, **kwargs)
+    return cursor, (lambda **values: FakeConnection(cursor))
+
+
+def check_explain_reports_columns_rows_and_done():
+    """A SELECT explains as step connect, one columns, the plan rows and a done.
+
+    The protocol is `preview`'s, because all three servers answer EXPLAIN with a
+    result set and the grid already knows how to paint one.
+    """
+    cursor, connect = explain_fake(EXPLAIN_ROWS)
+    with fake_connect(connect):
+        code, out, err = run_engine(
+            "explain", TRINO_HOST="trino.internal", TRINO_USER="analyst",
+            SQL="SELECT kode_wilayah, nama FROM wilayah", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}, stderr={err!r}"
+    events = events_of(out)
+
+    assert events[0] == {"event": "step", "step": "connect"}, events[0]
+    assert event_names(events)[0] == "step", events  # before anything is fetched
+    assert events[1] == {
+        "event": "columns",
+        "columns": [{"name": "Query Plan", "type": "varchar"}],
+    }, events[1]
+    assert all(isinstance(column["type"], str) for column in events[1]["columns"]), events[1]
+
+    batches = [event for event in events if event["event"] == "rows"]
+    assert len(batches) == 1, events
+    assert batches[0]["data"] == [
+        ["Output[kode_wilayah, nama]"],
+        ["  TableScan[table = hive:analytics:wilayah]"],
+    ], batches[0]
+
+    done = events[-1]
+    assert done["event"] == "done", events
+    assert done["rows"] == 2, done
+    assert done["query_id"] == QUERY_ID, done
+    assert isinstance(done["elapsed_ms"], int) and done["elapsed_ms"] >= 0, done
+    # A plan is not capped, so there is no `truncated` at all -- the key's
+    # absence is the contract, exactly as `count`'s `done` carries no `rows`.
+    assert "truncated" not in done, done
+    assert only_event(events, "columns")["columns"], events
+
+
+def check_wrappers_drop_a_comment_trailing_terminator():
+    """Both wrappers lose a `;` that sits at the end of a trailing comment.
+
+    A comment cannot hold the statement separator, but its `;` still ends the
+    statement on the wire, so `EXPLAIN SELECT 1 -- note;` and
+    `SELECT COUNT(*) FROM (SELECT 1 -- note;)` are syntax errors if it survives.
+    The two wrappers reach that by different routes -- the driver peels the
+    terminator after finding the separator, `count` strips it before scanning --
+    so this pins the *outcome* both share rather than either implementation.
+    """
+    from exporter.drivers import DRIVERS
+
+    assert DRIVERS["trino"].explain_sql("SELECT 1 -- note;") == "EXPLAIN SELECT 1 -- note", "explain"
+    assert DRIVERS["postgres"].explain_sql("SELECT 1 -- note;") == "EXPLAIN SELECT 1 -- note", "pg"
+    assert DRIVERS["mysql"].explain_sql("SELECT 1 -- note;") == "EXPLAIN SELECT 1 -- note", "mysql"
+
+    # A statement separator stranded before a trailing comment must go too, or the wrap keeps a
+    # `;` in the middle: this is the case that made the first version wrong. The comment itself
+    # stays -- it is the caller's text, and dropping it would plan a statement they did not write.
+    assert DRIVERS["trino"].explain_sql("SELECT 1; -- trailing;") == (
+        "EXPLAIN SELECT 1 -- trailing"
+    ), "stranded"
+    assert DRIVERS["trino"].explain_sql("SELECT 1; -- note") == "EXPLAIN SELECT 1 -- note", "before"
+
+    # A block comment is part of the statement, not a trailing aside, so it stays.
+    assert DRIVERS["trino"].explain_sql("SELECT 1 /* x; */;") == "EXPLAIN SELECT 1 /* x; */", "block"
+
+    # A literal's `;` is untouchable in either direction: it is never the final character, so
+    # neither the separator rule nor the terminator peel can reach it.
+    assert DRIVERS["trino"].explain_sql("SELECT 'a;b;'") == "EXPLAIN SELECT 'a;b;'", "literal"
+    wrapped = engine.count_statement("SELECT 'a;b;'")
+    assert wrapped == "SELECT COUNT(*) FROM (SELECT 'a;b;') AS queryhive_count", wrapped
+
+    # And `count` loses a trailing comment's terminator too.
+    wrapped = engine.count_statement("SELECT 1 -- note;")
+    assert wrapped == "SELECT COUNT(*) FROM (SELECT 1 -- note) AS queryhive_count", wrapped
+
+    # Every terminator goes, because everything after the keyword is one statement.
+    assert DRIVERS["trino"].explain_sql("SELECT 1;;") == "EXPLAIN SELECT 1", "double"
+    # `count` refuses two separators rather than guessing which statement the grid shows; only
+    # EXPLAIN, which wraps whatever it is handed, strips them all.
+    try:
+        engine.count_statement("SELECT 1;;")
+        raise AssertionError("count wrapped a two-statement string")
+    except ValueError as error:
+        assert "2 statements" in str(error), error
+
+
+def check_explain_statement_per_driver():
+    """Each driver builds its own statement: EXPLAIN, and the SQL byte for byte."""
+    cursor, connect = explain_fake(EXPLAIN_ROWS)
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 0, f"trino: exit {code}, stdout={out!r}"
+    assert cursor.statements == ["EXPLAIN SELECT 1"], cursor.statements
+
+    cursor = FakeCursor(EXPLAIN_ROWS, EXPLAIN_COLUMNS)
+    with fake_dbapi(psycopg, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "explain", DB_KIND="postgres", DB_HOST="pg.internal", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 0, f"postgres: exit {code}, stdout={out!r}"
+    assert cursor.statements == ["EXPLAIN SELECT 1"], cursor.statements
+
+    cursor = FakeCursor(
+        [["1", "SIMPLE", "wilayah"]], MYSQL_EXPLAIN_COLUMNS
+    )
+    with fake_dbapi(pymysql, lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "explain", DB_KIND="mysql", DB_HOST="mysql.internal", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 0, f"mysql: exit {code}, stdout={out!r}"
+    assert cursor.statements == ["EXPLAIN SELECT 1"], cursor.statements
+
+    # And the driver owns the spelling, not the engine: the base class has no
+    # statement and says so by name rather than guessing at one.
+    from exporter.drivers import Driver
+
+    try:
+        Driver().explain_sql("SELECT 1")
+    except ValueError as exc:
+        assert "explain" in str(exc), exc
+    else:
+        raise AssertionError("the base Driver built an explain statement")
+
+
+def check_explain_statement_comes_from_the_driver():
+    """The engine asks the driver; it does not spell EXPLAIN itself.
+
+    Each driver may spell its plan differently -- these three happen to agree,
+    which is exactly why a check has to force a disagreement. A driver whose
+    `explain_sql` returns something the engine could not have written on its own
+    proves which side built the statement: if the engine hard-coded `EXPLAIN`,
+    the cursor would receive that instead of this marker.
+    """
+    from exporter import drivers as drivers_module
+
+    cursor = FakeCursor(EXPLAIN_ROWS, EXPLAIN_COLUMNS)
+    real = drivers_module.DRIVERS["trino"]
+
+    class MarkerDriver(type(real)):
+        kind = "trino"
+
+        def explain_sql(self, sql):
+            # Not something any engine-side f-string could produce, and it keeps
+            # the caller's own text so a leak of the raw SQL shows up too.
+            return f"SHOW PLAN FOR <<{sql}>>"
+
+    drivers_module.DRIVERS["trino"] = MarkerDriver()
+    try:
+        with fake_connect(lambda **kwargs: FakeConnection(cursor)):
+            code, out, _err = run_engine(
+                "explain", TRINO_HOST="trino.internal", SQL="SELECT 1", RETRIES="0",
+            )
+    finally:
+        drivers_module.DRIVERS["trino"] = real
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["SHOW PLAN FOR <<SELECT 1>>"], cursor.statements
+    assert events_of(out)[0] == {"event": "step", "step": "connect"}, out
+
+    # The engine hands the driver the caller's SQL as written, and the driver
+    # applies its own trailing-semicolon rule: stripping is part of building the
+    # statement, so a driver that builds it differently is left free to. The
+    # engine does not pre-edit the caller's text on the driver's behalf.
+    cursor = FakeCursor(EXPLAIN_ROWS, EXPLAIN_COLUMNS)
+    drivers_module.DRIVERS["trino"] = MarkerDriver()
+    try:
+        with fake_connect(lambda **kwargs: FakeConnection(cursor)):
+            code, out, _err = run_engine(
+                "explain", TRINO_HOST="trino.internal", SQL="SELECT 1;  ", RETRIES="0",
+            )
+    finally:
+        drivers_module.DRIVERS["trino"] = real
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["SHOW PLAN FOR <<SELECT 1;  >>"], cursor.statements
+
+    # And the real driver does strip it, because that is what EXPLAIN needs.
+    cursor = FakeCursor(EXPLAIN_ROWS, EXPLAIN_COLUMNS)
+    with fake_connect(lambda **kwargs: FakeConnection(cursor)):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="SELECT 1;  ", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["EXPLAIN SELECT 1"], cursor.statements
+
+
+def check_explain_strips_one_trailing_semicolon():
+    """`SELECT 1;  ` explains as `EXPLAIN SELECT 1`: EXPLAIN SELECT 1; is invalid.
+
+    Only the final separator goes. The whitespace around and after it goes too,
+    so the statement handed to the cursor has no trailing debris.
+    """
+    for sql, expected in (
+        ("SELECT 1", "EXPLAIN SELECT 1"),
+        ("SELECT 1;", "EXPLAIN SELECT 1"),
+        ("SELECT 1;  ", "EXPLAIN SELECT 1"),
+        ("  SELECT 1 ;  \n", "EXPLAIN SELECT 1"),
+        ("SELECT * FROM t LIMIT 5;", "EXPLAIN SELECT * FROM t LIMIT 5"),
+    ):
+        cursor, connect = explain_fake(EXPLAIN_ROWS)
+        with fake_connect(connect):
+            code, out, _err = run_engine(
+                "explain", TRINO_HOST="trino.internal", SQL=sql, RETRIES="0",
+            )
+        assert code == 0, f"{sql!r}: exit {code}, stdout={out!r}"
+        assert cursor.statements == [expected], (sql, cursor.statements)
+
+    # A semicolon in the middle is not the final one, and is left where it is:
+    # removing it would be rewriting a statement the caller is asking about.
+    cursor, connect = explain_fake(EXPLAIN_ROWS)
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="SELECT 1; SELECT 2", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ["EXPLAIN SELECT 1; SELECT 2"], cursor.statements
+
+
+def check_explain_keeps_a_semicolon_inside_a_literal():
+    """`SELECT 'a;b'` explains as `EXPLAIN SELECT 'a;b'`: the `;` is text.
+
+    The cases that matter are the ones where a semicolon sits at the very end of
+    the statement but is *not* the terminator, because that is where a naive
+    `rstrip(";")` and this scanner disagree: it would eat the `;` inside a
+    trailing literal and hand the server a statement the caller never wrote.
+
+    A `;` inside a *comment* survives too, for the same reason a literal's does:
+    it may be text the caller wrote deliberately, and this function strips only
+    what the scanner reports as a real statement separator.
+
+    Note the last two cases. The driver's own rule leaves a comment's trailing
+    `;` alone, but `QueryStream` re-applies a naive `sql.strip().rstrip(";")` to
+    whatever it is handed (exporter/source.py), so a `;` at the very end of a
+    comment is removed one layer below this command regardless. These
+    expectations describe what the cursor really receives; the rule the driver
+    actually implements is asserted directly in
+    `check_strip_one_trailing_semicolon_directly`.
+    """
+    for sql, expected in (
+        ("SELECT 'a;b'", "EXPLAIN SELECT 'a;b'"),
+        ("SELECT 'a;b';", "EXPLAIN SELECT 'a;b'"),
+        ('SELECT "a;b"', 'EXPLAIN SELECT "a;b"'),
+        ("SELECT 'it''s; ok'", "EXPLAIN SELECT 'it''s; ok'"),
+        # A literal that ends the statement: its closing `;` is text, not a
+        # terminator, so nothing is stripped.
+        ("SELECT 'a;b;'", "EXPLAIN SELECT 'a;b;'"),
+        ("SELECT 'a;b;' ;", "EXPLAIN SELECT 'a;b;'"),
+        # A `;` in a comment that is not final is untouched by either layer.
+        ("/* one; two */ SELECT 1", "EXPLAIN /* one; two */ SELECT 1"),
+        ("SELECT 1 /* one; two */", "EXPLAIN SELECT 1 /* one; two */"),
+        ("SELECT 1 -- one; two", "EXPLAIN SELECT 1 -- one; two"),
+        # ... and one that ends the statement: QueryStream's own strip removes
+        # it, so the cursor does not see it even though the driver kept it.
+        ("SELECT 1 -- one; two;", "EXPLAIN SELECT 1 -- one; two"),
+        # The separator before the comment goes, and the comment stays. Its own `;` goes too,
+        # because a comment runs to the end of its line and so does the statement.
+        ("SELECT 1; -- trailing;", "EXPLAIN SELECT 1 -- trailing"),
+    ):
+        cursor, connect = explain_fake(EXPLAIN_ROWS)
+        with fake_connect(connect):
+            code, out, _err = run_engine(
+                "explain", TRINO_HOST="trino.internal", SQL=sql, RETRIES="0",
+            )
+        assert code == 0, f"{sql!r}: exit {code}, stdout={out!r}"
+        assert cursor.statements == [expected], (sql, cursor.statements)
+
+
+def check_strip_one_trailing_semicolon_directly():
+    """The stripper's own contract, asserted where it actually lives.
+
+    The end-to-end checks around this one cannot pin it down: `QueryStream`
+    re-applies `sql.strip().rstrip(";")` to whatever it is handed
+    (exporter/source.py), so by the time a cursor sees the statement the
+    driver's more careful strip has been flattened into the same answer for
+    every input tried. That makes the driver's version redundant *today* -- but
+    it is the one that is correct, and the naive one would corrupt
+    `SELECT 'a;b;'` the moment that outer layer changes. So the rule is asserted
+    here, on the function, rather than through a path that cannot observe it.
+    """
+    from exporter.drivers import strip_one_trailing_semicolon as strip
+
+    cases = (
+        # An ordinary terminator goes, with the whitespace around it.
+        ("SELECT 1", "SELECT 1"),
+        ("SELECT 1;", "SELECT 1"),
+        ("SELECT 1;  ", "SELECT 1"),
+        ("  SELECT 1 ;  \n", "SELECT 1"),
+        # A `;` inside a literal is the caller's text and never goes.
+        ("SELECT 'a;b'", "SELECT 'a;b'"),
+        ("SELECT 'a;b';", "SELECT 'a;b'"),
+        ("SELECT 'a;b;'", "SELECT 'a;b;'"),      # ends the statement, still text
+        ("SELECT 'a;b;' ;", "SELECT 'a;b;'"),
+        ('SELECT "a;b;"', 'SELECT "a;b;"'),
+        ("SELECT 'it''s; ok';", "SELECT 'it''s; ok'"),
+        # A `;` inside a comment survives, like a literal's: the scanner does
+        # not report it as a separator, so it is not the terminator this strips.
+        ("SELECT 1 -- note;", "SELECT 1 -- note;"),
+        ("SELECT 1; -- note;", "SELECT 1; -- note;"),
+        # Only the final separator is touched, never one in the middle.
+        ("SELECT 1; SELECT 2", "SELECT 1; SELECT 2"),
+        ("SELECT 'a;b';;", "SELECT 'a;b';"),
+        ("", ""),
+    )
+    for sql, expected in cases:
+        got = strip(sql)
+        assert got == expected, (sql, got, expected)
+
+    # The inputs a naive `rstrip(";")` gets wrong, which is why the scanner
+    # exists: it eats a `;` that is comment text rather than a separator, and it
+    # eats the caller's second separator rather than only the final terminator.
+    for sql in ("SELECT 1 -- note;", "SELECT 'a;b';;", "SELECT 'a;b;' ;"):
+        assert sql.strip().rstrip(";") != strip(sql), \
+            f"the naive strip and the scanner-aware one agree on {sql!r}"
+    assert strip("SELECT 1 -- note;") == "SELECT 1 -- note;", strip("SELECT 1 -- note;")
+    assert strip("SELECT 'a;b';;") == "SELECT 'a;b';", strip("SELECT 'a;b';;")
+    assert strip("SELECT 'a;b;' ;") == "SELECT 'a;b;'", strip("SELECT 'a;b;' ;")
+
+
+def check_explain_multi_column_row_arrives_intact():
+    """The MySQL shape: every column is reported and a two-column row survives.
+
+    A plan table is wider than one text column, so the engine may not flatten,
+    reorder or drop positions -- the grid aligns cells by index.
+    """
+    rows = [
+        ["1", "SIMPLE", "wilayah"],
+        ["1", "PRIMARY", None],
+    ]
+    cursor, connect = explain_fake(rows, MYSQL_EXPLAIN_COLUMNS)
+    with fake_dbapi(pymysql, connect):
+        code, out, _err = run_engine(
+            "explain", DB_KIND="mysql", DB_HOST="mysql.internal",
+            SQL="SELECT * FROM wilayah", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+
+    columns = only_event(events, "columns")["columns"]
+    assert [column["name"] for column in columns] == ["id", "select_type", "table"], columns
+    assert all(isinstance(column["type"], str) for column in columns), columns
+
+    sent = preview_rows(events)
+    assert sent == [["1", "SIMPLE", "wilayah"], ["1", "PRIMARY", None]], sent
+    assert len(sent[0]) == 3, sent[0]  # every position, none dropped
+    assert sent[0][1] == "SIMPLE" and sent[1][1] == "PRIMARY", sent  # order preserved
+    assert events[-1]["rows"] == 2, events[-1]
+
+
+def check_explain_null_cell_is_json_null():
+    """A NULL plan line is JSON null: not "None", not an empty string."""
+    cursor, connect = explain_fake([["Output[]"], [None], [""]])
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    lines = out.splitlines()
+    rows_lines = [line for line in lines if json.loads(line)["event"] == "rows"]
+    assert len(rows_lines) == 1, lines
+    assert "null" in rows_lines[0], rows_lines[0]  # the wire form, not just the parsed value
+    assert "None" not in rows_lines[0], rows_lines[0]
+    assert preview_rows(events_of(out)) == [["Output[]"], [None], [""]], events_of(out)
+
+
+def check_explain_blank_sql_is_usage_error():
+    """A blank SQL is a usage error: one error event, exit 1, no network.
+
+    Whitespace-only counts as blank, and no `step connect` is emitted: the
+    verdict is made before the network is touched, exactly as `preview`'s is.
+    """
+    for sql in ("", "   ", "\n\t "):
+        calls = []
+        with fake_connect(lambda **kwargs: calls.append(kwargs)):
+            code, out, _err = run_engine(
+                "explain", TRINO_HOST="trino.internal", SQL=sql, SQL_PATH="",
+            )
+        assert code == 1, f"{sql!r}: exit {code}, stdout={out!r}"
+        events = events_of(out)
+        assert event_names(events) == ["error"], (sql, events)
+        assert "SQL" in events[0]["message"], (sql, events[0])
+        assert not calls, f"{sql!r}: the engine connected despite a blank SQL"
+
+    # And a SQL_PATH that cannot be read is the same kind of usage error.
+    calls = []
+    with fake_connect(lambda **kwargs: calls.append(kwargs)):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="",
+            SQL_PATH="/nonexistent/queryhive/nope.sql",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["error"], events
+    assert "SQL_PATH" in events[0]["message"], events[0]
+    assert not calls, "the engine connected despite an unreadable SQL_PATH"
+
+
+def check_explain_connection_failure():
+    """A connect that will not open: step connect, then one error, exit 1."""
+
+    def refuse(**kwargs):
+        raise OSError("connection refused")
+
+    with fake_connect(refuse):
+        code, out, err = run_engine(
+            "explain", TRINO_HOST="trino.invalid", SQL="SELECT 1", RETRIES="0",
+        )
+    assert code == 1, f"exit {code}, stdout={out!r}"
+    events = events_of(out)
+    assert event_names(events) == ["step", "error"], events
+    assert events[0] == {"event": "step", "step": "connect"}, events
+    assert "OSError" in events[-1]["message"] and "connection refused" in events[-1]["message"], events
+    assert "done" not in event_names(events), events
+    assert "columns" not in event_names(events), events
+    assert "Traceback" in err and "Traceback" not in out, (err, out)
+
+
+def check_explain_stdout_is_json_only():
+    """Every stdout line of an explain run is one compact JSON object."""
+    batch = engine.PREVIEW_BATCH
+    cursor, connect = explain_fake(
+        [[f"plan line {i}"] for i in range(batch + 3)],
+        columns=EXPLAIN_COLUMNS,
+    )
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "explain", TRINO_HOST="trino.internal", SQL="SELECT * FROM t", RETRIES="0",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    lines = out.splitlines()
+    assert lines, "no stdout at all"
+    for line in lines:
+        assert line.strip() == line and line, f"padding or a blank line in {line!r}"
+        payload = json.loads(line)  # raises if any line is not exactly one JSON object
+        assert isinstance(payload, dict) and isinstance(payload.get("event"), str), payload
+    assert lines[-1].startswith('{"event": "done"'), lines[-1]
+    # More than one batch for a plan longer than PREVIEW_BATCH, all of it sent.
+    events = events_of(out)
+    batches = [event for event in events if event["event"] == "rows"]
+    assert len(batches) > 1, "a plan larger than PREVIEW_BATCH arrived as one event"
+    assert all(len(event["data"]) <= batch for event in batches), [len(e["data"]) for e in batches]
+    assert len(preview_rows(events)) == batch + 3, events[-1]
+
+
+# --------------------------------------------------------------------------- #
 # postgres and mysql: the same protocol, three different drivers
 # --------------------------------------------------------------------------- #
 
@@ -1912,6 +2387,11 @@ MYSQL_DATABASES_SQL = (
 
 MYSQL_ALL_DATABASES_SQL = (
     "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY 1"
+)
+
+POSTGRES_DATABASES_SQL = (
+    "SELECT datname FROM pg_database "
+    "WHERE NOT datistemplate AND datallowconn ORDER BY 1"
 )
 
 POSTGRES_SCHEMAS_SQL = (
@@ -1978,7 +2458,10 @@ def check_postgres_kind_reaches_psycopg():
     assert pg_seen["host"] == "pg.internal" and pg_seen["port"] == 5433, pg_seen
     assert pg_seen["user"] == "analyst" and pg_seen["dbname"] == "appdb", pg_seen
     assert pg_seen["password"] == "secret", pg_seen
-    assert cursor.statements == [POSTGRES_SCHEMAS_SQL], cursor.statements  # test's own probe
+    # `test` runs the driver's first available browse statement as its probe, and Postgres now
+    # answers `catalogs` -- so the probe is the database list rather than the schema list. The
+    # point of this assertion is that the probe is real SQL for the driver chosen, not which SQL.
+    assert cursor.statements == [POSTGRES_DATABASES_SQL], cursor.statements  # test's own probe
     assert cursor.closed, "the engine left a handle open"
 
     trino_seen = {}
@@ -2071,21 +2554,24 @@ def check_qualified_drops_the_level_it_lacks():
 
 
 def check_postgres_has_no_catalog_level():
-    """`catalogs` on postgres is a usage error naming the driver; the rest work."""
-    calls = []
+    """Postgres lists its databases but has no catalog *level*; schemas and tables work.
 
-    def connect(**kwargs):
-        calls.append(kwargs)
-        return FakeConnection(FakeCursor())
+    `catalogs` used to be a usage error here on the grounds that a connection cannot query across
+    databases. That is still true of the object tree -- `levels` is unchanged, so a Postgres
+    connection is still schema-first -- but the statement is answerable, and it is what lets a query
+    be pointed at another database.
+    """
+    cursor = FakeCursor([("appdb",), ("warehouse",)])
 
-    with fake_dbapi(psycopg, connect):
+    with fake_dbapi(psycopg, lambda **kwargs: FakeConnection(cursor)):
         code, out, _err = run_engine("catalogs", DB_KIND="postgres", DB_HOST="pg.internal")
-    assert code == 1, f"exit {code}, stdout={out!r}"
-    events = events_of(out)
-    assert event_names(events) == ["error"], events
-    assert "postgres" in events[0]["message"], events[0]
-    assert "catalog" in events[0]["message"], events[0]
-    assert not calls, "the engine connected for a command the driver cannot answer"
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [POSTGRES_DATABASES_SQL], cursor.statements
+    assert only_event(events_of(out), "catalogs")["names"] == ["appdb", "warehouse"]
+
+    # The tree's contract is untouched: no catalog node appears under a Postgres connection.
+    from exporter.drivers import DRIVERS
+    assert DRIVERS["postgres"].levels == ("schema", "table"), DRIVERS["postgres"].levels
 
     cases = (
         ("schemas", [("public",), ("analytics",)], {}, POSTGRES_SCHEMAS_SQL),

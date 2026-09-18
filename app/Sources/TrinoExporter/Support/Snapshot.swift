@@ -157,7 +157,15 @@ enum Snapshot {
         let secondary = Connection(id: UUID(), name: "Trino sandbox", color: .amber, kind: .trino,
                                    host: "localhost", port: 8080, scheme: "http",
                                    user: "dev", database: "tpch", schema: "", verify: true)
-        model.connections = [primary, secondary]
+        // The cascade's levels follow the driver, so each one needs its own connection to show
+        // what it does and does not offer.
+        let pg = Connection(id: UUID(), name: "Warehouse", color: .violet, kind: .postgres,
+                            host: "pg.internal", port: 5432, sslmode: "prefer",
+                            user: "analyst", database: "warehouse", schema: "public", verify: true)
+        let my = Connection(id: UUID(), name: "Reporting", color: .amber, kind: .mysql,
+                            host: "mysql.internal", port: 3306, sslmode: "disable",
+                            user: "analyst", database: "reporting", schema: "", verify: true)
+        model.connections = [primary, secondary, pg, my]
         model.rebuildTree()
 
         let root = model.tree[0]
@@ -273,6 +281,42 @@ enum Snapshot {
             tab.previewedSQL = tab.sql
             tab.stage = .done
             tab.panel = .result
+        case "explain":
+            // The plan lands in the grid, where the rows would go — it is a result set too.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat"
+            tab.columns = [Event.Column(name: "Query Plan", type: "varchar")]
+            tab.preview = PreviewResult(
+                columns: tab.columns,
+                rows: [
+                    ["Output[kode_wilayah, nama, jumlah_jiwa, bobot, aktif, diperbarui]"],
+                    ["│   Layout: [kode_wilayah:varchar, nama:varchar, jumlah_jiwa:bigint]"],
+                    ["│   Estimates: {rows: 48320 (1.21MB), cpu: ?, memory: ?, network: ?}"],
+                    ["│   aktif := false"],
+                    ["└─ TableScan[hive.analytics.penerima_manfaat]"],
+                    ["       Layout: [kode_wilayah:varchar, nama:varchar, jumlah_jiwa:bigint]"],
+                    ["       Estimates: {rows: 48320 (1.21MB), cpu: 1.21M, memory: 0B, network: 0B}"],
+                    ["       tahun := 2026"],
+                    ["       aktif := true"],
+                ],
+                truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 148)
+            tab.previewedSQL = tab.sql
+            tab.showingPlan = true
+            tab.stage = .done
+            tab.panel = .result
+        case "cascade-long":
+            // The case that broke the breadcrumb: a catalog long enough to push Run off the bar.
+            tab.connectionID = primary.id
+            tab.contextDatabase = "aktivitas-produksi-harian"
+            tab.contextSchema = "sandbox"
+            tab.sql = "SELECT * FROM wilayah"
+        case "cascade-postgres", "cascade-mysql":
+            // What the breadcrumb offers per driver: Postgres has no catalog level, MySQL no schema.
+            let wanted = scene == "cascade-mysql" ? "Reporting" : "Warehouse"
+            if let connection = model.connections.first(where: { $0.name == wanted }) {
+                tab.connectionID = connection.id
+            }
+            tab.sql = "SELECT * FROM wilayah"
         case "syntax":
             // Every class the colourer knows, in SQL that reads like the real thing.
             tab.sql = """
