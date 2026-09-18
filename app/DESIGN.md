@@ -254,13 +254,23 @@ never overwritten by the window it happened to open in.
 The tree hides Postgres's system schemas — `pg_catalog`, `information_schema`, anything `pg_*` —
 because they are not object-tree levels a user browses. Right-clicking a connection offers
 **Show System Schemas**, which flips a per-connection flag (`Connection.showAllSchemas`) and re-lists
-the connection, this time with `DB_ALL_SCHEMAS=1` so the engine drops its filter.
+the connection, this time with `DB_ALL_SCHEMAS=1` so the engine drops its filter. The same switch is
+an `InlineCheckbox` labelled **Show All** beside the Schema field in the connection editor — the
+editor is where it is set up, the menu is where it is reached while browsing.
 
-The switch is deliberately **Postgres-only** in the menu. Trino's `SHOW SCHEMAS FROM` and MySQL's
-`SHOW DATABASES` already return everything the server has, so a "show all" toggle there would be a
-control with nothing behind it. The engine still accepts the flag on every driver — Trino as a
-no-op, MySQL as the same "no schema level" usage error it already was — so a stray flag can never
-turn into a `TypeError` the way it would if the parameter were Postgres-only.
+MySQL reuses the same switch with the opposite default: its system databases (`information_schema`,
+`mysql`, `performance_schema`, `sys`) are **hidden until asked for**, because the server always
+returns them and a tree listing them carries four entries nobody browses. That is why its `catalogs`
+statement is `SELECT SCHEMA_NAME FROM information_schema.SCHEMATA` rather than `SHOW DATABASES` —
+the two list the same thing, and only one of them can carry a `WHERE`. Its checkbox sits beside the
+Database field, since MySQL has no schema level.
+
+The toggle is offered on **Postgres and MySQL only**, and the context-menu entry stays Postgres-only
+because MySQL's is reachable from the editor. Trino already returns everything its coordinator has,
+so a "show all" there would be a control with nothing behind it. The engine nonetheless accepts the
+flag on every driver — Trino as a no-op, and every `catalogs_sql` / `schemas_sql` takes the keyword
+— so a stray flag can never turn into a `TypeError` the way it would if the parameter existed on
+only one driver. That near-miss already happened once, with the Trino schema list.
 
 ### Where controls sit
 
@@ -277,6 +287,13 @@ the status carries a *negative* `layoutPriority` — it yields width before the 
 does, or a greedy status squeezes "Test Connection" down to "Test Conn…". Success truncates at the
 tail, a failure in the middle (its cause is at the end, its class prefix at the start, and the
 whole message stays in the tooltip). The sheet is 620pt wide for the same reason.
+
+A control that modifies one field sits **with that field**, not in a section of its own. The
+schema-level "Show All" checkbox began life as an "Object tree" block below the SSL mode — a
+different row from the field it acts on, which invites reading it as a setting about the
+connection. It is beside the Schema input now, and `InlineCheckbox` exists for the place: the
+`ChipToggle` beside it draws a dark chip, and two boxed controls side by side read as two fields
+rather than a field and its modifier.
 
 **Headers group left; footers commit right.** Those are different conventions on purpose. A header
 is a label plus its actions, so they sit together at the start. A footer ends a panel or a dialog,

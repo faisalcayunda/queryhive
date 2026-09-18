@@ -383,6 +383,36 @@ struct ChipToggle: View {
     }
 }
 
+/// A bare checkbox, for sitting *beside* a text field rather than on its own row.
+///
+/// `ChipToggle` draws a dark chip around itself, which is right for a setting that owns its row and
+/// wrong next to an input: two boxed controls side by side read as two fields. This one has no
+/// background, so the eye sees a field and a modifier for it.
+struct InlineCheckbox: View {
+    let label: String
+    @Binding var isOn: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isOn ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isOn ? Tone.ice : .white.opacity(hovering ? 0.55 : 0.35))
+                Text(label)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isOn ? .white.opacity(0.95) : Tone.secondary)
+            }
+            .padding(.vertical, 5)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: isOn)
+    }
+}
+
 /// "1 column" / "2 columns", comma-grouped. Shared by every user-facing count in the app so
 /// singular/plural never has to be spelled out at each call site.
 func pluralized(_ n: Int, _ singular: String, _ plural: String? = nil) -> String {

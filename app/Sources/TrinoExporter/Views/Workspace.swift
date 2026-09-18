@@ -146,10 +146,6 @@ struct QueryToolbar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            actionButton
-
-            ToolbarSeparator()
-
             // Name only: the host and catalog are already on the title strip and the status
             // bar, and repeating them here just truncated the name that identifies the choice.
             ConnectionPickerButton(selection: $tab.connectionID)
@@ -158,7 +154,18 @@ struct QueryToolbar: View {
             ToolbarSeparator()
 
             DestinationPopover(tab: tab)
-            Spacer(minLength: 8)
+
+            Spacer(minLength: 12)
+
+            // Run sits at the trailing corner: it is the button pressed over and over, and the
+            // corner is the largest, most repeatable target on the bar — the same reasoning a
+            // dialog footer uses for its committing action.
+            //
+            // A little more inset than the bar's own gutter, because the Run capsule draws a
+            // coloured glow: at a symmetric 12pt the halo ran into the window edge and the group
+            // read as clipped even though its frame was not.
+            actionButton
+                .padding(.trailing, 6)
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbar)

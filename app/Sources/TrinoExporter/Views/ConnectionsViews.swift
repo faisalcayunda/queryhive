@@ -369,7 +369,7 @@ struct ConnectionEditorSheet: View {
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .bottom, spacing: 12) {
                 LabeledField(kind.databaseLabel + (kind.requiresDatabase ? " · Required" : "")) {
                     TextField(kind == .trino ? "hive" : "mydb", text: $database)
                         .field(invalid: attemptedSave && missingRequired.contains("database"))
@@ -378,6 +378,26 @@ struct ConnectionEditorSheet: View {
                 if kind.hasSchemaLevel {
                     LabeledField("Schema") { TextField("public", text: $schema).field() }
                 }
+                // Beside the schema it modifies, not in a section of its own: it is a property of
+                // that field, and reading it as anything else was the previous layout's mistake.
+                // Postgres only — it is the one driver that hides anything.
+                if kind == .postgres {
+                    InlineCheckbox(label: "Show All", isOn: $showAllSchemas)
+                        .padding(.bottom, 5)
+                        .help("List pg_catalog, information_schema and pg_* schemas in the object tree too.")
+                } else if kind == .mysql {
+                    // Same switch, opposite default story: MySQL's system databases are always
+                    // returned by the server, so this one starts hidden and the box reveals them.
+                    //
+                    // `fixedSize` and a layout priority, because MySQL has no schema field and a
+                    // lone Database field expands to the full row width -- which pushed the
+                    // checkbox off the edge entirely rather than sharing the row with it.
+                    InlineCheckbox(label: "Show All", isOn: $showAllSchemas)
+                        .fixedSize()
+                        .layoutPriority(1)
+                        .padding(.bottom, 5)
+                        .help("List information_schema, mysql, performance_schema and sys in the object tree too.")
+                }
             }
             if kind.hasSSLModes {
                 LabeledField("SSL mode") {
@@ -385,19 +405,6 @@ struct ConnectionEditorSheet: View {
                 }
             } else {
                 ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
-            }
-            // Only Postgres hides system schemas, so only there does this mean anything. The tree's
-            // context menu toggles the same stored flag — this is the discoverable, set-up-time
-            // place, the menu is the while-browsing place.
-            if kind == .postgres {
-                LabeledField("Object tree") {
-                    ChipToggle(label: "List system schemas too", isOn: $showAllSchemas)
-                    Text("Off by default: pg_catalog, information_schema and pg_* schemas are not "
-                         + "levels you usually browse. Turn on to see every schema.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Tone.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
     }

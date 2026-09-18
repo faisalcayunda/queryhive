@@ -1904,6 +1904,16 @@ def check_count_stdout_is_json_only():
 # postgres and mysql: the same protocol, three different drivers
 # --------------------------------------------------------------------------- #
 
+MYSQL_DATABASES_SQL = (
+    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
+    "WHERE SCHEMA_NAME NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') "
+    "ORDER BY 1"
+)
+
+MYSQL_ALL_DATABASES_SQL = (
+    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY 1"
+)
+
 POSTGRES_SCHEMAS_SQL = (
     "SELECT schema_name FROM information_schema.schemata "
     "WHERE schema_name NOT LIKE 'pg\\_%' "
@@ -2155,6 +2165,26 @@ def check_show_all_schemas_is_a_noop_on_trino():
     assert only_event(events_of(out), "schemas")["names"] == ["analytics", "information_schema"]
 
 
+def check_mysql_show_all_databases():
+    """DB_ALL_SCHEMAS=1 reveals MySQL's system databases; off keeps them hidden."""
+    cursor = FakeCursor([("mydb",)])
+
+    def connect(**kwargs):
+        return FakeConnection(cursor)
+
+    with fake_dbapi(pymysql, connect):
+        code, out, _err = run_engine(
+            "catalogs", DB_KIND="mysql", DB_HOST="mysql.internal", DB_ALL_SCHEMAS="1",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [MYSQL_ALL_DATABASES_SQL], cursor.statements
+
+    with fake_dbapi(pymysql, connect):
+        code, out, _err = run_engine("catalogs", DB_KIND="mysql", DB_HOST="mysql.internal")
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [MYSQL_ALL_DATABASES_SQL, MYSQL_DATABASES_SQL], cursor.statements
+
+
 def check_mysql_catalogs_are_databases():
     """MySQL's top level is its databases, and `tables` needs the database level."""
     seen = {}
@@ -2168,7 +2198,9 @@ def check_mysql_catalogs_are_databases():
         code, out, _err = run_engine("catalogs", DB_KIND="mysql", DB_HOST="mysql.internal",
                                      DB_USER="root")
     assert code == 0, f"exit {code}, stdout={out!r}"
-    assert cursor.statements == ["SHOW DATABASES"], cursor.statements
+    # information_schema.SCHEMATA, not SHOW DATABASES: same list, but a WHERE clause can filter it
+    # and SHOW cannot.
+    assert cursor.statements == [MYSQL_DATABASES_SQL], cursor.statements
     assert only_event(events_of(out), "catalogs")["names"] == ["information_schema", "mydb"]
     assert seen["host"] == "mysql.internal" and seen["port"] == 3306, seen
     assert seen["user"] == "root", seen

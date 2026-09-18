@@ -371,9 +371,11 @@ final class AppModel {
             // engine otherwise hides. Only Postgres filters, so the flag is set here alone.
             env["DB_ALL_SCHEMAS"] = connection.showAllSchemas ? "1" : "0"
         case (.mysql, .connection):
-            // MySQL's information_schema calls a database a CATALOG_NAME, so `catalogs` is
-            // exactly `SHOW DATABASES`.
+            // MySQL's information_schema calls a database a CATALOG_NAME, so `catalogs` is its
+            // database list. Its system databases are hidden unless the connection asks for them,
+            // the same switch Postgres uses for its system schemas.
             command = "catalogs"
+            env["DB_ALL_SCHEMAS"] = connection.showAllSchemas ? "1" : "0"
         case (.mysql, .database):
             command = "tables"
             env["DB_DATABASE"] = node.database ?? ""

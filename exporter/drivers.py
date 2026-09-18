@@ -213,7 +213,7 @@ class Driver:
         message = f"{self.kind} has no {level} level"
         return f"{message}; {hint}" if hint else message
 
-    def catalogs_sql(self, database="", schema="") -> str:
+    def catalogs_sql(self, database="", schema="", include_system=False) -> str:
         raise ValueError(self._no_level("catalogs"))
 
     def schemas_sql(self, database="", schema="", include_system=False) -> str:
@@ -310,7 +310,9 @@ class TrinoDriver(Driver):
             raise ValueError(f"{' and '.join(missing)} required to list tables")
         return f"SHOW TABLES FROM {self.quote(database)}.{self.quote(schema)}"
 
-    def catalogs_sql(self, database="", schema=""):
+    def catalogs_sql(self, database="", schema="", include_system=False):
+        # `include_system` is accepted but unused: SHOW CATALOGS lists every catalog
+        # the coordinator has, and there is no system set to hide.
         return "SHOW CATALOGS"
 
 
@@ -439,9 +441,19 @@ class MysqlDriver(Driver):
             kwargs["ssl"] = {"check_hostname": bool(getattr(config, "verify", True))}
         return pymysql.connect(**kwargs)
 
-    def catalogs_sql(self, database="", schema=""):
-        # MySQL's catalogs are its databases, which is exactly SHOW DATABASES.
-        return "SHOW DATABASES"
+    # The databases MySQL keeps for itself. They are real databases and a user with
+    # privileges can read them, but they are not what someone browsing a tree is
+    # looking for, so they are hidden unless asked for.
+    _SYSTEM_DATABASES = ("information_schema", "mysql", "performance_schema", "sys")
+
+    def catalogs_sql(self, database="", schema="", include_system=False):
+        # MySQL's catalogs are its databases. `information_schema.SCHEMATA` rather
+        # than `SHOW DATABASES` because a WHERE clause can filter it and SHOW
+        # cannot -- the two list the same thing, and the filtered form is the
+        # reason this is not the one-liner it used to be.
+        names = ", ".join(_literal(name) for name in self._SYSTEM_DATABASES)
+        where = "" if include_system else f"WHERE SCHEMA_NAME NOT IN ({names}) "
+        return "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA " + where + "ORDER BY 1"
 
     def tables_sql(self, database="", schema=""):
         if not database:
