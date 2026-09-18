@@ -236,6 +236,25 @@ final class AppModel {
         rebuildTree()
     }
 
+    /// Flips "show all schemas" for a connection and re-lists its children so the change is visible
+    /// immediately rather than after the next expansion. Only Postgres has anything to reveal, but
+    /// the toggle is stored per-connection so it survives a relaunch like every other field.
+    func toggleShowAllSchemas(_ id: UUID) {
+        guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
+        var next = connections
+        next[index].showAllSchemas.toggle()
+        do {
+            try ConnectionStore.save(next)
+        } catch {
+            notice = Notice(title: "Couldn't save the setting", message: error.localizedDescription)
+            return
+        }
+        connections = next
+        // Rebuild drops the cached children, so the connection re-lists — with the flag — the next
+        // time it is expanded instead of showing the schemas it fetched under the old setting.
+        rebuildTree()
+    }
+
     /// Opens a `.sql` file into a fresh query tab rather than the one that is already open, so
     /// running a script never overwrites work in progress.
     func runSQLFile(connectionID: UUID) {
@@ -344,6 +363,9 @@ final class AppModel {
             env["DB_SCHEMA"] = node.schema ?? ""
         case (.postgres, .connection):
             command = "schemas"
+            // "Show all schemas" reveals pg_catalog, information_schema and any pg_* schema the
+            // engine otherwise hides. Only Postgres filters, so the flag is set here alone.
+            env["DB_ALL_SCHEMAS"] = connection.showAllSchemas ? "1" : "0"
         case (.mysql, .connection):
             // MySQL's information_schema calls a database a CATALOG_NAME, so `catalogs` is
             // exactly `SHOW DATABASES`.

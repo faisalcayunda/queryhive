@@ -447,7 +447,14 @@ def run_browse_command(env, command):
     naming the driver, decided before anything is opened.
     """
     config, driver = _browse_config(env)
-    sql = getattr(driver, f"{command}_sql")(config.database, config.schema)
+    if command == "schemas" and _flag(env, "DB_ALL_SCHEMAS"):
+        # "Show all schemas": list the system ones too. Only Postgres actually
+        # filters anything today, so for Trino this is the same statement as
+        # before -- but the setting is a single switch at the command, not a
+        # per-driver special case the caller has to remember.
+        sql = driver.schemas_sql(config.database, config.schema, include_system=True)
+    else:
+        sql = getattr(driver, f"{command}_sql")(config.database, config.schema)
     emit(command, names=_show_names(config, sql))
 
 

@@ -235,6 +235,21 @@ struct TreeRow: View {
             // connection profiles, no server-side "New Database", no groups or sharing. What is
             // left is what the app can actually do.
             Button("Open Connection") { model.expand(node) }
+            // Only Postgres filters system schemas away, so only there does "show all" reveal
+            // anything. MySQL and Trino already list everything `SHOW DATABASES` / `SHOW SCHEMAS`
+            // return, so offering the switch there would be a control with nothing behind it.
+            if let connection = model.connections.first(where: { $0.id == node.connectionID }),
+               connection.kind == .postgres {
+                Button {
+                    model.toggleShowAllSchemas(node.connectionID)
+                } label: {
+                    if connection.showAllSchemas {
+                        Label("Show System Schemas", systemImage: "checkmark")
+                    } else {
+                        Text("Show System Schemas")
+                    }
+                }
+            }
             Divider()
             Button("Edit Connection…") { model.presentConnectionEditor(node.connectionID) }
             Button("Duplicate Connection") { model.duplicateConnection(node.connectionID) }

@@ -216,7 +216,7 @@ class Driver:
     def catalogs_sql(self, database="", schema="") -> str:
         raise ValueError(self._no_level("catalogs"))
 
-    def schemas_sql(self, database="", schema="") -> str:
+    def schemas_sql(self, database="", schema="", include_system=False) -> str:
         raise ValueError(self._no_level("schemas"))
 
     def tables_sql(self, database="", schema="") -> str:
@@ -292,7 +292,10 @@ class TrinoDriver(Driver):
             heartbeat_interval=30.0,
         )
 
-    def schemas_sql(self, database="", schema=""):
+    def schemas_sql(self, database="", schema="", include_system=False):
+        # `include_system` is accepted but unused: SHOW SCHEMAS already lists
+        # every schema the catalog has, system ones included, so the "show all"
+        # switch is a no-op here rather than a broken call.
         if not database:
             raise ValueError(f"{setting_label('DB_DATABASE')} is required to list schemas")
         return f"SHOW SCHEMAS FROM {self.quote(database)}"
@@ -363,15 +366,20 @@ class PostgresDriver(Driver):
             kwargs["options"] = f"-c search_path={schema}"
         return psycopg.connect(**kwargs)
 
-    def schemas_sql(self, database="", schema=""):
-        # The database the connection points at; nothing to parameterise. The
-        # system schemas are not object-tree levels a user browses, and the
-        # backslash escapes the underscore so `pg_%` does not also match, say,
-        # `pgx`.
+    def schemas_sql(self, database="", schema="", include_system=False):
+        # By default the system schemas are hidden: they are not object-tree
+        # levels a user browses, and the backslash escapes the underscore so
+        # `pg_%` does not also match, say, `pgx`. "Show all schemas" drops the
+        # filter, because someone asking for everything wants `pg_catalog` to
+        # appear the same as any user schema.
+        where = (
+            ""
+            if include_system
+            else "WHERE schema_name NOT LIKE 'pg\\_%' "
+                 "AND schema_name <> 'information_schema' "
+        )
         return (
-            "SELECT schema_name FROM information_schema.schemata "
-            "WHERE schema_name NOT LIKE 'pg\\_%' "
-            "AND schema_name <> 'information_schema' ORDER BY 1"
+            "SELECT schema_name FROM information_schema.schemata " + where + "ORDER BY 1"
         )
 
     def tables_sql(self, database="", schema=""):

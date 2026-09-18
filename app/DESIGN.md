@@ -233,6 +233,19 @@ survive being restored on a small one; without the cap, restoring 480pt onto a 7
 the editor 79pt tall. The cap is applied when drawing, never stored, so the user's own value is
 never overwritten by the window it happened to open in.
 
+### Showing every schema
+
+The tree hides Postgres's system schemas — `pg_catalog`, `information_schema`, anything `pg_*` —
+because they are not object-tree levels a user browses. Right-clicking a connection offers
+**Show System Schemas**, which flips a per-connection flag (`Connection.showAllSchemas`) and re-lists
+the connection, this time with `DB_ALL_SCHEMAS=1` so the engine drops its filter.
+
+The switch is deliberately **Postgres-only** in the menu. Trino's `SHOW SCHEMAS FROM` and MySQL's
+`SHOW DATABASES` already return everything the server has, so a "show all" toggle there would be a
+control with nothing behind it. The engine still accepts the flag on every driver — Trino as a
+no-op, MySQL as the same "no schema level" usage error it already was — so a stray flag can never
+turn into a `TypeError` the way it would if the parameter were Postgres-only.
+
 ### Where controls sit
 
 The rule, learned from getting it wrong: **an action belongs next to what it acts on.** The editor

@@ -111,10 +111,15 @@ struct Connection: Identifiable, Codable, Equatable {
     var schema: String
     /// Trino only. Postgres expresses certificate checking through `sslmode`.
     var verify: Bool
+    /// Postgres only: list system schemas (`pg_catalog`, `information_schema`, anything `pg_*`)
+    /// in the object tree too, instead of hiding them. Meaningful only where a schema level exists
+    /// and the engine filters it.
+    var showAllSchemas: Bool
 
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
-         user: String, database: String, schema: String, verify: Bool) {
+         user: String, database: String, schema: String, verify: Bool,
+         showAllSchemas: Bool = false) {
         self.id = id
         self.name = name
         self.color = color
@@ -127,10 +132,12 @@ struct Connection: Identifiable, Codable, Equatable {
         self.database = database
         self.schema = schema
         self.verify = verify
+        self.showAllSchemas = showAllSchemas
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
+        case showAllSchemas
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -159,6 +166,8 @@ struct Connection: Identifiable, Codable, Equatable {
             ?? ""
         schema = try container.decodeIfPresent(String.self, forKey: .schema) ?? ""
         verify = try container.decodeIfPresent(Bool.self, forKey: .verify) ?? true
+        // Absent on a connections.json written before "Show all schemas" existed: stay hidden.
+        showAllSchemas = try container.decodeIfPresent(Bool.self, forKey: .showAllSchemas) ?? false
     }
 
     /// One-line identity for the sidebar and the picker: `host:port/database.schema`.

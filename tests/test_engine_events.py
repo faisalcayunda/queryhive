@@ -300,6 +300,7 @@ ENGINE_KEYS = (
     "BATCH_SIZE", "ROWS_PER_FILE", "RETRIES", "DELIMITER", "ENCODING", "HEADER", "BOM",
     "NULL_TEXT", "JSONL", "SQL_TABLE", "SHEET", "DBF_CHAR_WIDTH", "DBF_ENCODING", "PROGRESS_MS",
     "TARGET_CATALOG", "TARGET_SCHEMA", "TARGET_TABLE", "WRITE_MODE", "LIMIT",
+    "DB_ALL_SCHEMAS",
 )
 
 
@@ -2102,6 +2103,56 @@ def check_postgres_has_no_catalog_level():
     message = events_of(out)[0]["message"]
     assert "DB_SCHEMA" in message and "TRINO_SCHEMA" in message, message
     assert not calls, "the engine connected despite a blank schema"
+
+
+def check_postgres_show_all_schemas():
+    """DB_ALL_SCHEMAS=1 drops the system-schema filter; off keeps it."""
+    all_schemas_sql = (
+        "SELECT schema_name FROM information_schema.schemata ORDER BY 1"
+    )
+
+    cursor = FakeCursor([("public",), ("analytics",)])
+
+    def pg_connect(**kwargs):
+        return FakeConnection(cursor)
+
+    with fake_dbapi(psycopg, pg_connect):
+        code, out, _err = run_engine(
+            "schemas", DB_KIND="postgres", DB_HOST="pg.internal", DB_ALL_SCHEMAS="1",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == [all_schemas_sql], cursor.statements
+
+    with fake_dbapi(psycopg, pg_connect):
+        code, out, _err = run_engine("schemas", DB_KIND="postgres", DB_HOST="pg.internal")
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    # The last statement is the default (filtered) one: the flag stays off unless asked.
+    assert cursor.statements == [all_schemas_sql, POSTGRES_SCHEMAS_SQL], cursor.statements
+
+
+def check_show_all_schemas_is_a_noop_on_trino():
+    """DB_ALL_SCHEMAS=1 must not crash a driver that already lists every schema.
+
+    Trino's SHOW SCHEMAS returns system schemas as a matter of course, so the
+    flag cannot reveal anything it does not already show — and more to the point,
+    it must not turn the schemas command into a TypeError for a driver that has
+    nothing to filter.
+    """
+    cursor = FakeCursor([("analytics",), ("information_schema",)])
+    connection = FakeConnection(cursor)
+
+    def connect(**kwargs):
+        return connection
+
+    with fake_connect(connect):
+        code, out, _err = run_engine(
+            "schemas", TRINO_HOST="trino.internal", TRINO_CATALOG="hive",
+            DB_ALL_SCHEMAS="1",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert cursor.statements == ['SHOW SCHEMAS FROM "hive"'], cursor.statements
+    # Both the user schema and the system one come back; nothing was hidden to begin with.
+    assert only_event(events_of(out), "schemas")["names"] == ["analytics", "information_schema"]
 
 
 def check_mysql_catalogs_are_databases():
