@@ -20,6 +20,23 @@ final class AppModel {
     var selectedNodeID: String?
     var treeFilter = ""
 
+    /// The key-binding scheme, remembered across launches.
+    ///
+    /// Every binding in the app is read through `shortcut(for:)`, so switching this takes effect
+    /// everywhere at once rather than only where someone remembered to look.
+    var shortcutScheme: ShortcutScheme = {
+        let raw = UserDefaults.standard.string(forKey: "shortcutScheme") ?? ""
+        return ShortcutScheme(rawValue: raw) ?? .dbeaver
+    }() {
+        didSet { UserDefaults.standard.set(shortcutScheme.rawValue, forKey: "shortcutScheme") }
+    }
+
+    /// The binding for an action under the current scheme, or `nil` where this scheme leaves it
+    /// unbound — in which case the view must not attach a shortcut at all.
+    func shortcut(for action: ShortcutAction) -> KeyboardShortcut? {
+        shortcutScheme.shortcut(for: action)?.keyboard
+    }
+
     // MARK: Query tabs
 
     var tabs: [QueryTab] = []
@@ -93,10 +110,28 @@ final class AppModel {
     /// reads as a failure.
     var statusConnection: String {
         if let connection = selectedConnection {
-            return "\(connection.name) · \(connection.displayTarget)"
+            // Name and whether it is answering, not where it lives: the host and port were already
+            // on the title strip, and the status bar is the one place that has to answer "is this
+            // thing talking to the server?" at a glance.
+            return "\(connection.name) · \(connectionState(for: connection.id).label)"
         }
         if connections.isEmpty { return "No connections" }
         return selectedTab == nil ? "No query open" : "No connection selected"
+    }
+
+    /// Whether the app is talking to a server right now.
+    ///
+    /// Derived from the connection's root node rather than tracked in a flag of its own: a browse
+    /// command in flight *is* `node.loading`, a failed one leaves `node.error`, and a node with
+    /// children has answered a browse at least once. A second flag could disagree with the tree the
+    /// user is looking at; this cannot.
+    func connectionState(for connectionID: UUID?) -> ConnectionState {
+        guard let connectionID,
+              let root = tree.first(where: { $0.connectionID == connectionID })
+        else { return .disconnected }
+        if root.loading { return .connecting }
+        if root.error != nil { return .disconnected }
+        return root.children == nil ? .disconnected : .connected
     }
 
     // MARK: Tabs

@@ -50,7 +50,7 @@ struct EmptyWorkspace: View {
                 .foregroundStyle(Tone.secondary)
                 .multilineTextAlignment(.center)
             HubButton(title: "New Query", symbol: "plus", hue: .exporter) { model.newTab() }
-                .keyboardShortcut("t", modifiers: .command)
+                .keyboardShortcut(model.shortcut(for: .newQuery))
                 .padding(.top, 4)
         }
         .padding(40)
@@ -185,7 +185,7 @@ struct QueryToolbar: View {
         HStack(spacing: 2) {
             HubButton(title: "Run", symbol: "play.fill", hue: .exporter) { model.preview(tab) }
                 .disabled(running || model.runBlockedReason != nil)
-                .keyboardShortcut("r", modifiers: .command)
+                .keyboardShortcut(model.shortcut(for: .run))
                 .help(model.runBlockedReason ?? "Run the query and show the rows (⌘R)")
 
             Menu {
@@ -217,11 +217,13 @@ struct QueryToolbar: View {
             .help("Run, or run only the statement the caret is in")
 
             IconButton(symbol: "stop.fill", tint: running ? Tone.coral : Tone.secondary,
-                       help: running ? "Stop (⌘.)" : "Nothing to stop", diameter: 28) {
+                       help: running
+                           ? "Stop (\(model.shortcutScheme.shortcut(for: .stop)?.display ?? "no key"))"
+                           : "Nothing to stop", diameter: 28) {
                 if tab.previewing { model.cancelPreview(tab) } else { model.stop(tab) }
             }
             .disabled(!running)
-            .keyboardShortcut(".", modifiers: .command)
+            .keyboardShortcut(model.shortcut(for: .stop))
 
             // Explain sits after Stop, where Navicat puts it: the plan is something you reach for
             // while looking at a query, not a peer of Run. It shares Run's blocked reasons, since
@@ -306,7 +308,7 @@ struct EditorPane: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(Tone.secondary)
                 PillButton(title: "Load File…", symbol: "folder", compact: true) { tab.loadSQLFromFile() }
-                    .keyboardShortcut("o", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .openFile))
                     .help("Load SQL from a file (⌘O)")
                     .padding(.leading, 6)
                 // Quiet: clearing is not a commitment, and giving it the same weight as

@@ -105,6 +105,25 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
     var defaultSSLMode: String { self == .postgres ? "prefer" : "disable" }
 }
 
+/// Whether the app is talking to a server, as the status bar reports it.
+///
+/// Three states rather than a boolean, because "still trying" is the one a user actually needs:
+/// a connection with no children yet is not *broken*, and showing it as disconnected would report
+/// a failure that has not happened.
+enum ConnectionState {
+    case connected
+    case connecting
+    case disconnected
+
+    var label: String {
+        switch self {
+        case .connected: "Connected"
+        case .connecting: "Connecting…"
+        case .disconnected: "Disconnected"
+        }
+    }
+}
+
 /// A saved database, Navicat style. The password never lives here: it is stored separately in the
 /// Keychain, keyed by `id`, and a connection with no stored password simply connects without one.
 struct Connection: Identifiable, Codable, Equatable {

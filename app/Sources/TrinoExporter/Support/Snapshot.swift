@@ -46,11 +46,23 @@ enum Snapshot {
         // .accessory keeps it out of the Dock and out of the menu bar for the second it lives.
         app.setActivationPolicy(.accessory)
 
-        let hosting = NSHostingView(rootView: RootView()
-            .environment(seeded(scene: scene))
-            .frame(width: width, height: height)
-            .preferredColorScheme(.dark))
-        hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        let model = seeded(scene: scene)
+        // Settings is its own scene in the running app, so it needs its own root here or it stays
+        // the one screen nobody can look at without launching.
+        let hosting: NSHostingView<AnyView>
+        if scene == "settings" {
+            hosting = NSHostingView(rootView: AnyView(SettingsView()
+                .environment(model)
+                .preferredColorScheme(.dark)))
+        } else {
+            hosting = NSHostingView(rootView: AnyView(RootView()
+                .environment(model)
+                .frame(width: width, height: height)
+                .preferredColorScheme(.dark)))
+        }
+        hosting.frame = scene == "settings"
+            ? NSRect(x: 0, y: 0, width: 520, height: 560)
+            : NSRect(x: 0, y: 0, width: width, height: height)
 
         let window = NSWindow(contentRect: hosting.frame,
                               styleMask: [.titled, .fullSizeContentView],
@@ -304,6 +316,27 @@ enum Snapshot {
             tab.showingPlan = true
             tab.stage = .done
             tab.panel = .result
+        case "tree-large":
+            // The shape from a real Trino server: dozens of catalogs, each open, each with
+            // schemas and their tables. Built to measure the tree's layout cost rather than to
+            // look at, which is why nothing here is named after anything.
+            let rootNode = model.tree[0]
+            rootNode.children = (0..<40).map { index in
+                let catalog = TreeNode.catalog(String(format: "datawarehouse-%02d", index),
+                                               parent: rootNode)
+                catalog.expanded = true
+                catalog.children = (0..<8).map { s in
+                    let schema = TreeNode.schema("analytics_\(s)", parent: catalog)
+                    schema.expanded = true
+                    schema.children = (0..<20).map { t in
+                        TreeNode.table(String(format: "table_%02d_%02d_%02d", index, s, t),
+                                       parent: schema)
+                    }
+                    return schema
+                }
+                return catalog
+            }
+            rootNode.expanded = true
         case "cascade-long":
             // The case that broke the breadcrumb: a catalog long enough to push Run off the bar.
             tab.connectionID = primary.id

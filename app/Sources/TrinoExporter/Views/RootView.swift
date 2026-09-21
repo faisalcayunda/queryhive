@@ -116,15 +116,13 @@ struct StatusBar: View {
     }
 
     private var dot: Color {
-        switch model.selectedTab?.stage {
-        case .running: return Tone.ice
-        case .done: return Tone.mint
-        case .failed: return Tone.coral
-        default:
-            // Idle is not a state worth colouring: only a query that is written and ready gets
-            // a lit dot. No tab at all is grey, never coral — nothing has gone wrong.
-            guard let tab = model.selectedTab else { return Tone.gray.opacity(0.6) }
-            return tab.hasSQL ? Tone.mint.opacity(0.8) : Tone.gray.opacity(0.6)
+        // The dot answers the same question as the label beside it, so the two can never disagree:
+        // a green dot next to "Disconnected" is worse than no dot at all. The query's own state is
+        // still reported on the right, which is where it belongs.
+        switch model.connectionState(for: model.selectedTab?.connectionID) {
+        case .connected: return Tone.mint
+        case .connecting: return Tone.ice
+        case .disconnected: return Tone.gray.opacity(0.6)
         }
     }
 }

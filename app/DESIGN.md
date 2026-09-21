@@ -288,6 +288,41 @@ connection.
 
 None of the three changed what is drawn, only what is re-drawn.
 
+### Shortcut schemes
+
+Two schemes ship, switched in **Settings** (⌘,): **DBeaver** by default and **QueryHive**, which is
+what the app bound before schemes existed. The switch is not cosmetic — every binding in the app is
+read through `AppModel.shortcut(for:)`, so changing scheme moves the menu bar entries and the
+in-view buttons together rather than only where someone remembered to look.
+
+DBeaver's entries are **read from its own source**, not from memory: the SQL editor's bindings live
+in `plugins/org.jkiss.dbeaver.ui.editors.sql/plugin.xml` under `org.eclipse.ui.bindings`, and the
+`cocoa` platform rows are the macOS ones (`COMMAND+Enter`, not `CTRL+Enter`). Where DBeaver declares
+a command with no `<key>` of its own — `cancel.query`, `run.count` and `export.data` are all
+declared that way — this app leaves the action **unbound and says so in the table**, rather than
+inventing a key and presenting it as DBeaver's.
+
+`CTRL+F3` binds `core.sql.editor.create` in that source, but `KeyEquivalent` has no function-key
+cases; `CTRL+]` binds the same command from the same declaration, so that is what New Query uses.
+
+The scheme is saved under `shortcutScheme`, so the choice survives a relaunch.
+
+### The status bar says whether the server is answering
+
+`● name · Connected` — the connection's name and whether it is talking, not where it lives. The host
+and port were already on the title strip, and the status bar is the one place that has to answer "is
+this thing working?" at a glance.
+
+The state is **derived from the connection's root node** rather than tracked in a flag of its own: a
+browse command in flight *is* `node.loading`, a failed one leaves `node.error`, and a node with
+children has answered a browse at least once. A second flag could disagree with the tree the user is
+looking at; this cannot. The dot is coloured from the same value as the label, for the same reason —
+a green dot beside "Disconnected" is worse than no dot at all.
+
+Three states, not a boolean: "still trying" is the one a user needs, and a connection with no
+children yet is not broken, so reporting it as disconnected would announce a failure that has not
+happened.
+
 ### The context breadcrumb
 
 The toolbar's picker is a cascade, not a single connection menu: **connection, then that driver's

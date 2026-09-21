@@ -38,22 +38,38 @@ struct QueryHiveApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1320, height: 880)
+
+        // The standard app-menu entry, so ⌘, works without this app inventing its own key.
+        Settings {
+            SettingsView()
+                .environment(model)
+                .preferredColorScheme(.dark)
+        }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Query") { model.newTab() }
-                    .keyboardShortcut("t", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .newQuery))
                 Button("Close Query") { model.closeSelectedTab() }
-                    .keyboardShortcut("w", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .closeTab))
             }
+            // Every binding here comes from the current scheme, so switching scheme in Settings
+            // moves the menu entries too. A `nil` leaves the item with no key at all rather than
+            // silently keeping a stale one.
             CommandMenu("Query") {
                 Button("Run") { model.runSelectedTab() }
-                    .keyboardShortcut("r", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .run))
                     .disabled(model.selectedTab?.previewing == true)
+                Button("Run Script") { model.selectedTab.map { model.run($0, from: .all) } }
+                    .keyboardShortcut(model.shortcut(for: .runScript))
+                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
+                Button("Explain") { model.selectedTab.map { model.explain($0) } }
+                    .keyboardShortcut(model.shortcut(for: .explain))
+                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
                 Button("Export") { model.selectedTab.map { model.run($0) } }
-                    .keyboardShortcut("e", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .exportData))
                     .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
                 Button("Stop") { model.stopSelectedTab() }
-                    .keyboardShortcut(".", modifiers: .command)
+                    .keyboardShortcut(model.shortcut(for: .stop))
                     .disabled(model.selectedTab?.stage != .running)
                 Divider()
                 Button("Reveal Output in Finder") { model.selectedTab?.revealFiles() }
