@@ -17,8 +17,10 @@
 
 #![forbid(unsafe_code)]
 
+mod batch;
 mod error;
 mod value;
 
+pub use batch::{BatchError, ColumnBatch, ColumnMeta};
 pub use error::{EngineError, FailureKind};
 pub use value::{unsupported, IntervalValue, Value};

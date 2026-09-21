@@ -19,6 +19,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qh-result-store"
+version = "0.1.0"
+dependencies = [
+ "qh-core",
+ "thiserror",
+]
+
+[[package]]
 name = "qh-sql"
 version = "0.1.0"
 dependencies = [
