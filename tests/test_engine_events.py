@@ -2947,6 +2947,109 @@ def check_postgres_and_mysql_stdout_is_json_only():
         assert "Traceback" in err and "Traceback" not in out, (err, out)
 
 
+def check_objects_command():
+    """`objects` emits the driver's own columns, and every cell as text."""
+    cursor = FakeCursor([("penerima_manfaat", "BASE TABLE"), ("wilayah", "BASE TABLE")])
+    connection = FakeConnection(cursor)
+
+    with fake_connect(lambda **kwargs: connection):
+        code, out, _err = run_engine(
+            "objects", TRINO_HOST="trino.internal",
+            TRINO_CATALOG="hive", TRINO_SCHEMA="analytics",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert events_of(out) == [{
+        "event": "objects",
+        "object_columns": ["Name", "Type"],
+        "data": [["penerima_manfaat", "BASE TABLE"], ["wilayah", "BASE TABLE"]],
+    }], out
+    assert cursor.closed and connection.closed, "the engine left a handle open"
+
+
+def check_objects_null_cell_is_empty_not_the_word_none():
+    """A NULL arrives as "", because the grid draws a NULL cell and an empty one alike."""
+    cursor = FakeCursor([("t", None)])
+    connection = FakeConnection(cursor)
+
+    with fake_connect(lambda **kwargs: connection):
+        code, out, _err = run_engine(
+            "objects", TRINO_HOST="trino.internal",
+            TRINO_CATALOG="hive", TRINO_SCHEMA="analytics",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    assert events_of(out)[0]["data"] == [["t", ""]], out
+
+
+def check_objects_event_avoids_the_two_colliding_field_names():
+    """`objects` may not reuse `columns` or `rows`: the app types both differently.
+
+    `Event.columns` is `[{"name","type"}]` and `Event.rows` is an Int on progress and
+    done. Emitting the driver's plain-string headers under `columns`, or its grid rows
+    under `rows`, produces an event the app cannot decode at all -- and the failure
+    would look like a broken query rather than a protocol mistake.
+    """
+    cursor = FakeCursor([("t", "BASE TABLE")])
+    connection = FakeConnection(cursor)
+    with fake_connect(lambda **kwargs: connection):
+        code, out, _err = run_engine(
+            "objects", TRINO_HOST="trino.internal",
+            TRINO_CATALOG="hive", TRINO_SCHEMA="analytics",
+        )
+    assert code == 0, f"exit {code}, stdout={out!r}"
+    event = events_of(out)[0]
+    assert "columns" not in event, event
+    assert "rows" not in event, event
+    assert set(event) == {"event", "object_columns", "data"}, event
+
+
+def check_objects_columns_and_sql_are_per_driver():
+    """Each driver names its own object columns, and its statement selects exactly those.
+
+    The grid labels every cell from `objects_columns`, so a driver whose SELECT list
+    drifts out of step with its declaration puts every value under the wrong header --
+    silently, because both are still strings. Pinning the statements here is what makes
+    that a failing check instead of a wrong-looking grid.
+    """
+    from exporter.drivers import DRIVERS
+
+    assert DRIVERS["postgres"].objects_columns == ("Name", "OID", "Owner", "ACL"), \
+        DRIVERS["postgres"].objects_columns
+    assert DRIVERS["postgres"].objects_sql("", "analytics") == (
+        "SELECT c.relname, c.oid, pg_get_userbyid(c.relowner), "
+        "COALESCE(array_to_string(c.relacl, ', '), '') "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'analytics' AND c.relkind IN ('r', 'p') "
+        "ORDER BY c.relname"
+    ), DRIVERS["postgres"].objects_sql("", "analytics")
+
+    assert DRIVERS["trino"].objects_columns == ("Name", "Type"), \
+        DRIVERS["trino"].objects_columns
+    assert DRIVERS["trino"].objects_sql("hive", "analytics") == (
+        'SELECT table_name, table_type FROM "hive".information_schema.tables '
+        "WHERE table_schema = 'analytics' ORDER BY 1"
+    ), DRIVERS["trino"].objects_sql("hive", "analytics")
+
+    assert DRIVERS["mysql"].objects_columns == ("Name", "Engine", "Rows", "Comment"), \
+        DRIVERS["mysql"].objects_columns
+    assert DRIVERS["mysql"].objects_sql("sips", "") == (
+        "SELECT TABLE_NAME, ENGINE, TABLE_ROWS, TABLE_COMMENT "
+        "FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = 'sips' ORDER BY 1"
+    ), DRIVERS["mysql"].objects_sql("sips", "")
+
+
+def check_objects_without_a_schema_is_a_usage_error():
+    """Trino and Postgres need a schema; the refusal names the setting, not a stack trace."""
+    for command, values in (
+        ("objects", {"TRINO_HOST": "trino.internal", "TRINO_CATALOG": "hive"}),
+        ("objects", {"TRINO_HOST": "trino.internal", "TRINO_SCHEMA": "analytics"}),
+    ):
+        code, out, _err = run_engine(command, **values)
+        assert code == 1, f"exit {code}, stdout={out!r}"
+        event = only_event(events_of(out), "error")
+        assert "required to list objects" in event["message"], event
+
+
 # --------------------------------------------------------------------------- #
 
 def main():

@@ -40,8 +40,44 @@ enum Snapshot {
         return arguments[index + 1]
     }
 
+    /// `--theme <name>`, `--accent <name>` and `--tone <name>`: draw the shell in an appearance
+    /// the user has not chosen. All three go through `ThemeStore.pin`, so reviewing one never
+    /// leaves it behind in the user's preferences — which matters because these flags are how the
+    /// design is checked, and a check that rewrites what it is checking is not a check.
+    static func requestedAppearance() -> (theme: AppTheme?, accent: AccentChoice?, tone: SurfaceTone?,
+                                          mode: AppearanceMode?, systemIsDark: Bool?)? {
+        let arguments = CommandLine.arguments
+        func value(_ flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
+            return arguments[index + 1]
+        }
+        let theme = value("--theme").flatMap(AppTheme.init(rawValue:))
+        let accent = value("--accent").flatMap(AccentChoice.init(rawValue:))
+        let tone = value("--tone").flatMap(SurfaceTone.init(rawValue:))
+        let mode = value("--mode").flatMap(AppearanceMode.init(rawValue:))
+        // `--system-appearance dark|light` states what the *machine* would report. A snapshot has
+        // no real window, so it cannot ask AppKit; this is how `--mode system` is drawn as light on
+        // a machine that is currently dark.
+        let systemIsDark = value("--system-appearance").map { $0 == "dark" }
+        guard theme != nil || accent != nil || tone != nil || mode != nil || systemIsDark != nil else { return nil }
+        return (theme, accent, tone, mode, systemIsDark)
+    }
+
     @MainActor
     static func run(path: String, scene: String, width: CGFloat = 1240, height: CGFloat = 800) -> Never {
+        let requested = requestedAppearance()
+        // A snapshot has no window to inherit an appearance from, so the scheme it draws in is
+        // decided here: the requested mode when there is one, otherwise the user's stored mode.
+        //
+        // Everything goes through `pin` in one call. Nothing here may touch a public setter: those
+        // persist, and a review is not allowed to change the user's preferences. The order inside
+        // `pin` (mode before theme) is what puts a light request in the light slot.
+        let store = ThemeStore.shared
+        if let requested {
+            store.pin(theme: requested.theme, accent: requested.accent, tone: requested.tone,
+                      mode: requested.mode, systemIsDark: requested.systemIsDark)
+        }
+        let scheme = store.mode.colorScheme
         let app = NSApplication.shared
         // .accessory keeps it out of the Dock and out of the menu bar for the second it lives.
         app.setActivationPolicy(.accessory)
@@ -53,12 +89,12 @@ enum Snapshot {
         if scene == "settings" {
             hosting = NSHostingView(rootView: AnyView(SettingsView()
                 .environment(model)
-                .preferredColorScheme(.dark)))
+                .preferredColorScheme(scheme)))
         } else {
             hosting = NSHostingView(rootView: AnyView(RootView()
                 .environment(model)
                 .frame(width: width, height: height)
-                .preferredColorScheme(.dark)))
+                .preferredColorScheme(scheme)))
         }
         hosting.frame = scene == "settings"
             ? NSRect(x: 0, y: 0, width: 520, height: 560)
@@ -69,7 +105,9 @@ enum Snapshot {
                               backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.appearance = NSAppearance(named: .darkAqua)
+        // The window's own appearance decides what `.ultraThinMaterial` samples and how every
+        // dynamic colour resolves, so it has to match the scheme being drawn.
+        window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
         window.contentView = hosting
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
@@ -83,19 +121,24 @@ enum Snapshot {
             if scene == "suggest" { typeIntoEditor(in: window) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            // Sheets and popovers are windows of their own, and a scene that opened one means
-            // that one, not the window behind it. Without this the format and target popovers
-            // were the only surfaces in the app nobody ever looked at.
-            let overlay = NSApp.windows.first { $0.isSheet }
-                ?? NSApp.windows.first { String(describing: type(of: $0)).contains("Popover") }
-            // A sheet or popover draws its own chrome as a system material, which
-            // `cacheDisplay` cannot sample — the capture comes back transparent where the
-            // background should be, and white text on it is invisible. Compositing over the
-            // canvas colour shows what the eye sees.
-            capture(window: overlay ?? window, to: path, over: overlay == nil ? nil : Tone.canvas)
-            exit(0)
+            captureAndExit(window: window, path: path)
         }
         app.run()
+        exit(0)
+    }
+
+    @MainActor
+    private static func captureAndExit(window: NSWindow, path: String) {
+        // Sheets and popovers are windows of their own, and a scene that opened one means
+        // that one, not the window behind it. Without this the format and target popovers
+        // were the only surfaces in the app nobody ever looked at.
+        let overlay = NSApp.windows.first { $0.isSheet }
+            ?? NSApp.windows.first { String(describing: type(of: $0)).contains("Popover") }
+        // A sheet or popover draws its own chrome as a system material, which
+        // `cacheDisplay` cannot sample — the capture comes back transparent where the
+        // background should be, and white text on it is invisible. Compositing over the
+        // canvas colour shows what the eye sees.
+        capture(window: overlay ?? window, to: path, over: overlay == nil ? nil : Tone.canvas)
         exit(0)
     }
 
@@ -249,6 +292,28 @@ enum Snapshot {
             tab.files = []
             tab.logLines = Array(tab.logLines.prefix(4))
             tab.startedAt = Date(timeIntervalSinceNow: -18)
+        case "objects":
+            // What clicking a schema now opens. The columns and rows are seeded exactly as the
+            // engine's `objects` event carries them -- Postgres answers all four of these from
+            // `pg_class` -- because `openObjects` would otherwise start a real run against a
+            // server this fixture does not have.
+            let objectsTab = QueryTab(title: "analytics")
+            objectsTab.connectionID = primary.id
+            objectsTab.objectScope = ObjectScope(connectionID: primary.id,
+                                                 catalog: "hive", schema: "analytics")
+            objectsTab.objectColumns = ["Name", "OID", "Owner", "ACL"]
+            objectsTab.objectRows = [
+                ["kasus_kesehatan", "24601", "app_datahub", ""],
+                ["penerima_manfaat", "24602", "app_datahub", "{app_datahub=arwdDxt/app_datahub,readonly=r/app_datahub}"],
+                ["wilayah", "24603", "postgres", ""],
+                ["wilayah_kode", "24604", "app_datahub", ""],
+                ["wilayah_replika", "24605", "replication", "{replication=arwdDxt/replication}"],
+                ["kasus_harian", "24606", "app_datahub", ""],
+                ["referensi_jenis_kelamin", "24607", "postgres", ""],
+                ["kasus_kesehatan_2025", "24608", "app_datahub", ""],
+            ]
+            model.tabs.append(objectsTab)
+            model.selectedTabID = objectsTab.id
         case "connection-tested":
             // The footer's success state, which is otherwise unreachable without a server.
             model.presentConnectionEditor(primary.id, previewTestCount: 56)

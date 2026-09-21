@@ -58,6 +58,12 @@ final class AppModel {
     static let panelShare: CGFloat = 0.55
     var panelCollapsed = false
 
+    /// The panel holding the whole workspace with the editor hidden behind it. This is what opening
+    /// a table gives you -- rows, not a form you have to dismiss -- and the panel's minimise control
+    /// is what puts the editor back. Unlike `panelCollapsed` it is not persisted: it is a view of the
+    /// current tab's work, and reopening the app into a hidden editor would be a surprise.
+    var panelExpanded = false
+
     // MARK: Sheets and alerts
 
     var editingConnection: ConnectionEditorTarget?
@@ -105,18 +111,52 @@ final class AppModel {
         return allNodes().first { $0.id == id }
     }
 
-    /// What the status bar names on the left. With no tab open there is no *active* connection,
-    /// which is not the same as having none: saying "No connection" next to a full object tree
-    /// reads as a failure.
+    /// What the status bar names on the left, and what the dot beside it reports.
+    ///
+    /// This follows the connection the user is *looking at*, which is not the same as the one the
+    /// active tab would run against. It used to read `selectedTab?.connectionID`, so clicking a
+    /// connection in the tree changed nothing until a query tab happened to point at it — and with
+    /// no tab open it reported "No query open" over a tree full of connections. Selecting a row is
+    /// the user saying which connection they mean; the status bar should agree with the tree they
+    /// are looking at.
+    ///
+    /// The tree selection wins, and the active tab is the fallback for when nothing is selected —
+    /// so a tab opened from the menu (which selects its connection's root, see `selectTab`) and a
+    /// row clicked by hand both land here, and there is no state where the bar names one connection
+    /// while the tree highlights another.
     var statusConnection: String {
-        if let connection = selectedConnection {
+        if let connection = statusConnectionTarget {
             // Name and whether it is answering, not where it lives: the host and port were already
             // on the title strip, and the status bar is the one place that has to answer "is this
             // thing talking to the server?" at a glance.
             return "\(connection.name) · \(connectionState(for: connection.id).label)"
         }
         if connections.isEmpty { return "No connections" }
-        return selectedTab == nil ? "No query open" : "No connection selected"
+        return "No connection selected"
+    }
+
+    /// Which connection the status bar is about: the tree's selection when there is one, the
+    /// active tab's otherwise.
+    var statusConnectionTarget: Connection? {
+        if let id = selectedNodeID,
+           let parsed = connectionID(fromNodeID: id),
+           let connection = connections.first(where: { $0.id == parsed }) {
+            return connection
+        }
+        return selectedConnection
+    }
+
+    /// The connection a node id belongs to, read from the id itself rather than by walking.
+    ///
+    /// Every id is built from its parent's: a connection is `c:<uuid>`, and each level below appends
+    /// `/cat:`, `/db:`, `/sch:` or `/tab:`. The owning connection is therefore the leading
+    /// `c:<uuid>` segment, so this is a string parse instead of `allNodes()` — a full recursive
+    /// walk. That matters because the status bar asks for this twice per redraw (label and dot),
+    /// and DESIGN.md already records that flattening the whole tree on every redraw is one of the
+    /// three mistakes that made this window slow once.
+    private func connectionID(fromNodeID id: String) -> UUID? {
+        guard id.hasPrefix("c:") else { return nil }
+        return UUID(uuidString: String(id.dropFirst(2).prefix { $0 != "/" }))
     }
 
     /// Whether the app is talking to a server right now.
@@ -131,7 +171,11 @@ final class AppModel {
         else { return .disconnected }
         if root.loading { return .connecting }
         if root.error != nil { return .disconnected }
-        return root.children == nil ? .disconnected : .connected
+        // Not yet expanded is **idle**, not broken. Reporting `.disconnected` here announced a
+        // failure that had not happened: a connection the user had simply not opened yet was
+        // labelled the same as one that had just refused a connection, and on first launch that was
+        // every connection in the tree.
+        return root.children == nil ? .idle : .connected
     }
 
     // MARK: Tabs
@@ -147,6 +191,80 @@ final class AppModel {
         tab.title = node.title
         tab.sql = "SELECT * FROM \(name)"
         preview(tab)
+        // Rows take the window. Opening a table is asking to *see* it, and the editor is still
+        // there one click away; the previous behaviour showed the rows in a panel under a query the
+        // user had not written.
+        panelCollapsed = false
+        panelExpanded = true
+    }
+
+    /// Opens a schema's (or a MySQL database's) objects in a tab of their own.
+    ///
+    /// One tab per scope: asking for the same schema twice brings the tab you already have to the
+    /// front and reloads it, rather than stacking duplicates whose contents drift apart.
+    func openObjects(_ node: TreeNode) {
+        guard connections.contains(where: { $0.id == node.connectionID }) else { return }
+        let scope = ObjectScope(connectionID: node.connectionID,
+                                catalog: node.database ?? "",
+                                schema: node.schema ?? "")
+        if let existing = tabs.first(where: { $0.objectScope == scope }) {
+            selectedTabID = existing.id
+            loadObjects(existing)
+            return
+        }
+        let tab = QueryTab(title: node.title)
+        tab.connectionID = node.connectionID
+        tab.objectScope = scope
+        tabs.append(tab)
+        selectedTabID = tab.id
+        panelExpanded = false
+        loadObjects(tab)
+        _ = connection
+    }
+
+    /// Runs the `objects` command for one object tab and fills it.
+    ///
+    /// The environment is built the same way every other browse command builds it, so a connection
+    /// that browses in the tree lists objects here without any second set of rules.
+    func loadObjects(_ tab: QueryTab) {
+        guard let scope = tab.objectScope,
+              let connection = connections.first(where: { $0.id == scope.connectionID }) else { return }
+        guard var env = try? connectionEnvironment(connection) else { return }
+        env["RETRIES"] = "2"
+        // Blank means "whatever the connection already sets", which is right for both: a Trino
+        // schema always names its catalog, and Postgres has no catalog level to name at all.
+        if !scope.catalog.isEmpty { env["DB_DATABASE"] = scope.catalog }
+        if !scope.schema.isEmpty { env["DB_SCHEMA"] = scope.schema }
+
+        let token = UUID()
+        tab.objectToken = token
+        tab.objectLoading = true
+        tab.objectError = nil
+        tab.objectProcess = Engine.run("objects", env: env, onEvent: { event in
+            guard tab.objectToken == token else { return }
+            switch event.event {
+            case "objects":
+                tab.objectColumns = event.objectColumns ?? []
+                tab.objectRows = event.data ?? []
+                tab.objectLoading = false
+            case "error":
+                tab.objectError = event.message ?? "Listing the objects failed."
+                tab.objectLoading = false
+            default:
+                break
+            }
+        }, onExit: { status, log in
+            guard tab.objectToken == token else { return }
+            tab.objectProcess = nil
+            tab.objectLoading = false
+            // A non-zero exit with no `error` event still has to say something: a driver that
+            // refused the level, or a crash before the first emit, would otherwise leave the pane
+            // spinning forever with nothing written to it.
+            if status != 0, tab.objectError == nil {
+                tab.objectError = log.split(separator: "\n").last.map(String.init)
+                    ?? "Listing the objects failed."
+            }
+        })
     }
 
     func newTab(connectionID: UUID? = nil) {
@@ -270,6 +388,206 @@ final class AppModel {
             }
         }
         rebuildTree()
+    }
+
+    // MARK: Importing from another client
+
+    /// Asks for Navicat's exported `.ncx` and adds what is in it.
+    ///
+    /// A panel rather than a remembered path: the file is wherever the user's own export put it,
+    /// and naming a location from here would be a guess about their disk.
+    func presentNavicatImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Connections from Navicat"
+        panel.message = "Choose the .ncx file Navicat wrote for File ▸ Export Connections."
+        panel.prompt = "Import"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        // A filter is applied only if the system actually has a type registered for `.ncx`. A panel
+        // whose content types resolve to nothing would allow nothing, which is worse than allowing
+        // too much — the parse either recognises the file or says so.
+        if let ncx = UTType(filenameExtension: "ncx") { panel.allowedContentTypes = [ncx] }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importNavicatConnections(from: url)
+    }
+
+    /// Adds every connection in a Navicat export that this app has a driver for, with the password
+    /// Navicat saved alongside it.
+    ///
+    /// **Adds, and never replaces.** An import is a bulk edit to a hand-curated list, so an
+    /// existing connection is never touched: a name already in use gets a numeric suffix and the
+    /// original keeps its host and its stored password. Matching by name and updating would
+    /// silently rewrite a connection the user is working in — the host and the credential — which
+    /// is a far worse outcome than a duplicate row they can delete.
+    ///
+    /// Keychain is written before the JSON, the same order the connection editor uses: if a write
+    /// fails, the saved list never claims a password that is not there.
+    func importNavicatConnections(from url: URL) {
+        let export: NavicatImport.Export
+        do {
+            export = try NavicatImport.read(url)
+        } catch {
+            notice = Notice(title: "Couldn't read the Navicat export", message: error.localizedDescription)
+            return
+        }
+
+        var next = connections
+        var taken = Set(next.map(\.name))
+        var added: [String] = []
+        var refreshed: [String] = []
+        var renamed: [String] = []
+        var noPassword: [String] = []
+        var noDatabase: [String] = []
+        var tunnelled: [String] = []
+        var keychainFailures: [String] = []
+
+        for imported in export.connections {
+            // Same name **and** same host means this is the very connection the export describes,
+            // so it is refreshed in place instead of duplicated. Without this, re-importing — which
+            // is exactly what someone does when the first import turns out to have got something
+            // wrong — would append forty near-copies of connections they already have, and the only
+            // way back would be deleting forty rows by hand.
+            //
+            // Matching on the host as well is what keeps that safe: a same-named entry pointing at a
+            // different server is a different connection, and it still gets a suffix rather than
+            // having its host rewritten underneath it.
+            if let index = next.firstIndex(where: {
+                $0.name == imported.name && $0.host == imported.host
+            }) {
+                let id = next[index].id
+                next[index].kind = imported.kind
+                next[index].port = imported.port
+                next[index].user = imported.user
+                next[index].database = imported.database
+                // `schema` is deliberately not refreshed. The export has no schema to refresh it
+                // with — see `NavicatImport` — so the only thing this could do is overwrite a value
+                // the user set by hand with nothing.
+                refreshed.append(imported.name)
+                if imported.database.isEmpty { noDatabase.append(imported.name) }
+                if !imported.sshHost.isEmpty { tunnelled.append(imported.name) }
+                if let password = imported.password, !password.isEmpty {
+                    do {
+                        try ConnectionKeychain.set(password, for: id)
+                    } catch {
+                        keychainFailures.append(imported.name)
+                    }
+                } else {
+                    noPassword.append(imported.name)
+                }
+                continue
+            }
+
+            // A name that is already here on a *different* host gets " 2", " 3", … rather than
+            // overwriting. The loop is bounded by the list itself, so a file full of one repeated
+            // name cannot spin.
+            var name = imported.name
+            if taken.contains(name) {
+                var suffix = 2
+                while taken.contains("\(name) \(suffix)") { suffix += 1 }
+                let unique = "\(name) \(suffix)"
+                renamed.append("\(name) → \(unique)")
+                name = unique
+            }
+            taken.insert(name)
+
+            let id = UUID()
+            let connection = Connection(
+                id: id,
+                name: name,
+                // The colour is this app's own tag, not something Navicat has. Cycling the palette
+                // keeps a freshly imported list visually separable instead of uniformly grey.
+                color: ConnectionColor.allCases[next.count % ConnectionColor.allCases.count],
+                kind: imported.kind,
+                host: imported.host,
+                port: imported.port,
+                scheme: imported.kind == .trino ? "https" : "https",
+                // The export carries encryption settings this app spells differently, and guessing
+                // a mapping would be worse than leaving the default: an sslmode that is wrong is a
+                // connection failure, not a silent one.
+                sslmode: "",
+                user: imported.user,
+                database: imported.database,
+                schema: imported.schema,
+                verify: false,
+                showAllSchemas: false
+            )
+
+            if let password = imported.password, !password.isEmpty {
+                do {
+                    try ConnectionKeychain.set(password, for: id)
+                } catch {
+                    keychainFailures.append(name)
+                }
+            } else {
+                noPassword.append(name)
+            }
+            if imported.database.isEmpty { noDatabase.append(name) }
+            if !imported.sshHost.isEmpty { tunnelled.append(name) }
+            added.append(name)
+            next.append(connection)
+        }
+
+        do {
+            try ConnectionStore.save(next)
+        } catch {
+            notice = Notice(title: "Couldn't save the imported connections",
+                            message: error.localizedDescription)
+            return
+        }
+        connections = next
+        rebuildTree()
+        notice = Notice(title: noticeTitle(added: added.count, refreshed: refreshed.count,
+                                            skipped: export.skipped.count),
+                        message: importSummary(added: added, refreshed: refreshed, renamed: renamed,
+                                               noPassword: noPassword,
+                                               noDatabase: noDatabase, tunnelled: tunnelled,
+                                               keychainFailures: keychainFailures,
+                                               skipped: export.skipped))
+    }
+
+    private func noticeTitle(added: Int, refreshed: Int, skipped: Int) -> String {
+        var parts: [String] = []
+        if added > 0 { parts.append("Imported \(added) \(added == 1 ? "connection" : "connections")") }
+        if refreshed > 0 { parts.append("refreshed \(refreshed)") }
+        if parts.isEmpty { parts.append("Nothing new") }
+        var title = parts.joined(separator: ", ")
+        if skipped > 0 { title += ", skipped \(skipped)" }
+        return title + " from Navicat"
+    }
+
+    /// Every line here exists because silence about it would be a lie of omission — a connection
+    /// that arrived without its password, or with a tunnel this app cannot open, will not connect,
+    /// and the user would otherwise be left to find that out one failed test at a time.
+    private func importSummary(added: [String], refreshed: [String], renamed: [String],
+                               noPassword: [String], noDatabase: [String], tunnelled: [String],
+                               keychainFailures: [String],
+                               skipped: [NavicatImport.Skipped]) -> String {
+        var lines: [String] = []
+        if !added.isEmpty { lines.append("Added: " + added.joined(separator: ", ") + ".") }
+        if !refreshed.isEmpty {
+            lines.append("Updated in place, because the name and host already matched: "
+                         + refreshed.joined(separator: ", ") + ".")
+        }
+        if lines.isEmpty { lines.append("Nothing was added or updated.") }
+        if !renamed.isEmpty {
+            lines.append("Renamed, because the name was already in use: " + renamed.joined(separator: ", ") + ".")
+        }
+        if !noPassword.isEmpty {
+            lines.append("No password in the export for: " + noPassword.joined(separator: ", ") + ". Set one in the connection editor.")
+        }
+        if !keychainFailures.isEmpty {
+            lines.append("Password couldn't be saved to Keychain for: " + keychainFailures.joined(separator: ", ") + ".")
+        }
+        if !noDatabase.isEmpty {
+            lines.append("No database in the export for: " + noDatabase.joined(separator: ", ") + ". Pick one in the connection editor before browsing.")
+        }
+        if !tunnelled.isEmpty {
+            lines.append("These use an SSH tunnel, which this app doesn't open: " + tunnelled.joined(separator: ", ") + ".")
+        }
+        if !skipped.isEmpty {
+            lines.append("Skipped: " + skipped.map { "\($0.name) (\($0.reason))" }.joined(separator: "; ") + ".")
+        }
+        return lines.joined(separator: "\n\n")
     }
 
     /// Recolours a saved connection. The colour is the user's own tag — it is what the sidebar

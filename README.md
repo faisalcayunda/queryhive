@@ -78,6 +78,43 @@ loaded, the columns the last run reported, and Trino keywords — filtered by th
 caret and ranked so an object beats a keyword on the same prefix. ↑ ↓ pick, ⏎ or ⇥ accepts, esc
 dismisses, and ⌃Space opens the list on demand. Nothing is offered inside a string literal.
 
+### Appearance
+
+**Settings (⌘,) ▸ Appearance** picks the **mode** — System, Light or Dark — and then the canvas, the
+accent, the tone and how hard the backdrop glows. System follows macOS and keeps following it:
+switch the system appearance with the window open and the app repaints with it. Light and Dark pin
+one instead. The choice is remembered across launches, and each appearance remembers its own canvas
+and its own theme, so switching between them does not throw a choice away.
+
+Three presets — **Classic** (midnight + ice, the app's own look), **Slate** (neutral charcoal + blue)
+and **Flat** (Slate with every gradient off) — sit above seven canvases, five accents and three tones
+for anyone who wants to mix their own. Each preset names a canvas for the dark *and* one for the
+light, so switching mode stays inside the preset.
+
+**Theme** is the canvas, and a canvas belongs to one appearance: Midnight, Graphite, Nord and Ink in
+the dark; Daylight, Cloud and Paper in the light. Settings lists only the half you are in, because
+there is no such thing as a light Midnight. None of the light canvases is pure white — a `#FFFFFF`
+canvas makes every hairline invisible and turns the frosted panels into grey rectangles.
+
+**Tone** is how the coloured surfaces are painted, independent of which colours they are: *Glow* is
+what the app shipped with (gradient fills, a sheen, a coloured glow, a lit backdrop), *Plain* is one
+flat colour per surface, and *Soft* is a faint accent wash inside an accent border. Plain and Soft
+draw no gradient at all — no ramp on the Run capsule, no sheen, no coloured shadow, flat backdrop.
+
+The accent moves the interactive chrome — the Run capsule, focus rings, the selected tab and tile —
+and stops there: the object tree's own colours are how it tells a table from a column, and the app's
+mark keeps its own pair.
+
+```bash
+QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh.png --theme graphite --accent blue --tone plain
+QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh-light.png --mode light --theme daylight
+```
+
+Renders the shell in an appearance you have not chosen, without saving it — which is how the themes
+were reviewed. `--mode system` draws what the system would decide; add `--system-appearance
+dark|light` to say what the machine would report, which is how a System-mode render is checked
+without changing your Mac's setting.
+
 ### Ship it as a DMG
 
 ```bash
@@ -242,6 +279,7 @@ app/
   Sources/TrinoExporter/
     App.swift               @main, the engine's Event type, notices
     Support/Theme.swift     the CleanMyMac design system: Tone, Hue, glass, HubButton, the comb
+    Support/ThemeStore.swift  the appearance choice: AppTheme, AccentChoice, ThemeStore, presets
     Support/Engine.swift    launches the bundled engine, decodes its JSON events
     Models/AppModel.swift   connections, object tree, tabs, run orchestration
     Models/QueryTab.swift   one query tab: SQL, destination, format options, log, run state

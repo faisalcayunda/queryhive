@@ -102,23 +102,38 @@ enum SQLSyntax {
 
     // MARK: Palette
 
-    private static func colour(_ hex: UInt32, italic: Bool = false) -> [NSAttributedString.Key: Any] {
+    /// One token's colour, as a pair: the value for a dark canvas and the value for a light one.
+    ///
+    /// Every one of these was chosen for a near-black canvas and is unusable on an off-white one —
+    /// measured, `base` is 1.11:1 on Daylight and `string` 1.48:1, which is why a light appearance
+    /// made the query text effectively disappear. Rather than keep two hand-tuned palettes in sync,
+    /// each token is built through `NSColor(name:dynamicProvider:)` so AppKit picks the right half
+    /// per appearance, exactly like `Tone.ink`.
+    ///
+    /// The light values are not guesses: each was darkened at its own hue until it cleared 4.5:1
+    /// against the Daylight canvas (`#F4F6FB`), and each dark value still clears 4.5:1 against
+    /// Midnight (`#0A0B1E`). `comment` is deliberately below that in the dark — it is the one token
+    /// meant to recede — but is kept legible in the light.
+    private static func colour(_ dark: UInt32, _ light: UInt32, italic: Bool = false) -> [NSAttributedString.Key: Any] {
         let plain = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
         // Through the descriptor, not NSFontManager: the monospaced system face has no italic cut
         // for the manager to convert to, and it returns nil.
         let font = italic
             ? (NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: 12.5) ?? plain)
             : plain
-        return [.foregroundColor: NSColor(Color(hex: hex)), .font: font]
+        let adaptive = NSColor(name: nil) { appearance in
+            NSColor(Color(hex: appearance.isDark ? dark : light))
+        }
+        return [.foregroundColor: adaptive, .font: font]
     }
 
-    static let base = colour(0xE8EAF2)
-    static let keyword = colour(0x8B7BFF)
-    static let function = colour(0x4FD8FF)
-    static let string = colour(0x3EE6A8)
-    static let number = colour(0xFFB547)
-    static let quotedIdentifier = colour(0xE8C468)
-    static let literal = colour(0xFF7A8A)
-    static let comment = colour(0x5A6072, italic: true)
-    static let punctuation = colour(0x8A90A6)
+    static let base = colour(0xE8EAF2, 0x1C1F26)
+    static let keyword = colour(0x8B7BFF, 0x5B3FD6)
+    static let function = colour(0x4FD8FF, 0x0B6E8F)
+    static let string = colour(0x3EE6A8, 0x0A7A52)
+    static let number = colour(0xFFB547, 0x9A5B00)
+    static let quotedIdentifier = colour(0xE8C468, 0x7A5C00)
+    static let literal = colour(0xFF7A8A, 0xBE2F45)
+    static let comment = colour(0x5A6072, 0x5F6672, italic: true)
+    static let punctuation = colour(0x8A90A6, 0x565C6B)
 }

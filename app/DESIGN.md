@@ -36,7 +36,7 @@ several queries are open at once. What the two share is the palette, the glass a
 
 | Element | Rule |
 |---|---|
-| Canvas | `Tone.canvas` `#0A0B1E`, near-black, behind everything. |
+| Canvas | `Tone.canvas`, behind everything. Follows the theme *and* the mode (see **Appearance**): `#0A0B1E` midnight by default, `#F4F6FB` when the appearance is light. |
 | Module glow | Two colours per module (`Hue`): the exporter is ice `#4FD8FF` → violet `#7B61FF`, connections are magenta → violet. Success is mint, failure amber → coral. |
 | Backdrop | `Backdrop(hue:)` behind the workspace only; the tree and the status bar carry their own material. Radial gradients, never `.blur` (a snapshot capture does not render it). |
 | Surfaces | Panels are `.glass(radius)` where they float, flat tinted fills where they are chrome. |
@@ -64,11 +64,15 @@ several queries are open at once. What the two share is the palette, the glass a
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-- The title strip carries **nothing on the left**. A mark placed just after the window controls
-  sat closer to them than to its own wordmark, so the two read as one object and the lights
-  looked crowded. The app's identity lives in the sidebar header instead, which is a panel and
-  can give it room; the strip keeps the connection chip on the right and stays draggable
-  everywhere else.
+- The title strip carries **nothing at all**, and that is the point. A mark placed just after the
+  window controls sat closer to them than to its own wordmark, so the two read as one object and
+  the lights looked crowded; the app's identity lives in the sidebar header instead, which is a
+  panel and can give it room. The connection chip that used to sit on the right is gone too: it
+  restated the connection the toolbar's breadcrumb already names, on every tab, in the one strip
+  with no other job — so the row read as a toolbar holding a single control. Nothing became
+  unreachable, because the editor it opened is on the connection picker's menu and on the tree's
+  context menu (`Edit Connection…`). What is left is a drag area at the height the traffic lights
+  need.
 - The tree and the panel both resize by dragging their seam; the cursor changes over each.
 - The toolbar has **two shapes**, switched by the `File | Table` segmented control:
 
@@ -162,13 +166,21 @@ outside a single-quoted string and outside `--` and `/* */` comments. A semicolo
 Postgres dollar-quoted body would fool it, and that is deliberate — such a script is rare, and
 refusing to guess beats splitting wrongly and running half a statement.
 
-### Double-click opens a table
+### Double-click opens a table, and expands everything else
 
-The tree's double-click is **Open**: a new tab named after the table holding `SELECT * FROM
+The tree's double-click is **Open** on a table: a new tab named after it holding `SELECT * FROM
 "catalog"."schema"."table"`, already run, so the rows are on screen before anything is typed. That
 is what a database client does with a table, and it is what the gesture is for. Inserting the name
 into whatever editor happens to be in front is the same action as before, and it is still there —
 in the context menu, where a deliberate choice belongs.
+
+On every other row — connection, catalog, database, schema — the double-click **expands**. A
+connection used to open the editor here instead, which made the one row you double-click most often
+the one row that refused to expand: the root of the tree, the thing you open to start browsing.
+Expand is what the gesture means in every other tree on the platform and what this tree already did
+for catalogs and schemas; the connection was a lone exception, and it was the wrong way round.
+Editing a connection is a deliberate act with a form and a Save button, so it lives in the context
+menu (`Edit Connection…`) and on the connection picker's menu.
 
 ### The column filter has two shapes
 
@@ -307,11 +319,121 @@ cases; `CTRL+]` binds the same command from the same declaration, so that is wha
 
 The scheme is saved under `shortcutScheme`, so the choice survives a relaunch.
 
+### Appearance: mode and theme
+
+**Settings ▸ Appearance** chooses a **mode**, a canvas, an accent, a **tone**, and how hard the
+backdrop glows. Saved under `appearanceMode`, `appTheme`, `lightTheme`, `accentChoice`,
+`surfaceTone` and `glowIntensity`.
+
+**Mode** is System, Light or Dark, and it is separate from the theme. The mode decides light vs
+dark; the theme decides *which* light or dark. System hands `preferredColorScheme(nil)`, which is
+what makes SwiftUI inherit macOS's appearance — and keep inheriting it live, so flipping the system
+appearance repaints the app with no observer of ours. Light and Dark pin one instead.
+
+Seven canvases, in pairs: Midnight (`#0A0B1E`, the original), Graphite (`#151517`, neutral —
+measured off a reference screenshot, not invented), Nord (`#2E3440`), Ink (`#060709`), and the
+lights Daylight (`#F4F6FB`, cool), Cloud (`#F5F5F7`, neutral) and Paper (`#FAF8F4`, warm). None of
+the lights is `#FFFFFF`: a pure-white canvas makes every 1pt hairline invisible and turns the
+frosted panels into grey rectangles, so the chrome has nowhere to be. Five accents, applied as the
+glow → deep pair `Hue.exporter` is built from.
+
+**The chrome is adaptive, and that is what made a light canvas possible at all.** The chrome layer
+is ~120 literal `white`/`black` low-opacity values across ten view files — `.white.opacity(0.07)`
+hairlines, `.white.opacity(0.9)` body text, `Color.black.opacity(0.30)` recessed fields. Those were
+correct on any near-black and unusable on off-white, and rewriting each value per appearance would
+have meant two palettes to keep in sync forever.
+
+Instead the **base colour** became dynamic and the opacities stayed. `Tone.ink` is white in a dark
+appearance and black in a light one; `Tone.recess` is the same trick for the wells that sit *into*
+the canvas. Both are built through `NSColor(name:dynamicProvider:)`, so **AppKit resolves them per
+draw** against the appearance in effect. `.ink.opacity(0.07)` is therefore a white hairline in the
+dark and a black one in the light, and all ~120 call sites keep meaning what they meant.
+
+Two consequences worth recording:
+
+- **No observer, no plumbing.** Because resolution happens in AppKit at draw time, `.ink` is
+  correct under System mode for free: when the user switches the system appearance, AppKit
+  re-resolves and redraws. `ThemeStore.systemIsDark` exists only for the parts SwiftUI computes in
+  a view body (which canvas, which theme tiles), and it is kept current by KVO on
+  `NSApplication.effectiveAppearance` — the documented route, because AppKit publishes no
+  `didChangeEffectiveAppearance` notification and the old `NSControlTintDidChangeNotification` is
+  deprecated.
+- **Four things are deliberately *not* adaptive**, because they are not chrome: gradients' white
+  sheen (a highlight on a saturated surface), white glyphs and labels drawn on an accent fill (the
+  Run capsule, the driver tiles, the comb), and shadows (a shadow is dark in both appearances).
+
+**A canvas belongs to one appearance**, so the theme tiles are filtered to the mode in effect —
+offering a near-black Midnight tile while the app is light would be offering a canvas that cannot be
+painted. The store keeps a theme for each appearance (`darkTheme` / `lightTheme`), so switching mode
+keeps a choice for both instead of letting one overwrite the other.
+
+**What a theme may move, and what it may not.** Only three things follow the choice:
+
+| Follows the accent | Fixed, and why |
+|---|---|
+| `Tone.accent` / `Tone.accentDeep`, hence `Hue.exporter`, the Run capsule, focus rings, selected tabs and tiles, toggle on-states, checkmarks | `Tone.ice`, `violet`, `mint`, `amber`, `coral`, `blue` — these are a *categorical set*: the five suggestion kinds, the nine format tints, the four column types, the three connection states. If `ice` followed the accent, picking Mint would paint a table icon and a column icon the same green and the set would stop carrying information. |
+| `Tone.canvas`, and the glass, which tints itself with it | `Tone.brandGlow`/`brandDeep` — the comb. It is the app's identity, and it is what `make-icon.sh` bakes into the fixed `assets/icon.icns`. A mark that is ice on one Mac and mint on another is not a mark. |
+| The two backdrop glows, scaled by `glowIntensity` (0…1.5, default 1.0) | `Hue.connection` — magenta → violet is how the second module is told from the first. |
+
+`Tone.canvas`, `Tone.accent` and `Tone.accentDeep` are **computed properties reading
+`ThemeStore.shared`**, and that is load-bearing: they are read from ~145 call sites, most inside a
+view body, so SwiftUI's observation tracking repaints every one of them when the store changes.
+Stored `let`s would bake the palette in at first access and Settings would appear to do nothing.
+
+**Tone** is orthogonal to both: `glow` (what shipped — gradient fills, a sheen, a coloured shadow,
+a lit backdrop), `plain` (one flat colour per surface) and `soft` (a faint accent wash inside an
+accent border). Only `glow` draws a gradient anywhere; the other two drop the ramp, the sheen, the
+coloured shadow and the backdrop's radial glows, which are themselves gradients. It is enforced in
+`Hue.gradient` and `Hue.isLuminous` rather than at each call site, so every primary action, driver
+tile and illustration flattens together.
+
+Three presets exist because three combinations are not arbitrary: **Classic** (midnight + ice, the
+app's own look), **Slate** (graphite + blue) and **Flat** (Slate with `plain`, every gradient off).
+Each preset carries a canvas for **both** appearances — Classic is Midnight in the dark and Daylight
+in the light — and applying one writes both halves, so switching mode afterwards stays inside the
+preset rather than landing on whatever the other half happened to hold.
+
+**Reviewing an appearance.** `--theme`, `--accent` and `--tone` draw the shell in an appearance the
+user has not chosen, going through `ThemeStore.pin` so a review never rewrites the user's
+preferences. `--mode system|light|dark` picks the appearance, and `--system-appearance dark|light`
+states what the *machine* would report — a snapshot has no real window to ask AppKit, so that flag
+is what draws `--mode system` as light on a machine that is currently dark:
+
+```bash
+QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh.png --theme graphite --accent blue --tone plain
+QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh-light.png --mode light --theme daylight
+QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/qh-sys-light.png --mode system --system-appearance light
+```
+
+**The SQL editor's palette is a second, separate set of dynamic colours.** All nine syntax tokens
+were chosen for near-black and were unusable on off-white — measured on Daylight, `base` was
+1.11:1 and `string` 1.48:1, which is why a light appearance made the query text effectively
+vanish. Each token now carries a value per appearance, and the light values are not guesses: each
+was darkened at its own hue until it cleared 4.5:1 against the Daylight canvas, while every dark
+value still clears 4.5:1 against Midnight. `comment` is the deliberate exception in the dark — it
+is the one token meant to recede. The editor's caret and default text colour come from AppKit's
+`.labelColor` for the same reason.
+
+**The backdrop glow is damped to 28% on a light canvas.** A radial glow is a dark-canvas idiom: on
+near-black it reads as light spilling from a corner, and the same gradient over off-white reads as
+a stain, which the design's own 0.30 did — a visibly dirty wash across the lower half of the
+window. Light does not need to be added to a light canvas, so what survives is a faint tint that
+says which accent is in use.
+
+`--icon` and `--icon-sheet` pin midnight/ice for the same reason — the shipped icon must not change
+colour with whoever last opened Settings.
+
 ### The status bar says whether the server is answering
 
 `● name · Connected` — the connection's name and whether it is talking, not where it lives. The host
 and port were already on the title strip, and the status bar is the one place that has to answer "is
 this thing working?" at a glance.
+
+It follows the connection the user is **looking at** — the tree's selected row, falling back to the
+active tab — not the tab's connection alone. Reading `selectedTab` meant clicking a connection in
+the tree changed nothing until a tab happened to point at it, and with no tab open the bar said
+"No query open" over a tree full of connections. Selecting a row is the user saying which connection
+they mean.
 
 The state is **derived from the connection's root node** rather than tracked in a flag of its own: a
 browse command in flight *is* `node.loading`, a failed one leaves `node.error`, and a node with
@@ -319,9 +441,10 @@ children has answered a browse at least once. A second flag could disagree with 
 looking at; this cannot. The dot is coloured from the same value as the label, for the same reason —
 a green dot beside "Disconnected" is worse than no dot at all.
 
-Three states, not a boolean: "still trying" is the one a user needs, and a connection with no
-children yet is not broken, so reporting it as disconnected would announce a failure that has not
-happened.
+**Four states, not a boolean.** `idle` — never expanded, so nothing has been asked of it yet — is
+distinct from `disconnected`, which means a browse was attempted and failed. A connection with no
+children yet is not broken, so calling it disconnected announces a failure that has not happened;
+on first launch that labelled every connection in the tree as failed.
 
 ### The context breadcrumb
 
@@ -410,8 +533,8 @@ and its action belongs in the corner where the pointer already is — `Reveal in
 `Copy Name`, and the connection editor's `Cancel` / `Save` stay where they are.
 
 What stays on the right of a header is the control that acts on the *pane* rather than its
-contents: the panel's collapse chevron, the window's connection chip. That is a window control,
-not an action, and the corner is where you look for it.
+contents: the panel's collapse chevron. That is a window control, not an action, and the corner is
+where you look for it.
 
 ### Spacing
 

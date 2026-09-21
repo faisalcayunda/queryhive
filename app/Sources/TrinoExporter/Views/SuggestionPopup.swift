@@ -19,7 +19,7 @@ struct SuggestionPopup: View {
                         .frame(width: 14)
                     Text(item.text)
                         .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(index == completion.selected ? .white : .white.opacity(0.85))
+                        .foregroundStyle(Tone.ink.opacity(index == completion.selected ? 1 : 0.85))
                         .lineLimit(1)
                     Spacer(minLength: 10)
                     Text(item.kind.label)
@@ -28,7 +28,7 @@ struct SuggestionPopup: View {
                 }
                 .padding(.horizontal, 9)
                 .frame(height: Self.rowHeight)
-                .background(index == completion.selected ? Color.white.opacity(0.15) : Color.clear,
+                .background(index == completion.selected ? Tone.ink.opacity(0.15) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
         }

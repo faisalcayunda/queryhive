@@ -67,23 +67,23 @@ struct DestinationPopover: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Divider().overlay(.white.opacity(0.08))
+            Divider().overlay(Tone.ink.opacity(0.08))
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     switch tab.destination {
                     case .file:
                         FormatGrid(selection: $tab.format)
-                        Divider().overlay(.white.opacity(0.08))
+                        Divider().overlay(Tone.ink.opacity(0.08))
                         FormatOptionsPanel(tab: tab)
-                        Divider().overlay(.white.opacity(0.08))
+                        Divider().overlay(Tone.ink.opacity(0.08))
                         StreamingOptions(tab: tab)
-                        Divider().overlay(.white.opacity(0.08))
+                        Divider().overlay(Tone.ink.opacity(0.08))
                         LabeledField("Folder") {
                             HStack(spacing: 8) {
                                 Text(tab.outputDirectory?.path ?? "No folder chosen")
                                     .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(tab.outputDirectory == nil ? Tone.coral : .white)
+                                    .foregroundStyle(tab.outputDirectory == nil ? Tone.coral : Tone.ink)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -103,7 +103,7 @@ struct DestinationPopover: View {
             .frame(height: 396)
             .scrollBounceBehavior(.basedOnSize)
 
-            Divider().overlay(.white.opacity(0.08))
+            Divider().overlay(Tone.ink.opacity(0.08))
 
             HStack(spacing: 8) {
                 if let blocked {
@@ -192,19 +192,19 @@ struct TableTargetFields: View {
             LabeledField("Table") {
                 TextField("penerima_manfaat_2026", text: $tab.targetTable).field()
             }
-            Divider().overlay(.white.opacity(0.08))
+            Divider().overlay(Tone.ink.opacity(0.08))
             SectionLabel(text: "If the table already exists")
             ForEach(WriteMode.allCases) { mode in
                 Button { tab.writeMode = mode } label: {
                     HStack(alignment: .top, spacing: 9) {
                         Image(systemName: tab.writeMode == mode ? "checkmark.circle.fill" : "circle")
                             .font(.system(size: 12))
-                            .foregroundStyle(tab.writeMode == mode ? mode.tint : .white.opacity(0.3))
+                            .foregroundStyle(tab.writeMode == mode ? mode.tint : Tone.ink.opacity(0.3))
                             .padding(.top, 1)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.statement)
                                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(mode == .replace ? Tone.coral : .white)
+                                .foregroundStyle(mode == .replace ? Tone.coral : Tone.ink)
                             Text(mode.help)
                                 .font(.system(size: 11))
                                 .foregroundStyle(Tone.secondary)

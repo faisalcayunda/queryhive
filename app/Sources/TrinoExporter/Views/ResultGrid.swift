@@ -128,7 +128,7 @@ struct ResultGrid: View {
                 VStack(alignment: isNumeric(column.type) ? .trailing : .leading, spacing: 3) {
                     Text(column.name)
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(Tone.ink.opacity(0.92))
                         .lineLimit(1)
                     Chip(text: column.type, tint: typeTint(column.type))
                 }
@@ -137,11 +137,11 @@ struct ResultGrid: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .overlay(alignment: .topTrailing) { filterButton(index) }
-                .overlay(Rectangle().fill(.white.opacity(0.05)).frame(width: 1), alignment: .trailing)
+                .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
         .background(Color(hex: 0x141726))
-        .overlay(Rectangle().fill(.white.opacity(0.12)).frame(height: 1), alignment: .bottom)
+        .overlay(Rectangle().fill(Tone.ink.opacity(0.12)).frame(height: 1), alignment: .bottom)
     }
 
     private func rowView(_ row: [String?], index: Int, columns: [Event.Column], widths: [CGFloat]) -> some View {
@@ -153,21 +153,21 @@ struct ResultGrid: View {
                            alignment: isNumeric(column.type) ? .trailing : .leading)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .overlay(Rectangle().fill(.white.opacity(0.05)).frame(width: 1), alignment: .trailing)
+                    .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
-        .background(index % 2 == 1 ? Color.white.opacity(0.03) : Color.clear)
+        .background(index % 2 == 1 ? Tone.ink.opacity(0.03) : Color.clear)
     }
 
     /// The row-number column, shared by the header and every row so they cannot drift apart.
     private func gutter(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 10.5, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.35))
+            .foregroundStyle(Tone.ink.opacity(0.35))
             .frame(width: 44, alignment: .trailing)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .overlay(Rectangle().fill(.white.opacity(0.05)).frame(width: 1), alignment: .trailing)
+            .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
     }
 
     /// A NULL is not an empty string and must not look like one: it is italic and dim, the same
@@ -175,17 +175,17 @@ struct ResultGrid: View {
     @ViewBuilder private func cell(_ value: String?) -> some View {
         if let value {
             if value.isEmpty {
-                Text("∅").font(.mono12).foregroundStyle(.white.opacity(0.3))
+                Text("∅").font(.mono12).foregroundStyle(Tone.ink.opacity(0.3))
             } else {
                 Text(value)
                     .font(.mono12)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(Tone.ink.opacity(0.9))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(value)
             }
         } else {
-            Text("null").italic().font(.mono12).foregroundStyle(.white.opacity(0.3))
+            Text("null").italic().font(.mono12).foregroundStyle(Tone.ink.opacity(0.3))
         }
     }
 
@@ -256,7 +256,7 @@ struct ResultGrid: View {
             Image(systemName: active ? "line.3.horizontal.decrease.circle.fill"
                                      : "line.3.horizontal.decrease.circle")
                 .font(.system(size: 10))
-                .foregroundStyle(active ? Tone.ice : .white.opacity(0.30))
+                .foregroundStyle(active ? Tone.accent : Tone.ink.opacity(0.30))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -352,8 +352,8 @@ struct ResultGrid: View {
                         .frame(width: 52)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.10)))
+                        .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Tone.ink.opacity(0.10)))
                 }
                 .help("How many rows Run fetches. It does not change the query; the engine stops reading here.")
             }
@@ -372,7 +372,7 @@ struct ResultGrid: View {
         }
         .padding(.horizontal, Metrics.gutter)
         .padding(.vertical, 6)
-        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
         .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?",
                             isPresented: $confirmReplace) {
             Button("Drop and Recreate", role: .destructive) { model.run(tab) }
@@ -421,7 +421,7 @@ private struct ValuePickerList: View {
                         if values.count > 3, search.isEmpty {
                             row(title: picked.count == values.count ? "Clear" : "Select all",
                                 checked: picked.count == values.count) { toggleAll() }
-                            Divider().overlay(.white.opacity(0.08)).padding(.vertical, 3)
+                            Divider().overlay(Tone.ink.opacity(0.08)).padding(.vertical, 3)
                         }
                         ForEach(shown, id: \.self) { value in
                             row(title: display(value), checked: picked.contains(token(value))) {
@@ -446,10 +446,10 @@ private struct ValuePickerList: View {
             HStack(spacing: 8) {
                 Image(systemName: checked ? "checkmark.square.fill" : "square")
                     .font(.system(size: 11))
-                    .foregroundStyle(checked ? Tone.ice : .white.opacity(0.35))
+                    .foregroundStyle(checked ? Tone.accent : Tone.ink.opacity(0.35))
                 Text(title)
                     .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(title == "null" ? .white.opacity(0.45) : .white.opacity(0.92))
+                    .foregroundStyle(title == "null" ? Tone.ink.opacity(0.45) : Tone.ink.opacity(0.92))
                     .italic(title == "null")
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -460,7 +460,7 @@ private struct ValuePickerList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(checked ? Color.white.opacity(0.05) : .clear,
+        .background(checked ? Tone.ink.opacity(0.05) : .clear,
                     in: RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 

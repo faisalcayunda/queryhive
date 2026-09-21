@@ -13,12 +13,24 @@ struct Workspace: View {
         VStack(spacing: 0) {
             if let tab = model.selectedTab {
                 TabStrip()
-                QueryToolbar(tab: tab)
-                // Keyed by tab: sharing one editor across tabs would carry the previous query's
-                // undo stack and scroll position into the next one.
-                EditorPane(tab: tab).id(tab.id)
-                PanelResizer()
-                BottomPanel(tab: tab, ceiling: workspaceHeight.map { $0 * AppModel.panelShare })
+                if tab.isObjects {
+                    // No toolbar and no editor: an object tab holds no query to run, and the
+                    // toolbar's destination controls would be switches for something that does
+                    // not exist on this tab.
+                    ObjectsPane(tab: tab)
+                } else if model.panelExpanded {
+                    // Rows over the whole window. The toolbar, editor and resizer all go with the
+                    // editor they belong to -- a resizer under a full-height panel would have
+                    // nothing left to resize. The panel's minimise control is the way back.
+                    BottomPanel(tab: tab, ceiling: workspaceHeight)
+                } else {
+                    QueryToolbar(tab: tab)
+                    // Keyed by tab: sharing one editor across tabs would carry the previous
+                    // query's undo stack and scroll position into the next one.
+                    EditorPane(tab: tab).id(tab.id)
+                    PanelResizer()
+                    BottomPanel(tab: tab, ceiling: workspaceHeight.map { $0 * AppModel.panelShare })
+                }
             } else {
                 EmptyWorkspace()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -86,8 +98,8 @@ struct TabStrip: View {
             }
         }
         .frame(height: Metrics.tabStrip)
-        .background(Color.black.opacity(0.22))
-        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .background(Tone.recess.opacity(0.22))
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
     }
 }
 
@@ -104,7 +116,7 @@ struct TabChip: View {
             Text(tab.title)
                 .font(.system(size: 12, weight: selected ? .semibold : .regular))
                 .lineLimit(1)
-                .foregroundStyle(selected ? .white : .white.opacity(0.75))
+                .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
             Button { model.closeTab(tab.id) } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -118,10 +130,10 @@ struct TabChip: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 27)
-        .background(Color.white.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
+        .background(Tone.ink.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
                     in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .strokeBorder(selected ? Tone.ice.opacity(0.35) : .clear))
+            .strokeBorder(selected ? Tone.accent.opacity(0.35) : .clear))
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onTapGesture { model.selectTab(tab.id) }
         .onHover { hovering = $0 }
@@ -166,8 +178,8 @@ struct QueryToolbar: View {
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.toolbar)
-        .background(Color.white.opacity(0.03))
-        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .background(Tone.ink.opacity(0.03))
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
         .onChange(of: tab.destination) { _, destination in
             if destination == .table { model.prepareTableDestination(tab) }
         }
@@ -205,7 +217,7 @@ struct QueryToolbar: View {
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(running ? .white.opacity(0.3) : .white.opacity(0.75))
+                    .foregroundStyle(running ? Tone.ink.opacity(0.3) : Tone.ink.opacity(0.75))
                     .frame(width: 18, height: 28)
                     .contentShape(Rectangle())
             }
@@ -229,7 +241,7 @@ struct QueryToolbar: View {
             // while looking at a query, not a peer of Run. It shares Run's blocked reasons, since
             // explaining needs exactly what running needs.
             IconButton(symbol: "list.bullet.rectangle",
-                       tint: tab.explaining ? Tone.ice : Tone.secondary,
+                       tint: tab.explaining ? Tone.accent : Tone.secondary,
                        help: tab.explaining ? "Explaining…"
                             : (model.runBlockedReason ?? "Show the query plan without running it"),
                        diameter: 28) {
@@ -269,9 +281,9 @@ struct WriteModeButton: View {
             }
             .padding(.horizontal, 9)
             .frame(height: Metrics.control)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(mode == .replace ? Tone.coral.opacity(0.5) : .white.opacity(0.10)))
+                .strokeBorder(mode == .replace ? Tone.coral.opacity(0.5) : Tone.ink.opacity(0.10)))
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .menuStyle(.button)
@@ -303,7 +315,7 @@ struct EditorPane: View {
             // and its actions at the other reads as broken.
             HStack(spacing: 8) {
                 SectionLabel(text: "Query")
-                Text("·").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.25))
+                Text("·").font(.system(size: 10.5)).foregroundStyle(Tone.ink.opacity(0.25))
                 Text(pluralized(lineCount, "line"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(Tone.secondary)
@@ -334,10 +346,10 @@ struct EditorPane: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("SELECT * FROM hive.analytics.penerima_manfaat")
                                 .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.26))
+                                .foregroundStyle(Tone.ink.opacity(0.26))
                             Text("Suggestions appear as you type · ⌃Space to ask for them")
                                 .font(.system(size: 11.5))
-                                .foregroundStyle(.white.opacity(0.22))
+                                .foregroundStyle(Tone.ink.opacity(0.22))
                         }
                         .padding(.leading, 13)
                         .padding(.top, 10)
@@ -361,7 +373,7 @@ struct PanelResizer: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
             Color.clear.contentShape(Rectangle())
         }
         .frame(height: 7)
@@ -427,10 +439,10 @@ struct FormatTile: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
-            .background(Color.white.opacity(selected ? 0.14 : (hovering ? 0.06 : 0.02)),
+            .background(Tone.ink.opacity(selected ? 0.14 : (hovering ? 0.06 : 0.02)),
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(selected ? Tone.ice.opacity(0.5) : .white.opacity(0.08), lineWidth: selected ? 1.5 : 1))
+                .strokeBorder(selected ? Tone.accent.opacity(0.5) : Tone.ink.opacity(0.08), lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -510,5 +522,135 @@ struct StreamingOptions: View {
                 .fixedSize(horizontal: false, vertical: true)
             ChipToggle(label: "Zip the result files", isOn: $tab.zip)
         }
+    }
+}
+
+// MARK: Objects
+
+/// A schema's objects, as a grid whose columns are the driver's own.
+///
+/// There is no fixed four-column shape here on purpose. Postgres answers Name, OID, Owner and ACL
+/// — `pg_class` genuinely carries all four — while Trino's information_schema has no OID, owner or
+/// ACL to give and answers Name and Type, and MySQL answers Name, Engine, Rows and Comment. A
+/// shared shape would put empty cells in three of four columns on two of the three drivers, which
+/// is the grid claiming to know something it does not.
+struct ObjectsPane: View {
+    @Environment(AppModel.self) private var model
+    let tab: QueryTab
+    /// Wide enough for a schema-qualified name without truncating it to nothing, narrow enough
+    /// that four columns still fit the window the editor normally occupies.
+    private let columnWidth: CGFloat = 170
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
+            grid
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "tablecells")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Tone.secondary)
+            Text(tab.objectScope?.title ?? tab.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+            if tab.objectLoading {
+                ProgressView().controlSize(.mini)
+            } else if !tab.objectRows.isEmpty {
+                Text(pluralized(tab.objectRows.count, "object"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Tone.secondary)
+            }
+            Spacer()
+            IconButton(symbol: "arrow.clockwise", help: "Reload these objects", diameter: 20) {
+                model.loadObjects(tab)
+            }
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .frame(height: Metrics.panelTabs)
+        .background(Tone.recess.opacity(0.22))
+    }
+
+    @ViewBuilder
+    private var grid: some View {
+        if let error = tab.objectError {
+            note(error, symbol: "exclamationmark.triangle")
+        } else if tab.objectRows.isEmpty {
+            // Still "loading" with nothing yet is a spinner rather than an empty state, because
+            // "No objects here" while a query is in flight is a claim the app has not earned.
+            note(tab.objectLoading ? "Loading…" : "No objects here.",
+                 symbol: tab.objectLoading ? "clock" : "tray")
+        } else {
+            // A ScrollView on *both* axes centres content smaller than its viewport, which parked
+            // eight rows in the middle of the window with a screenful of nothing above them.
+            //
+            // A `.frame(maxHeight: .infinity, alignment: .topLeading)` on the content does not fix
+            // it, and it is worth saying why rather than leaving the next reader to rediscover it:
+            // a scroll view proposes an *unspecified* size along the axes it scrolls, so that frame
+            // collapses to the content's own height and the alignment has nothing to align against.
+            // Handing the content the viewport's own size as a minimum leaves no slack to centre.
+            GeometryReader { viewport in
+                ScrollView([.horizontal, .vertical]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        headerRow
+                        ForEach(Array(tab.objectRows.enumerated()), id: \.offset) { _, row in
+                            rowView(row)
+                        }
+                    }
+                    .padding(.horizontal, Metrics.gutter)
+                    .padding(.bottom, 12)
+                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height,
+                           alignment: .topLeading)
+                }
+            }
+        }
+    }
+
+    private var headerRow: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(tab.objectColumns, id: \.self) { name in
+                    Text(name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Tone.secondary)
+                        .frame(width: columnWidth, alignment: .leading)
+                }
+            }
+            .padding(.vertical, 6)
+            Rectangle().fill(Tone.ink.opacity(0.09)).frame(height: 1)
+        }
+    }
+
+    private func rowView(_ row: [String?]) -> some View {
+        HStack(spacing: 0) {
+            // Driven by the headers, not by the row: a driver that answered a short row would
+            // otherwise shift every value one column to the left, under the wrong header, which is
+            // worse than a blank cell.
+            ForEach(tab.objectColumns.indices, id: \.self) { index in
+                Text(index < row.count ? (row[index] ?? "") : "")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Tone.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: columnWidth, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func note(_ text: String, symbol: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol).font(.system(size: 22)).foregroundStyle(Tone.secondary)
+            Text(text)
+                .font(.body13)
+                .foregroundStyle(Tone.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(30)
     }
 }

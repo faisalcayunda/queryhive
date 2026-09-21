@@ -34,8 +34,11 @@ struct SQLEditor: NSViewRepresentable {
         textView.isSelectable = true
         textView.allowsUndo = true
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textColor = .white
-        textView.insertionPointColor = .white
+        // Adaptive, not pinned white: this NSTextView draws on `Tone.canvas`, which is near-black
+        // in a dark appearance and off-white in a light one. AppKit resolves both of these per
+        // appearance, so the caret and the default text colour follow the canvas with no observer.
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .labelColor
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         // Every one of these would corrupt SQL: a quote would become curly, "--" an em dash, and

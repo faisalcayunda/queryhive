@@ -13,7 +13,7 @@ struct BottomPanel: View {
         VStack(spacing: 0) {
             header
             if !model.panelCollapsed {
-                Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
+                Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
                 Group {
                     switch tab.panel {
                     case .log: LogPanel(tab: tab)
@@ -30,8 +30,8 @@ struct BottomPanel: View {
             }
         }
         .frame(height: model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity))
-        .background(Color.black.opacity(0.20))
-        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .background(Tone.recess.opacity(0.20))
+        .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
     }
 
     private var header: some View {
@@ -49,11 +49,22 @@ struct BottomPanel: View {
                 ProgressView().controlSize(.mini).padding(.leading, 6)
             }
             Spacer()
-            IconButton(symbol: model.panelCollapsed ? "chevron.up" : "chevron.down",
-                       help: model.panelCollapsed ? "Show the panel" : "Hide the panel", diameter: 20) {
-                model.panelCollapsed.toggle()
+            // When the rows hold the whole window this is a *minimise*, not a collapse: collapsing
+            // a full-height panel would leave an empty window with a header at the bottom, which is
+            // not a state anyone asked for. Both controls are never shown together.
+            if model.panelExpanded {
+                IconButton(symbol: "rectangle.compress.vertical",
+                           help: "Minimise, and bring the editor back", diameter: 20) {
+                    model.panelExpanded = false
+                }
+                .padding(.trailing, 4)
+            } else {
+                IconButton(symbol: model.panelCollapsed ? "chevron.up" : "chevron.down",
+                           help: model.panelCollapsed ? "Show the panel" : "Hide the panel", diameter: 20) {
+                    model.panelCollapsed.toggle()
+                }
+                .padding(.trailing, 4)
             }
-            .padding(.trailing, 4)
         }
         .padding(.leading, Metrics.gutter)
         .padding(.trailing, Metrics.gutter - 6)
@@ -85,16 +96,16 @@ struct PanelTabButton: View {
                 if let count {
                     Text("\(count)")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(selected ? Tone.ice : Tone.secondary)
+                        .foregroundStyle(selected ? Tone.accent : Tone.secondary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.white.opacity(0.08), in: Capsule())
+                        .background(Tone.ink.opacity(0.08), in: Capsule())
                 }
             }
-            .foregroundStyle(selected ? .white : Tone.secondary)
+            .foregroundStyle(selected ? Tone.ink : Tone.secondary)
             .padding(.horizontal, 9)
             .frame(height: 21)
-            .background(Color.white.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
+            .background(Tone.ink.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
                         in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
@@ -148,7 +159,7 @@ struct LogRow: View {
         HStack(alignment: .top, spacing: 8) {
             Text(line.at, format: .dateTime.hour().minute().second())
                 .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(Tone.ink.opacity(0.35))
                 .frame(width: 56, alignment: .leading)
             Image(systemName: line.kind.symbol)
                 .font(.system(size: 9, weight: .bold))
@@ -157,7 +168,7 @@ struct LogRow: View {
                 .padding(.top, 2)
             Text(line.text)
                 .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(line.kind == .info ? .white.opacity(0.82) : line.kind.tint)
+                .foregroundStyle(line.kind == .info ? Tone.ink.opacity(0.82) : line.kind.tint)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -216,7 +227,7 @@ struct TablePanel: View {
             }
             .padding(.horizontal, Metrics.gutter)
             .padding(.vertical, 6)
-            .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+            .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
         }
     }
 
@@ -229,7 +240,7 @@ struct TablePanel: View {
                 .frame(width: 96, alignment: .leading)
             Text(value)
                 .font(monospaced ? .system(size: 12, design: .monospaced) : .system(size: 12))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(Tone.ink.opacity(0.9))
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -253,7 +264,7 @@ struct FilesPanel: View {
                 if let directory = tab.outputDirectory {
                     Text(directory.path)
                         .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(Tone.ink.opacity(0.35))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -290,7 +301,7 @@ struct FilesPanel: View {
                             }
                             .padding(.vertical, 4)
                             .padding(.horizontal, Metrics.gutter)
-                            .background(Color.white.opacity(index % 2 == 0 ? 0.03 : 0), in: Rectangle())
+                            .background(Tone.ink.opacity(index % 2 == 0 ? 0.03 : 0), in: Rectangle())
                         }
                     }
                     .padding(.vertical, 4)
@@ -305,7 +316,7 @@ struct FilesPanel: View {
                 }
                 .padding(.horizontal, Metrics.gutter)
                 .padding(.vertical, 6)
-                .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+                .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
             }
         }
     }

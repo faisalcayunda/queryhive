@@ -5,8 +5,12 @@ import SwiftUI
 /// strip so a connection reads the same way everywhere it appears.
 func connectionTile(_ connection: Connection, size: CGFloat = 22) -> some View {
     RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-        .fill(LinearGradient(colors: [connection.color.color, connection.color.color.opacity(0.55)],
-                              startPoint: .topLeading, endPoint: .bottomTrailing))
+        // The tile's own subtle ramp, flattened under a flat tone like every other gradient.
+        .fill(ThemeStore.shared.tone.isLuminous
+              ? LinearGradient(colors: [connection.color.color, connection.color.color.opacity(0.55)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+              : LinearGradient(colors: [connection.color.color, connection.color.color],
+                               startPoint: .topLeading, endPoint: .bottomTrailing))
         .frame(width: size, height: size)
         .overlay {
             if let logo = DriverLogo.image(for: connection.kind) {
@@ -51,8 +55,8 @@ struct ConnectionPickerButton: View {
             .padding(.horizontal, 9)
             .frame(maxWidth: .infinity)
             .frame(height: 28)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.white.opacity(0.10)))
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Tone.ink.opacity(0.10)))
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .menuStyle(.button)
@@ -72,7 +76,7 @@ struct ColorSwatchPicker: View {
                     Circle()
                         .fill(color.color)
                         .frame(width: 22, height: 22)
-                        .overlay(Circle().strokeBorder(.white.opacity(selection == color ? 0.9 : 0.15), lineWidth: selection == color ? 2 : 1))
+                        .overlay(Circle().strokeBorder(Tone.ink.opacity(selection == color ? 0.9 : 0.15), lineWidth: selection == color ? 2 : 1))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(color.rawValue.capitalized)
@@ -190,7 +194,7 @@ struct ConnectionEditorSheet: View {
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             VStack(alignment: .leading, spacing: 14) {
                 SectionLabel(text: "Select a connection type")
                 HStack(spacing: 12) {
@@ -206,9 +210,19 @@ struct ConnectionEditorSheet: View {
             }
             .padding(20)
             Spacer()
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             HStack(spacing: 10) {
                 PillButton(title: "New Connection with URI…", symbol: "link") { step = .url }
+                // This sheet closes first. `presentNavicatImport` runs a modal `NSOpenPanel`, and
+                // starting one from inside a sheet being dismissed puts the panel behind the sheet
+                // on its way out — the wait is the sheet's own dismissal animation, not a guess.
+                PillButton(title: "Import from Navicat…", symbol: "square.and.arrow.down") {
+                    dismiss()
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(350))
+                        model.presentNavicatImport()
+                    }
+                }
                 Spacer()
                 PillButton(title: "Cancel", role: .quiet) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -227,7 +241,7 @@ struct ConnectionEditorSheet: View {
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             VStack(alignment: .leading, spacing: 12) {
                 SectionLabel(text: "Connection URI")
                 TextField("postgresql://user:password@host:5432/mydb", text: $urlText)
@@ -242,12 +256,12 @@ struct ConnectionEditorSheet: View {
                      mysql://user:password@host:3306/mydb
                      """)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(Tone.ink.opacity(0.4))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(20)
             Spacer()
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             HStack(spacing: 10) {
                 PillButton(title: "Back", symbol: "chevron.left", role: .quiet) { step = .typePicker }
                 Spacer()
@@ -262,11 +276,11 @@ struct ConnectionEditorSheet: View {
     private var formStep: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             ScrollView {
                 form.padding(20)
             }
-            Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             footer
         }
     }
@@ -449,7 +463,7 @@ struct ConnectionEditorSheet: View {
             Circle().fill(tint).frame(width: 7, height: 7).layoutPriority(1)
             Text(text)
                 .font(.system(size: 12))
-                .foregroundStyle(tint == Tone.coral ? Tone.coral : .white.opacity(0.85))
+                .foregroundStyle(tint == Tone.coral ? Tone.coral : Tone.ink.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(truncation)
         }
@@ -475,11 +489,11 @@ struct ConnectionEditorSheet: View {
                     ProgressView().controlSize(.small)
                     Text("Testing…").font(.system(size: 12.5, weight: .medium))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(Tone.ink)
                 .padding(.horizontal, 13)
                 .frame(height: 28)
-                .background(Color.white.opacity(0.10), in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.14)))
+                .background(Tone.ink.opacity(0.10), in: Capsule())
+                .overlay(Capsule().strokeBorder(Tone.ink.opacity(0.14)))
             } else {
                 PillButton(title: "Test Connection", symbol: "bolt") { runTest() }
                     .keyboardShortcut("t", modifiers: .command)
@@ -652,13 +666,15 @@ struct ConnectionTypeTile: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(hue.gradient)
                     .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
-                                                 startPoint: .top, endPoint: .center))
+                        if hue.isLuminous {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
+                                                     startPoint: .top, endPoint: .center))
+                        }
                     }
                     .overlay {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(.white.opacity(0.28))
+                            .strokeBorder(hue.isLuminous ? Tone.ink.opacity(0.28) : hue.stroke.opacity(0.6))
                     }
                     .overlay {
                         if let logo = DriverLogo.image(for: kind) {
@@ -677,17 +693,17 @@ struct ConnectionTypeTile: View {
 
                 Text(kind.label)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Tone.ink)
                 Text(verbatim: "port \(kind.defaultPort)")
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Tone.secondary)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
-            .background(Color.white.opacity(hovering ? 0.07 : 0.03),
+            .background(Tone.ink.opacity(hovering ? 0.07 : 0.03),
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(hovering ? 0.18 : 0.09)))
+                .strokeBorder(Tone.ink.opacity(hovering ? 0.18 : 0.09)))
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -712,9 +728,13 @@ struct ConnectionBrandTile: View {
     var body: some View {
         let tile = RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
         tile.fill(hue.gradient)
-            .overlay(tile.fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
-                                               startPoint: .top, endPoint: .center)))
-            .overlay(tile.strokeBorder(.white.opacity(0.3)))
+            .overlay {
+                if hue.isLuminous {
+                    tile.fill(LinearGradient(colors: [.white.opacity(0.35), .clear],
+                                             startPoint: .top, endPoint: .center))
+                }
+            }
+            .overlay(tile.strokeBorder(hue.isLuminous ? Tone.ink.opacity(0.3) : hue.stroke.opacity(0.6)))
             .overlay {
                 if let logo = DriverLogo.image(for: kind) {
                     Image(nsImage: logo).resizable().scaledToFit()
@@ -722,6 +742,6 @@ struct ConnectionBrandTile: View {
                 }
             }
             .frame(width: size, height: size)
-            .shadow(color: hue.accent.opacity(0.5), radius: size * 0.16, y: size * 0.06)
+            .shadow(color: hue.accent.opacity(hue.isLuminous ? 0.5 : 0), radius: size * 0.16, y: size * 0.06)
     }
 }

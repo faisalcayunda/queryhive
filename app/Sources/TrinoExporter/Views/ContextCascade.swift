@@ -115,7 +115,7 @@ struct ContextCascade: View {
             HStack(spacing: 6) {
                 Text(value.isEmpty ? label : value)
                     .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(showing ? .white.opacity(0.92) : Tone.secondary)
+                    .foregroundStyle(showing ? Tone.ink.opacity(0.92) : Tone.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 2)
@@ -129,9 +129,9 @@ struct ContextCascade: View {
             }
             .padding(.horizontal, 9)
             .frame(width: width, height: 28)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(.white.opacity(showing ? 0.16 : 0.10)))
+                .strokeBorder(Tone.ink.opacity(showing ? 0.16 : 0.10)))
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .menuStyle(.button)

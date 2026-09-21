@@ -35,13 +35,12 @@ struct SidebarTree: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 5)
             }
-            hint
         }
         .background {
             Rectangle().fill(.thinMaterial)
-            Rectangle().fill(Color.black.opacity(0.18))
+            Rectangle().fill(Tone.recess.opacity(0.18))
         }
-        .overlay(alignment: .trailing) { Rectangle().fill(.white.opacity(0.07)).frame(width: 1) }
+        .overlay(alignment: .trailing) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1) }
     }
 
     private var header: some View {
@@ -92,24 +91,13 @@ struct SidebarTree: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 24)
-            .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(.white.opacity(0.08)))
+            .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Tone.ink.opacity(0.08)))
         }
         .padding(.horizontal, Metrics.gutter)
         .padding(.top, 12)
         .padding(.bottom, 9)
-        .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
-    }
-
-    private var hint: some View {
-        Text("Double-click a table to open it · right-click to insert its name")
-            .font(.system(size: 10))
-            .foregroundStyle(.white.opacity(0.35))
-            .lineLimit(1)
-            .padding(.horizontal, Metrics.gutter)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
     }
 
     private var emptyState: some View {
@@ -180,7 +168,7 @@ struct TreeRow: View {
             messageRow(symbol: "exclamationmark.triangle.fill", text: error, tint: Tone.coral)
         } else if showChildren, let children = node.children {
             if children.isEmpty {
-                messageRow(symbol: nil, text: "Empty", tint: .white.opacity(0.3))
+                messageRow(symbol: nil, text: "Empty", tint: Tone.ink.opacity(0.3))
             } else {
                 // Lazy, so a wide catalog builds only the rows on screen. The recursion is a
                 // method call on the child, not a nested `TreeRow`, which is what keeps the type
@@ -225,7 +213,7 @@ struct TreeRow: View {
         .padding(.leading, CGFloat(depth) * Metrics.treeIndent + 6)
         .padding(.trailing, 7)
         .frame(height: Metrics.treeRow)
-        .background(Color.white.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
+        .background(Tone.ink.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
                     in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -334,10 +322,25 @@ struct TreeRow: View {
         }
     }
 
+    /// The tree's double-click: **Open** on a table, **list its objects** on a schema or a MySQL
+    /// database, and **expand** on everything else.
+    ///
+    /// A schema used to expand here like a catalog does. That is the right gesture for a catalog --
+    /// you are walking down to the level you want -- but a schema is where the objects actually
+    /// are, and asking to see them is what a click there means. Expanding is still one click away
+    /// on the disclosure triangle, which is where the platform puts it anyway.
+    ///
+    /// A connection used to open the editor here, which made the one row you double-click most
+    /// often — the root of the tree, the thing you expand to start browsing — the one row that
+    /// refused to expand. Expand/collapse is what the gesture means in every other tree on the
+    /// platform, and it is what this tree does for catalogs, schemas and databases; a connection
+    /// was the single exception, and the exception was the wrong way round. Editing a connection
+    /// is a deliberate act with a form and a Save button, so it belongs in the context menu, where
+    /// it already is.
     private func doubleClick() {
         switch node.kind {
         case .table: model.openTable(node)
-        case .connection: model.presentConnectionEditor(node.connectionID)
+        case .schema, .database: model.openObjects(node)
         default:
             model.selectedNodeID = node.id
             model.toggleExpansion(node)
@@ -358,7 +361,7 @@ struct TreeRow: View {
     private var helpText: String {
         switch node.kind {
         case .connection:
-            "\(node.title) · \(node.connectionKind.label) — double-click to edit, or expand to browse"
+            "\(node.title) · \(node.connectionKind.label) — double-click to expand. Right-click to edit."
         case .catalog:
             "Catalog \(node.title) — expand to list schemas"
         case .database:

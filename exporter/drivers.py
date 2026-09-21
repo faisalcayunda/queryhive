@@ -305,6 +305,25 @@ class Driver:
     def tables_sql(self, database="", schema="") -> str:
         raise ValueError(self._no_level("tables"))
 
+    # The columns `objects_sql` answers, in order, and these are declared by the
+    # driver rather than fixed for every driver. What a catalog can say about an
+    # object is the catalog's own business: Postgres keeps a real OID, an owner and
+    # an ACL in `pg_class`, Trino's information_schema has none of those, and MySQL
+    # keeps engine/rows/comment instead. One shared four-column shape (Name, OID,
+    # Owner, ACL) would put empty cells in three of four columns on two of the three
+    # drivers, and the grid would be lying about what it knows.
+    objects_columns: ClassVar[tuple[str, ...]] = ()
+
+    def objects_sql(self, database="", schema="") -> str:
+        """The objects of one schema, with whatever metadata this driver can answer.
+
+        Distinct from `tables_sql`: that one answers "what are the names", one
+        string per row, and every caller of it expects exactly that. This one
+        answers "what are the objects and what do we know about them", and the
+        shape of the answer is `objects_columns`.
+        """
+        raise ValueError(self._no_level("objects"))
+
     def probe_sql(self, database="", schema="") -> str:
         """The statement `test` runs: the top level this driver lists at all.
 
@@ -455,6 +474,27 @@ class TrinoDriver(Driver):
         # the coordinator has, and there is no system set to hide.
         return "SHOW CATALOGS"
 
+    # Name and Type, and nothing else, because nothing else is true here: Trino's
+    # information_schema exposes catalog/schema/name/type and no OID, owner or ACL,
+    # and inventing those columns for Trino would be inventing them.
+    objects_columns = ("Name", "Type")
+
+    def objects_sql(self, database="", schema=""):
+        missing = [
+            setting_label(key)
+            for key, value in (("DB_DATABASE", database), ("DB_SCHEMA", schema))
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"{' and '.join(missing)} required to list objects")
+        # `information_schema.tables` rather than `SHOW TABLES`: both list the same
+        # tables, but only this one can carry a second column -- the object's type --
+        # which is what makes the grid worth more than the tree it sits next to.
+        return (
+            f"SELECT table_name, table_type FROM {self.quote(database)}.information_schema.tables "
+            f"WHERE table_schema = {_literal(schema)} ORDER BY 1"
+        )
+
     def explain_sql(self, sql):
         # Trino's plan comes back as one text column, one row per plan line.
         return self._explain("EXPLAIN", sql)
@@ -548,6 +588,24 @@ class PostgresDriver(Driver):
             "AND table_type = 'BASE TABLE' ORDER BY 1"
         )
 
+    # The one driver where the Navicat-style shape is real: `pg_class` genuinely
+    # carries an OID and an owner, and `relacl` genuinely carries the ACL (NULL means
+    # "the owner's default", which is shown as empty rather than as the word NULL).
+    objects_columns = ("Name", "OID", "Owner", "ACL")
+
+    def objects_sql(self, database="", schema=""):
+        if not schema:
+            raise ValueError(f"{setting_label('DB_SCHEMA')} is required to list objects")
+        # 'r' and 'p' are ordinary and partitioned tables: the same set `tables_sql`
+        # means by `table_type = 'BASE TABLE'`, so the grid and the tree agree.
+        return (
+            "SELECT c.relname, c.oid, pg_get_userbyid(c.relowner), "
+            "COALESCE(array_to_string(c.relacl, ', '), '') "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = {_literal(schema)} AND c.relkind IN ('r', 'p') "
+            "ORDER BY c.relname"
+        )
+
     def explain_sql(self, sql):
         # Postgres answers with a single `QUERY PLAN` text column.
         return self._explain("EXPLAIN", sql)
@@ -618,6 +676,22 @@ class MysqlDriver(Driver):
         if not database:
             raise ValueError(f"{setting_label('DB_DATABASE')} is required to list tables")
         return f"SHOW TABLES FROM {self.quote(database)}"
+
+    # No OID, no owner, no ACL anywhere in MySQL's catalogs. Engine, row count and
+    # comment are what `information_schema.TABLES` actually answers, so those are
+    # what the grid offers.
+    objects_columns = ("Name", "Engine", "Rows", "Comment")
+
+    def objects_sql(self, database="", schema=""):
+        if not database:
+            raise ValueError(f"{setting_label('DB_DATABASE')} is required to list objects")
+        # MySQL calls the level a database where the other two call it a schema, so
+        # the schema argument is deliberately unused here rather than required.
+        return (
+            "SELECT TABLE_NAME, ENGINE, TABLE_ROWS, TABLE_COMMENT "
+            "FROM information_schema.TABLES "
+            f"WHERE TABLE_SCHEMA = {_literal(database)} ORDER BY 1"
+        )
 
     def explain_sql(self, sql):
         # MySQL is the odd one out: EXPLAIN returns a real multi-column table

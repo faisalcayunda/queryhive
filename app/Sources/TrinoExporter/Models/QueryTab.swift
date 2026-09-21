@@ -330,12 +330,47 @@ enum PanelTab: String, CaseIterable, Identifiable {
 
 /// One query tab: the SQL, where it goes, what happened when it ran, and the bottom panel's
 /// contents. Navicat's unit of work, and the reason several exports can be in flight at once.
+/// Which objects a tab is showing.
+///
+/// One value rather than three loose fields, so "is this scope already open" is an equality check
+/// and so the two engine settings always travel with the connection they belong to.
+struct ObjectScope: Equatable {
+    var connectionID: UUID
+    /// Trino's catalog, MySQL's database; empty for Postgres, whose database is fixed by the
+    /// connection and already in the environment it builds.
+    var catalog: String
+    /// Trino's and Postgres's schema; empty for MySQL, which has no such level.
+    var schema: String
+
+    /// What the pane's header names, and nothing when neither level has a name.
+    var title: String {
+        [catalog, schema].filter { !$0.isEmpty }.joined(separator: ".")
+    }
+}
+
 @Observable
 final class QueryTab: Identifiable {
     enum Stage { case idle, running, done, failed }
 
     let id = UUID()
     var title: String
+
+    // MARK: Objects
+
+    /// Set when this tab lists a schema's objects instead of holding a query. A tab is one or the
+    /// other for its whole life: the pane, the toolbar and the run controls all key off this, and
+    /// a tab that could be both would need every one of them to ask twice.
+    var objectScope: ObjectScope?
+    var objectColumns: [String] = []
+    var objectRows: [[String?]] = []
+    var objectLoading = false
+    var objectError: String?
+    /// Guards a stale reply: a second load updates the token, and the first run's late events are
+    /// then ignored instead of overwriting the newer list.
+    var objectToken: UUID?
+    var objectProcess: Process?
+
+    var isObjects: Bool { objectScope != nil }
 
     // MARK: Query
 

@@ -26,8 +26,10 @@ struct QueryHiveIcon: View {
     var body: some View {
         ZStack {
             // No baked-in drop shadow: the Dock draws its own, and two of them read as a smudge.
+            // The mark's own pair, pinned: this render becomes assets/icon.icns, a fixed file no
+            // user setting can reach, so it must not follow the accent the user happened to pick.
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(LinearGradient(colors: [Tone.ice, Tone.violet],
+                .fill(LinearGradient(colors: [Tone.brandGlow, Tone.brandDeep],
                                      startPoint: .topLeading, endPoint: .bottomTrailing))
                 .overlay {
                     // Top sheen, the glossy highlight every CleanMyMac tile carries.
@@ -161,6 +163,10 @@ extension AppIconRenderer {
 
     @MainActor
     static func runSheet(path: String) -> Never {
+        // The sheet's own background is `Tone.canvas`, which follows the theme; pin it so an icon
+        // build renders the same sheet regardless of who ran it. The mark itself is drawn in
+        // `Tone.brandGlow`/`brandDeep`, which no setting can reach.
+        ThemeStore.shared.pin(theme: .midnight, accent: .ice)
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let renderer = ImageRenderer(content: QueryHiveIconSheet())

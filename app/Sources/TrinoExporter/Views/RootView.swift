@@ -18,7 +18,7 @@ struct RootView: View {
             }
             StatusBar()
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(Tone.ink)
         .background(Tone.canvas)
         .ignoresSafeArea()
         .sheet(item: $model.editingConnection) { target in
@@ -51,39 +51,21 @@ struct RootView: View {
 
 /// The strip the traffic lights live in.
 ///
-/// It carries nothing on the left any more. A mark placed just after the window controls sat
-/// closer to them than to its own wordmark, so the two read as one object and the lights looked
-/// crowded; the app's identity moved to the sidebar header, which is a panel and can give it
-/// room. What is left here is a drag area and the connection this window is pointed at.
+/// It carries nothing at all, and that is the point. A mark placed just after the window controls
+/// sat closer to them than to its own wordmark, so the two read as one object and the lights
+/// looked crowded; the app's identity moved to the sidebar header, which is a panel and can give
+/// it room.
+///
+/// The connection chip that used to sit at the right end is gone too. It restated the connection
+/// the toolbar's breadcrumb already names, on every tab, in the one strip that has no other job —
+/// and the row it lived in read as a toolbar with a single control in it. Nothing became
+/// unreachable: the editor it opened is on the connection picker's own menu, on the tree's
+/// context menu, and on a double-click of any row under the connection.
+///
+/// What is left is a drag area for the window, at the height the traffic lights need.
 struct TitleStrip: View {
-    @Environment(AppModel.self) private var model
-
     var body: some View {
-        HStack(spacing: 9) {
-            Spacer()
-            if let connection = model.selectedConnection {
-                Button { model.presentConnectionEditor(connection.id) } label: {
-                    HStack(spacing: 7) {
-                        Circle().fill(connection.color.color).frame(width: 7, height: 7)
-                        Text(connection.name).font(.system(size: 11, weight: .medium))
-                        Text(connection.displayTarget)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Tone.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06), in: Capsule())
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.08)))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("Edit this connection")
-            }
-        }
-        .padding(.horizontal, Metrics.gutter)
-        .frame(height: Metrics.titleStrip)
+        Color.clear.frame(height: Metrics.titleStrip)
     }
 }
 
@@ -105,24 +87,29 @@ struct StatusBar: View {
                 }
                 Text(tab.summary)
                     .font(.system(size: 11, weight: tab.stage == .failed ? .semibold : .regular))
-                    .foregroundStyle(tab.stage == .failed ? Tone.coral : .white.opacity(0.9))
+                    .foregroundStyle(tab.stage == .failed ? Tone.coral : Tone.ink.opacity(0.9))
                     .lineLimit(1)
             }
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.statusBar)
-        .background(Color.black.opacity(0.30))
-        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.07)).frame(height: 1) }
+        .background(Tone.recess.opacity(0.30))
+        .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
     }
 
     private var dot: Color {
         // The dot answers the same question as the label beside it, so the two can never disagree:
         // a green dot next to "Disconnected" is worse than no dot at all. The query's own state is
         // still reported on the right, which is where it belongs.
-        switch model.connectionState(for: model.selectedTab?.connectionID) {
+        //
+        // It reads the same target the label does — the tree's selection, falling back to the
+        // active tab. Reading `selectedTab` directly here was how a bar could name one connection
+        // while its dot reported another.
+        switch model.connectionState(for: model.statusConnectionTarget?.id) {
         case .connected: return Tone.mint
         case .connecting: return Tone.ice
-        case .disconnected: return Tone.gray.opacity(0.6)
+        case .idle: return Tone.gray.opacity(0.6)
+        case .disconnected: return Tone.coral
         }
     }
 }
@@ -135,7 +122,7 @@ struct SidebarResizer: View {
 
     var body: some View {
         ZStack {
-            Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
             Color.clear.contentShape(Rectangle())
         }
         .frame(width: 7)

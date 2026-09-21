@@ -10,8 +10,48 @@ import SwiftUI
 // QueryHive is the sibling of Iceberg Tools and shares its palette deliberately. Only the mark
 // differs -- an iceberg is a berg on water, QueryHive is a comb of cells with one lit.
 
+// Two kinds of colour live here, and the split is the whole design of the theming:
+//
+//   * `accent` / `accentDeep` / `canvas` are **computed** and read `ThemeStore`, so they follow the
+//     user's choice. They are read from ~145 call sites in ten files, most inside a view body;
+//     SwiftUI's observation tracking registers the store read that happens while that body runs,
+//     so changing a theme repaints every one of them. Stored `let`s would bake the palette in at
+//     first access and Settings would appear to do nothing.
+//
+//   * Everything else is a fixed `let`. These are the app's *meaning* colours, and they must not
+//     follow the accent. `ice`, `mint`, `amber`, `violet`, `coral` and `blue` are used as a
+//     distinguishable *set* — the five suggestion kinds, the nine format tints, the four column
+//     types, the three connection states. If `ice` became the accent, picking Mint would paint a
+//     table icon and a column icon the same green, and the set would stop carrying information.
+//     A theme may repaint the chrome; it may not collapse a vocabulary.
 enum Tone {
-    static let canvas = Color(hex: 0x0A0B1E)
+    /// The near-black behind everything, from the chosen theme. `glass` and every panel tint
+    /// themselves with this, so one value repaints the whole shell.
+    static var canvas: Color { ThemeStore.shared.theme.canvas }
+
+    /// The interactive colour: focus rings, selected tabs and tiles, toggle on-states, checkmarks,
+    /// the Run capsule. Follows the user's accent.
+    static var accent: Color { ThemeStore.shared.accent.glow }
+
+    /// The deep end of every accent gradient. Follows the accent, one step behind `accent`.
+    static var accentDeep: Color { ThemeStore.shared.accent.deep }
+
+    // MARK: The mark
+
+    // The comb's own two colours, and the one pair a theme cannot move.
+    //
+    // `accent` began as this pair, so it is tempting to let the comb follow the accent. It must
+    // not: the comb *is* the app's identity — it is what `make-icon.sh` bakes into
+    // `assets/icon.icns`, a fixed file no user setting can reach — and a mark that is ice on one
+    // Mac and mint on another is not a mark. The chrome follows the accent; the logo does not.
+    static let brandGlow = Color(hex: 0x4FD8FF)
+    static let brandDeep = Color(hex: 0x7B61FF)
+
+    // MARK: The fixed vocabulary
+
+    /// The app's cyan. A *categorical* colour, not the accent: it is the "column" suggestion, the
+    /// "txt" format, the "append" write mode, the database icon, and the "connecting" dot — every
+    /// one of them a member of a set whose members have to stay tellable apart.
     static let ice = Color(hex: 0x4FD8FF)
     static let violet = Color(hex: 0x7B61FF)
     static let magenta = Color(hex: 0xFF4FA3)
@@ -20,7 +60,36 @@ enum Tone {
     static let coral = Color(hex: 0xFF5E6C)
     static let gray = Color(hex: 0x9AA0A8)
     static let blue = Color(hex: 0x4F8DFF)
-    static let secondary = Color.white.opacity(0.68)
+
+    // MARK: Appearance-adaptive chrome
+
+    /// The chrome's "ink": white on a dark appearance, black on a light one.
+    ///
+    /// This is the whole trick that makes light mode possible without rewriting the ~119 chrome
+    /// call sites. Those sites say `Tone.ink.opacity(0.07)` for a hairline, `Tone.ink.opacity(0.9)` for
+    /// body text, and so on — values that are correct on near-black and invisible on off-white.
+    /// `Tone.ink` is a **dynamic** colour: AppKit resolves it per draw against the appearance in
+    /// effect, so `Tone.ink.opacity(0.07)` is a white hairline in the dark and a black one in the light,
+    /// and every existing opacity keeps meaning what it meant.
+    ///
+    /// Resolved by AppKit rather than tracked in Swift code, which is what makes it correct under
+    /// `AppearanceMode.system` too: when the user switches macOS appearance, AppKit re-resolves
+    /// every dynamic colour and redraws, with no observer and no plumbing here.
+    static var ink: Color { Color(nsColor: NSColor(name: nil) { $0.isDark ? .white : .black }) }
+
+    /// The chrome's "recess": a translucent black on a dark appearance, a translucent white on a
+    /// light one. The counterpart to `ink`, for the fields and wells that sit *into* the canvas
+    /// rather than on top of it — `Tone.recess.opacity(0.30)` today.
+    static var recess: Color { Color(nsColor: NSColor(name: nil) { $0.isDark ? .black : .white }) }
+
+    /// Secondary body text: the chrome's ink at 68%, which is what `Tone.secondary` has always been.
+    static var secondary: Color { ink.opacity(0.68) }
+}
+
+extension NSAppearance {
+    /// Whether this appearance is one of the dark ones, asked through `bestMatch` because a view's
+    /// appearance can be a vibrancy or high-contrast variant rather than plain `.darkAqua`.
+    var isDark: Bool { bestMatch(from: [.aqua, .darkAqua]) == .darkAqua }
 }
 
 extension Color {
@@ -42,9 +111,41 @@ struct Hue {
     let glow: Color
     let accent: Color
 
-    var gradient: LinearGradient { LinearGradient(colors: [glow, accent], startPoint: .topLeading, endPoint: .bottomTrailing) }
+    private var tone: SurfaceTone { ThemeStore.shared.tone }
 
-    static let exporter = Hue(glow: Tone.ice, accent: Tone.violet)
+    /// The fill for a coloured surface: a gradient under `glow`, a single flat colour under `plain`
+    /// and `soft`.
+    ///
+    /// This is where the tone is enforced, rather than at each call site. Every primary action,
+    /// driver tile and empty-state illustration fills itself with `hue.gradient`, so returning a
+    /// flat `LinearGradient` of one colour — not a `Color` — keeps all of them compiling while
+    /// removing the ramp. `LinearGradient` of a single colour renders as that colour, which is why
+    /// the return type does not have to change.
+    var gradient: LinearGradient {
+        switch tone {
+        case .glow:
+            LinearGradient(colors: [glow, accent], startPoint: .topLeading, endPoint: .bottomTrailing)
+        case .plain:
+            LinearGradient(colors: [accent, accent], startPoint: .top, endPoint: .bottom)
+        case .soft:
+            // The wash, not the full colour: `soft` states the accent without filling with it.
+            LinearGradient(colors: [glow.opacity(0.22), glow.opacity(0.22)], startPoint: .top, endPoint: .bottom)
+        }
+    }
+
+    /// The colour an accent border or label should use under the current tone. `soft` keeps the
+    /// accent; `plain` uses it at full strength.
+    var stroke: Color { tone == .soft ? glow.opacity(0.55) : glow }
+
+    /// Whether the sheen overlay, the coloured drop shadow and the halo are drawn. They are all
+    /// gradients, so a flat tone drops every one of them.
+    var isLuminous: Bool { tone.isLuminous }
+
+    /// Computed, not a `static let`: this pair is the user's accent, and a stored constant would
+    /// be evaluated once at first use and then keep the old colour for the life of the process.
+    static var exporter: Hue { Hue(glow: Tone.accent, accent: Tone.accentDeep) }
+    /// Connections keep their own fixed magenta → violet. It is how the second module is told apart
+    /// from the first at a glance, so it must not become a second copy of the accent.
     static let connection = Hue(glow: Tone.magenta, accent: Tone.violet)
     static let success = Hue(glow: Tone.mint, accent: Color(hex: 0x12A886))
     static let failure = Hue(glow: Tone.amber, accent: Tone.coral)
@@ -53,20 +154,29 @@ struct Hue {
 /// The workspace backdrop: one radial glow per module colour, drawn behind the panels so the
 /// glass has something to sit on. Radial gradients, never `.blur` (a snapshot capture does not
 /// render it) and far cheaper than a 190pt blur.
+///
+/// The two opacities below are the design's own 0.30 / 0.22 scaled by the user's glow setting, so
+/// at the default the drawing is byte-for-byte what shipped.
 struct Backdrop: View {
     let hue: Hue
+    private var store: ThemeStore { .shared }
 
     var body: some View {
         ZStack {
             Tone.canvas
-            RadialGradient(colors: [hue.glow, .clear], center: .center, startRadius: 0, endRadius: 340)
-                .frame(width: 680, height: 680)
-                .opacity(0.30)
-                .offset(x: 90, y: -280)
-            RadialGradient(colors: [hue.accent, .clear], center: .center, startRadius: 0, endRadius: 280)
-                .frame(width: 560, height: 560)
-                .opacity(0.22)
-                .offset(x: -260, y: 320)
+            // The two radial glows are gradients, so a flat tone drops them entirely rather than
+            // merely dimming them — "no gradient" has to mean no gradient, and a faint radial wash
+            // is exactly the thing being switched off.
+            if store.tone.isLuminous {
+                RadialGradient(colors: [hue.glow, .clear], center: .center, startRadius: 0, endRadius: 340)
+                    .frame(width: 680, height: 680)
+                    .opacity(store.lit(0.30))
+                    .offset(x: 90, y: -280)
+                RadialGradient(colors: [hue.accent, .clear], center: .center, startRadius: 0, endRadius: 280)
+                    .frame(width: 560, height: 560)
+                    .opacity(store.lit(0.22))
+                    .offset(x: -260, y: 320)
+            }
         }
         .animation(.easeInOut(duration: 0.8), value: hue.glow)
         .ignoresSafeArea()
@@ -86,7 +196,7 @@ extension View {
         }
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .strokeBorder(tint?.opacity(tintOpacity) ?? .white.opacity(0.12), lineWidth: lineWidth))
+            .strokeBorder(tint?.opacity(tintOpacity) ?? Tone.ink.opacity(0.12), lineWidth: lineWidth))
     }
 
     func field(invalid: Bool = false) -> some View {
@@ -94,9 +204,9 @@ extension View {
             .font(.body13)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(invalid ? Tone.coral.opacity(0.8) : .white.opacity(0.1), lineWidth: invalid ? 1.5 : 1))
+                .strokeBorder(invalid ? Tone.coral.opacity(0.8) : Tone.ink.opacity(0.1), lineWidth: invalid ? 1.5 : 1))
     }
 
     /// A toolbar-height recessed control (the folder chip, the output-name field).
@@ -105,22 +215,22 @@ extension View {
             .font(.system(size: 12))
             .padding(.horizontal, 9)
             .frame(height: 28)
-            .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.white.opacity(0.10)))
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Tone.ink.opacity(0.10)))
     }
 
     /// The SQL editor's inset: recessed black, block-shaped, and focus shown with the module
     /// accent rather than the system focus ring.
     func editorBox(focused: Bool) -> some View {
-        background(Color.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        background(Tone.recess.opacity(0.34), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(focused ? Tone.ice.opacity(0.45) : .white.opacity(0.08), lineWidth: 1))
+                .strokeBorder(focused ? Tone.accent.opacity(0.45) : Tone.ink.opacity(0.08), lineWidth: 1))
     }
 
     /// Hairline panel edge used between the sidebar, the toolbar and the panel.
     func panelEdge(_ edge: Edge) -> some View {
         overlay(alignment: edge == .trailing ? .trailing : edge == .leading ? .leading : edge == .top ? .top : .bottom) {
-            Rectangle().fill(.white.opacity(0.07)).frame(width: edge == .leading || edge == .trailing ? 1 : nil,
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: edge == .leading || edge == .trailing ? 1 : nil,
                                                          height: edge == .top || edge == .bottom ? 1 : nil)
         }
     }
@@ -166,7 +276,7 @@ struct HubButton: View {
                 if let symbol { Image(systemName: symbol).font(.system(size: 11, weight: .bold)) }
                 Text(title).font(.system(size: 13, weight: .semibold))
             }
-            .foregroundStyle(enabled ? .white : .white.opacity(0.42))
+            .foregroundStyle(enabled ? .white : Tone.ink.opacity(0.42))
             .padding(.horizontal, 14)
             .frame(height: 28)
             .background {
@@ -175,14 +285,19 @@ struct HubButton: View {
                 // available"; an empty capsule with dim text reads as "not yet", which is true.
                 if enabled {
                     Capsule().fill(hue.gradient)
-                    Capsule().fill(LinearGradient(colors: [.white.opacity(0.28), .clear],
-                                                  startPoint: .top, endPoint: .center))
+                    // The sheen is a gradient, so a flat tone drops it. Without this the capsule
+                    // would keep a highlight ramp and "Plain" would only be half true.
+                    if hue.isLuminous {
+                        Capsule().fill(LinearGradient(colors: [.white.opacity(0.28), .clear],
+                                                      startPoint: .top, endPoint: .center))
+                    }
                 } else {
-                    Capsule().fill(Color.white.opacity(0.05))
+                    Capsule().fill(Tone.ink.opacity(0.05))
                 }
             }
-            .overlay(Capsule().strokeBorder(enabled ? .white.opacity(0.25) : .white.opacity(0.10)))
-            .shadow(color: hue.accent.opacity(enabled ? (hovering ? 0.65 : 0.45) : 0), radius: hovering ? 14 : 9, y: 3)
+            .overlay(Capsule().strokeBorder(enabled ? Tone.ink.opacity(0.25) : Tone.ink.opacity(0.10)))
+            .shadow(color: hue.accent.opacity(hue.isLuminous && enabled ? (hovering ? 0.65 : 0.45) : 0),
+                    radius: hovering ? 14 : 9, y: 3)
             .contentShape(Capsule())
         }
         .buttonStyle(PressScale())
@@ -194,7 +309,7 @@ struct HubButton: View {
 /// Square icon button for the toolbar and the tree header.
 struct IconButton: View {
     let symbol: String
-    var tint: Color = .white
+    var tint: Color = Tone.ink
     var help: String = ""
     var diameter: CGFloat = 28
     let action: () -> Void
@@ -207,10 +322,10 @@ struct IconButton: View {
                 .font(.system(size: diameter * 0.42, weight: .semibold))
                 .foregroundStyle(enabled ? tint : tint.opacity(0.3))
                 .frame(width: diameter, height: diameter)
-                .background(Color.white.opacity(hovering && enabled ? 0.13 : 0.06),
+                .background(Tone.ink.opacity(hovering && enabled ? 0.13 : 0.06),
                             in: RoundedRectangle(cornerRadius: diameter * 0.26, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: diameter * 0.26, style: .continuous)
-                    .strokeBorder(.white.opacity(0.08)))
+                    .strokeBorder(Tone.ink.opacity(0.08)))
                 .contentShape(RoundedRectangle(cornerRadius: diameter * 0.26, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -255,7 +370,7 @@ struct PillButton: View {
 
     private var tint: Color {
         switch role {
-        case .secondary, .quiet: .white
+        case .secondary, .quiet: Tone.ink
         case .destructive: Tone.coral
         }
     }
@@ -285,16 +400,16 @@ struct PillButton: View {
 
     private var fill: Color {
         switch role {
-        case .secondary: Color.white.opacity(hovering && enabled ? 0.16 : 0.10)
-        case .quiet: Color.white.opacity(hovering && enabled ? 0.09 : 0)
+        case .secondary: Tone.ink.opacity(hovering && enabled ? 0.16 : 0.10)
+        case .quiet: Tone.ink.opacity(hovering && enabled ? 0.09 : 0)
         case .destructive: Tone.coral.opacity(hovering && enabled ? 0.18 : 0.09)
         }
     }
 
     private var border: Color {
         switch role {
-        case .secondary: .white.opacity(0.14)
-        case .quiet: .white.opacity(hovering && enabled ? 0.10 : 0.06)
+        case .secondary: Tone.ink.opacity(0.14)
+        case .quiet: Tone.ink.opacity(hovering && enabled ? 0.10 : 0.06)
         case .destructive: Tone.coral.opacity(0.45)
         }
     }
@@ -303,7 +418,7 @@ struct PillButton: View {
 /// Vertical hairline between toolbar groups.
 struct ToolbarSeparator: View {
     var body: some View {
-        Rectangle().fill(.white.opacity(0.10)).frame(width: 1, height: 18).padding(.horizontal, 3)
+        Rectangle().fill(Tone.ink.opacity(0.10)).frame(width: 1, height: 18).padding(.horizontal, 3)
     }
 }
 
@@ -322,14 +437,14 @@ struct Segmented<T: Hashable>: View {
                         .font(.system(size: 12, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(selection == option ? 0.18 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .background(Tone.ink.opacity(selection == option ? 0.18 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(3)
-        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .animation(.easeOut(duration: 0.15), value: selection)
     }
 }
@@ -366,15 +481,15 @@ struct ChipToggle: View {
             HStack(spacing: 6) {
                 Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isOn ? Tone.ice : .white.opacity(0.35))
+                    .foregroundStyle(isOn ? Tone.accent : Tone.ink.opacity(0.35))
                 Text(label).font(.system(size: 12))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(Color.black.opacity(0.24), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Tone.recess.opacity(0.24), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(isOn ? Tone.ice.opacity(0.45) : .white.opacity(hovering ? 0.18 : 0.09)))
+                .strokeBorder(isOn ? Tone.accent.opacity(0.45) : Tone.ink.opacity(hovering ? 0.18 : 0.09)))
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -398,10 +513,10 @@ struct InlineCheckbox: View {
             HStack(spacing: 6) {
                 Image(systemName: isOn ? "checkmark.square.fill" : "square")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isOn ? Tone.ice : .white.opacity(hovering ? 0.55 : 0.35))
+                    .foregroundStyle(isOn ? Tone.accent : Tone.ink.opacity(hovering ? 0.55 : 0.35))
                 Text(label)
                     .font(.system(size: 12))
-                    .foregroundStyle(isOn ? .white.opacity(0.95) : Tone.secondary)
+                    .foregroundStyle(isOn ? Tone.ink.opacity(0.95) : Tone.secondary)
             }
             .padding(.vertical, 5)
             .padding(.horizontal, 4)
@@ -477,8 +592,8 @@ struct ComboField: View {
             }
         }
         .frame(width: width, height: Metrics.control)
-        .background(Color.black.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.white.opacity(0.10)))
+        .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Tone.ink.opacity(0.10)))
     }
 }
 
@@ -507,14 +622,20 @@ struct SymbolHero: View {
     var body: some View {
         let tile = RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
         ZStack {
-            if halo {
+            if halo && hue.isLuminous {
                 Circle().fill(RadialGradient(colors: [hue.glow.opacity(0.35), .clear], center: .center, startRadius: 0, endRadius: size * 0.7))
             }
             tile.fill(hue.gradient)
-                .overlay(tile.fill(LinearGradient(colors: [.white.opacity(0.4), .clear], startPoint: .top, endPoint: .center)))
-                .overlay(tile.strokeBorder(.white.opacity(0.35), lineWidth: 1))
+                .overlay {
+                    // The sheen and the coloured shadow are both gradients; a flat tone keeps the
+                    // tile and its glyph and drops the gloss.
+                    if hue.isLuminous {
+                        tile.fill(LinearGradient(colors: [.white.opacity(0.4), .clear], startPoint: .top, endPoint: .center))
+                    }
+                }
+                .overlay(tile.strokeBorder(hue.isLuminous ? Tone.ink.opacity(0.35) : hue.stroke.opacity(0.6), lineWidth: 1))
                 .frame(width: size * 0.62, height: size * 0.62)
-                .shadow(color: hue.accent.opacity(0.6), radius: size * 0.14, y: size * 0.07)
+                .shadow(color: hue.accent.opacity(hue.isLuminous ? 0.6 : 0), radius: size * 0.14, y: size * 0.07)
             Image(systemName: symbol)
                 .font(.system(size: size * 0.27, weight: .semibold))
                 .foregroundStyle(.white)
@@ -571,12 +692,18 @@ struct HiveMark: View {
             let radius = min(canvasSize.width, canvasSize.height) / 2 * 0.98
             let centre = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
 
+            // The mark keeps its own two colours under every theme, but a flat tone still drops
+            // the ramp between them: "no gradient" is about how a surface is painted, not about
+            // which colour the brand is.
+            let brand: [Color] = ThemeStore.shared.tone.isLuminous
+                ? [Tone.brandGlow, Tone.brandDeep]
+                : [Tone.brandGlow, Tone.brandGlow]
             context.fill(hexagonPath(centre: centre, radius: radius), with: .linearGradient(
-                Gradient(colors: [Tone.ice, Tone.violet]),
+                Gradient(colors: brand),
                 startPoint: CGPoint(x: 0, y: 0),
                 endPoint: CGPoint(x: canvasSize.width, y: canvasSize.height)))
             context.stroke(hexagonPath(centre: centre, radius: radius * 0.46),
-                           with: .color(.white.opacity(0.92)), lineWidth: max(1, size * 0.075))
+                           with: .color(Tone.ink.opacity(0.92)), lineWidth: max(1, size * 0.075))
         }
         .frame(width: size, height: size)
     }
@@ -584,6 +711,10 @@ struct HiveMark: View {
 
 /// The comb at hero scale, for the workspace's empty state: lit centre cell, six dim neighbours,
 /// a glow behind it, and a slow bob that keeps it from reading as a frozen screenshot.
+///
+/// Drawn in `brandGlow`/`brandDeep` rather than the accent, because this is the same glyph
+/// `HiveMark` draws and `make-icon.sh` bakes into the app icon. The mark is the app's identity, so
+/// it is the one thing on screen that a theme choice must not move.
 struct HiveHero: View {
     var size: CGFloat = 200
     @State private var bob = false
@@ -591,25 +722,31 @@ struct HiveHero: View {
     var body: some View {
         let radius = size / 5.5
         ZStack {
-            Circle().fill(RadialGradient(colors: [Tone.ice.opacity(0.30), .clear], center: .center, startRadius: 0, endRadius: size * 0.55))
+            if ThemeStore.shared.tone.isLuminous {
+                Circle().fill(RadialGradient(colors: [Tone.brandGlow.opacity(0.30), .clear], center: .center, startRadius: 0, endRadius: size * 0.55))
+            }
             Canvas { context, canvasSize in
                 let start = CGPoint(x: 0, y: 0)
                 let end = CGPoint(x: canvasSize.width, y: canvasSize.height)
+                let lit = ThemeStore.shared.tone.isLuminous
+                let litPair: [Color] = lit ? [Tone.brandGlow, Tone.brandDeep] : [Tone.brandGlow, Tone.brandGlow]
+                let dimPair: [Color] = lit
+                    ? [Tone.brandGlow.opacity(0.20), Tone.brandDeep.opacity(0.10)]
+                    : [Tone.brandGlow.opacity(0.16), Tone.brandGlow.opacity(0.16)]
                 for cell in hiveCells(in: canvasSize) {
                     if cell.lit {
                         context.fill(cell.path, with: .linearGradient(
-                            Gradient(colors: [Tone.ice, Tone.violet]), startPoint: start, endPoint: end))
-                        context.stroke(cell.path, with: .color(.white.opacity(0.45)), lineWidth: max(1, radius * 0.06))
+                            Gradient(colors: litPair), startPoint: start, endPoint: end))
+                        context.stroke(cell.path, with: .color(Tone.ink.opacity(0.45)), lineWidth: max(1, radius * 0.06))
                     } else {
                         context.fill(cell.path, with: .linearGradient(
-                            Gradient(colors: [Tone.ice.opacity(0.20), Tone.violet.opacity(0.10)]),
-                            startPoint: start, endPoint: end))
-                        context.stroke(cell.path, with: .color(.white.opacity(0.20)), lineWidth: max(1, radius * 0.05))
+                            Gradient(colors: dimPair), startPoint: start, endPoint: end))
+                        context.stroke(cell.path, with: .color(Tone.ink.opacity(0.20)), lineWidth: max(1, radius * 0.05))
                     }
                 }
             }
             .frame(width: size * 0.78, height: size * 0.78)
-            .shadow(color: Tone.ice.opacity(0.35), radius: 20)
+            .shadow(color: Tone.brandGlow.opacity(ThemeStore.shared.tone.isLuminous ? 0.35 : 0), radius: 20)
             .offset(y: bob ? -4 : 4)
             .animation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true), value: bob)
         }

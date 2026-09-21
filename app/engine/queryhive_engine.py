@@ -503,6 +503,40 @@ def run_tables_command(env):
     run_browse_command(env, "tables")
 
 
+def _object_rows(config, sql):
+    """Every row of one `objects` statement, as text, one entry per declared column.
+
+    Unlike `_show_names` this keeps every column rather than only the first. `None`
+    becomes an empty string rather than the word "None": the grid draws an empty cell
+    either way, and the difference between a NULL and an empty string is not worth a
+    second protocol field the app would have to decode.
+    """
+    return [
+        ["" if cell is None else str(cell) for cell in row]
+        for row in _fetch_all(config, sql)
+    ]
+
+
+def run_objects_command(env):
+    """One schema's objects, with whatever metadata the driver can answer.
+
+    The two field names are load-bearing and were both wrong the first time:
+
+    - `object_columns`, not `columns`. `Event.columns` is `[{"name","type"}]` -- the
+      preview grid's typed headers -- and a driver here declares plain strings with no
+      type to go with them. Sending `["Name","Type"]` under that key fails to decode.
+    - `data`, not `rows`. `Event.rows` is an **Int** on `progress` and `done`, and the
+      app's own comment says one key cannot be two types. `data` is the app's existing
+      row payload from `preview`, so the grid already has a decoder for it.
+
+    The driver still owns the names and their order, which is the whole reason this is
+    not just `tables` with more columns bolted on.
+    """
+    config, driver = _browse_config(env)
+    sql = driver.objects_sql(config.database, config.schema)
+    emit("objects", object_columns=list(driver.objects_columns), data=_object_rows(config, sql))
+
+
 def run_db_drivers_command(env):
     """Report every driver: kind, label, default port and object-tree levels.
 
@@ -927,6 +961,13 @@ def main(argv=None):
         # app that parses that suffix must keep seeing it. It also costs nothing
         # to ask, so it is the one command a caller can always run first.
         "db_drivers": run_db_drivers_command,
+        # `objects` sits here, ahead of the frozen suffix, and not beside the other browse
+        # commands where it belongs semantically. The suffix below is a contract -- a caller that
+        # parses it must keep seeing it -- and the usage line is this dictionary's keys in order,
+        # so a new command can only be added at the head. Dropping it between `tables` and `export`
+        # changed the suffix and `check_to_table_usage_line_lists_the_command` caught it, which is
+        # exactly what that check is for.
+        "objects": run_objects_command,
         "test": run_test_command,
         "catalogs": run_catalogs_command,
         "schemas": run_schemas_command,

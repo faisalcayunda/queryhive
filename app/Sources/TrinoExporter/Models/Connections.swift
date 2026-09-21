@@ -113,12 +113,17 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
 enum ConnectionState {
     case connected
     case connecting
+    /// Never expanded, so nothing has been asked of it yet. Distinct from `disconnected`, which
+    /// means a browse was attempted and failed — a connection the user has simply not opened is not
+    /// broken, and calling it disconnected announces a failure that has not happened.
+    case idle
     case disconnected
 
     var label: String {
         switch self {
         case .connected: "Connected"
         case .connecting: "Connecting…"
+        case .idle: "Not browsed yet"
         case .disconnected: "Disconnected"
         }
     }
