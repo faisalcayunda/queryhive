@@ -18,6 +18,34 @@
 
 ## Sudah teridentifikasi
 
+### D-3 — `timestamptz` dirender di zona waktu **sesi**, bukan zona saat ditulis · **Bukan regresi**
+
+Ditemukan oleh uji integrasi terhadap server nyata
+(`crates/qh-driver-postgres/tests/integration.rs`), bukan oleh penalaran.
+
+`type_zoo.tz_aware` ditulis sebagai `TIMESTAMPTZ '2026-01-31 12:00:00.123456+07'`.
+Yang kembali dari PostgreSQL adalah `2026-01-31 05:00:00.123456+00:00`.
+
+Ini **perilaku server**, bukan offset yang hilang: PostgreSQL menyimpan instant-nya
+saja, lalu merendernya di `TimeZone` milik sesi, yang default-nya UTC. Instant-nya
+benar — `12:00:00.123456+07:00` dan `05:00:00.123456+00:00` adalah momen yang sama,
+terpaut tujuh jam di jam dinding.
+
+Bukti bahwa offset-nya tidak hilang: setelah `SET TIME ZONE 'Asia/Jakarta'`, kolom
+yang sama dirender `2026-01-31 12:00:00.123456+07:00`. Kedua pernyataan itu diuji.
+
+Konsekuensi yang mengikat:
+
+1. **Perbandingan golden snapshot harus menyetel zona waktu sesi** sebelum merekam,
+   atau membandingkan instant-nya dan bukan teksnya. Tanpa itu, perbedaan rendering
+   akan terlihat seperti regresi padahal bukan.
+2. **Driver tidak menyetel zona waktu sesi.** Siapa pun yang menentukan — server —
+   yang benar, sama seperti keputusan untuk MySQL `TIMESTAMP` di tabel bawah. Jika
+   nanti aplikasi ingin menampilkan nilai di zona pengguna, itu keputusan tampilan
+   yang harus diambil eksplisit, bukan default diam-diam di driver.
+3. Bentuk yang sama berlaku untuk kolom `timestamp` naive: ia **tidak** boleh
+   mendapat offset, dan itu diuji terpisah.
+
 ### D-1 — Notasi ilmiah pada DECIMAL kecil · **Perbaikan disengaja**
 
 `Decimal("-0.0000000001")` dirender engine Python sebagai `-1E-10`.

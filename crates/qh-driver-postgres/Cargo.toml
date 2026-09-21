@@ -1,0 +1,24 @@
+[package]
+name = "qh-driver-postgres"
+version = "0.1.0"
+description = "PostgreSQL driver: streaming batches, exact decimals, and server-side cancel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false }
+qh-core.workspace = true
+qh-driver.workspace = true
+qh-sql.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio-postgres = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"

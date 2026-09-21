@@ -10,6 +10,7 @@ resolver = "2"
 members = [
     "crates/qh-core",
     "crates/qh-driver",
+    "crates/qh-driver-postgres",
     "crates/qh-result-store",
     "crates/qh-sql",
 ]
@@ -23,6 +24,10 @@ repository = "https://github.com/data-ecosystem/queryhive"
 
 [workspace.dependencies]
 qh-core = { path = "crates/qh-core" }
+qh-driver = { path = "crates/qh-driver" }
+qh-driver-postgres = { path = "crates/qh-driver-postgres" }
+qh-result-store = { path = "crates/qh-result-store" }
+qh-sql = { path = "crates/qh-sql" }
 thiserror = "2"
 
 # Release profile for the FFI artifact.

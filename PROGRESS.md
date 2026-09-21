@@ -18,7 +18,7 @@
 | B — Riset web | **Gagal sebagian** | `web_search` mengembalikan HTTP 402 (kuota paket pengguna habis) → [BUTUH TINDAKAN MANUAL] #1. `web_fetch` **berfungsi**: `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
-| D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store` selesai dan hijau; driver, export, credentials, storage, tunnel, FFI belum ada |
+| D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, dan `qh-driver-postgres` selesai dan hijau; MySQL, Trino, export, credentials, storage, tunnel, FFI belum ada |
 | D — Fase 2, 3, 4 | Belum | |
 
 ---
@@ -49,7 +49,7 @@
   interval, bytea berisi NUL dan byte non-UTF8, `''` vs NULL, NUL di dalam teks,
   dan empat karakter `NULL`)
 
-### Fase 1 — awal
+### Fase 1 — crate inti
 
 - [x] Workspace Cargo (`Cargo.toml`) dengan profil release sesuai ADR-0009
   (`panic = "unwind"` + LTO + strip)
@@ -69,7 +69,7 @@
 - [x] `docs/dependencies.md` dihasilkan dari `cargo metadata` (semuanya MIT/Apache-2.0 →
   konsisten dengan ADR-0002)
 
-### Fase 0 — lingkungan uji & baseline
+### Tahap A — lingkungan uji & baseline
 
 - [x] `deploy/dev/make_seed.py` — generator fixture SQL (deterministik, dijalankan ulang
   menghasilkan berkas identik), bukan SQL yang diketik tangan: 30 kolom × 500.000 baris sulit
@@ -82,6 +82,30 @@
 - [x] `docs/benchmarks.md` + `deploy/dev/bench-results.jsonl` — baseline Python terukur untuk
   PostgreSQL dan MySQL; tabel laporan dihasilkan dari JSONL, tidak ada angka yang ditulis tangan
 - [x] Tag `python-engine-final` (lihat catatan di bagian tag)
+
+- [x] `crates/qh-driver` — kontrak `Driver`/`Session`/`Cursor`, `Capabilities`, `DriverRegistry`,
+  dan `ConnectionConfig` dengan `Debug` tulisan tangan yang tidak pernah mencetak password
+- [x] `crates/qh-driver-postgres` — driver PostgreSQL nyata: streaming batch, normalisasi tipe
+  yang menjaga DECIMAL presisi penuh, metadata tipe dari `prepare`, dan **cancel yang sampai ke
+  server** lewat `CancelRequest` pada koneksi kedua. **26 uji unit + 12 uji integrasi terhadap
+  container**, semuanya lulus
+- [x] **122 uji hijau** seluruh workspace (29 `qh-core` + 10 `qh-driver` + 26 `qh-driver-postgres`
+  + 12 integrasi + 20 `qh-result-store` + 25 `qh-sql`), `cargo fmt --all --check` bersih,
+  `cargo clippy --workspace --all-targets -- -D warnings` bersih
+
+Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
+
+| Bukti | Hasil |
+|---|---|
+| Cancel sampai ke server | `SELECT pg_sleep(30)` dibatalkan, selesai **di bawah 500 ms** (target §6), error membawa SQLSTATE **57014** (`query_canceled`). Proses Python yang dibunuh tidak bisa menghasilkan ini. |
+| Koneksi tetap sehat sesudah cancel | `SELECT 1` sesudahnya berhasil |
+| DECIMAL presisi penuh | `1234567890123456789012345678.1234567890` kembali utuh — 38 digit, tanpa `f64` |
+| Metadata tipe | `int4`, `text`, `numeric` terbaca dari `prepare` |
+| `bytea` berisi NUL dan non-UTF8 | `Value::Bytes([0x00, 0x01, 0xff])` |
+| NULL vs string kosong vs kata "NULL" | Tiga nilai berbeda, ketiganya benar |
+| Zona waktu | Instant dipertahankan; setelah `SET TIME ZONE`, dirender ulang sesuai zona sesi (D-3) |
+| TLS | Tiga mode selain `Disable` **ditolak** dengan pesan yang menyebut TLS, bukan turun ke plaintext |
+| Password salah | `FailureKind::Permanent`, dan pesannya tidak memuat password itu |
 
 Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan di test:
 
@@ -96,27 +120,35 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
 4. **Anchor time-to-first-row salah.** Menganchor pada event `columns` menghasilkan 1,7 ms —
    menyesatkan, karena event itu baru muncul setelah halaman pertama sudah ada. Anchor yang benar
    adalah `step connect`, yang dikirim engine sebelum menyentuh jaringan.
+5. **`split_offset` terlalu rakus.** Versi pertama memindai mundur selama karakter masih
+   `[0-9:+-]`, sehingga pada `12:00:00+07` ia menelan seluruh bagian jam dan menyisakan kepala
+   kosong — tiga uji timestamp gagal. Sekarang ia mulai dari tanda terakhir dan membatasi offset
+   ke rentang nyata (−12:00…+14:00), sehingga `-31` di `2026-01-31` tidak pernah dibaca sebagai
+   offset tiga puluh satu jam.
+6. **Ekspektasi `timestamptz` salah, kodenya benar.** Uji saya mengasumsikan server
+   mengembalikan `+07:00` seperti saat ditulis. PostgreSQL merender di zona waktu **sesi**, jadi
+   yang kembali `+00:00` dengan instant yang sama. Diperbaiki dengan membuktikan dua arah:
+   instant-nya cocok, dan setelah `SET TIME ZONE 'Asia/Jakarta'` offset-nya kembali `+07:00`.
 
 ## Tugas berikutnya (urutan yang dikerjakan)
 
-1. **`qh-driver-postgres`, di atas jalur extended protocol.** Rancangan dan alasan mengapa simple
-   query tidak bisa dipakai ada di K7 di bawah — baca itu lebih dulu, ia menentukan bentuk
-   driver-nya. Modul normalisasi teks→`Value` yang sudah ditulis (belum terkompilasi) dipakai
-   bersama driver ini, bukan sebelumya, supaya tidak ada kode mati di antara keduanya.
-2. **Protocol `DatabaseEngine` di Swift + `MockEngine`.** Dijadwalkan bersama Fase 2, bukan
-   sekarang, dan alasannya dicatat supaya tidak terlihat seperti kelalaian: `AppModel` memakai
+1. **Driver MySQL**, mengikuti bentuk `qh-driver-postgres`. Bedanya nyata dan harus dijaga:
+   `KILL QUERY` pada koneksi kedua untuk cancel, `caching_sha2_password`, dan `TIMESTAMP` yang
+   dirender di zona sesi (lihat D-3).
+2. **Driver Trino** — protokol HTTP, tanpa pool (ADR-0006). Butuh VM podman dinaikkan dulu.
+3. **TLS PostgreSQL** (K8) — connector `rustls`, lalu `TlsMode::Prefer`/`Require` benar-benar
+   berfungsi alih-alih ditolak. Dijadwalkan bersama `qh-credentials`.
+4. `qh-rt` (pemetaan QoS), lalu `qh-export`, `qh-credentials`, `qh-storage`, `qh-tunnel`.
+5. **Protocol `DatabaseEngine` di Swift + `MockEngine`.** Dijadwalkan bersama Fase 2, dan
+   alasannya dicatat supaya tidak terlihat seperti kelalaian: `AppModel` memakai
    `tab.process?.terminate()` sebagai cancel di 10 titik (`Models/AppModel.swift:243, 758, 809,
    828, 1024, 1098, 1155, 1243`), dan `Engine.terminate` di `App.swift:113`. Protocol yang benar
    menyatakan cancel sebagai kemampuan driver dengan semantik server-side (blueprint §2.7), dan
-   itu baru jujur diimplementasikan di atas engine Rust. Menuliskannya sekarang berarti membuat
-   adapter yang berpura-pura membatalkan di server padahal hanya membunuh proses — persis P5 yang
-   sedang diperbaiki, hanya dipindahkan ke lapisan lain. Protocol ditulis begitu `qh-ffi` ada,
+   itu baru jujur diimplementasikan di atas engine Rust. Protocol ditulis begitu `qh-ffi` ada,
    lalu `AppModel` dipindah dalam satu langkah.
-3. `qh-rt` (pemetaan QoS), lalu driver MySQL dan Trino mengikuti bentuk yang sama.
-4. `qh-export`, `qh-credentials`, `qh-storage`, `qh-tunnel`.
-5. Snapshot golden dari **server nyata** (container sudah menyala; zoo tipe PG dan MySQL sudah
-   ada di `deploy/dev/seed-*.sql`) untuk menutup K3.
-6. `qh-ffi` + CLI `qh-ffi` setara `preview`, supaya sisi "Rust" di `docs/benchmarks.md` bisa diisi.
+6. **Snapshot golden dari server nyata** (container sudah menyala; tabel `type_zoo` sudah ada di
+   kedua engine) untuk menutup K3. Perhatikan D-3: setel zona waktu sesi sebelum merekam.
+7. `qh-ffi` + CLI `qh-ffi` setara `preview`, supaya sisi "Rust" di `docs/benchmarks.md` bisa diisi.
 
 ## Hasil pengukuran terakhir
 
@@ -150,29 +182,36 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 |---|---|---|---|
 | K1 | `web_search` tidak tersedia (HTTP 402, kuota paket habis) | §8.1 (pain point pesaing) tidak punya sumber; riset Tahap B tidak lengkap | [BUTUH TINDAKAN MANUAL] #1 |
 | K2 | ~~Baseline benchmark Python belum ada~~ **Selesai** | — | Terukur untuk PG dan MySQL; Trino tertunda karena memori VM (lihat #4) |
-| K3 | Zoo tipe belum diuji terhadap server nyata | Normalisasi tipe PG/MySQL belum tervalidasi di luar objek Python | Tabel `type_zoo` sudah dimuat di kedua container; snapshot server nyata masuk tugas berikutnya #4 |
+| K3 | ~~Zoo tipe belum diuji terhadap server nyata~~ **Sebagian selesai** | PostgreSQL sudah tervalidasi uji integrasi; MySQL belum | Snapshot server nyata untuk MySQL masuk tugas berikutnya #1 |
 | K4 | `tools/deps.py` (referensi di `docs/dependencies.md`) belum ada | Tabel dependency masih dibuat manual | Dibuat bersama job CI `cargo deny` |
 | K5 | Trino belum pernah dijalankan | Driver Trino (ADR-0006) belum punya validasi terhadap protokol nyata | [BUTUH TINDAKAN MANUAL] #4 |
 | K6 | Ukuran XCFramework belum diukur | `panic = "unwind"` (ADR-0009) menambah unwinding table; konsekuensinya dijanjikan dicatat sebagai angka | Diukur begitu `qh-ffi` menghasilkan artefak |
-| K7 | **Driver PostgreSQL belum ada**, dan bentuknya ditentukan oleh temuan API di bawah | Tidak ada driver yang bisa dipakai; `qh-driver` sudah ada tapi belum ada implementasinya | Dikerjakan berikutnya dengan jalur extended protocol |
+| K7 | ~~Driver PostgreSQL belum ada~~ **Selesai** | — | Bentuknya ditentukan temuan API di bawah; celah yang tersisa ada di K8 dan K9 |
+| K8 | **TLS PostgreSQL belum diimplementasikan** | Driver **menolak** `Prefer`/`Require`/`RequireNoVerify` dengan error yang jelas, jadi tidak ada penurunan senyap ke plaintext — tetapi koneksi yang butuh TLS belum bisa dipakai | Butuh connector `rustls` + root store sistem; dijadwalkan bersama `qh-credentials` |
+| K9 | SQL multi-statement ditolak driver | `prepare` mendeskripsikan satu statement; skrip banyak statement gagal dengan pesan yang menyebutkan penyebabnya | Pemanggil memecah dengan `qh-sql::scan`/`strip_terminator`, yang sudah ada dan teruji |
 
-### K7 — kenapa driver PostgreSQL belum selesai (temuan API yang mengikat desain)
+### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 
 Dibaca langsung dari sumber crate, bukan dari ingatan:
 `~/.cargo/registry/src/*/tokio-postgres-0.7.18/src/simple_query.rs`.
 
 | Fakta | Konsekuensi |
 |---|---|
-| `Client::simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error>` — `SimpleQueryStream` **tidak punya parameter lifetime** | Bagus: cursor bisa memilikinya langsung, tanpa task perantara + channel. Streaming murni tetap mungkin. |
-| `SimpleColumn` hanya mengekspos **`name()`**. Tidak ada akses ke tipe kolom (`src/simple_query.rs:23-32`). | **Ini yang memblokir.** Jalur simple query tidak memberi nama tipe, padahal: (a) grid menampilkan type chip dari nama tipe, dan (b) normalisasi tipe→`Value` butuh nama tipe sebagai kunci. |
-| `SimpleQueryMessage::RowDescription(Arc<[SimpleColumn]>)` (`src/lib.rs:260`) | Tetap tidak menolong: `SimpleColumn`-nya sama, hanya nama. |
-| `Client` adalah `Clone` dan punya `cancel_token()` (`src/client.rs:721`) | Cancel side-server tetap bisa diimplementasikan seperti direncanakan (ADR-0005). |
+| `Client::simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error>` — `SimpleQueryStream` **tidak punya parameter lifetime** | Bagus, tapi tidak cukup: lihat baris berikutnya. |
+| `SimpleColumn` hanya mengekspos **`name()`**; tidak ada aksesor tipe kolom (`src/simple_query.rs:23-32`) | Jalur simple query saja **tidak memberi metadata tipe**. Ini yang memblokir versi pertama. |
+| `SimpleQueryMessage::RowDescription(Arc<[SimpleColumn]>)` (`src/lib.rs:260`) | Tetap tidak menolong: `SimpleColumn`-nya sama. |
+| `Client::prepare(&self, query) -> Statement`, `Statement::columns() -> &[Column]`, `Column::type_() -> &Type`, `Type::name() -> &str` | **Jalan keluarnya:** satu `prepare` (Parse/Describe, tanpa eksekusi) memberi nama tipe, lalu `simple_query_raw` menjalankan statement dan mengalirkan nilai teks. Satu putaran tambahan + satu parse tambahan di server, tanpa eksekusi ganda. |
+| `SimpleQueryStream` **bukan `Unpin`** | Harus di-`Box::pin` sebelum bisa di-poll dari balik `&mut`. |
+| `Client` adalah `Clone` dan punya `cancel_token()` (`src/client.rs:721`) | Cancel server-side terpasang seperti direncanakan (ADR-0005). |
 
-Alternatif yang dievaluasi, dan kenapa belum diambil: jalur extended protocol (`query_raw`) memang memberi `Row::columns()` → `Column::type_().name()`, jadi ia menyelesaikan masalah nama tipe — tetapi hasilnya dikirim dalam format biner, sehingga setiap nilai harus didekode per tipe konkret. Decoding `numeric` yang presisi penuh lewat jalur itu butuh penanganan `i128 + scale` sendiri, dan itu pekerjaan yang harus dirancang, bukan ditambal.
+Biaya yang diterima secara sadar: karena `prepare` hanya mendeskripsikan **satu** statement, SQL
+multi-statement ditolak driver — lihat K9. Alternatifnya (menebak metadata, atau menjalankan
+tanpa tipe) sudah dievaluasi dan ditolak: yang pertama menghasilkan grid tanpa type chip, yang
+kedua adalah regresi diam-diam dari engine Python.
 
-**Keputusan yang diambil:** crate driver yang setengah jadi **dihapus**, bukan dibiarkan di workspace. Alasannya §4.4: stub dan kode mati di jalur pengguna dilarang. Yang paling penting, driver yang berjalan di atas simple query akan kehilangan metadata tipe — itu **regresi diam-diam** dari engine Python, yang melaporkan tipe kolom, dan regresi diam-diam adalah hal yang justru dilarang dokumen ini. Menghapus lebih jujur daripada mengirim driver yang terlihat bekerja.
-
-Rancangan yang harus dipakai saat melanjutkan: `query_raw` untuk nama tipe, dengan teks sebagai format nilai. Modul normalisasi teks→`Value` sudah ditulis untuk seluruh zoo tipe (`numeric(38,10)` presisi penuh, `timestamptz` ber-offset, `bytea` berisi NUL, interval, json/jsonb) dan berisi 20 uji, **tetapi uji itu belum pernah dijalankan**: crate-nya dihapus sebelum sempat dikompilasi, jadi statusnya belum terverifikasi. Angka "20" adalah jumlah fungsi uji yang ditulis, bukan hasil yang lulus. Ia disimpan untuk sesi berikutnya bersama driver-nya, supaya tidak ada kode mati di antara keduanya.
+Versi pertama driver ini **dihapus, bukan dikirim**, karena berjalan di atas simple query saja —
+artinya kehilangan tipe kolom yang dilaporkan engine Python. Alasan pencatatan itu ada di commit
+`dafd071`.
 
 ## [BUTUH TINDAKAN MANUAL]
 

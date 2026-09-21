@@ -348,6 +348,14 @@ pub trait Session: Send {
     /// Metadata for the objects at one level, for the objects grid.
     async fn objects(&mut self, path: &ObjectPath) -> Result<ObjectsPage, EngineError>;
 
+    /// The statement that asks the server for the plan of `sql`.
+    ///
+    /// Each driver spells this itself — all three happen to use `EXPLAIN` today,
+    /// but MySQL's is a different grammar and Trino's accepts options, so the
+    /// spelling belongs with the driver rather than in shared code that would
+    /// have to grow a match on the kind.
+    fn explain_statement(&self, sql: &str) -> String;
+
     /// Ask the server to stop the statement in flight.
     ///
     /// Must be idempotent: calling it with nothing running is success, not an
@@ -558,6 +566,10 @@ mod tests {
                 columns: vec!["Name".to_owned()],
                 rows: vec![vec!["people".to_owned()]],
             })
+        }
+
+        fn explain_statement(&self, sql: &str) -> String {
+            format!("EXPLAIN {sql}")
         }
 
         async fn cancel(&self) -> Result<(), EngineError> {
