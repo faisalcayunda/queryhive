@@ -266,6 +266,28 @@ survive being restored on a small one; without the cap, restoring 480pt onto a 7
 the editor 79pt tall. The cap is applied when drawing, never stored, so the user's own value is
 never overwritten by the window it happened to open in.
 
+### Why the tree stays fast
+
+The tree did not start slow, it was made slow by three honest mistakes, each visible in the code.
+
+**`AnyView` ate the diff.** The recursion wrapped every child row in `AnyView`, which erases the
+row's type — and SwiftUI cannot diff an erased view, so each rebuild drew the whole subtree from
+scratch. The docstring even justified it as the only way to recurse; a self-containing `View` is
+indeed infinitely sized, but a `@ViewBuilder` *function* can call itself and still return a
+concrete `some View`. Same shape, diffable rows.
+
+**Rows listened to the whole app.** Every row carried `@Environment(AppModel.self)` and read the
+selection from it, so any observable change — including the editor's keystrokes — re-ran every row.
+The selection is now passed in as a plain `Bool`: a row body that reads no observable property is
+one SwiftUI can skip when something unrelated changes.
+
+**The breadcrumb walked every node.** `loadedNames` flattened the whole tree with `allNodes()` and
+filtered, twice per toolbar redraw. It now walks only the one connection's subtree and stops
+descent at a match — 2.4x on a synthetic 30k-node tree, and it no longer scales with every other
+connection.
+
+None of the three changed what is drawn, only what is re-drawn.
+
 ### The context breadcrumb
 
 The toolbar's picker is a cascade, not a single connection menu: **connection, then that driver's

@@ -506,15 +506,26 @@ final class AppModel {
     /// Names the tree has already loaded at one level. These are the options behind the target
     /// fields' chevron; empty until that connection has been expanded, which is why the field is
     /// a combo box rather than a menu. `database` narrows to one parent where the level has one.
+    ///
+    /// Only the one connection's subtree is walked. This is read from the toolbar's computed
+    /// properties, twice per redraw, and walking every connection's every node each time is what
+    /// made the breadcrumb expensive on a server with thirty catalogs.
     func loadedNames(for connectionID: UUID?, kind: TreeNode.Kind, database: String = "") -> [String] {
-        guard let connectionID else { return [] }
-        return allNodes()
-            .filter { node in
-                node.connectionID == connectionID && node.kind == kind
-                    && (database.isEmpty || node.database == database)
+        guard let connectionID,
+              let root = tree.first(where: { $0.connectionID == connectionID }) else { return [] }
+        var names: [String] = []
+        func walk(_ nodes: [TreeNode]) {
+            for node in nodes {
+                if node.kind == kind, database.isEmpty || node.database == database {
+                    names.append(node.title)
+                }
+                // A node of the wanted kind has no children of that kind below it, so a match is
+                // a leaf for this purpose and the descent can stop there.
+                if node.kind != kind { walk(node.children ?? []) }
             }
-            .map(\.title)
-            .sorted()
+        }
+        walk(root.children ?? [])
+        return names.sorted()
     }
 
     /// Switching a tab to a table destination starts from the connection's own catalog/schema and

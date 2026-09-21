@@ -27,7 +27,8 @@ struct SidebarTree: View {
                         noMatches
                     } else {
                         ForEach(model.tree) { node in
-                            TreeRow(node: node, depth: 0, visible: visibleIDs)
+                            TreeRow(node: node, depth: 0, visible: visibleIDs,
+                                    selected: model.selectedNodeID == node.id)
                         }
                     }
                 }
@@ -137,14 +138,23 @@ struct SidebarTree: View {
     }
 }
 
-/// One tree row plus, when it is open, its children. The recursion goes through `AnyView`: a
-/// `View` whose body contains itself is an infinitely sized type, and `AnyView` is what breaks
-/// that cycle.
+/// One tree row plus, when it is open, its children.
+///
+/// The recursion goes through `@ViewBuilder` functions rather than a `View` whose body contains
+/// itself: a self-containing `View` is an infinitely sized type, and the old code broke that cycle
+/// with `AnyView` — which erases the type, so SwiftUI cannot diff child rows at all and rebuilds
+/// the whole subtree whenever the parent redraws. With a tree this size that is what made
+/// expanding and scrolling feel sluggish. A function can call itself and still return a concrete
+/// `some View`, so every row keeps its identity and only what changed is redrawn.
 struct TreeRow: View {
     @Environment(AppModel.self) private var model
     @Bindable var node: TreeNode
     let depth: Int
     let visible: Set<String>?
+    /// Passed in rather than read from the model. A body that reads no observable property is one
+    /// SwiftUI can skip re-running when something unrelated changes — and with a few hundred rows
+    /// on screen, "something unrelated" happens on every keystroke in the editor.
+    var selected = false
     @State private var hovering = false
 
     private var isVisible: Bool { visible?.contains(node.id) ?? true }
@@ -156,17 +166,29 @@ struct TreeRow: View {
         if isVisible {
             VStack(alignment: .leading, spacing: 1) {
                 row
-                if node.loading {
-                    messageRow(symbol: nil, text: "Loading…", tint: Tone.secondary)
-                } else if let error = node.error {
-                    messageRow(symbol: "exclamationmark.triangle.fill", text: error, tint: Tone.coral)
-                } else if showChildren, let children = node.children {
-                    if children.isEmpty {
-                        messageRow(symbol: nil, text: "Empty", tint: .white.opacity(0.3))
-                    } else {
-                        ForEach(children) { child in
-                            AnyView(TreeRow(node: child, depth: depth + 1, visible: visible))
-                        }
+                children
+            }
+        }
+    }
+
+    /// The children, built only when this node is actually open. A collapsed catalog contributes
+    /// one line to the layout instead of a row per schema it has never fetched.
+    @ViewBuilder private var children: some View {
+        if node.loading {
+            messageRow(symbol: nil, text: "Loading…", tint: Tone.secondary)
+        } else if let error = node.error {
+            messageRow(symbol: "exclamationmark.triangle.fill", text: error, tint: Tone.coral)
+        } else if showChildren, let children = node.children {
+            if children.isEmpty {
+                messageRow(symbol: nil, text: "Empty", tint: .white.opacity(0.3))
+            } else {
+                // Lazy, so a wide catalog builds only the rows on screen. The recursion is a
+                // method call on the child, not a nested `TreeRow`, which is what keeps the type
+                // concrete.
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(children) { child in
+                        TreeRow(node: child, depth: depth + 1, visible: visible,
+                                selected: model.selectedNodeID == child.id)
                     }
                 }
             }
@@ -332,7 +354,6 @@ struct TreeRow: View {
         }
     }
 
-    private var selected: Bool { model.selectedNodeID == node.id }
 
     private var helpText: String {
         switch node.kind {
