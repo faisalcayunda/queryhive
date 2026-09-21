@@ -99,7 +99,11 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
 
 ## Tugas berikutnya (urutan yang dikerjakan)
 
-1. **Protocol `DatabaseEngine` di Swift + `MockEngine`.** Dijadwalkan bersama Fase 2, bukan
+1. **`qh-driver-postgres`, di atas jalur extended protocol.** Rancangan dan alasan mengapa simple
+   query tidak bisa dipakai ada di K7 di bawah — baca itu lebih dulu, ia menentukan bentuk
+   driver-nya. Modul normalisasi teks→`Value` yang sudah ditulis (belum terkompilasi) dipakai
+   bersama driver ini, bukan sebelumya, supaya tidak ada kode mati di antara keduanya.
+2. **Protocol `DatabaseEngine` di Swift + `MockEngine`.** Dijadwalkan bersama Fase 2, bukan
    sekarang, dan alasannya dicatat supaya tidak terlihat seperti kelalaian: `AppModel` memakai
    `tab.process?.terminate()` sebagai cancel di 10 titik (`Models/AppModel.swift:243, 758, 809,
    828, 1024, 1098, 1155, 1243`), dan `Engine.terminate` di `App.swift:113`. Protocol yang benar
@@ -108,11 +112,11 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
    adapter yang berpura-pura membatalkan di server padahal hanya membunuh proses — persis P5 yang
    sedang diperbaiki, hanya dipindahkan ke lapisan lain. Protocol ditulis begitu `qh-ffi` ada,
    lalu `AppModel` dipindah dalam satu langkah.
-2. `qh-rt` (pemetaan QoS) dan `qh-driver` + tiga driver.
-3. `qh-export`, `qh-credentials`, `qh-storage`, `qh-tunnel`.
-4. Snapshot golden dari **server nyata** (container sudah menyala; zoo tipe PG dan MySQL sudah
+3. `qh-rt` (pemetaan QoS), lalu driver MySQL dan Trino mengikuti bentuk yang sama.
+4. `qh-export`, `qh-credentials`, `qh-storage`, `qh-tunnel`.
+5. Snapshot golden dari **server nyata** (container sudah menyala; zoo tipe PG dan MySQL sudah
    ada di `deploy/dev/seed-*.sql`) untuk menutup K3.
-5. `qh-ffi` + CLI `qh-ffi` setara `preview`, supaya sisi "Rust" di `docs/benchmarks.md` bisa diisi.
+6. `qh-ffi` + CLI `qh-ffi` setara `preview`, supaya sisi "Rust" di `docs/benchmarks.md` bisa diisi.
 
 ## Hasil pengukuran terakhir
 
@@ -150,6 +154,25 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 | K4 | `tools/deps.py` (referensi di `docs/dependencies.md`) belum ada | Tabel dependency masih dibuat manual | Dibuat bersama job CI `cargo deny` |
 | K5 | Trino belum pernah dijalankan | Driver Trino (ADR-0006) belum punya validasi terhadap protokol nyata | [BUTUH TINDAKAN MANUAL] #4 |
 | K6 | Ukuran XCFramework belum diukur | `panic = "unwind"` (ADR-0009) menambah unwinding table; konsekuensinya dijanjikan dicatat sebagai angka | Diukur begitu `qh-ffi` menghasilkan artefak |
+| K7 | **Driver PostgreSQL belum ada**, dan bentuknya ditentukan oleh temuan API di bawah | Tidak ada driver yang bisa dipakai; `qh-driver` sudah ada tapi belum ada implementasinya | Dikerjakan berikutnya dengan jalur extended protocol |
+
+### K7 — kenapa driver PostgreSQL belum selesai (temuan API yang mengikat desain)
+
+Dibaca langsung dari sumber crate, bukan dari ingatan:
+`~/.cargo/registry/src/*/tokio-postgres-0.7.18/src/simple_query.rs`.
+
+| Fakta | Konsekuensi |
+|---|---|
+| `Client::simple_query_raw(&self, query: &str) -> Result<SimpleQueryStream, Error>` — `SimpleQueryStream` **tidak punya parameter lifetime** | Bagus: cursor bisa memilikinya langsung, tanpa task perantara + channel. Streaming murni tetap mungkin. |
+| `SimpleColumn` hanya mengekspos **`name()`**. Tidak ada akses ke tipe kolom (`src/simple_query.rs:23-32`). | **Ini yang memblokir.** Jalur simple query tidak memberi nama tipe, padahal: (a) grid menampilkan type chip dari nama tipe, dan (b) normalisasi tipe→`Value` butuh nama tipe sebagai kunci. |
+| `SimpleQueryMessage::RowDescription(Arc<[SimpleColumn]>)` (`src/lib.rs:260`) | Tetap tidak menolong: `SimpleColumn`-nya sama, hanya nama. |
+| `Client` adalah `Clone` dan punya `cancel_token()` (`src/client.rs:721`) | Cancel side-server tetap bisa diimplementasikan seperti direncanakan (ADR-0005). |
+
+Alternatif yang dievaluasi, dan kenapa belum diambil: jalur extended protocol (`query_raw`) memang memberi `Row::columns()` → `Column::type_().name()`, jadi ia menyelesaikan masalah nama tipe — tetapi hasilnya dikirim dalam format biner, sehingga setiap nilai harus didekode per tipe konkret. Decoding `numeric` yang presisi penuh lewat jalur itu butuh penanganan `i128 + scale` sendiri, dan itu pekerjaan yang harus dirancang, bukan ditambal.
+
+**Keputusan yang diambil:** crate driver yang setengah jadi **dihapus**, bukan dibiarkan di workspace. Alasannya §4.4: stub dan kode mati di jalur pengguna dilarang. Yang paling penting, driver yang berjalan di atas simple query akan kehilangan metadata tipe — itu **regresi diam-diam** dari engine Python, yang melaporkan tipe kolom, dan regresi diam-diam adalah hal yang justru dilarang dokumen ini. Menghapus lebih jujur daripada mengirim driver yang terlihat bekerja.
+
+Rancangan yang harus dipakai saat melanjutkan: `query_raw` untuk nama tipe, dengan teks sebagai format nilai. Modul normalisasi teks→`Value` sudah ditulis untuk seluruh zoo tipe (`numeric(38,10)` presisi penuh, `timestamptz` ber-offset, `bytea` berisi NUL, interval, json/jsonb) dan berisi 20 uji, **tetapi uji itu belum pernah dijalankan**: crate-nya dihapus sebelum sempat dikompilasi, jadi statusnya belum terverifikasi. Angka "20" adalah jumlah fungsi uji yang ditulis, bukan hasil yang lulus. Ia disimpan untuk sesi berikutnya bersama driver-nya, supaya tidak ada kode mati di antara keduanya.
 
 ## [BUTUH TINDAKAN MANUAL]
 
