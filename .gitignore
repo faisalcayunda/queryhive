@@ -19,3 +19,6 @@ backup.zip
 # one opens a GUI window when it runs.
 /test_mac.py
 /test_menu.py
+
+# Rust build artifacts
+/target

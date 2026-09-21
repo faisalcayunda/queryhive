@@ -1,0 +1,35 @@
+# Workspace root.
+#
+# Members are added phase by phase as each crate is implemented for real: the
+# blueprint's target tree (docs/architecture/rust-engine-blueprint.md, section 3.2)
+# lists the destination, not a promise that every crate exists today. A crate is
+# only added here once it holds working code, so that `cargo test` never runs
+# against a stub.
+[workspace]
+resolver = "2"
+members = [
+    "crates/qh-core",
+    "crates/qh-sql",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Faisal Nugraha Cayunda"]
+repository = "https://github.com/data-ecosystem/queryhive"
+
+[workspace.dependencies]
+qh-core = { path = "crates/qh-core" }
+thiserror = "2"
+
+# Release profile for the FFI artifact.
+#
+# `panic = "unwind"`, deliberately: the FFI boundary catches panics and turns them
+# into an errored call rather than letting them cross into Swift, and that needs
+# unwinding tables. See docs/decisions/0009-panic-unwind-across-ffi.md.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

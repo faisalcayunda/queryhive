@@ -1,0 +1,14 @@
+[package]
+name = "qh-sql"
+version = "0.1.0"
+description = "Dialect-aware SQL scanning, statement wrapping and identifier quoting"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
