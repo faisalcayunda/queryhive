@@ -189,6 +189,7 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 | K7 | ~~Driver PostgreSQL belum ada~~ **Selesai** | — | Bentuknya ditentukan temuan API di bawah; celah yang tersisa ada di K8 dan K9 |
 | K8 | **TLS PostgreSQL belum diimplementasikan** | Driver **menolak** `Prefer`/`Require`/`RequireNoVerify` dengan error yang jelas, jadi tidak ada penurunan senyap ke plaintext — tetapi koneksi yang butuh TLS belum bisa dipakai | Butuh connector `rustls` + root store sistem; dijadwalkan bersama `qh-credentials` |
 | K9 | SQL multi-statement ditolak driver | `prepare` mendeskripsikan satu statement; skrip banyak statement gagal dengan pesan yang menyebutkan penyebabnya | Pemanggil memecah dengan `qh-sql::scan`/`strip_terminator`, yang sudah ada dan teruji |
+| K10 | Driver MySQL belum ada | Tidak ada MySQL sama sekali; hanya desainnya yang sudah dikonfirmasi | Rancangan lengkapnya ada di bawah — baca itu lebih dulu, ia menentukan bentuk driver-nya |
 
 ### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 
@@ -212,6 +213,32 @@ kedua adalah regresi diam-diam dari engine Python.
 Versi pertama driver ini **dihapus, bukan dikirim**, karena berjalan di atas simple query saja —
 artinya kehilangan tipe kolom yang dilaporkan engine Python. Alasan pencatatan itu ada di commit
 `dafd071`.
+
+### K10 — desain driver MySQL, sudah dikonfirmasi dari sumber crate
+
+Dibaca langsung dari `~/.cargo/registry/src/*/mysql_async-0.36.2/`, bukan dari ingatan. Crate
+`mysql_async` ter-resolve ke **0.36.2**, jadi versi itu terverifikasi, bukan tebakan.
+
+| Fakta | Konsekuensi |
+|---|---|
+| `QueryResult<'a, 't: 'a, P>` menyimpan `conn: Connection<'a, 't>` (`src/queryable/query_result/mod.rs:71`) | **Ini yang menentukan desain.** Berbeda dari `SimpleQueryStream` PostgreSQL yang owned, `QueryResult` **meminjam** koneksinya, sehingga `Box<dyn Cursor>` tidak bisa memilikinya selama session masih dipinjam. |
+| `QueryResult::next(&mut self) -> Result<Option<Row>>` (`:194`) | Streaming per baris tersedia, tetapi hanya di dalam scope yang meminjam koneksi. |
+| `QueryResult::columns() -> Option<Arc<[Column]>>` (`:395`), `columns_ref() -> &[Column]` (`:382`) | **Kabar baiknya: MySQL tidak punya masalah metadata PostgreSQL.** Tipe kolom tersedia langsung dari hasil query, jadi tidak perlu langkah describe terpisah. |
+| `Column::name_str() -> Cow<str>` (`mysql_common-0.35.5/src/packets/mod.rs:406`), `Column::column_type() -> ColumnType` (`:335`) | Nama dan tipe kolom bisa dibaca tanpa menebak. |
+| `Conn::id() -> u32` (`src/conn/mod.rs:195`) | ID koneksi untuk `KILL QUERY` — mekanisme cancel MySQL (blueprint §2.7). |
+| `OptsBuilder`: `ip_or_hostname`, `tcp_port`, `user`, `pass`, `db_name`, `init(Vec<String>)`, `secure_auth`, `stmt_cache_size` | `init` adalah tempat `SET time_zone = ...` bila nanti diinginkan; untuk sekarang zona dibiarkan seperti server memutuskan (lihat D-3). |
+| `Conn::new(...)` | **Belum diverifikasi.** Jangan mengarang tanda tangannya; baca `src/conn/mod.rs` lebih dulu. |
+
+**Rancangan yang harus dipakai:** karena `QueryResult` meminjam koneksi, cursor tidak bisa
+memilikinya. Yang diperlukan adalah **task produsen + channel berbatas**: `Conn` dipindahkan ke
+dalam task, task mengalirkan `ColumnBatch` lewat channel, dan cursor membaca dari channel. Ini
+sekaligus memberi backpressure — persis bentuk yang sudah direncanakan di blueprint §2.3
+("channel dengan batas, bukan `queue.Queue` + thread manual"). Cancel memakai koneksi kedua yang
+terpisah, jadi tidak terpengaruh koneksi yang sedang dipinjam task.
+
+Crate kerangka MySQL **dihapus dari workspace**, bukan dibiarkan berisi `// placeholder`. Alasannya
+sama seperti `dafd071`: stub di jalur pengguna dilarang, dan kerangka kosong yang terlihat seperti
+pekerjaan yang belum selesai lebih membingungkan daripada tidak ada apa-apa.
 
 ## [BUTUH TINDAKAN MANUAL]
 
