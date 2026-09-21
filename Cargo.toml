@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/qh-core",
+    "crates/qh-driver",
     "crates/qh-result-store",
     "crates/qh-sql",
 ]
