@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "tables",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Table names under an explicit catalog and schema."
+}

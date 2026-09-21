@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "count",
+  "command": "count",
+  "event_lines": 3,
+  "exit_code": 0,
+  "notes": "The true row count from the wrapped statement."
+}

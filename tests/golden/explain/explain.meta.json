@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "explain",
+  "command": "explain",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "A plan has no `truncated` key at all -- its absence is the contract."
+}

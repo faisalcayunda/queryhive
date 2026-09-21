@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "objects_trino",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The driver's own columns, and a NULL cell rendered as an empty string."
+}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "to_table_create",
+  "command": "to_table",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "CTAS: which statement is built, and what `done` reports."
+}

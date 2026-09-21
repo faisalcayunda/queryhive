@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "type_zoo",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "Every hard type: DECIMAL precision, tz-aware and naive timestamps, interval, bytes, NULL, empty string, embedded NUL, and the four characters NULL."
+}

@@ -1,0 +1,3 @@
+{"event": "step", "step": "connect"}
+{"event": "count", "rows": 4321}
+{"elapsed_ms": "<TIME>", "event": "done"}

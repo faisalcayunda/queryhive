@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_catalogs",
+  "command": "catalogs",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "MySQL calls its top level `catalogs` on the wire, and means databases."
+}

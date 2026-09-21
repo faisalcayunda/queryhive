@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "schemas",
+  "command": "schemas",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Schema names under an explicit catalog."
+}

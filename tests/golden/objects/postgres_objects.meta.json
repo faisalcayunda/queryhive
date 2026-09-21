@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_objects",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Postgres declares four object columns: Name, OID, Owner, ACL."
+}

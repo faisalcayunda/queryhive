@@ -1,0 +1,170 @@
+[
+  {
+    "captures": "stdout",
+    "case": "batching",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "More rows than one batch, so the batch boundary itself is frozen."
+  },
+  {
+    "captures": "stdout",
+    "case": "blank_sql",
+    "command": "preview",
+    "event_lines": 1,
+    "exit_code": 1,
+    "notes": "A missing statement is refused before the network is touched."
+  },
+  {
+    "captures": "stdout",
+    "case": "catalogs",
+    "command": "catalogs",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Top-level names, in the server's own order -- never re-sorted."
+  },
+  {
+    "captures": "stdout",
+    "case": "connect_failure",
+    "command": "test",
+    "event_lines": 1,
+    "exit_code": 1,
+    "notes": "A refused connection is one error event carrying the reason, and stderr keeps the traceback."
+  },
+  {
+    "captures": "stdout",
+    "case": "count",
+    "command": "count",
+    "event_lines": 3,
+    "exit_code": 0,
+    "notes": "The true row count from the wrapped statement."
+  },
+  {
+    "captures": "stdout",
+    "case": "drivers",
+    "command": "db_drivers",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The three drivers and the object-tree levels each declares. No network, no settings."
+  },
+  {
+    "captures": "stdout",
+    "case": "explain",
+    "command": "explain",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "A plan has no `truncated` key at all -- its absence is the contract."
+  },
+  {
+    "captures": "stdout",
+    "case": "export_csv",
+    "command": "export",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "The CSV writer's bytes: header, quoting, and a NULL rendered as empty."
+  },
+  {
+    "captures": "stdout",
+    "case": "limit_truncation",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "A row cap that ends on a page boundary: `truncated` says whether more exists."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_catalogs",
+    "command": "catalogs",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "MySQL calls its top level `catalogs` on the wire, and means databases."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_objects",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "MySQL declares four object columns: Name, Engine, Rows, Comment."
+  },
+  {
+    "captures": "stdout",
+    "case": "no_rows",
+    "command": "preview",
+    "event_lines": 3,
+    "exit_code": 0,
+    "notes": "An empty result still emits columns and done."
+  },
+  {
+    "captures": "stdout",
+    "case": "objects_trino",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The driver's own columns, and a NULL cell rendered as an empty string."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_objects",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Postgres declares four object columns: Name, OID, Owner, ACL."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_schemas",
+    "command": "schemas",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Postgres has no catalog level; schema listing is its top level."
+  },
+  {
+    "captures": "stdout",
+    "case": "schemas",
+    "command": "schemas",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Schema names under an explicit catalog."
+  },
+  {
+    "captures": "stdout",
+    "case": "tables",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Table names under an explicit catalog and schema."
+  },
+  {
+    "captures": "stdout",
+    "case": "test_probe",
+    "command": "test",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The connection probe. The count key is `catalog_count`, never `catalogs`."
+  },
+  {
+    "captures": "stdout",
+    "case": "to_table_create",
+    "command": "to_table",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "CTAS: which statement is built, and what `done` reports."
+  },
+  {
+    "captures": "stdout",
+    "case": "type_zoo",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "Every hard type: DECIMAL precision, tz-aware and naive timestamps, interval, bytes, NULL, empty string, embedded NUL, and the four characters NULL."
+  },
+  {
+    "captures": "stdout",
+    "case": "unknown_command",
+    "command": "usage",
+    "event_lines": 1,
+    "exit_code": 1,
+    "notes": "A usage error is one error event and exit 1 -- never a traceback on stdout."
+  }
+]

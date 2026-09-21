@@ -1,0 +1,1 @@
+{"drivers": [{"default_port": 8080, "kind": "trino", "label": "Trino", "levels": ["catalog", "schema", "table"]}, {"default_port": 5432, "kind": "postgres", "label": "PostgreSQL", "levels": ["schema", "table"]}, {"default_port": 3306, "kind": "mysql", "label": "MySQL", "levels": ["database", "table"]}], "event": "drivers"}

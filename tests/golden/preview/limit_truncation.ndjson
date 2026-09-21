@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "id", "type": "integer"}], "event": "columns"}
+{"data": [["1"], ["2"], ["3"]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 3, "truncated": true}

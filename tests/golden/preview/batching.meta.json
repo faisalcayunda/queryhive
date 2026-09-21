@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "batching",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "More rows than one batch, so the batch boundary itself is frozen."
+}
