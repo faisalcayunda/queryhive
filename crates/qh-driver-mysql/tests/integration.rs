@@ -304,10 +304,22 @@ async fn kill_query_reaches_the_server_and_the_session_stays_usable() {
         return;
     };
 
+    // `execute` must hand back a cursor while the query is still running. If it
+    // blocks until the result set begins -- which for a blocking query is when the
+    // query ends -- the caller has nothing to cancel, and pressing stop does
+    // nothing at all. That was the real defect: measured, this took 2.002 s for
+    // `SELECT SLEEP(2)` and over 5 s for a long join, before any cursor existed.
+    let submitted = Instant::now();
     let mut cursor = session
         .execute("SELECT SLEEP(30)", &ExecuteOptions::default())
         .await
         .expect("execute");
+    let submit_latency = submitted.elapsed();
+    assert!(
+        submit_latency < std::time::Duration::from_millis(500),
+        "execute blocked for {submit_latency:?}; the statement was never handed over, \
+         so no cancel could reach it"
+    );
 
     // Let the statement actually start, or the kill arrives before there is
     // anything to kill and the test proves nothing.
@@ -317,6 +329,7 @@ async fn kill_query_reaches_the_server_and_the_session_stays_usable() {
     session.cancel().await.expect("cancel");
     let outcome = cursor.next_batch(8).await;
     let latency = started.elapsed();
+    let total = submitted.elapsed();
 
     // Section 6 asks for under 500 ms, so it is asserted rather than printed.
     // This is also what proves the kill reached the server: a `SLEEP(30)` that was
@@ -326,29 +339,41 @@ async fn kill_query_reaches_the_server_and_the_session_stays_usable() {
         "cancel took {latency:?}, over the 500 ms target"
     );
 
-    // MySQL's `SLEEP()` reports an interruption by *returning 0* rather than by
-    // raising an error, so the value is the signal here and there is no code to
-    // check. That is why the latency assertion above is what proves the kill
-    // landed: an uninterruptible `SLEEP(30)` cannot finish in under half a second.
+    // `SLEEP()` reports which happened through its return value, and the two are
+    // the opposite way round from what this test first assumed: **1 means it was
+    // interrupted, 0 means it slept the full duration and returned normally**. The
+    // earlier version asserted 0 and passed -- because `execute` had blocked for the
+    // whole thirty seconds, the statement had already finished, and the value it saw
+    // was the ordinary completion value. Asserting 1 is what distinguishes an
+    // interrupt from a query that simply ran to the end.
     //
-    // A second test once tried to prove the error-code path with a long join. It
-    // was removed rather than kept: the join kept running for 91 seconds and only
-    // stopped when the thread was killed by hand from outside the test, so the
-    // driver's cancel did not interrupt it. That is an open defect, recorded as
-    // K11 in PROGRESS.md, and a test that hangs for 90 seconds and then passes for
-    // the wrong reason is worse than no test.
+    // `total` is what makes this proof rather than coincidence. An earlier version
+    // of this test passed while proving nothing: `execute` blocked until the query
+    // finished, so by the time `cancel` ran the statement was already over, SLEEP
+    // had returned its ordinary 0, and the latency assertion measured a cancel of
+    // nothing. The whole suite took 30.28 s -- exactly `SLEEP(30)` running to
+    // completion. Asserting the total keeps that from coming back.
     match outcome {
         Ok(Some(batch)) => {
             assert_eq!(batch.rows(), 1, "SLEEP returns exactly one row: {batch:?}");
             assert_eq!(
                 batch.value(0, 0),
-                Some(&Value::Int(0)),
-                "SLEEP signals interruption with 0; anything else means it ran to completion"
+                Some(&Value::Int(1)),
+                "1 is SLEEP reporting the interruption; 0 would mean it slept the full \
+                 thirty seconds and nothing stopped it"
             );
         }
         Ok(None) => panic!("SLEEP produced nothing, so it never reported an outcome"),
         Err(error) => panic!("SLEEP reported an error instead of its interrupt value: {error:?}"),
     }
+
+    // The uninterruptible `SLEEP(30)` would have taken thirty seconds; this proves
+    // it did not run to completion, which is the difference between an interrupt
+    // and a query that simply finished.
+    assert!(
+        total < std::time::Duration::from_secs(10),
+        "the statement ran for {total:?}, so nothing interrupted it"
+    );
 
     // The session must still work — `KILL QUERY` and not `KILL CONNECTION` is the
     // whole reason this is not a dropped connection.
@@ -358,6 +383,54 @@ async fn kill_query_reaches_the_server_and_the_session_stays_usable() {
         .expect("the session was unusable after a cancel");
     let (rows, _) = drain(&mut after, 4).await;
     assert_eq!(rows[0][0], Value::Int(1));
+
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn an_interrupted_statement_reports_the_servers_own_code() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    // A join with no usable index: long enough to interrupt, and unlike SLEEP it
+    // does not absorb the interrupt as a return value. This test was deleted once
+    // because it hung for 91 seconds and only passed after the thread was killed by
+    // hand from outside; with `execute` no longer waiting for the result set, the
+    // cursor exists while the query runs and cancel can reach it.
+    let mut cursor = session
+        .execute(
+            "SELECT COUNT(*) FROM wide_500k a JOIN wide_500k b ON a.id < b.id",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute should return while the join is still running");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    session.cancel().await.expect("cancel");
+
+    // Bounded on purpose: if cancel stops working this fails in ten seconds with a
+    // clear message instead of hanging the suite for a minute and a half.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), cursor.next_batch(8))
+        .await
+        .expect("cancel did not stop the join within ten seconds");
+
+    // MySQL reports an interrupted statement as 1317, "query execution was
+    // interrupted". A killed process could not produce this: the server is what
+    // stopped the work.
+    match outcome {
+        Err(error) => assert_eq!(
+            error.code(),
+            Some("1317"),
+            "expected the interrupt code, got {error:?}"
+        ),
+        Ok(Some(batch)) => panic!(
+            "the statement completed instead of being interrupted: {} row(s)",
+            batch.rows()
+        ),
+        Ok(None) => panic!("the statement ended with no rows rather than being interrupted"),
+    }
 
     session.close().await.expect("close");
 }

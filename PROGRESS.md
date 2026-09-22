@@ -122,8 +122,10 @@ Yang dibuktikan uji integrasi MySQL terhadap server nyata:
 | Urutan lintas batas batch | id terbaca 1, 2, 3 … lurus menembus beberapa batch produsen |
 | `binary(16)` | 16 byte apa adanya, bukan teks hasil decode yang rusak |
 | ENUM | Label-nya (`ok`), bukan ordinalnya |
-| Cancel | Latensi < 500 ms; `SLEEP` mengembalikan 0 sebagai sinyal interupsi. **Tetapi lihat K11: tidak terbukti untuk join panjang** |
+| Cancel | `execute` kembali < 500 ms sehingga cursor sudah ada saat query berjalan, lalu join panjang benar-benar diinterupsi dengan kode **1317**; `SLEEP` mengembalikan **1** sebagai sinyal interupsi |
 | Sesudah cancel | `SELECT 1` tetap berhasil — `KILL QUERY`, bukan `KILL CONNECTION` |
+| Deskripsi tanpa eksekusi | `prep` mengembalikan 1 kolom dalam 915 µs untuk join yang butuh >90 detik bila dijalankan |
+| Durasi suite | **0,33 dtk**, turun dari 30,28 dtk — sekaligus membuktikan query-nya tidak lagi berjalan tuntas di dalam `execute` |
 | Database sistem | Disembunyikan kecuali diminta, dan yang disembunyikan tepat empat nama, bukan pola `LIKE` yang bisa menelan database pengguna |
 | Level schema | Ditolak dengan petunjuk yang menyebut apa yang harus dipakai |
 
@@ -149,10 +151,19 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
    MySQL melaporkan kolom `TEXT` sebagai `MYSQL_TYPE_BLOB` juga, sehingga kolom teks kosong menjadi
    `Bytes([])` alih-alih string kosong. Diperbaiki dengan membaca character set (63 = binary) —
    nilainya diambil dari `information_schema.COLLATIONS` server, bukan dari ingatan.
-7. **`KILL QUERY` tidak menghentikan join panjang.** Uji yang saya tulis untuk membuktikan jalur
-   error 1317 "lulus" setelah 91 detik hanya karena saya mematikan thread-nya manual dari luar uji.
-   Uji itu **dihapus**, bukan dilonggarkan: uji yang menggantung 90 detik lalu lulus karena alasan
-   yang salah lebih buruk daripada tidak ada uji. Cacatnya dicatat sebagai K11.
+7. **`execute` menunggu seluruh query, dan itu membuat cancel mustahil — bukan cancel-nya yang
+   rusak.** Versi pertama `execute` menunggu produsen mengirim deskripsi kolom, dan MySQL mengirim
+   deskripsi itu saat result set *mulai*; untuk query blocking, artinya saat query *selesai*.
+   Terukur: `execute(SELECT SLEEP(2))` kembali setelah **2,002 detik**, dan join panjang belum
+   kembali setelah **5 detik** — jadi pemanggil belum memegang cursor, dan tidak ada yang bisa
+   dibatalkan. Diperbaiki dengan mendeskripsikan lebih dulu lewat `prep` (COM_STMT_PREPARE):
+   query yang sama dideskripsikan dalam **915 µs** dengan 1 kolom.
+8. **Klaim saya sendiri yang salah, dicabut.** Saya pernah menulis bahwa cancel MySQL "terbukti
+   untuk `SLEEP` (latensi < 500 ms, `SLEEP` mengembalikan 0)". Itu keliru dua kali. Ujinya lulus
+   karena `SLEEP(30)` sudah selesai di dalam `execute`, jadi yang diukur adalah pembatalan atas
+   sesuatu yang tidak ada. Dan `SLEEP` mengembalikan **1** saat diinterupsi, bukan 0 — **0 berarti
+   ia tidur penuh dan kembali normal**. Nilai 0 itulah bukti bahwa tidak terjadi interupsi, dan uji
+   lama justru menegaskannya sebagai keberhasilan.
 8. **Ekspektasi `timestamptz` salah, kodenya benar.** Uji saya mengasumsikan server
    mengembalikan `+07:00` seperti saat ditulis. PostgreSQL merender di zona waktu **sesi**, jadi
    yang kembali `+00:00` dengan instant yang sama. Diperbaiki dengan membuktikan dua arah:
@@ -219,8 +230,8 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 | K8 | **TLS PostgreSQL belum diimplementasikan** | Driver **menolak** `Prefer`/`Require`/`RequireNoVerify` dengan error yang jelas, jadi tidak ada penurunan senyap ke plaintext — tetapi koneksi yang butuh TLS belum bisa dipakai | Butuh connector `rustls` + root store sistem; dijadwalkan bersama `qh-credentials` |
 | K9 | SQL multi-statement ditolak driver | `prepare` mendeskripsikan satu statement; skrip banyak statement gagal dengan pesan yang menyebutkan penyebabnya | Pemanggil memecah dengan `qh-sql::scan`/`strip_terminator`, yang sudah ada dan teruji |
 | K10 | ~~Driver MySQL belum ada~~ **Selesai** | — | Rancangannya ternyata bukan extended protocol melainkan task produsen + channel; alasannya di bawah |
-| K11 | **`KILL QUERY` tidak menghentikan join panjang** | Cancel MySQL terbukti bekerja untuk `SLEEP` (latensi < 500 ms, `SLEEP` mengembalikan 0 sebagai sinyal interupsi), tetapi **tidak** untuk `wide_500k a JOIN wide_500k b ON a.id < b.id`: query itu tetap berjalan 91 detik dan baru berhenti ketika thread-nya dimatikan manual dari luar uji | Diselidiki berikutnya. Dugaan yang harus diuji lebih dulu: apakah `KILL QUERY` perlu diulang, apakah statement masih dalam fase yang belum bisa diinterupsi, atau apakah `execute` menunggu metadata lebih lama dari yang diasumsikan |
-| K12 | Suite uji MySQL memakan 30 detik | Satu uji memakai `SELECT SLEEP(30)`; kill-nya terbukti cepat, tetapi suite tetap berjalan 30 detik, sehingga ada yang menunggu sesuatu yang belum dijelaskan | Diukur dan dijelaskan, bukan dibiarkan sebagai kebiasaan |
+| K11 | ~~`KILL QUERY` tidak menghentikan join panjang~~ **Selesai, akar masalahnya bukan cancel** | `execute` menunggu deskripsi kolom, dan MySQL mengirimnya saat result set **mulai** — untuk query blocking, itu berarti saat query **selesai**. Jadi `execute` menunggu seluruh query, pemanggil belum memegang cursor apa pun, dan cancel tidak punya sasaran. Cancel-nya sendiri selalu sehat | Diperbaiki dengan mendeskripsikan lebih dulu lewat `prep` (COM_STMT_PREPARE, tanpa eksekusi). Terukur: `execute(SLEEP(2))` 2,002 dtk → `prep` untuk join yang sama **915 µs** |
+| K12 | ~~Suite uji MySQL memakan 30 detik~~ **Selesai** | 30,28 dtk itu adalah `SELECT SLEEP(30)` yang berjalan **tuntas di dalam `execute`** sebelum cancel sempat dipanggil. Penjelasan yang sama dengan K11, dan bukti bahwa uji cancel-nya tidak membuktikan apa pun | Suite kini **0,33 dtk** |
 
 ### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 

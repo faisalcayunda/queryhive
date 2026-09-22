@@ -245,21 +245,58 @@ impl Session for MysqlSession {
         sql: &str,
         options: &ExecuteOptions,
     ) -> Result<Box<dyn Cursor>, EngineError> {
-        let conn = self.connection().await?;
+        let mut conn = self.connection().await?;
+
+        // Describe the statement **without running it**. `prep` is
+        // COM_STMT_PREPARE: it returns the result columns and executes nothing, so
+        // it costs one round trip and does no work.
+        //
+        // This is not a tidy-up, it is what makes cancel reachable at all. MySQL
+        // sends a result set's column descriptions when the result set *begins*,
+        // and for a blocking query that is when the query finishes. Waiting for
+        // them here therefore waited for the whole query. Measured against the dev
+        // container: `execute(SELECT SLEEP(2))` returned after 2.002 s, and a long
+        // join had not returned after 5 s. During that window `execute` had not
+        // handed anything back, so the caller had no cursor to cancel and pressing
+        // stop did nothing. Describing that same join first returns in 915 µs.
+        let described = conn.prep(sql).await.ok();
+        let (columns, column_types, binary) = describe(&described);
+        // The described statement is not the one that runs — the rows come from the
+        // text-protocol query in the producer — so it is closed rather than left
+        // occupying a slot in the connection's statement cache.
+        if let Some(statement) = described {
+            let _ = conn.close(statement).await;
+        }
+
         let (sender, mut receiver) = mpsc::channel(BATCH_BACKLOG);
         let producer = Producer {
             conn,
             sql: sql.to_owned(),
             row_limit: options.row_limit,
             batch_rows: DEFAULT_PRODUCER_BATCH,
+            column_types,
+            binary,
+            // A statement the server declines to describe still has to run. Its
+            // columns are then only known once the result set starts, so the
+            // producer announces them and `execute` waits — the old behaviour,
+            // kept for the cases that cannot do better.
+            announce_columns: columns.is_empty(),
             sender,
             connection_id: Arc::clone(&self.connection_id),
         };
         tokio::spawn(producer.run());
 
-        // Wait for the column descriptions. They arrive before any row, so this
-        // does not delay the first row — it is what lets `columns()` be valid as
-        // soon as `execute` returns, which the trait requires.
+        // The fast path: the columns are already known, so there is nothing to
+        // wait for and the caller gets a cursor it can cancel immediately.
+        if !columns.is_empty() {
+            return Ok(Box::new(MysqlCursor {
+                columns,
+                receiver,
+                pending: None,
+                finished: false,
+            }));
+        }
+
         match receiver.recv().await {
             Some(Message::Ready { columns }) => Ok(Box::new(MysqlCursor {
                 columns,
@@ -381,6 +418,41 @@ impl Session for MysqlSession {
 // the streaming path
 // --------------------------------------------------------------------------- //
 
+/// The columns, types and binary flags a described statement reported.
+///
+/// All three come back empty when the statement could not be described, which is
+/// also what a statement with no result set reports — the two are told apart in the
+/// producer, by asking the result.
+fn describe(
+    statement: &Option<mysql_async::Statement>,
+) -> (
+    Vec<ColumnMeta>,
+    Vec<mysql_async::consts::ColumnType>,
+    Vec<bool>,
+) {
+    let Some(statement) = statement else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let columns = statement
+        .columns()
+        .iter()
+        .map(|column| ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column)))
+        .collect();
+    let column_types = statement
+        .columns()
+        .iter()
+        .map(mysql_async::Column::column_type)
+        .collect();
+    // `TEXT` and `BLOB` are the same protocol type, so the character set is read
+    // once per column here rather than guessed at per value.
+    let binary = statement
+        .columns()
+        .iter()
+        .map(normalize::is_binary)
+        .collect();
+    (columns, column_types, binary)
+}
+
 /// What the producer sends the cursor.
 enum Message {
     /// Column metadata, sent before any row so `execute` can return a cursor
@@ -398,6 +470,12 @@ struct Producer {
     sql: String,
     row_limit: Option<usize>,
     batch_rows: usize,
+    /// Known up front when the statement could be described.
+    column_types: Vec<mysql_async::consts::ColumnType>,
+    binary: Vec<bool>,
+    /// Whether the columns still have to be announced, because describing up front
+    /// did not work.
+    announce_columns: bool,
     sender: mpsc::Sender<Message>,
     connection_id: Arc<AtomicU32>,
 }
@@ -426,29 +504,36 @@ impl Producer {
             .await
             .map_err(|error| map_query_error(error, &self.sql))?;
 
-        let columns: Vec<ColumnMeta> = result
-            .columns_ref()
-            .iter()
-            .map(|column| {
-                ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column))
-            })
-            .collect();
-        let column_types: Vec<mysql_async::consts::ColumnType> = result
-            .columns_ref()
-            .iter()
-            .map(mysql_async::Column::column_type)
-            .collect();
-        // `TEXT` and `BLOB` are the same protocol type, so the character set is
-        // read once per column here rather than guessed at per value.
-        let binary: Vec<bool> = result
-            .columns_ref()
-            .iter()
-            .map(normalize::is_binary)
-            .collect();
+        let (column_types, binary) = if self.announce_columns {
+            // Not described up front, so ask the result set. This is also where a
+            // statement with no result set becomes distinguishable from one that
+            // could not be described: an empty list here means there are no rows to
+            // come.
+            let columns: Vec<ColumnMeta> = result
+                .columns_ref()
+                .iter()
+                .map(|column| {
+                    ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column))
+                })
+                .collect();
+            let types = result
+                .columns_ref()
+                .iter()
+                .map(mysql_async::Column::column_type)
+                .collect();
+            let binary = result
+                .columns_ref()
+                .iter()
+                .map(normalize::is_binary)
+                .collect();
+            if self.sender.send(Message::Ready { columns }).await.is_err() {
+                return Ok(());
+            }
+            (types, binary)
+        } else {
+            (self.column_types.clone(), self.binary.clone())
+        };
 
-        if self.sender.send(Message::Ready { columns }).await.is_err() {
-            return Ok(());
-        }
         // A statement with no result set — DDL, or an UPDATE — has nothing to
         // stream, and saying so now is better than sending empty batches.
         if column_types.is_empty() {
