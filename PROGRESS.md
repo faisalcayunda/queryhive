@@ -550,47 +550,44 @@ melainkan kosakata UI yang belum punya kata untuk itu.
 
 ## Tugas berikutnya (urutan yang dikerjakan)
 
-1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling
-   penting dari daftar ini: cancel yang bekerja untuk sebagian query lebih berbahaya daripada
-   cancel yang tidak ada, karena UI akan mengklaim sudah berhenti padahal belum. Sekalian
-   menjelaskan K12 (30 detik yang tidak dijelaskan di suite MySQL).
-2. **Driver Trino** — protokol HTTP, tanpa pool (ADR-0006). Butuh VM podman dinaikkan dulu.
-3. **TLS PostgreSQL** (K8) — connector `rustls`, lalu `TlsMode::Prefer`/`Require` benar-benar
-   berfungsi alih-alih ditolak. Dijadwalkan bersama `qh-credentials`.
-4. `qh-rt` (pemetaan QoS), lalu `qh-export`, `qh-credentials`, `qh-storage`, `qh-tunnel`.
-5. **Protocol `DatabaseEngine` di Swift + `MockEngine`.** Dijadwalkan bersama Fase 2, dan
-   alasannya dicatat supaya tidak terlihat seperti kelalaian: `AppModel` memakai
-   `tab.process?.terminate()` sebagai cancel di 10 titik (`Models/AppModel.swift:243, 758, 809,
-   828, 1024, 1098, 1155, 1243`), dan `Engine.terminate` di `App.swift:113`. Protocol yang benar
-   menyatakan cancel sebagai kemampuan driver dengan semantik server-side (blueprint §2.7), dan
-   itu baru jujur diimplementasikan di atas engine Rust. Protocol ditulis begitu `qh-ffi` ada,
-   lalu `AppModel` dipindah dalam satu langkah.
-6. **Snapshot golden dari server nyata** (container sudah menyala; tabel `type_zoo` sudah ada di
-   kedua engine) untuk menutup K3. Perhatikan D-3: setel zona waktu sesi sebelum merekam.
-7. ~~`qh-ffi` + CLI setara `preview`~~ **Selesai untuk 11 perintah.** Yang **belum**, dan
-   masing-masing punya rumahnya:
-   - **Permukaan UniFFI** di atas `qh-ffi` (blueprint §3.2). Command-nya sudah library yang bisa
-     dipanggil tanpa stdout, jadi ini pembungkusan, bukan penulisan ulang.
-   - **`Cursor` belum punya update count.** Akibatnya `to_table` melaporkan `rows: -1` dan tidak
-     bisa memancarkan `progress`/`state` (`docs/golden-deltas.md` D-6). Tempatnya: satu method
-     opsional di `qh-driver`, diisi driver Trino dari `updateCount` halaman terakhir. Setelah itu
-     `to_table` bisa setara tanpa perubahan di sisi perintah.
-   - **`RETRIES` dibaca lalu diabaikan.** Retry adalah milik lapisan session (blueprint §1.7),
-     yang belum ada. Ini perbedaan perilaku nyata pada koneksi yang putus di tengah ekspor, jadi
-     dicatat, bukan disembunyikan.
-   - **`ENCODING` dan `DBF_ENCODING`** juga dibaca lalu diabaikan: semua writer engine ini UTF-8
-     dan code page `dbf` tetap cp1252.
-   - **`bundle` (ZIP) memakai deflate `flate2`, bukan zlib `zipfile`.** Isinya identik (nama,
-     byte, CRC), byte arsipnya tidak diklaim sama.
-8. ~~Menutup T-1~~ **Selesai 22 Sep 2026.** Ternyata bukan sekadar dua renderer: decoder Trino dan
-   PostgreSQL juga memakai konvensi `micros` yang berbeda (jam dinding vs instant). Modelnya
-   disatukan ke milik Python — instant + zona — decoder Trino mengikuti, dan `value.rs` sekarang
-   hanya meneruskan ke `render::to_text`. Duplikasi 338 baris hilang, aturan float yang setia
-   diangkat, dan buktinya diukur terhadap PostgreSQL dengan zona sesi `Asia/Jakarta`
-   (`docs/golden-deltas.md` T-1).
-9. **`qh-credentials`** (Keychain `id.data-ecosystem.queryhive` harus dipertahankan supaya
-   password lama tetap terbaca), lalu **`qh-storage`** dan **`qh-tunnel`**. Ini yang tersisa
-   sebelum aplikasi bisa memakai engine Rust untuk menyimpan koneksi.
+Daftar ini diperbarui 23 Sep 2026. Sembilan item sebelumnya sudah selesai -- termasuk K11 dan K12
+yang justru bukan soal cancel sama sekali, melainkan `execute` yang menunggu deskripsi kolom
+sehingga query blocking selesai sebelum pemanggil memegang cursor apa pun. Yang tersisa di bawah
+ini adalah yang benar-benar belum.
+
+1. **Empat workstream paritas, satu agen per crate** (berkas terpisah, jadi paralel):
+   - `crates/qh-driver-trino` — header `X-Trino-Client-Capabilities` yang tidak pernah dikirim,
+     sehingga server menurunkan presisi timestamp menjadi milidetik. Yang membuat ini mendesak
+     bukan presisinya, melainkan **uji integrasi di crate itu yang mengabadikan pemotongan
+     tersebut sebagai kebenaran protokol**: uji yang salah lebih berbahaya daripada tidak ada uji,
+     karena ia membuat perbaikan terlihat seperti regresi. Sekaligus `explain` yang tidak membuang
+     `;` milik pemanggil.
+   - `crates/qh-driver-postgres` — `catalogs` ditolak padahal mesin lama menjawabnya; itu
+     satu-satunya cacat paritas nyata di crate itu. Tiga selisih lain (interval, array, uuid)
+     arahnya **kebalikan** dari dugaan pertama: sisi Rust yang lebih setia (psycopg melipat
+     interval menjadi hari dan menambahkan tanda kutip yang tidak diminta), jadi yang dibutuhkan
+     keputusan tertulis, bukan perubahan.
+   - `crates/qh-driver-mysql` — kolom `ENUM` terbaca `char` (keputusan parent, karena `254` berarti
+     `CHAR` **dan** `ENUM`), dan pesan penolakan level yang kehilangan petunjuk yang dulu ada.
+   - `crates/qh-ffi/src/config.rs` — `DB_SSLMODE` diabaikan untuk Trino, dan `Prefer` tidak punya
+     sumber sama sekali dari setelan Trino.
+2. **`RETRIES` dibaca lalu diabaikan.** Retry adalah milik lapisan session (blueprint §1.7), yang
+   belum ada. Ini perbedaan perilaku nyata pada koneksi yang putus di tengah ekspor, jadi dicatat
+   dan bukan disembunyikan.
+3. **`ENCODING` dan `DBF_ENCODING`** juga dibaca lalu diabaikan: semua writer engine ini UTF-8 dan
+   code page `dbf` tetap cp1252.
+4. **Protocol bertipe + `MockEngine` di aplikasi (Fase 2).** Seam-nya sudah ada
+   (`app/Sources/TrinoExporter/Support/DatabaseEngine.swift`, satu konformer `PythonEngine`,
+   sembilan call site melewatinya); yang belum adalah permukaan `descriptors()/browse()/run()`
+   bertipe §1.6 beserta `MockEngine`-nya, dan data plane handle + offset buffer (ADR-0004). Enam
+   tepi yang akan terasa canggung sudah dicatat di riwayat di atas, dimulai dari
+   `onExit(status, stderr)`.
+5. **Celah cakupan golden: `export` dan `to_table` live di PostgreSQL dan MySQL.** Boleh
+   ditinggalkan, tapi harus sebagai pilihan: stdout keduanya memuat path dan ukuran, bukan nilai,
+   jadi yang dibekukan sedikit.
+6. **Yang butuh tangan manusia, bukan agen:** rotasi kunci kenari, dan pembacaan lintas-program
+   item Keychain yang ditulis engine ini -- pembacaan dari aplikasi memunculkan dialog izin, dan
+   itu batas yang tidak bisa dilewati tanpa orang.
 
 ## Hasil pengukuran terakhir
 
