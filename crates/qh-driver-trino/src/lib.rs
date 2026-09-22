@@ -36,10 +36,38 @@
 //!
 //! ## TLS
 //!
-//! Only [`TlsMode::Disable`] is accepted, and every other mode is **refused** with
-//! a clear error rather than silently connecting in clear. `reqwest` is built with
-//! `rustls-tls` so the transport can do it; what is missing is the connector
-//! plumbing, and that is tracked separately (K8).
+//! This is HTTP, so unlike the socket drivers the scheme in the URL *is* the TLS
+//! decision, and all four [`TlsMode`]s mean here what they mean everywhere else:
+//!
+//! | Mode | Scheme | Certificate |
+//! |---|---|---|
+//! | `Disable` | `http` | — |
+//! | `Prefer` | `https`, with `http` only when the coordinator does not speak TLS | not checked |
+//! | `Require` | `https` | platform trust store |
+//! | `RequireNoVerify` | `https` | not checked |
+//!
+//! The trust store is the platform's — on macOS the Keychain, through
+//! `rustls-platform-verifier` — which is what makes a corporate CA the user
+//! installed work without the app having to carry a CA file.
+//!
+//! **`Prefer` encrypts but does not verify**, which is a decision and not a
+//! leftover. The Python engine's `prefer` (psycopg, pymysql) encrypted and did not
+//! check, and an internal coordinator behind a self-signed certificate is ordinary
+//! in this product's deployments; a `Prefer` that started verifying would break
+//! those on upgrade, and the app's own per-connection answer to that situation is a
+//! `verify: false` flag. `Require` is the mode that means "and check it".
+//!
+//! **`Prefer` falls back only when the coordinator is not speaking TLS at all.**
+//! A plain-HTTP coordinator answers the TLS ClientHello with an ordinary HTTP
+//! response, which `rustls` rejects as a malformed record; that is the one signal
+//! that is allowed to downgrade. A server that *does* speak TLS and then fails —
+//! a TLS alert, a truncated record, a connection reset mid-handshake — is an
+//! error, because a downgrade an attacker can trigger is precisely the attack the
+//! two cases are told apart to avoid. Not verifying the certificate does not blunt
+//! this: the check is about what the peer *answered*, not about what it proved. The
+//! decision is made once, on the statement's first `POST`, and pinned for the
+//! session: a later page poll uses the client that was chosen and never re-decides,
+//! so a poll cannot be made to fall back.
 
 mod decode;
 
@@ -55,6 +83,10 @@ use qh_driver::{
 };
 use serde::Deserialize;
 use serde_json::Value as Json;
+
+// Re-exported so a caller — in practice the tests — can name the store it hands to
+// [`client_for`] without having to depend on `rustls` at the same version.
+pub use rustls::RootCertStore;
 
 /// How long to wait between polls of a page URI that is still queued.
 ///
@@ -134,6 +166,138 @@ struct Running {
 type Shared = Arc<Mutex<Option<Running>>>;
 
 // ---------------------------------------------------------------------------
+// Building the client
+// ---------------------------------------------------------------------------
+
+/// Build the HTTP client for one TLS mode.
+///
+/// `roots` is where certificates are checked, and only [`TlsMode::Require`] reads
+/// it. `None` — what the driver itself uses — is the platform trust store, so a
+/// root the user installed in the macOS Keychain is trusted. `Some` is the seam the
+/// tests need: verifying a real certificate cannot be exercised in CI, but the
+/// verifying path still must be, so a test hands in a store of its own choosing and
+/// gets the same client construction.
+///
+/// `Prefer` takes no store at all, and that is deliberate rather than an omission.
+/// It encrypts without verifying, which is what the Python engine's `prefer` did
+/// (psycopg encrypts and does not check), and this product's deployments are full of
+/// internal coordinators with self-signed certificates. A `Prefer` that verified
+/// would break those on upgrade with a message about a TLS handshake — and `Require`
+/// is the mode for "and check it".
+pub fn client_for(
+    tls: TlsMode,
+    roots: Option<RootCertStore>,
+) -> Result<reqwest::Client, EngineError> {
+    let builder = reqwest::Client::builder();
+    let built = match tls {
+        TlsMode::Disable => builder.build(),
+        // `verify: false` in the app's own vocabulary for `RequireNoVerify`, and the
+        // same absence of checking inside `Prefer`: both encrypt and neither
+        // verifies. What separates them is below — `Prefer` is the only one that may
+        // end up in clear, and only when the coordinator has no TLS to speak.
+        TlsMode::Prefer | TlsMode::RequireNoVerify => {
+            builder.danger_accept_invalid_certs(true).build()
+        }
+        TlsMode::Require => match roots {
+            Some(roots) => {
+                let config = tls_builder()?
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                builder
+                    .use_preconfigured_tls(with_http1_alpn(config))
+                    .build()
+            }
+            None => {
+                use rustls_platform_verifier::BuilderVerifierExt;
+                let config = tls_builder()?
+                    .with_platform_verifier()
+                    .map_err(|error| {
+                        client_error(format!(
+                            "the platform trust store could not be opened: {error}"
+                        ))
+                    })?
+                    .with_no_client_auth();
+                builder
+                    .use_preconfigured_tls(with_http1_alpn(config))
+                    .build()
+            }
+        },
+    };
+    built.map_err(|error| client_error(format!("could not build the HTTP client: {error}")))
+}
+
+/// The start of every verifying configuration.
+///
+/// The crypto provider is named rather than resolved: `ClientConfig::builder()`
+/// looks one up from the crate features and the process default, and panics when
+/// the answer is ambiguous — a panic at connect time, chosen by whatever else
+/// happens to be in the dependency graph. `ring` is the one this crate compiles
+/// on purpose, so it is the one named.
+fn tls_builder(
+) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>, EngineError> {
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| client_error(format!("the TLS versions could not be configured: {error}")))
+}
+
+/// Advertise HTTP/1.1, because that is the only version this build speaks.
+///
+/// A preconfigured [`rustls::ClientConfig`] replaces the one reqwest would have
+/// built, ALPN included, so the one protocol it would have offered is restored
+/// here rather than left to chance.
+fn with_http1_alpn(mut config: rustls::ClientConfig) -> rustls::ClientConfig {
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config
+}
+
+fn client_error(message: String) -> EngineError {
+    EngineError::Connect {
+        message,
+        kind: FailureKind::Permanent,
+    }
+}
+
+/// Whether a failed HTTPS attempt means the peer is not speaking TLS at all.
+///
+/// This is the *only* failure [`TlsMode::Prefer`] may downgrade on, and it is the
+/// narrow reading deliberately: a plain-HTTP coordinator answers the TLS
+/// ClientHello with an ordinary HTTP response, and `rustls` rejects those bytes as
+/// a malformed record (`InvalidMessage`). Everything else — a certificate that
+/// does not verify, an alert, a reset, a timeout — means TLS was there and did
+/// not complete, and retrying in clear is exactly the downgrade an attacker on the
+/// path would like to cause.
+fn not_a_tls_server(error: &reqwest::Error) -> bool {
+    let mut source = Some(error as &(dyn std::error::Error + 'static));
+    while let Some(current) = source {
+        if let Some(verdict) = rustls_verdict(current) {
+            return verdict;
+        }
+        source = current.source();
+    }
+    false
+}
+
+/// The rustls error inside one link of a `reqwest` failure, if there is one.
+///
+/// Written as a second walk rather than a `downcast` in the loop above because an
+/// `io::Error` does not hand out its own cause from `source()` — it delegates to
+/// the *innermost* cause, so the layer that actually holds the rustls error (a
+/// `Custom` wrapping another `Custom` wrapping the error) is stepped over by any
+/// ordinary chain walk. `get_ref()` is what reaches it. Skipping this is not
+/// academic: the plain-coordinator case reports
+/// `Custom { kind: Other, error: Custom { kind: InvalidData, error:
+/// InvalidMessage(InvalidContentType) } }` and nothing else.
+fn rustls_verdict(error: &(dyn std::error::Error + 'static)) -> Option<bool> {
+    let mut current = error;
+    loop {
+        if let Some(tls) = current.downcast_ref::<rustls::Error>() {
+            return Some(matches!(tls, rustls::Error::InvalidMessage(_)));
+        }
+        current = current.downcast_ref::<std::io::Error>()?.get_ref()?;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The driver
 // ---------------------------------------------------------------------------
 
@@ -199,38 +363,56 @@ impl Driver for TrinoDriver {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
-        if config.tls != TlsMode::Disable {
-            return Err(EngineError::Connect {
-                message: format!(
-                    "Trino over {:?} is not implemented yet, and this driver will not quietly \
-                     connect in clear instead — the transport has TLS but the connector plumbing \
-                     does not. Use TLS = disable for now (tracked as K8).",
-                    config.tls
-                ),
-                kind: FailureKind::Permanent,
-            });
-        }
-
         // `reqwest::Client` holds the connection pool that makes repeated pages
         // cheap. It is not a *database* connection: nothing here is a session that
         // the server knows about, and the driver still reports
-        // `persistent_connection = false`.
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|error| EngineError::Connect {
-                message: format!("could not build the HTTP client: {error}"),
-                kind: FailureKind::Permanent,
-            })?;
+        // `persistent_connection = false`. The client is built once per session,
+        // here, from the mode — never per request.
+        let client = client_for(config.tls, None)?;
+        // `Prefer` starts on HTTPS and keeps the plaintext client in reserve for
+        // the one case it is allowed to use it. Every other mode has nothing to
+        // fall back to, which is what makes "require" mean required.
+        let fallback = if config.tls == TlsMode::Prefer {
+            Some(client_for(TlsMode::Disable, None)?)
+        } else {
+            None
+        };
 
         Ok(Box::new(TrinoSession {
             client,
-            base: format!("{}://{}:{}", "http", config.host, config.port),
+            fallback,
+            base: format!(
+                "{}://{}:{}",
+                scheme_for(config.tls),
+                config.host,
+                config.port
+            ),
             user: non_empty(&config.user).unwrap_or_else(|| "queryhive".to_owned()),
             catalog: config.database.clone().unwrap_or_default(),
             schema: config.schema.clone().unwrap_or_default(),
             running: Arc::new(Mutex::new(None)),
             last_id: None,
         }))
+    }
+}
+
+/// The scheme a mode starts on.
+///
+/// `Prefer` starts on `https`: falling back to clear is the exception, so it is
+/// the attempt that has to fail first, never the default.
+fn scheme_for(tls: TlsMode) -> &'static str {
+    match tls {
+        TlsMode::Disable => "http",
+        TlsMode::Prefer | TlsMode::Require | TlsMode::RequireNoVerify => "https",
+    }
+}
+
+/// The same authority under a different scheme, which is all a `Prefer` downgrade
+/// changes: the host and the port stay exactly as configured.
+fn with_scheme(scheme: &str, base: &str) -> String {
+    match base.split_once("://") {
+        Some((_, authority)) => format!("{scheme}://{authority}"),
+        None => format!("{scheme}://{base}"),
     }
 }
 
@@ -248,7 +430,14 @@ fn non_empty(text: &str) -> Option<String> {
 
 struct TrinoSession {
     client: reqwest::Client,
-    /// `http://host:port`, with no trailing slash.
+    /// `Prefer` only, and only until the first statement has settled the scheme:
+    /// the plaintext client used when the coordinator turns out not to speak TLS.
+    /// Taking it (`None`) is what makes the fallback a decision taken once — after
+    /// that there is no client to fall back with, so no later request, page poll
+    /// included, can reach for cleartext.
+    fallback: Option<reqwest::Client>,
+    /// `http://host:port` or `https://host:port`, with no trailing slash. Settled
+    /// once, on the first `POST`.
     base: String,
     user: String,
     /// Trino's catalog, which is this driver's `database` slot.
@@ -285,8 +474,12 @@ impl TrinoSession {
         (catalog, schema)
     }
 
-    /// POST one statement and return its first page.
-    async fn post(&self, sql: &str) -> Result<Page, EngineError> {
+    /// Send the statement over whatever client and scheme the session currently
+    /// holds, with no fallback of its own.
+    ///
+    /// Split out so `post` can try it once, decide, and try again if — and only
+    /// if — the peer turned out not to speak TLS.
+    async fn send_post(&self, sql: &str) -> Result<reqwest::Response, reqwest::Error> {
         let mut request = self
             .client
             .post(format!("{}/v1/statement", self.base))
@@ -298,16 +491,41 @@ impl TrinoSession {
         if !self.schema.is_empty() {
             request = request.header("X-Trino-Schema", &self.schema);
         }
+        request.body(sql.to_owned()).send().await
+    }
 
-        let response =
-            request
-                .body(sql.to_owned())
-                .send()
-                .await
-                .map_err(|error| EngineError::Connect {
+    /// POST one statement and return its first page.
+    ///
+    /// This is where [`TlsMode::Prefer`] settles the scheme, because it is the
+    /// first request the session makes and the answer has to hold for every page
+    /// after it.
+    async fn post(&mut self, sql: &str) -> Result<Page, EngineError> {
+        let response = match self.send_post(sql).await {
+            Ok(response) => response,
+            // The one downgrade that is allowed, and only with a plaintext client
+            // still in reserve: the coordinator answered the handshake with
+            // something that is not TLS, so it has none to speak.
+            Err(failure) if self.fallback.is_some() && not_a_tls_server(&failure) => {
+                // Taking the fallback is what makes this a decision taken once:
+                // after this there is no plaintext client left to reach for, so a
+                // later poll has nothing to downgrade to.
+                self.fallback = None;
+                self.client = client_for(TlsMode::Disable, None)?;
+                self.base = with_scheme("http", &self.base);
+                self.send_post(sql)
+                    .await
+                    .map_err(|error| EngineError::Connect {
+                        message: format!("could not reach {}: {error}", self.base),
+                        kind: FailureKind::Transient,
+                    })?
+            }
+            Err(error) => {
+                return Err(EngineError::Connect {
                     message: format!("could not reach {}: {error}", self.base),
                     kind: FailureKind::Transient,
-                })?;
+                })
+            }
+        };
 
         let status = response.status();
         let text = response.text().await.map_err(|error| EngineError::Query {
@@ -1124,27 +1342,42 @@ mod tests {
     }
 
     #[test]
-    fn tls_is_refused_rather_than_quietly_downgraded() {
-        // A client that accepts `require` and then talks in clear is worse than one
-        // that says it cannot yet, because the user would never find out.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        for mode in [TlsMode::Prefer, TlsMode::Require] {
-            let config =
-                ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "hive").tls(mode);
-            let outcome = runtime.block_on(TrinoDriver.connect(&config));
-            match outcome {
-                Err(EngineError::Connect { message, kind }) => {
-                    assert_eq!(kind, FailureKind::Permanent);
-                    assert!(
-                        message.contains("K8"),
-                        "the message should name the tracker: {message}"
-                    );
-                }
-                other => panic!("{mode:?} should be refused, got {:?}", other.is_ok()),
-            }
+    fn a_mode_starts_on_the_scheme_it_means() {
+        // `Prefer` starts on HTTPS and has HTTP only as the one fallback it is
+        // allowed; the other three have one scheme each. This is the mapping the
+        // whole module's TLS section describes, pinned where it can be read.
+        assert_eq!(scheme_for(TlsMode::Disable), "http");
+        assert_eq!(scheme_for(TlsMode::Prefer), "https");
+        assert_eq!(scheme_for(TlsMode::Require), "https");
+        assert_eq!(scheme_for(TlsMode::RequireNoVerify), "https");
+    }
+
+    #[test]
+    fn a_downgrade_changes_only_the_scheme() {
+        // The host and the port are exactly what the user configured: a fallback
+        // that quietly moved the address would be a different connection, not the
+        // same one without TLS.
+        assert_eq!(
+            with_scheme("http", "https://coordinator.internal:8443"),
+            "http://coordinator.internal:8443"
+        );
+    }
+
+    #[test]
+    fn every_mode_can_build_its_client() {
+        // The client is built once per session from the mode, so a mode that cannot
+        // build one is a mode that cannot connect at all. `Require` and `Prefer`
+        // reach the platform trust store here, which is what a real connection does.
+        for mode in [
+            TlsMode::Disable,
+            TlsMode::Prefer,
+            TlsMode::Require,
+            TlsMode::RequireNoVerify,
+        ] {
+            assert!(
+                client_for(mode, None).is_ok(),
+                "{mode:?} should build a client"
+            );
         }
     }
 }

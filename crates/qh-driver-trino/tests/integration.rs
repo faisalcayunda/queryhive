@@ -464,33 +464,156 @@ async fn explain_returns_the_servers_own_plan() {
     assert!(!rows.is_empty(), "a plan should have at least one line");
 }
 
+// ---------------------------------------------------------------------------
+// TLS against real coordinators
+//
+// Two coordinators, both real, and the difference between them is the whole
+// subject: the plaintext dev one on 58080, and `qh-trino-tls` on 58081, which
+// serves HTTPS behind a self-signed keystore.
+// ---------------------------------------------------------------------------
+
+/// The TLS coordinator's port. Its own, so nothing else is disturbed.
+fn tls_port() -> u16 {
+    std::env::var("QH_TRINO_TLS_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(58081)
+}
+
+fn tls_config(mode: TlsMode) -> ConnectionConfig {
+    ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", tls_port(), "queryhive").tls(mode)
+}
+
+const TLS_SKIP_HINT: &str =
+    "skipped: set QH_TEST_TRINO=1 with deploy/dev/qh-trino-tls.sh running on 58081";
+
+/// Gate for the TLS-coordinator tests: the usual `QH_TEST_TRINO` switch **and** a
+/// coordinator actually listening.
+///
+/// The second half is not a convenience. `qh-trino-tls` is a second single-node
+/// Trino, and this machine's VM (3.6 GiB, shared with the dev containers and the
+/// fixtures other work brings up) cannot hold two of them at once — measured, not
+/// assumed: bringing this one up OOM-killed `qh-trino`, twice. Requiring both at
+/// once would mean the suite could never be green, so the coordinator's own
+/// reachability is checked and its absence is printed, the same way the
+/// `QH_TEST_TRINO` gate prints its own.
+fn tls_gate() -> bool {
+    if config().is_none() {
+        eprintln!("{TLS_SKIP_HINT}");
+        return false;
+    }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], tls_port()));
+    if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_err() {
+        eprintln!(
+            "skipped: no TLS coordinator listening on {address}; start it with \
+             deploy/dev/qh-trino-tls.sh (it cannot run alongside `qh-trino` on this \
+             machine's VM, so the two halves of this suite are run one at a time)"
+        );
+        return false;
+    }
+    true
+}
+
 #[tokio::test]
-async fn tls_is_refused_rather_than_silently_downgraded() {
-    // No server needed: the refusal happens before any request is made, which is
-    // the whole point -- a client that accepts `require` and then talks in clear is
-    // worse than one that says it cannot yet.
+async fn require_refuses_the_self_signed_certificate_of_the_tls_coordinator() {
+    if !tls_gate() {
+        return;
+    }
+    // The failure is the feature: `Require` checks the certificate against the
+    // platform trust store, and the coordinator's keystore is signed by nobody that
+    // store knows. A driver that connected here would be a driver that checks
+    // nothing.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::Require))
+        .await
+        .expect("connect builds the client; the handshake is where this fails");
+    match session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await
+    {
+        Err(qh_core::EngineError::Connect { message, .. }) => {
+            assert!(message.contains("https://"), "{message}");
+        }
+        Err(other) => panic!("expected a connect failure, got {other:?}"),
+        Ok(_) => panic!("a self-signed certificate must not verify"),
+    }
+}
+
+#[tokio::test]
+async fn require_no_verify_reaches_the_tls_coordinator() {
+    if !tls_gate() {
+        return;
+    }
+    // Same coordinator, same certificate, and it works: the difference between this
+    // and the test above is a user's per-connection choice, not a different server.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::RequireNoVerify))
+        .await
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn prefer_encrypts_against_the_tls_coordinator_without_verifying_it() {
+    if !tls_gate() {
+        return;
+    }
+    // `Prefer` does not verify, so the self-signed keystore is no obstacle and the
+    // statement runs. That it ran over TLS rather than by falling back is a fact
+    // about this coordinator rather than about the absence of an error: 58081 is
+    // published to 8443 and nothing else, so a plaintext attempt has nowhere to
+    // succeed.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::Prefer))
+        .await
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn prefer_falls_back_against_the_plaintext_dev_coordinator() {
     let Some(_) = config() else {
         eprintln!("{SKIP_HINT}");
         return;
     };
-    let base = config().expect("config");
-    for mode in [TlsMode::Prefer, TlsMode::Require] {
-        let with_tls = ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "queryhive")
-            .database("tpch")
-            .schema("tiny")
-            .tls(mode);
-        match TrinoDriver::new().connect(&with_tls).await {
-            Err(qh_core::EngineError::Connect { kind, message }) => {
-                assert_eq!(kind, FailureKind::Permanent);
-                assert!(message.contains("K8"), "{message}");
-            }
-            other => panic!("{mode:?} should be refused, got {:?}", other.is_ok()),
-        }
-    }
-    // And the plaintext config still works, so the refusal is about TLS and not
-    // about the driver being unable to connect at all.
-    TrinoDriver::new()
-        .connect(&base)
+    // The real coordinator with no TLS configured: it answers the ClientHello with
+    // an HTTP response, which is the one signal allowed to downgrade. Measured
+    // against a real server rather than only the test's own listener, because "a
+    // plaintext server answers a handshake this way" is a fact about Jetty.
+    let mut session = TrinoDriver::new()
+        .connect(
+            &ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "queryhive")
+                .tls(TlsMode::Prefer),
+        )
         .await
-        .expect("plaintext still connects");
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn require_never_connects_to_a_coordinator_without_tls() {
+    let Some(_) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // `Require` means required: no fallback exists, so a coordinator that cannot
+    // complete a handshake is an error even though it is reachable.
+    let mut session = TrinoDriver::new()
+        .connect(
+            &ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "queryhive")
+                .tls(TlsMode::Require),
+        )
+        .await
+        .expect("connect");
+    let outcome = session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await;
+    assert!(
+        matches!(outcome, Err(qh_core::EngineError::Connect { .. })),
+        "require over a plaintext coordinator should fail, got {:?}",
+        outcome.is_ok()
+    );
 }
