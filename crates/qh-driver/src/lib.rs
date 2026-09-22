@@ -414,16 +414,21 @@ pub trait Cursor: Send {
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError>;
 
-    /// How many rows the statement affected, once the server has said.
+    /// How many rows the statement affected, as the server reported it.
     ///
     /// A statement that writes — a `CREATE TABLE AS SELECT`, an `INSERT`, a `DELETE` —
-    /// can report a count; a `SELECT` cannot, and neither can a `DROP`. `None` is that
-    /// "the server has not said", and it is also the honest answer for a driver whose
-    /// protocol has no such field, which is why it defaults to `None` rather than
-    /// forcing every driver to invent one.
+    /// can report a count. `None` means the driver's protocol had nothing to report,
+    /// which is a fact about the server rather than a gap here: Trino sends no count
+    /// for a `SELECT` or a `DROP`, and PostgreSQL's `CommandComplete` tag for a
+    /// `CREATE TABLE AS` carries none either.
     ///
-    /// It is only meaningful **after the cursor has been driven to its end**: the
-    /// count arrives in the last page for the protocols that carry it.
+    /// **`Some(0)` is not the same as `None`.** MySQL always answers, with `0` for a
+    /// statement that affected no rows, and that zero is the server's own answer — a
+    /// `DROP TABLE` really does affect none. A caller that needs to know whether a
+    /// statement wrote anything must decide that from the statement, not from a zero.
+    ///
+    /// It is only meaningful **after the cursor has been driven to its end**: the count
+    /// arrives in the last page, or in the OK packet that ends the result set.
     fn affected_rows(&self) -> Option<u64> {
         None
     }

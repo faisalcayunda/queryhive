@@ -73,26 +73,30 @@ dan nama program memang harus berubah, karena yang menjalankan bukan lagi skrip 
 `an_unknown_command_is_one_error_event` membandingkan akhiran itu dan memastikan hanya nama
 programnya yang berbeda.
 
-### D-6 — `to_table`: hitungan baris dari server, kecuali di dua driver · **Sebagian tertutup**
+### D-6 — `to_table` tidak memancarkan aliran `progress.state` · **Keterbatasan yang diketahui**
 
-`done.rows` pada snapshot berisi `5` dari `cursor.rowcount` klien trino, dan `progress` mendahuluinya.
-Engine Rust sekarang memancarkan keduanya dengan bentuk yang sama, dan `to_table_create` sudah naik
-dari "perbedaan yang diterima" menjadi **kasus yang identik** di uji paritas.
+Hitungan barisnya sendiri sudah setara. `done.rows` pada snapshot berisi `5` dari `cursor.rowcount`
+klien trino, `progress` mendahuluinya dengan `state: null`, dan engine Rust memancarkan keduanya
+dengan bentuk yang sama — `to_table_create` sudah menjadi **kasus yang identik** di uji paritas.
 
-Sumber angkanya sudah diukur, bukan diasumsikan: Trino mengirim `updateCount` **di level atas page**,
-bukan di dalam `stats` — `CREATE TABLE AS SELECT` menjawab 25, `INSERT` menjawab 3, dan `SELECT` atau
-`DROP` tidak menjawab apa pun (Trino 483, `deploy/dev`). Field itulah yang dibaca klien Python untuk
-mengisi `rowcount`, jadi inilah yang membuat laporan sebuah penulisan sama dengan yang dulu diberikan
-engine Python. Terhadap server sungguhan: `create` → 25, `append` → 3, `replace` → 2 (DROP tidak
-menghasilkan hitungan, jadi angka yang bertahan adalah milik CREATE).
+Angkanya datang dari server, dan itu diukur, bukan diasumsikan:
 
-Yang masih terbuka, dan alasannya berbeda-beda:
+| Driver | Sumber | Bukti terhadap `deploy/dev` |
+|---|---|---|
+| Trino | `updateCount` **di level atas page**, bukan di dalam `stats` | `CREATE TABLE AS SELECT` → 25, `INSERT` → 3, `SELECT`/`DROP` tidak menjawab apa pun (Trino 483) |
+| MySQL | `affected_rows` dari paket OK, lewat `QueryResult::affected_rows()` | `create`/`append`/`replace` pada `type_zoo` → 1 baris, dan tabelnya benar-benar berisi angka itu (uji integrasi `a_write_reports_the_rows_the_server_said_it_wrote`) |
+| PostgreSQL | `-1` | `CommandComplete` untuk `CREATE TABLE AS` memang tidak membawa jumlah baris, jadi `cursor.rowcount` psycopg pun `-1`. Ini **paritas**, bukan kekurangan |
 
-| Bagian | Keadaan |
-|---|---|
-| `progress.state` | Selalu `null`. Nilainya dulu datang dari `stats_callback` klien trino (`RUNNING`, `writtenRows`), sebuah aliran yang tidak dimiliki trait `Cursor`. Snapshot juga mencatat `null`, jadi ini setara — tapi bukan aliran progres sungguhan |
-| PostgreSQL | `-1`. `CommandComplete` untuk `CREATE TABLE AS` tidak membawa jumlah baris, jadi `cursor.rowcount` psycopg pun `-1`: ini **paritas**, bukan kekurangan |
-| MySQL | `-1`. Paket OK MySQL membawa `affected_rows`, tapi driver ini belum mem-parse-nya. Ini yang paling mudah ditutup berikutnya |
+Satu hal yang benar-benar belum: **`progress.state` selalu `null`.** Nilainya dulu datang dari
+`stats_callback` klien trino (`{"state": "RUNNING", "writtenRows": …}`), sebuah aliran kejadian yang
+tidak punya tempat di trait `Cursor` — trait itu menjawab "batch berikutnya", bukan "seberapa jauh
+sekarang". Snapshot pun mencatat `null`, jadi tidak ada kasus uji yang menuntutnya; yang hilang
+adalah bilah progres yang bergerak sendiri pada penulisan tabel yang lama.
+
+Perhatikan juga satu perbedaan makna yang disengaja: MySQL selalu menjawab, dengan `0` untuk
+statement yang tidak mengubah baris apa pun, sementara Trino tidak menjawab sama sekali (`None`).
+Karena itu `Some(0)` dan `None` tidak boleh diperlakukan sama oleh pemanggil — lihat doc
+`Cursor::affected_rows`.
 
 ### D-7 — Setting yang dibaca lalu diabaikan · **Keterbatasan yang diketahui**
 

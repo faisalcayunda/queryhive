@@ -298,6 +298,69 @@ async fn a_statement_with_no_result_set_yields_no_batches() {
 }
 
 #[tokio::test]
+async fn a_write_reports_the_rows_the_server_said_it_wrote() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let _ = session
+        .execute(
+            "DROP TABLE IF EXISTS qh_affected_probe",
+            &ExecuteOptions::default(),
+        )
+        .await;
+
+    // The count a `CREATE TABLE AS SELECT` reports is the number of rows it wrote, and
+    // it is only readable once the cursor has been drained: the OK packet that ends the
+    // result set is the one that carries it.
+    let mut cursor = session
+        .execute(
+            "CREATE TABLE qh_affected_probe AS \
+             SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+    while cursor.next_batch(100).await.expect("next_batch").is_some() {}
+    assert_eq!(
+        cursor.affected_rows(),
+        Some(3),
+        "the CREATE reports the three rows it wrote"
+    );
+
+    let mut cursor = session
+        .execute(
+            "INSERT INTO qh_affected_probe SELECT id FROM qh_affected_probe",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+    while cursor.next_batch(100).await.expect("next_batch").is_some() {}
+    assert_eq!(
+        cursor.affected_rows(),
+        Some(3),
+        "the INSERT reports the three rows it added"
+    );
+
+    // The count is the server's, not this driver's arithmetic: the table really holds
+    // six rows now, counted by the server in a statement that reports no count at all.
+    let mut cursor = session
+        .execute(
+            "SELECT COUNT(*) FROM qh_affected_probe",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+    let (rows, _) = drain(&mut cursor, 10).await;
+    assert_eq!(rows[0][0].render_text().as_deref(), Some("6"));
+
+    let _ = session
+        .execute("DROP TABLE qh_affected_probe", &ExecuteOptions::default())
+        .await;
+}
+
+#[tokio::test]
 async fn kill_query_reaches_the_server_and_the_session_stays_usable() {
     let Some(mut session) = connect().await else {
         eprintln!("{SKIP_HINT}");

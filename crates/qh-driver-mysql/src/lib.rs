@@ -37,7 +37,7 @@
 pub mod normalize;
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
@@ -269,6 +269,9 @@ impl Session for MysqlSession {
         }
 
         let (sender, mut receiver) = mpsc::channel(BATCH_BACKLOG);
+        // Shared rather than sent as a message: the count belongs to the statement,
+        // and the cursor may be asked for it before or after the stream is drained.
+        let affected = Arc::new(Mutex::new(None));
         let producer = Producer {
             conn,
             sql: sql.to_owned(),
@@ -283,6 +286,7 @@ impl Session for MysqlSession {
             announce_columns: columns.is_empty(),
             sender,
             connection_id: Arc::clone(&self.connection_id),
+            affected: Arc::clone(&affected),
         };
         tokio::spawn(producer.run());
 
@@ -294,6 +298,7 @@ impl Session for MysqlSession {
                 receiver,
                 pending: None,
                 finished: false,
+                affected,
             }));
         }
 
@@ -303,6 +308,7 @@ impl Session for MysqlSession {
                 receiver,
                 pending: None,
                 finished: false,
+                affected,
             })),
             Some(Message::Failed(error)) => Err(error),
             Some(Message::Batch(_)) | None => Err(EngineError::Internal {
@@ -478,6 +484,8 @@ struct Producer {
     announce_columns: bool,
     sender: mpsc::Sender<Message>,
     connection_id: Arc<AtomicU32>,
+    /// Rows the statement wrote, once the server has said.
+    affected: Arc<Mutex<Option<u64>>>,
 }
 
 impl Producer {
@@ -535,8 +543,11 @@ impl Producer {
         };
 
         // A statement with no result set — DDL, or an UPDATE — has nothing to
-        // stream, and saying so now is better than sending empty batches.
+        // stream, and saying so now is better than sending empty batches. It does
+        // have a count: `CREATE TABLE ... AS SELECT` reports the rows it wrote in the
+        // OK packet that `query_iter` already read, and so does an `INSERT`.
         if column_types.is_empty() {
+            record_affected(&self.affected, &result);
             return Ok(());
         }
 
@@ -567,7 +578,29 @@ impl Producer {
             let rest = batch.take()?;
             let _ = self.sender.send(Message::Batch(rest)).await;
         }
+        // Read after the stream is exhausted: the OK packet that carries the count is
+        // the one that ends it.
+        record_affected(&self.affected, &result);
         Ok(())
+    }
+}
+
+/// Keep what the server said about rows written.
+///
+/// A free function rather than a method because the result set holds the connection
+/// mutably for as long as it lives, so the only thing that can be borrowed beside it is
+/// the shared slot itself.
+///
+/// MySQL answers `0` when a statement has nothing to report, and that zero is kept
+/// rather than turned into "no answer": a `DROP TABLE` really does affect no rows, and
+/// pymysql's `rowcount` said `0` for it too.
+fn record_affected<P: mysql_async::prelude::Protocol>(
+    affected: &Arc<Mutex<Option<u64>>>,
+    result: &mysql_async::QueryResult<'_, '_, P>,
+) {
+    let count = result.affected_rows();
+    if let Ok(mut slot) = affected.lock() {
+        *slot = Some(count);
     }
 }
 
@@ -633,12 +666,19 @@ struct MysqlCursor {
     /// Rows the producer read beyond what the caller asked for.
     pending: Option<ColumnBatch>,
     finished: bool,
+    /// Rows the statement wrote, filled in by the producer as it finishes. `None`
+    /// means the server has not said yet — not that nothing was written.
+    affected: Arc<Mutex<Option<u64>>>,
 }
 
 #[async_trait]
 impl Cursor for MysqlCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        self.affected.lock().ok().and_then(|affected| *affected)
     }
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
