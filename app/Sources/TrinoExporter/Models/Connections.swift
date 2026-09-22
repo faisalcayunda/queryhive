@@ -96,8 +96,20 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
 
     var sslModes: [String] {
         switch self {
+        // libpq's vocabulary, and the order the picker shows: the default first.
         case .postgres: ["prefer", "disable", "require", "verify-ca", "verify-full"]
-        case .mysql: ["disable", "require"]
+        // `prefer` was missing here, which made the MySQL driver's own default
+        // unreachable from the UI: the engine encrypts when the server offers it,
+        // but a connection made in the app could only say "never" or "always".
+        //
+        // The default stays `disable` rather than following the driver, and that is
+        // parity rather than an oversight: pymysql connected without TLS unless it
+        // was asked otherwise, so a connection made before this change behaves the
+        // way it always did. `verify-ca` and `verify-full` are deliberately absent
+        // too -- the MySQL client cannot reach the platform trust store, so on an
+        // internal server with a private CA they could only ever refuse, and an
+        // option whose only outcome is a failure is worse than no option.
+        case .mysql: ["disable", "prefer", "require"]
         case .trino: []
         }
     }
