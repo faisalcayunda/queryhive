@@ -548,6 +548,59 @@ MySQL pilihan `disable`/`require` dengan bawaan `disable`, sedangkan driver-nya 
 `Prefer`. Jadi mode bawaan driver tidak bisa dipilih dari picker — bukan peta yang hilang,
 melainkan kosakata UI yang belum punya kata untuk itu.
 
+### Empat workstream paritas, dan dua brief yang saya balik arahnya sendiri (23 Sep 2026)
+
+Empat cacat yang ditemukan putaran snapshot live dikerjakan empat agen paralel, satu per crate,
+dengan kepemilikan berkas yang terpisah. Hasilnya bukan hanya empat perbaikan; dua di antaranya
+mengubah **keputusan**, bukan kode, dan satu di antaranya berakhir di berkas saya sendiri.
+
+**Yang paling penting, dan yang tidak kelihatan dari daftar cacat.** Trino menurunkan presisi
+setiap nilai menjadi milidetik karena kliennya tidak pernah mengumumkan
+`X-Trino-Client-Capabilities`, dan yang membuat itu bertahan adalah **uji di crate itu yang
+memaku pemotongan tersebut sebagai kebenaran protokol**, dengan komentar yang menyatakan server
+memang hanya menyimpan `.123`. Uji yang salah lebih berbahaya daripada tidak ada uji: ia membuat
+perbaikan terlihat seperti regresi. Sekarang header itu dikirim pada POST, tiap poll dan DELETE
+cancel lewat satu helper -- nilainya diukur, bukan disalin dari klien Python (hanya
+`PARAMETRIC_DATETIME` yang mengubah apa pun; `NUMBER` dan `SESSION_AUTHORIZATION` sendirian tidak)
+-- dan ujinya menguji pengumumannya, dengan dua mutasi yang membuktikannya bergigi. `explain`
+juga tidak membuang `;` milik pemanggil, sehingga `trino_explain_live` sempat hanya memancarkan 2
+event melawan 4; sekarang identik dengan snapshot.
+
+**Dua dari empat brief saya salah arah.** Ringkasan saya menghilangkan kolom berlabel di tabel
+`RECORDED.md`, sehingga untuk Postgres saya menyuruh "seragamkan dengan mesin lama" pada tiga
+selisih yang justru sisi Rust yang lebih setia -- psycopg melipat interval menjadi 428 hari
+(timedelta tidak bisa menyimpan bulan) dan menambahkan tanda kutip dari fallback `json.dumps` --
+dan untuk MySQL saya sebut `TIME` yang terkutip sebagai cacat Rust padahal itu sisi Python.
+Koreksinya dikirim ke kedua agen di tengah kerja mereka, dan kedua agen kemudian memutuskan
+dengan bukti, bukan simetri: **tidak ada konsumen yang mem-parse sel sebagai JSON** (aplikasi
+mendekode setiap sel sebagai satu string, dan penulis ekspor memperlakukan teks server dan nilai
+JSON dengan cara yang sama), jadi menulis parser literal array Postgres untuk memformat ulang
+string yang tidak dibaca siapa pun adalah pekerjaan yang salah.
+
+**Satu cacat berakhir di gate saya sendiri.** `postgres_catalogs_live` ditolak meskipun driver
+PostgreSQL sudah menjawabnya sejak lama; yang menolak lebih dulu adalah `level_for` di
+`crates/qh-ffi/src/commands.rs`, yang membaca `capabilities().levels` -- bentuk **pohon** --
+sebagai "perintah yang dijawab driver". Keduanya pernyataan berbeda, dan mesin lama memaku
+keduanya sekaligus dalam satu uji: `levels = ("schema", "table")` sementara `catalogs` menjawab
+daftar database, karena daftar database itu daftar **pilihan**, bukan simpul yang digambar di
+bawah koneksi. Sekarang level semacam itu diteruskan ke driver, dan sisa gate-nya utuh: MySQL
+tetap menolak `schemas` sebelum menyentuh jaringan, dengan menyebut dua perintah yang bekerja.
+MySQL sendiri lolos sebelumnya hanya karena kebetulan -- level tengahnya **bernama** `Database`.
+
+**Keputusan yang dicatat, karena keputusan yang tidak ditulis akan dipertanyakan ulang:**
+`columns.type` adalah **nama tipe, bukan kode DBAPI** (`docs/golden-deltas.md` D-8). Kode angka
+itu artefak deskripsi pustaka klien; ia berbeda per DBAPI dan tidak cukup untuk mengatakan apa
+kolomnya -- MySQL melaporkan `ENUM`, `CHAR` dan `BINARY` semuanya sebagai `254`. Kolom `ENUM`
+sekarang dinamai oleh **flag**-nya, yang diukur di container: `ENUM_FLAG` 256 pada enum, nol pada
+`char(36)`, `BINARY_FLAG` 128 pada `binary(16)`.
+
+**Yang belum, dan alasannya masing-masing:** Trino `INTERVAL DAY TO SECOND` belum punya decoder di
+model nilai, jadi teks wire diteruskan apa adanya (`3 04:05:06.000` melawan `3 days, 4:05:06`) --
+menutupnya mengubah setiap grid dan ekspor yang memuat interval, jadi ia pekerjaan tersendiri.
+URL Trino tanpa path menelan `?sslmode=` ke dalam host (cacat lama, mengubah parsing host untuk
+semua URL). Aplikasi belum bisa menyatakan `Prefer` untuk Trino, dan `verify` adalah medan mati
+selama `scheme=http`.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 Daftar ini diperbarui 23 Sep 2026. Sembilan item sebelumnya sudah selesai -- termasuk K11 dan K12
