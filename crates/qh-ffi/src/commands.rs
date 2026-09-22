@@ -680,27 +680,33 @@ pub async fn to_table(
             break;
         }
 
-        let mut cursor = match session.execute(statement, &ExecuteOptions::default()).await {
-            Ok(cursor) => cursor,
-            Err(error) => {
-                // Warnings already earned travel with the failure: nothing the
-                // caller does can undo a DROP that has run.
-                let error: CliError = error.into();
-                return Err(if warnings.is_empty() {
-                    error
-                } else {
-                    CliError::Warned {
-                        message: error.to_string(),
-                        warnings,
-                    }
-                });
-            }
-        };
-        // A DDL statement has no rows to read, but it is not finished when
-        // `execute` returns: driving the cursor to its end is what waits for the
-        // server to finish the work, and what surfaces a failure that arrives on a
-        // later page.
-        while cursor.next_batch(1_000).await?.is_some() {}
+        // Both steps, and the reason this is one block: a failure can arrive two
+        // ways. `execute` refuses a statement that cannot be planned, and a
+        // coordinator that accepted the statement reports a later failure on a page —
+        // which is exactly what a CREATE ... AS SELECT against a missing table does.
+        // Either way the warnings already earned travel, because nothing the caller
+        // does afterwards can undo a DROP that has run.
+        let outcome: Result<(), CliError> = async {
+            let mut cursor = session
+                .execute(statement, &ExecuteOptions::default())
+                .await?;
+            // A DDL statement has no rows to read, but it is not finished when
+            // `execute` returns: driving the cursor to its end is what waits for the
+            // server to finish the work.
+            while cursor.next_batch(1_000).await?.is_some() {}
+            Ok(())
+        }
+        .await;
+        if let Err(error) = outcome {
+            return Err(if warnings.is_empty() {
+                error
+            } else {
+                CliError::Warned {
+                    message: error.message(),
+                    warnings,
+                }
+            });
+        }
         query_id = session.query_id();
     }
 
@@ -786,7 +792,7 @@ pub async fn explain(
 
     let mut session = engine.connect(&config).await?;
     let statement = session.explain_statement(&sql);
-    let cursor = session
+    let mut cursor = session
         .execute(
             &statement,
             &ExecuteOptions {
@@ -795,10 +801,11 @@ pub async fn explain(
             },
         )
         .await?;
+    let primed = cursor.next_batch(PREVIEW_BATCH).await?;
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
     // branch on it.
-    let (rows, _) = emit_batches(out, cursor, None).await?;
+    let (rows, _) = emit_batches(out, cursor, primed, None).await?;
     out.emit(
         event("done")
             .field("rows", rows)
@@ -823,7 +830,7 @@ async fn stream_rows(
     limit: Option<u64>,
 ) -> Result<(u64, bool, Option<String>), CliError> {
     let mut session = engine.connect(config).await?;
-    let cursor = session
+    let mut cursor = session
         .execute(
             sql,
             &ExecuteOptions {
@@ -834,7 +841,13 @@ async fn stream_rows(
             },
         )
         .await?;
-    let (rows, truncated) = emit_batches(out, cursor, limit).await?;
+    // The first batch is taken before anything is sent, because `columns` is the one
+    // event the grid cannot do without and a Trino cursor has none until a page
+    // carrying them has arrived. This is the same wait the Python engine did before
+    // it emitted the same event, and it is why the primed batch is handed on rather
+    // than dropped: those rows are already fetched.
+    let primed = cursor.next_batch(PREVIEW_BATCH).await?;
+    let (rows, truncated) = emit_batches(out, cursor, primed, limit).await?;
     let query_id = session.query_id();
     let _ = session.close().await;
     Ok((rows, truncated, query_id))
@@ -855,6 +868,7 @@ async fn stream_rows(
 async fn emit_batches(
     out: &mut dyn Emitter,
     mut cursor: Box<dyn Cursor>,
+    primed: Option<ColumnBatch>,
     limit: Option<u64>,
 ) -> Result<(u64, bool), CliError> {
     out.emit(
@@ -866,6 +880,7 @@ async fn emit_batches(
     let mut emitted: u64 = 0;
     let mut truncated = false;
     let mut pending: Vec<Json> = Vec::new();
+    let mut next = primed;
     'outer: loop {
         // The Python loop's own condition: it is `emitted` — the flushed count — that
         // gates the next fetch, and a partial batch is not `emitted` yet.
@@ -874,8 +889,12 @@ async fn emit_batches(
                 break;
             }
         }
-        let Some(batch) = cursor.next_batch(PREVIEW_BATCH).await? else {
-            break;
+        let batch = match next.take() {
+            Some(batch) => batch,
+            None => match cursor.next_batch(PREVIEW_BATCH).await? {
+                Some(batch) => batch,
+                None => break,
+            },
         };
         if batch.rows() == 0 {
             // An empty batch is not the end: a driver may legally return one while

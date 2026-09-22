@@ -220,6 +220,7 @@ impl Driver for TrinoDriver {
             catalog: config.database.clone().unwrap_or_default(),
             schema: config.schema.clone().unwrap_or_default(),
             running: Arc::new(Mutex::new(None)),
+            last_id: None,
         }))
     }
 }
@@ -244,7 +245,16 @@ struct TrinoSession {
     /// Trino's catalog, which is this driver's `database` slot.
     catalog: String,
     schema: String,
+    /// What `cancel` needs while a query is in flight, cleared when it ends.
     running: Shared,
+    /// The id of the last statement sent, kept after it finishes.
+    ///
+    /// Separate from `running` because the two answer different questions: `running`
+    /// is "is there something to cancel", which stops being true the moment the last
+    /// page arrives, and this is "which statement produced the grid the user is
+    /// looking at", which is still true afterwards. Trino sends the id with every
+    /// statement, so the POST answer is enough to know it.
+    last_id: Option<String>,
 }
 
 impl TrinoSession {
@@ -427,11 +437,7 @@ impl Session for TrinoSession {
     }
 
     fn query_id(&self) -> Option<String> {
-        self.running
-            .lock()
-            .expect("running state")
-            .as_ref()
-            .map(|running| running.id.clone())
+        self.last_id.clone()
     }
 
     async fn execute(
@@ -443,6 +449,11 @@ impl Session for TrinoSession {
         // is still QUEUED. See the module note: waiting here for the columns would
         // mean waiting for the whole query.
         let page = self.post(sql).await?;
+        // Recorded here rather than in the cursor: the id arrives with the POST's
+        // answer and belongs to the session, which is what `query_id` is asked of.
+        if page.id.is_some() {
+            self.last_id = page.id.clone();
+        }
 
         let columns = columns_of(&page);
         let pending: VecDeque<Vec<Value>> = match (page.columns.as_deref(), page.data.as_deref()) {

@@ -326,10 +326,16 @@ pub enum TlsMode {
 pub trait Session: Send {
     fn capabilities(&self) -> Capabilities;
 
-    /// The server's id for the query in flight, once it has one.
+    /// The server's identity for the work this session ran, once it has one.
     ///
-    /// Trino calls it a query id, PostgreSQL a backend pid, MySQL a connection
-    /// id. `None` before a statement has been sent.
+    /// Trino calls it a query id, MySQL a connection id, and PostgreSQL has no
+    /// per-statement identity to offer, so it answers `None` — which is a fact about
+    /// the server, not a gap here.
+    ///
+    /// It is **kept after the statement finishes**. A grid keeps showing which query
+    /// produced it, and the engines this one replaces reported an id alongside a
+    /// finished result; an id that vanished at completion would take that with it.
+    /// `None` only means nothing has been sent yet.
     fn query_id(&self) -> Option<String>;
 
     async fn execute(

@@ -99,6 +99,12 @@ tidak dimiliki driver Rust mana pun.
 Ketiganya tetap **diterima tanpa error**, supaya koneksi tersimpan yang membawanya tidak mendadak
 gagal. Tidak satupun muncul di snapshot, jadi tidak ada kasus uji yang terpengaruh.
 
+Diverifikasi terhadap server sungguhan: PostgreSQL melaporkan interval `14 months, 3 days, 4:05:06`
+(`SELECT * FROM type_zoo`), dan itulah teks yang dipancarkan engine — dengan bagian bulan, yang
+tidak bisa dinyatakan `timedelta` Python sama sekali. Jadi untuk nilai yang Python bisa pegang,
+teksnya identik kecuali kutipnya; untuk yang tidak bisa, bagian bulannya ditambahkan dan itu
+ekstensi yang jujur, bukan tebakan.
+
 ### D-1 — Notasi ilmiah pada DECIMAL kecil · **Perbaikan disengaja**
 
 `Decimal("-0.0000000001")` dirender engine Python sebagai `-1E-10`.
@@ -113,7 +119,7 @@ tetap tidak melewati `f64`.
 
 Yang harus dijaga test: nilai tidak boleh kehilangan digit, dan `scale` tidak boleh ikut berubah.
 
-### D-2 — Teks INTERVAL terbungkus tanda kutip JSON · **Perbaikan disengaja**
+### D-2 — Teks INTERVAL: kutip JSON dibuang, dan bulan ikut tampil · **Perbaikan disengaja**
 
 `timedelta(days=3, hours=4, minutes=5, seconds=6)` dirender sebagai `"3 days, 4:05:06"`
 (dengan tanda kutip sebagai bagian dari string).
@@ -144,6 +150,13 @@ Dampaknya: `qh-result-store` (yang memakai `render_text`) bisa merender `timesta
 lebih maju daripada jalur ekspor. Belum ada uji yang menangkapnya karena type zoo hanya diuji
 lewat jalur perintah. Dua aturan untuk satu kontrak harus menjadi satu — pekerjaan berikutnya,
 dan `render::to_text` adalah rumah yang benar.
+
+**Diperkuat server sungguhan (22 Sep 2026).** `SELECT * FROM type_zoo` di PostgreSQL dengan zona
+sesi UTC mengembalikan `2026-01-31 05:00:00.123456+00:00` untuk nilai yang ditulis sebagai
+`12:00+07:00`. Artinya server melaporkan **jam dinding di zona sesi** beserta offsetnya — persis
+konvensi yang dipatok uji decoder Trino. Aturan `render.rs` mencetaknya apa adanya (benar); aturan
+`value.rs` akan menambahkan offset itu sekali lagi dan mencetak `12:00:00+00:00` (salah, dan
+kebetulan terlihat "benar" kalau mata mengharapkan jam Jakarta).
 
 ## Yang belum dapat diverifikasi
 
