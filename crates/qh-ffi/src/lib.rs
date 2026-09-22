@@ -85,6 +85,14 @@ pub mod events;
 pub mod local;
 pub mod progress;
 pub mod sql_ident;
+// The scaffolding has to be generated in the crate root: it defines the `UniFfiTag` the
+// other derivations name, and the module path it records is the namespace the bindings
+// come out under.
+uniffi::setup_scaffolding!();
+
+/// The control-plane surface the app links against (ADR-0004). Its own module so the
+/// command-line and FFI entry points sit beside each other and share one dispatch.
+pub mod uniffi_api;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
