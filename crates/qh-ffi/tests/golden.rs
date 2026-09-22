@@ -898,18 +898,22 @@ async fn an_unknown_command_is_one_error_event() {
     let usage = qh_ffi::usage("queryhive-engine");
     assert_eq!(
         usage,
-        "usage: queryhive-engine db_drivers|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
+        "usage: queryhive-engine db_drivers|connections|import_connections|credential|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
     );
     let golden = snapshot("unknown_command", "usage");
     assert_eq!(golden.len(), 1);
     // The suffix the app parses is identical; only the program's name differs.
     let golden_message = golden[0]["message"].as_str().expect("a message");
-    // `usage: <program> <commands>`: the second field is the program's name and the
-    // third is the list. Only the name may differ.
-    assert_eq!(
-        usage.split_whitespace().nth(2),
-        golden_message.split_whitespace().nth(2)
-    );
+    // `usage: <program> <commands>`: the second field is the program's name and the third
+    // is the list. The name may differ, and so may the commands ahead of `objects` — the
+    // three local ones are not in the snapshot because the Python engine never had them —
+    // so what is compared is the frozen suffix that begins at `objects`.
+    let suffix = |line: &str| {
+        line.split_once("objects|")
+            .map(|(_, rest)| rest.to_owned())
+            .unwrap_or_else(|| panic!("no frozen suffix in {line:?}"))
+    };
+    assert_eq!(suffix(&usage), suffix(golden_message));
     assert!(golden_message.starts_with("usage: queryhive_engine.py "));
 }
 

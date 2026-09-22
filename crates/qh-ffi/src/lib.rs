@@ -1,4 +1,4 @@
-//! The engine entry point: the eleven commands, and the CLI the golden harness runs.
+//! The engine entry point: the fourteen commands, and the CLI the golden harness runs.
 //!
 //! This is the Rust side of `app/engine/queryhive_engine.py`. The blueprint puts the
 //! CLI's destination at `qh-ffi` ("11 perintah CLI | `queryhive_engine.py:950` |
@@ -19,6 +19,9 @@
 //! | Command | Events |
 //! |---|---|
 //! | `db_drivers` | `drivers` |
+//! | `connections` | `connections` |
+//! | `import_connections` | `import` |
+//! | `credential` | `credential` |
 //! | `test` | `test` |
 //! | `catalogs`, `schemas`, `tables` | `catalogs` / `schemas` / `tables`, each `names` |
 //! | `objects` | `objects` (`object_columns`, `data`) |
@@ -28,6 +31,12 @@
 //! | `explain` | `step`, `columns`, `rows`, `done` |
 //! | `count` | `step`, `count`, `done` |
 //! | any failure | one `error`, exit 1 |
+//!
+//! Three of the fourteen open no driver at all: `connections`, `import_connections` and
+//! `credential` are the local connection store and the password store, and they live in
+//! [`local`] rather than beside the driver-facing commands. The Python engine had none of
+//! them, so their events are not frozen by the golden harness — the app is their only
+//! other reader.
 //!
 //! # Two things that are deliberately not here
 //!
@@ -73,6 +82,7 @@ pub mod commands;
 pub mod config;
 pub mod env;
 pub mod events;
+pub mod local;
 pub mod progress;
 pub mod sql_ident;
 
@@ -130,6 +140,20 @@ pub enum CliError {
 
     #[error(transparent)]
     Export(#[from] qh_export::ExportError),
+
+    /// The local database refused an operation: a migration it will not apply, a file
+    /// that is not this engine's, a statement SQLite rejected.
+    #[error(transparent)]
+    Storage(#[from] qh_storage::StorageError),
+
+    /// The legacy `connections.json` could not be read into rows, copied aside, or
+    /// verified.
+    #[error(transparent)]
+    Import(#[from] qh_storage::import::ImportError),
+
+    /// The password store refused an operation.
+    #[error(transparent)]
+    Credential(#[from] qh_credentials::CredentialError),
 
     /// The event stream could not be written — stdout closed, most likely. Not
     /// recoverable here, and not something a retry would fix.
@@ -260,6 +284,9 @@ impl Engine for RealEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     DbDrivers,
+    Connections,
+    ImportConnections,
+    Credential,
     Objects,
     Test,
     Catalogs,
@@ -276,11 +303,15 @@ pub enum Command {
 ///
 /// The order is a contract, not a convenience: the usage message ends with the
 /// browse-and-write commands in a fixed order, and a caller that parses that suffix
-/// must keep seeing it. A new command can only be added at the head — which is why
-/// `objects` sits second, ahead of the frozen suffix, rather than beside the other
-/// browse commands where it belongs semantically.
-pub const COMMANDS: [&str; 11] = [
+/// must keep seeing it. A new command can only be added ahead of `objects` — which is
+/// why `objects` sits near the head, ahead of the frozen suffix, rather than beside the
+/// other browse commands where it belongs semantically. The three local commands are
+/// ahead of it for the same reason.
+pub const COMMANDS: [&str; 14] = [
     "db_drivers",
+    "connections",
+    "import_connections",
+    "credential",
     "objects",
     "test",
     "catalogs",
@@ -298,6 +329,9 @@ impl Command {
     pub fn parse(name: &str) -> Option<Self> {
         let command = match name {
             "db_drivers" => Command::DbDrivers,
+            "connections" => Command::Connections,
+            "import_connections" => Command::ImportConnections,
+            "credential" => Command::Credential,
             "objects" => Command::Objects,
             "test" => Command::Test,
             "catalogs" => Command::Catalogs,
@@ -333,6 +367,9 @@ pub async fn run(
 ) -> Result<(), CliError> {
     match command {
         Command::DbDrivers => commands::db_drivers(out, engine).await,
+        Command::Connections => local::connections(settings, out).await,
+        Command::ImportConnections => local::import_connections(settings, out).await,
+        Command::Credential => local::credential(settings, out).await,
         Command::Objects => commands::objects(settings, out, engine).await,
         Command::Test => commands::test(settings, out, engine).await,
         Command::Catalogs => commands::catalogs(settings, out, engine).await,

@@ -21,6 +21,7 @@ members = [
     "crates/qh-sql",
     "crates/qh-storage",
     "crates/qh-sync",
+    "crates/qh-tunnel",
 ]
 
 [workspace.package]

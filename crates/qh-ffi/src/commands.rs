@@ -1,4 +1,4 @@
-//! The eleven commands.
+//! The eleven driver-facing commands.
 //!
 //! One function per command, each a transcription of the Python engine's own
 //! (`queryhive_engine.py:453-935`) rather than a reinterpretation of it: the event
@@ -6,6 +6,10 @@
 //! app decodes and the snapshots freeze. Where a rule is subtle, the comment says
 //! which Python line it comes from and why it is that way, because these are the
 //! decisions the migration has to preserve rather than improve.
+//!
+//! The three local commands — the connection store, its legacy import and the password
+//! store — are in [`crate::local`] instead: they open no driver, and the Python engine
+//! had no equivalent of any of them.
 //!
 //! Two rules hold across every command and are worth stating once:
 //!
@@ -126,7 +130,10 @@ fn source_sql(settings: &Settings) -> Result<String, CliError> {
 /// `~` as the user's home directory, which is what `Path.expanduser()` did. A
 /// `~user` form is left alone: it needs a passwd lookup this engine has no business
 /// doing.
-fn expand_user(path: &str) -> PathBuf {
+///
+/// Shared with [`crate::local`], where `DB_PATH` and `LEGACY_PATH` are the other two
+/// settings that name a file the user may have written with a `~` in it.
+pub(crate) fn expand_user(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => match std::env::var("HOME") {
             Ok(home) if !home.is_empty() => Path::new(&home).join(rest),

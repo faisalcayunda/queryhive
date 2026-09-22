@@ -1,7 +1,7 @@
 [package]
 name = "qh-ffi"
 version = "0.1.0"
-description = "The engine entry point: the eleven commands, and the CLI the golden harness runs"
+description = "The engine entry point: the fourteen commands, and the CLI the golden harness runs"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 qh-core.workspace = true
+# The local store and the password store, for the three commands that do not open a
+# driver: `connections`, `import_connections` and `credential`.
+qh-credentials.workspace = true
 qh-driver.workspace = true
 qh-driver-mysql.workspace = true
 qh-driver-postgres.workspace = true
@@ -23,6 +26,12 @@ qh-driver-trino.workspace = true
 qh-export.workspace = true
 qh-rt.workspace = true
 qh-sql.workspace = true
+qh-storage.workspace = true
+qh-sync.workspace = true
+
+# A secret is carried in a `SecretString`, never in a `String` that outlives the call
+# that produced it.
+secrecy.workspace = true
 
 # Key order in an event does not matter to a decoder, but a stable one makes the
 # engine's stdout diffable against the frozen snapshots byte for byte. This build
@@ -35,6 +44,10 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal"] }
+# The local commands are pointed at a throwaway database and a throwaway
+# `connections.json` through `DB_PATH` / `LEGACY_PATH`, so a test never reads or writes
+# the files the app owns.
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"
