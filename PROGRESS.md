@@ -471,6 +471,45 @@ tidak menemukannya satu per satu:
    ditepati.
 6. Protokolnya masih terikat pada `Event`, yaitu tipe kawat NDJSON.
 
+### `qh-tunnel`: tunnel SSH, `known_hosts`, dan cacat di dependensinya sendiri (22 Sep 2026)
+
+Crate-nya ada dan hijau: 21 uji unit + 8 uji terhadap `sshd` sungguhan di container
+(`deploy/qh-sshd-run.sh`, port 52222). Yang dibangun adalah `known_hosts` sendiri — parsing,
+pencocokan nama host, entri ter-hash, wildcard dan negasi, `@revoked`, `@cert-authority` —
+lalu `russh` untuk transportnya, dengan verifikasi host key **sebelum autentikasi** dan TOFU
+sebagai **dua panggilan** (laporkan "host tidak dikenal beserta fingerprint-nya", lalu terima
+kalau manusia bilang ya), bukan prompt yang memblokir di dalam library.
+
+Bukti yang membuatnya layak dipercaya, bukan sekadar "lulus":
+
+- **Pencocokan entri ter-hash diperiksa terhadap OpenSSH, bukan terhadap bacaan kami sendiri.**
+  Ujinya menulis berkas dengan `ssh-keygen -H`, lalu membandingkan tiap putusan dengan exit status
+  `ssh-keygen -F`. Ini penting karena `HashKnownHosts` lazim menyala, dan pemeriksa yang diam-diam
+  mengabaikan entri ter-hash akan memunculkan prompt "host tidak dikenal" untuk host yang sudah
+  pernah diterima pengguna — yaitu melatih orang mengklik tembus satu-satunya prompt yang
+  melindungi mereka.
+- Fingerprint-nya cocok dengan vektor `ssh-keygen` (`SHA256:ldyiXa1J…`).
+- Forward-nya membawa bytes **dua arah** melalui bastion: banner OpenSSH dibaca kembali lewat
+  tunnel, lalu baris identifikasi kami dituliskan lewat tunnel yang sama.
+- Sebuah baris `@revoked` **tidak bisa** ditembus TOFU, dan urutan baris tidak menentukan: baris
+  `Matched` di atas baris `@revoked` untuk blob yang sama tetap `Revoked`.
+
+**Temuan yang memaksa kami menulis sendiri, bukan memilih:** modul `known_hosts` milik `russh`
+0.63 — yang sengaja tidak kami pakai — mengabaikan baris `@revoked` sepenuhnya. Saya verifikasi
+sendiri di sumber crate-nya: kata `revoked` tidak muncul sekali pun di `src/keys/known_hosts.rs`.
+Akibatnya sebuah kunci yang hanya ada sebagai `@revoked` terbaca "tidak dikenal", dan alur TOFU
+akan menerimanya kembali — persis kebalikan dari maksud baris itu. Dua cacat lain di modul yang
+sama: `learn_known_hosts_path` membuat berkasnya tanpa mode 0600, dan satu baris base64 yang
+rusak membatalkan seluruh pemeriksaan. Ketiganya ditangani implementasi kami.
+
+Dua penyimpangan yang disengaja, keduanya dicatat di doc crate-nya: `russh-keys` tidak dipakai
+sebagai dependensi terpisah karena di `russh` 0.63 kode kunci ada di `russh::keys`, dan menambahkan
+`russh-keys` 0.49 akan menaruh dua versi `ssh-key` (0.6 dan 0.7-rc) dalam satu pohon dengan tipe
+yang tidak sama; dan sertifikat host **ditolak dengan jelas**, bukan diabaikan.
+
+Yang **belum** teruji dan disebut apa adanya: jalur "kunci agen diterima" — jalur
+connect/identities/sign-nya berjalan, tapi container ini tidak menerima kunci agen mesin ini.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling

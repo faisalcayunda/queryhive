@@ -1,0 +1,41 @@
+[package]
+name = "qh-tunnel"
+version = "0.1.0"
+description = "SSH tunnel through a bastion, with known_hosts verification and a trust-on-first-use flow"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The blueprint (§3.1, line 581) chose `russh` over `ssh2` for one reason that matters
+# here: `ssh2` gives no control over `known_hosts`, and the TOFU flow needs it. Since
+# 0.63 the `russh-keys` code lives in `russh::keys` itself, so only this crate is
+# declared — depending on `russh-keys` 0.49 as well would put two `ssh-key` versions
+# (0.6 and 0.7-rc) in one tree, and the key types on one side would not be the key
+# types on the other.
+#
+# `ring`, not the default `aws-lc-rs`: the TLS stacks in this workspace already use
+# `ring` (qh-driver-postgres, qh-driver-trino), and a second C crypto backend would be
+# built and shipped for no gain. `rsa` and `flate2` stay on because RSA keys and
+# compressed sessions are still what bastions ask for.
+russh = { version = "0.63", default-features = false, features = ["flate2", "rsa", "ring"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+thiserror = "2"
+# The SSH wire format has no hash crate of its own: the fingerprint is SHA-256 and a
+# hashed `known_hosts` entry is HMAC-SHA1 (OpenSSH's `HashKnownHosts`), so both are
+# spelled out here rather than pulled in behind a larger crate.
+base64 = "0.22"
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+# Same reason qh-credentials uses it: a bastion password and a key passphrase are held
+# in a type that cannot be printed by accident and is zeroed on drop.
+secrecy = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
