@@ -19,6 +19,8 @@ members = [
     "crates/qh-rt",
     "crates/qh-result-store",
     "crates/qh-sql",
+    "crates/qh-storage",
+    "crates/qh-sync",
 ]
 
 [workspace.package]
@@ -40,6 +42,8 @@ qh-ffi = { path = "crates/qh-ffi" }
 qh-rt = { path = "crates/qh-rt" }
 qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
+qh-storage = { path = "crates/qh-storage" }
+qh-sync = { path = "crates/qh-sync" }
 thiserror = "2"
 # The Keychain, and the values that hold a password. `security-framework-sys` is the
 # raw attribute list and `SecItem*` calls; `core-foundation` builds the dictionary
@@ -49,6 +53,13 @@ security-framework-sys = "2"
 core-foundation = "0.10"
 secrecy = "0.10"
 zeroize = "1"
+# SQLite, compiled in: the local database is small metadata, and `bundled` removes any
+# dependence on the SQLite the machine happens to have (ADR-0005's sibling decision in
+# §5 of the blueprint). Used from a blocking thread, never from a tokio worker.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# UUIDv7 for row identity: time-ordered, so an index on the primary key stays close to
+# insertion order instead of scattering like a random UUID.
+uuid = { version = "1", features = ["v7"] }
 
 # Release profile for the FFI artifact.
 #

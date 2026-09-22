@@ -1,0 +1,17 @@
+[package]
+name = "qh-storage"
+version = "0.1.0"
+description = "The local SQLite database: connections, history, saved queries, and the migrations that make them"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-sync.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The migrator is a state machine; a fake clock is what keeps its tests honest.
+tempfile = "3"

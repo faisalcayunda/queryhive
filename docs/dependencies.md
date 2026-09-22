@@ -65,8 +65,12 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | errno | 0.3.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fallible-iterator | 0.2.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| fallible-iterator | 0.3.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| fastrand | 2.5.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | find-msvc-tools | 0.1.13 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| foldhash | 0.1.5 | Zlib | registry+https://github.com/rust-lang/crates.io-index |
 | foldhash | 0.2.0 | Zlib | registry+https://github.com/rust-lang/crates.io-index |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | futures-channel | 0.3.34 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -79,8 +83,10 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | getrandom | 0.2.17 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| hashbrown | 0.15.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| hashlink | 0.10.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hmac | 0.13.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | http | 1.5.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | http-body | 1.1.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -106,6 +112,8 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | keyed_priority_queue | 0.4.2 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | libc | 0.2.189 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | libredox | 0.1.25 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| libsqlite3-sys | 0.35.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | litemap | 0.8.3 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | log | 0.4.34 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -130,6 +138,7 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | phf | 0.13.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | phf_shared | 0.13.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | postgres-protocol | 0.6.12 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | postgres-types | 0.2.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | potential_utf | 0.1.6 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -153,7 +162,9 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | reqwest | 0.12.28 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | ring | 0.17.14 | Apache-2.0 AND ISC | registry+https://github.com/rust-lang/crates.io-index |
+| rusqlite | 0.37.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rustls-webpki | 0.103.15 | ISC | registry+https://github.com/rust-lang/crates.io-index |
@@ -187,6 +198,7 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | syn | 3.0.6 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | sync_wrapper | 1.0.2 | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | synstructure | 0.14.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| tempfile | 3.27.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | thiserror | 2.0.20 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | thiserror-impl | 2.0.20 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | tinystr | 0.8.4 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -213,6 +225,7 @@ Two shapes in the list are worth knowing rather than re-reading every row:
 | url | 2.5.8 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | uuid | 1.26.1 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| vcpkg | 0.2.15 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | version_check | 0.9.5 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | want | 0.3.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | wasi | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
