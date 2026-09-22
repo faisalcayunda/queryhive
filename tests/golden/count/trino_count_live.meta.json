@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_count_live",
+  "command": "count",
+  "event_lines": 3,
+  "exit_code": 0,
+  "notes": "The count wrapper run by the coordinator over tpch.tiny.orders."
+}

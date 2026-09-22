@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_objects_live",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Trino's information_schema objects query: Name/Type only, because Trino has no OID, owner or ACL to answer with."
+}

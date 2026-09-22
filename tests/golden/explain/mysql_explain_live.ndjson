@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "id", "type": "8"}, {"name": "select_type", "type": "253"}, {"name": "table", "type": "253"}, {"name": "partitions", "type": "250"}, {"name": "type", "type": "253"}, {"name": "possible_keys", "type": "253"}, {"name": "key", "type": "253"}, {"name": "key_len", "type": "253"}, {"name": "ref", "type": "253"}, {"name": "rows", "type": "8"}, {"name": "filtered", "type": "5"}, {"name": "Extra", "type": "253"}], "event": "columns"}
+{"data": [["1", "SIMPLE", "type_zoo", null, "const", "PRIMARY", "PRIMARY", "4", "const", "1", "100.0", null]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 1}

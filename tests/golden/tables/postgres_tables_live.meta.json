@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_tables_live",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The information_schema statement Postgres builds for `tables`, against a schema that really holds the seeded tables -- BASE TABLE only, ordered."
+}

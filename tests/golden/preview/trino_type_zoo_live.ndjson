@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "high_precision", "type": "decimal(38, 10)"}, {"name": "tiny_negative", "type": "decimal(38, 10)"}, {"name": "tz_aware", "type": "timestamp(6) with time zone"}, {"name": "tz_naive", "type": "timestamp(6)"}, {"name": "a_date", "type": "date"}, {"name": "a_time", "type": "time(6)"}, {"name": "an_interval", "type": "INTERVAL DAY TO SECOND"}, {"name": "no_value", "type": "varchar"}, {"name": "empty_text", "type": "varchar(0)"}], "event": "columns"}
+{"data": [["1234567890123456789012345678.1234567890", "-1E-10", "2026-01-31 12:00:00.123456+07:00", "2026-01-31 12:00:00.123456", "2026-01-31", "23:59:59.999999", "\"3 days, 4:05:06\"", null, ""]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 1, "truncated": false}

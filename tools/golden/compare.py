@@ -29,6 +29,13 @@ import record  # noqa: E402  (same directory, imported as a script companion)
 ROOT = record.ROOT
 GOLDEN_DIR = record.GOLDEN_DIR
 
+try:  # the live cases are recorded by a separate tool, against real servers
+    import live_cases  # noqa: E402
+
+    LIVE_IDS = set(live_cases.LIVE_IDS)
+except Exception:  # pragma: no cover - only when the module is missing
+    LIVE_IDS = set()
+
 
 def load_recorded(destination: Path = GOLDEN_DIR) -> dict[str, list[str]]:
     """{case_id: lines} read back from disk."""
@@ -79,6 +86,13 @@ def main(argv=None) -> int:
     failed = 0
     for case_id in sorted(golden):
         if case_id not in fresh:
+            if case_id in LIVE_IDS:
+                # Recorded against a real server by tools/golden/live_cases.py:
+                # this tool drives the engine with a fake cursor and cannot
+                # re-derive it, so it is reported rather than counted as a
+                # failure. Re-record it with that tool instead.
+                print(f"live {case_id}: real-server snapshot, re-record with live_cases.py")
+                continue
             print(f"MISSING case {case_id}: in the snapshot but no longer recorded")
             failed += 1
             continue
@@ -94,7 +108,9 @@ def main(argv=None) -> int:
     for case_id in sorted(set(fresh) - set(golden)):
         print(f"NEW   {case_id}: recorded but not in the snapshot; re-record on purpose")
 
-    print(f"\n{len(golden) - failed}/{len(golden)} cases match")
+    live = len([case_id for case_id in golden if case_id not in fresh and case_id in LIVE_IDS])
+    print(f"\n{len(golden) - failed - live}/{len(golden) - live} cases match"
+          + (f" ({live} live cases not re-recorded here)" if live else ""))
     return 1 if failed else 0
 
 

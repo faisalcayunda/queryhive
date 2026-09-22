@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_nation_live",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "The real Trino decoder on tpch.tiny.nation: bigint, varchar, and a NULL comment that must arrive as JSON null rather than \"None\"."
+}

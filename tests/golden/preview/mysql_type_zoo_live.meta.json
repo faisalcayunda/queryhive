@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_type_zoo_live",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "The same hard types again, as MySQL decodes them: decimal(38,10), datetime and timestamp kept distinct, a time PyMySQL hands back as an object, json re-ordered by the server, a blob with a NUL and 0xFF, an enum label, a char(36) and a binary(16) uuid, a NULL, an empty string and the four characters NULL. The `columns` type is MySQL's column type code."
+}

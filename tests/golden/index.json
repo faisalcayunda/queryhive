@@ -73,6 +73,14 @@
   },
   {
     "captures": "stdout",
+    "case": "mysql_batching_live",
+    "command": "preview",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "250 real rows through the 200-row preview batch: the boundary, the second batch and `truncated: true`."
+  },
+  {
+    "captures": "stdout",
     "case": "mysql_catalogs",
     "command": "catalogs",
     "event_lines": 1,
@@ -81,11 +89,59 @@
   },
   {
     "captures": "stdout",
+    "case": "mysql_count_live",
+    "command": "count",
+    "event_lines": 3,
+    "exit_code": 0,
+    "notes": "The count wrapper on MySQL over 500,000 real rows."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_explain_live",
+    "command": "explain",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "MySQL is the driver whose EXPLAIN is not one text column: a real multi-column plan table, which is why `explain` emits preview's protocol rather than a plan shape"
+  },
+  {
+    "captures": "stdout",
     "case": "mysql_objects",
     "command": "objects",
     "event_lines": 1,
     "exit_code": 0,
     "notes": "MySQL declares four object columns: Name, Engine, Rows, Comment."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_objects_live",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Name/Engine/Rows/Comment from information_schema.TABLES: the columns no other driver can answer, with a real engine name, a real (estimated) row count and an empty comment."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_schemas_live",
+    "command": "schemas",
+    "event_lines": 1,
+    "exit_code": 1,
+    "notes": "The one browse command MySQL has no level for: a usage error naming the driver, raised before the network is touched."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_tables_live",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "MySQL's SHOW TABLES FROM `qh`, quoted with backticks, in the server's own order."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_type_zoo_live",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "The same hard types again, as MySQL decodes them: decimal(38,10), datetime and timestamp kept distinct, a time PyMySQL hands back as an object, json re-ordered by the server, a blob with a NUL and 0xFF, an enum label, a char(36) and a binary(16) uuid, a NULL, an empty string and the four characters NULL. The `columns` type is MySQL's column type code."
   },
   {
     "captures": "stdout",
@@ -105,6 +161,38 @@
   },
   {
     "captures": "stdout",
+    "case": "postgres_batching_live",
+    "command": "preview",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "250 real rows through PREVIEW_BATCH=200: the batch boundary, the second batch, and `truncated: true` from the one extra row the cap costs."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_catalogs_live",
+    "command": "catalogs",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`catalogs` on the driver whose object tree has no catalog level: the pg_database listing, filtered to connectable non-template databases, in the query's own ORDER BY."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_count_live",
+    "command": "count",
+    "event_lines": 3,
+    "exit_code": 0,
+    "notes": "`count`'s wrapper run by Postgres itself on 500,000 real rows, so the number is the server's rather than a fake cursor's."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_explain_live",
+    "command": "explain",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "Postgres answers EXPLAIN with one `QUERY PLAN` text column; this freezes the real column name, the real plan text and the absence of `truncated`."
+  },
+  {
+    "captures": "stdout",
     "case": "postgres_objects",
     "command": "objects",
     "event_lines": 1,
@@ -113,11 +201,35 @@
   },
   {
     "captures": "stdout",
+    "case": "postgres_objects_live",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string."
+  },
+  {
+    "captures": "stdout",
     "case": "postgres_schemas",
     "command": "schemas",
     "event_lines": 1,
     "exit_code": 0,
     "notes": "Postgres has no catalog level; schema listing is its top level."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_tables_live",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The information_schema statement Postgres builds for `tables`, against a schema that really holds the seeded tables -- BASE TABLE only, ordered."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_type_zoo_live",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports."
   },
   {
     "captures": "stdout",
@@ -150,6 +262,54 @@
     "event_lines": 4,
     "exit_code": 0,
     "notes": "CTAS: which statement is built, and what `done` reports."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_batching_live",
+    "command": "preview",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "250 real tpch rows -- a bigint, the tpch connector's `double` totalprice and a date -- cut by the 200-row batch rule, so the boundary, the second batch and `truncated: true` are all frozen. tpch's generated orderkeys are sparse (1..7, then 32..39, ...), so the second batch starts at 801 rather than at 201: the row *number* is what the cap counts, not the key."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_count_live",
+    "command": "count",
+    "event_lines": 3,
+    "exit_code": 0,
+    "notes": "The count wrapper run by the coordinator over tpch.tiny.orders."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_explain_live",
+    "command": "explain",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "A real Trino plan: one varchar column, one row per plan line, fetched through EXPLAIN with the caller's semicolon stripped."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_nation_live",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "The real Trino decoder on tpch.tiny.nation: bigint, varchar, and a NULL comment that must arrive as JSON null rather than \"None\"."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_objects_live",
+    "command": "objects",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "Trino's information_schema objects query: Name/Type only, because Trino has no OID, owner or ACL to answer with."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_type_zoo_live",
+    "command": "preview",
+    "event_lines": 4,
+    "exit_code": 0,
+    "notes": "Trino's own decoding of the types that matter, from expressions rather than a table: a decimal(38,10) with its digits intact, a tiny negative decimal, a timestamp with a zone, a naive timestamp, a date, a time, an interval, a NULL and an empty string."
   },
   {
     "captures": "stdout",

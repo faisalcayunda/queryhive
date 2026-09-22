@@ -66,6 +66,50 @@ const EXACT: &[&str] = &[
 ];
 
 /// The cases that differ on purpose, with the reason the difference is acceptable.
+/// Snapshots recorded from a **real server** rather than through the fake session above.
+///
+/// These exist because the fake session can only reproduce the fake: whether PostgreSQL
+/// really returns `{1,NULL,3}` for an array, whether a MySQL `TIME` arrives quoted, whether
+/// Trino sends microsecond precision are all questions about servers, and the answer is a
+/// server's. So they are recorded by running the *previous* engine against the development
+/// containers and freezing what it wrote.
+///
+/// They are a third list rather than more `ACCEPTED` entries because `ACCEPTED` means "this
+/// difference was decided", and a live case is compared against a real engine by
+/// `tools/golden/live_cases.py`, not by anything here. What stops one being parked in this
+/// list without anyone deciding anything is the other half of
+/// `a_new_snapshot_cannot_be_ignored`: every id here must be declared in
+/// `tools/golden/live_cases.py`, which is the table that says which command, with which
+/// settings, against which container produced it — so the comparison can be run again.
+///
+/// Where each one stands when both engines run against the same live server, and the
+/// defects that explains, are in `tests/golden/RECORDED.md`. Several of the differences it
+/// records are known **bugs**, not parity decisions — the Trino client not announcing
+/// `PARAMETRIC_DATETIME`, PostgreSQL's `catalogs` refusal, and the value-rendering deltas —
+/// and they are listed here so that a reader finds them rather than a passing test.
+const LIVE: &[&str] = &[
+    "postgres_type_zoo_live",
+    "postgres_batching_live",
+    "postgres_catalogs_live",
+    "postgres_tables_live",
+    "postgres_objects_live",
+    "postgres_count_live",
+    "postgres_explain_live",
+    "mysql_type_zoo_live",
+    "mysql_batching_live",
+    "mysql_tables_live",
+    "mysql_objects_live",
+    "mysql_schemas_live",
+    "mysql_count_live",
+    "mysql_explain_live",
+    "trino_nation_live",
+    "trino_type_zoo_live",
+    "trino_batching_live",
+    "trino_objects_live",
+    "trino_count_live",
+    "trino_explain_live",
+];
+
 const ACCEPTED: &[&str] = &[
     // The Python engine prefixes every failure with its exception class
     // (`ValueError: SQL or SQL_PATH is required`, `OSError: connection refused`).
@@ -1019,16 +1063,42 @@ fn a_new_snapshot_cannot_be_ignored() {
                 .expect("a case name")
                 .to_owned();
             assert!(
-                EXACT.contains(&case_id.as_str()) || ACCEPTED.contains(&case_id.as_str()),
-                "{case_id} is in the snapshot but is neither reproduced nor listed as an accepted \
-                 difference"
+                EXACT.contains(&case_id.as_str())
+                    || ACCEPTED.contains(&case_id.as_str())
+                    || LIVE.contains(&case_id.as_str()),
+                "{case_id} is in the snapshot but is neither reproduced in process, nor listed as \
+                 an accepted difference, nor declared a live case"
             );
+            // One list only. A case that is both reproduced here and declared live would be
+            // checked twice with two different meanings, and the second check would be the
+            // one nobody reads.
+            let listed = [
+                EXACT.contains(&case_id.as_str()),
+                ACCEPTED.contains(&case_id.as_str()),
+                LIVE.contains(&case_id.as_str()),
+            ]
+            .into_iter()
+            .filter(|listed| *listed)
+            .count();
+            assert_eq!(listed, 1, "{case_id} is in more than one list");
+            // The teeth of `LIVE`: being here is not a place to park a snapshot. The case has
+            // to be declared in the tool that can run it against the real server again, so a
+            // file dropped in with no command line behind it fails right here.
+            if LIVE.contains(&case_id.as_str()) {
+                let declared = std::fs::read_to_string(root().join("tools/golden/live_cases.py"))
+                    .expect("the live case table");
+                assert!(
+                    declared.contains(&case_id),
+                    "{case_id} is listed as a live snapshot but is not declared in \
+                     tools/golden/live_cases.py, so nothing can reproduce it"
+                );
+            }
             found += 1;
         }
     }
     assert_eq!(
         found,
-        EXACT.len() + ACCEPTED.len(),
+        EXACT.len() + ACCEPTED.len() + LIVE.len(),
         "every listed case must exist in the snapshot"
     );
 }

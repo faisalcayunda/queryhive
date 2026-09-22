@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_objects_live",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string."
+}

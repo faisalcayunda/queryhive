@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_batching_live",
+  "command": "preview",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "250 real rows through PREVIEW_BATCH=200: the batch boundary, the second batch, and `truncated: true` from the one extra row the cap costs."
+}

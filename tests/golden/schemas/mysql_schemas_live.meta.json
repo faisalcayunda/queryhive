@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_schemas_live",
+  "command": "schemas",
+  "event_lines": 1,
+  "exit_code": 1,
+  "notes": "The one browse command MySQL has no level for: a usage error naming the driver, raised before the network is touched."
+}

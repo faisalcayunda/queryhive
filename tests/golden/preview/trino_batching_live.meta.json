@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_batching_live",
+  "command": "preview",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "250 real tpch rows -- a bigint, the tpch connector's `double` totalprice and a date -- cut by the 200-row batch rule, so the boundary, the second batch and `truncated: true` are all frozen. tpch's generated orderkeys are sparse (1..7, then 32..39, ...), so the second batch starts at 801 rather than at 201: the row *number* is what the cap counts, not the key."
+}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_count_live",
+  "command": "count",
+  "event_lines": 3,
+  "exit_code": 0,
+  "notes": "`count`'s wrapper run by Postgres itself on 500,000 real rows, so the number is the server's rather than a fake cursor's."
+}

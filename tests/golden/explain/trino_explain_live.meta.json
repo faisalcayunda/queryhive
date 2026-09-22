@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_explain_live",
+  "command": "explain",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "A real Trino plan: one varchar column, one row per plan line, fetched through EXPLAIN with the caller's semicolon stripped."
+}

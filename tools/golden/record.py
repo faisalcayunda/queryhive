@@ -22,6 +22,17 @@ No database is involved. The cases drive the engine in-process with the fake
 cursor from tests/test_engine_events.py, exactly as that file does, so what is
 frozen is the engine's own normalisation -- which is precisely the part that has
 to survive the migration.
+
+Against a real server
+---------------------
+This tool never opens a connection, which is its whole point: what it freezes is
+normalisation. What a real server *hands* the engine is a different question --
+whether a numeric(38,10) really arrives as a Decimal, which type code a driver
+reports -- and that one is answered by tools/golden/live_cases.py. It runs the
+same engine as a child process against the containers deploy/dev/up.sh starts
+and writes its snapshots into the same tree, with the same normalization (see
+`normalise`). index.json is rebuilt from every `.meta.json` on disk by
+`rebuild_index`, so neither recorder can drop the other's cases.
 """
 
 from __future__ import annotations
@@ -29,7 +40,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -96,6 +106,16 @@ def _normalise_path(text: str) -> str:
 
 
 _TMP_ROOTS: set[str] = set()
+
+
+def add_roots(*paths) -> None:
+    """Mask one more root out of every string a case emits.
+
+    `record()` seeds this with the directory its export case writes into;
+    `live_cases.py` seeds it with the temp root, because the same normalisation
+    has to apply to a run that never passed through this module's own cases.
+    """
+    _TMP_ROOTS.update(str(path) for path in paths if path)
 
 
 def normalise(stdout: str) -> list[str]:
@@ -423,12 +443,37 @@ def collect() -> dict[str, dict]:
     return results
 
 
-def record(destination: Path = GOLDEN_DIR, clean: bool = True) -> int:
+def rebuild_index(destination: Path = GOLDEN_DIR) -> None:
+    """Write index.json from every `.meta.json` in the tree.
+
+    The index is a view of what is on disk rather than of what this run
+    happened to produce, so the in-process cases and the ones recorded against
+    real servers by `live_cases.py` share one index without either recorder
+    knowing about the other's case list.
+    """
+    index = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(destination.glob("*/*.meta.json"))
+    ]
+    (destination / "index.json").write_text(
+        json.dumps(sorted(index, key=lambda entry: entry["case"]), indent=2,
+                   ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def record(destination: Path = GOLDEN_DIR) -> int:
+    """(Re)write this module's cases; leave every other snapshot alone.
+
+    Deliberately not a wipe of `destination`: `live_cases.py` keeps its cases in
+    the same tree, and re-recording the fake-cursor cases must not delete a
+    snapshot that took a server to produce. A case that has been renamed or
+    removed therefore leaves its old `.ndjson` behind -- which is visible rather
+    than silent, because the Rust harness fails on any snapshot it cannot
+    classify.
+    """
     results = collect()
-    if clean and destination.exists():
-        shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    index: list[dict] = []
     for case_id, payload in results.items():
         folder = destination / payload["meta"]["command"]
         folder.mkdir(parents=True, exist_ok=True)
@@ -441,12 +486,7 @@ def record(destination: Path = GOLDEN_DIR, clean: bool = True) -> int:
             json.dumps(meta, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        index.append(meta)
-    (destination / "index.json").write_text(
-        json.dumps(sorted(index, key=lambda entry: entry["case"]), indent=2,
-                   ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    rebuild_index(destination)
     return len(results)
 
 

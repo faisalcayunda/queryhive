@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_explain_live",
+  "command": "explain",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "Postgres answers EXPLAIN with one `QUERY PLAN` text column; this freezes the real column name, the real plan text and the absence of `truncated`."
+}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_objects_live",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Name/Engine/Rows/Comment from information_schema.TABLES: the columns no other driver can answer, with a real engine name, a real (estimated) row count and an empty comment."
+}

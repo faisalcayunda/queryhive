@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_tables_live",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "MySQL's SHOW TABLES FROM `qh`, quoted with backticks, in the server's own order."
+}
