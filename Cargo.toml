@@ -14,6 +14,7 @@ members = [
     "crates/qh-driver-postgres",
     "crates/qh-driver-trino",
     "crates/qh-export",
+    "crates/qh-ffi",
     "crates/qh-rt",
     "crates/qh-result-store",
     "crates/qh-sql",
@@ -33,6 +34,7 @@ qh-driver-mysql = { path = "crates/qh-driver-mysql" }
 qh-driver-postgres = { path = "crates/qh-driver-postgres" }
 qh-driver-trino = { path = "crates/qh-driver-trino" }
 qh-export = { path = "crates/qh-export" }
+qh-ffi = { path = "crates/qh-ffi" }
 qh-rt = { path = "crates/qh-rt" }
 qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
