@@ -94,7 +94,12 @@
   terhadap container**, semuanya lulus
 - [x] `ColumnBatch::slice_rows` di `qh-core`, supaya batas baris yang diminta pemanggil dihormati
   meskipun produsen membaca dalam batch-nya sendiri
-- [x] **170 uji unit hijau** seluruh workspace, `cargo fmt --all --check` bersih,
+- [x] `docs/compatibility.md` — kebijakan versi hulu dari sumber primer untuk PostgreSQL,
+  MySQL, dan Trino, plus versi yang benar-benar teruji (PostgreSQL 17.11, MySQL 8.4.11).
+  Catatan penting yang muncul dari riset ini: Trino **tidak punya jaminan antarversi**, jadi
+  driver Trino nanti harus diuji terhadap rilis bernomor dan proyek ini tidak boleh mengklaim
+  "bekerja dengan Trino" secara umum
+- [x] **171 uji hijau** seluruh workspace, `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
@@ -325,8 +330,11 @@ membuatnya lagi:
    - **DataGrip**: cari di YouTrack JetBrains (proyek `DBE`); halaman bantuan JetBrains tentang
      startup lambat **tidak** dipakai, karena dokumentasi troubleshooting bukan bukti produknya
      lebih lambat daripada pembanding.
-   - **`docs/compatibility.md`**: belum dibuat sama sekali; masih perlu riset status dukungan
-     upstream versi PostgreSQL/MySQL/Trino.
+   - ~~**`docs/compatibility.md`**~~ **Selesai**: dokumennya sudah ada, memuat kebijakan versi
+     hulu dari sumber primer (PostgreSQL 5 tahun/mayor, MySQL LTS vs Innovation, Trino tanpa
+     jaminan antarversi) plus versi yang benar-benar teruji. Yang **masih terbuka di dalamnya**:
+     versi *minimum* per mesin — yang tercatat baru versi *teruji*, dan menuliskan "PostgreSQL
+     15+" tanpa mengukurnya akan jadi klaim tanpa sumber.
    Sampai selesai, baris yang belum tertutup **tidak** dipakai sebagai dasar prioritas produk,
    dan §8.2 mewarisi batasan yang sama.
 2. **`x_search` belum bisa dipakai**: akun kenari menjawab `plan_limit_reached`, karena pencarian X
@@ -339,7 +347,10 @@ membuatnya lagi:
 5. **Kunci EdDSA Sparkle** untuk update bertanda tangan belum ada dan tidak boleh masuk repo;
    dibuat pada Fase 4 dan disimpan sebagai secret CI.
 6. **VM podman hanya punya 2 GiB RAM**, sedangkan Trino single-node butuh sekitar 2 GiB untuk
-   dirinya sendiri. Naikkan dulu, lalu jalankan `deploy/dev/up.sh trino`:
+   dirinya sendiri. Menaikkan memori VM menghentikan VM dan mengalokasikan lebih banyak RAM
+   host secara permanen, jadi ini saya tinggalkan untuk Anda putuskan — bukan tindakan yang
+   pantas saya ambil sendiri. Image-nya **sudah diunduh** (1,39 GB), jadi tinggal memori.
+   Naikkan dulu, lalu jalankan `deploy/dev/up.sh trino`:
    ```bash
    podman machine stop
    podman machine set --memory 8192
