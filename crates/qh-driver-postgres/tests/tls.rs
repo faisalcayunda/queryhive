@@ -226,11 +226,8 @@ async fn prefer_does_not_downgrade_when_the_server_offers_tls_and_the_handshake_
         // Everything the client sends from here, until it gives up. The socket is dropped
         // after this, which is the failed handshake.
         let mut after = Vec::new();
-        let _ = tokio::time::timeout(
-            Duration::from_millis(300),
-            socket.read_to_end(&mut after),
-        )
-        .await;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(300), socket.read_to_end(&mut after)).await;
         after
     });
 

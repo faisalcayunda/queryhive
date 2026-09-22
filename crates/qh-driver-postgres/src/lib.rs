@@ -21,6 +21,32 @@
 //! `qh-sql`'s job — it already scans literals and comments correctly — not
 //! something to guess at inside a driver.
 //!
+//! ## `catalogs` is answered, though it is not a tree level
+//!
+//! A PostgreSQL connection is bound to one database, so the object tree starts at
+//! schemas and [`Capabilities::levels`] says `[Schema, Table]`. The `catalogs`
+//! command is still answered, with the databases on the server (`pg_database`,
+//! filtered to the connectable non-template ones): which databases exist is what the
+//! context picker lists, and it is what a query needs to know before it is pointed at
+//! a different one. The list is a picker list, not a node of the tree — a connection
+//! cannot browse into another database, so no database level appears under it.
+//!
+//! The two are separate questions, and the previous engine declared them separately:
+//! `exporter/drivers.py` gave `PostgresDriver` both `levels = ("schema", "table")`
+//! and `browse = ("catalogs", "schemas", "tables")`, and its own test
+//! (`tests/test_engine_events.py::check_postgres_has_no_catalog_level`) pins both
+//! halves — `catalogs` emits the database list, and `levels` stays schema-first.
+//! This driver keeps that split: `browse` answers the command, under whichever of
+//! `Catalog` and `Database` the caller names it with. Both names mean one list, the
+//! way `crates/qh-driver-mysql` accepts both for the level it calls `database` where
+//! Trino calls its own `catalog`.
+//!
+//! Which is why [`Capabilities::levels`] must not be read as "the commands this
+//! driver will answer". A caller that gates a browse command on it refuses
+//! `catalogs` here before this driver is ever asked — the refusal
+//! `tests/golden/RECORDED.md` records as `postgres has no catalog level` against the
+//! previous engine's `{"event": "catalogs", "names": ["postgres", "qh"]}`.
+//!
 //! ## Cancelling
 //!
 //! `cancel` sends a `CancelRequest` on a **second connection** to the same
@@ -347,6 +373,11 @@ impl Session for PostgresSession {
             // answering — which databases exist is what a query needs to know
             // before it is pointed at another one, and it is what a context picker
             // lists. The Python engine answered it for the same reason.
+            //
+            // Both names are answered with the one list, because both arrive for the
+            // one question: `catalogs` is the command, and `database` is what MySQL
+            // calls this level. See the module doc for why the tree level is absent
+            // from `levels` while the command is answered anyway.
             BrowseLevel::Catalog | BrowseLevel::Database => catalogs_sql(include_system),
             BrowseLevel::Schema => schemas_sql(include_system),
             BrowseLevel::Table => {
@@ -497,6 +528,11 @@ impl Cursor for PostgresCursor {
 /// Templates are not real databases and `datallowconn = false` ones refuse
 /// connections, so offering either would be a choice that cannot be taken —
 /// unless the user asked for everything, in which case the filter goes.
+///
+/// The `catalogs` command is answered with this list even though no database level
+/// appears in the tree. The module doc says why, and
+/// `tests/integration.rs::catalogs_lists_databases_even_though_it_is_not_a_tree_level`
+/// proves it against a real server — including that both level names reach it.
 ///
 /// These strings are reproduced verbatim from `exporter/drivers.py` so the Rust
 /// driver answers with what the Python engine answered. They are pinned by tests.
@@ -687,10 +723,15 @@ mod tests {
         );
         // The UI builds the tree from this rather than hard-coding it.
         assert!(!capabilities.levels.contains(&BrowseLevel::Catalog));
-        // But `levels` and what the driver will *answer* are different questions.
-        // The database list is not a tree level, yet it is what a context picker
-        // needs, and the Python engine answered it for that reason. `browse`
-        // answers Catalog rather than refusing it.
+        // Neither name is a tree level, and both are answered as a browse command:
+        // `levels` is the tree, not the list of commands a driver will answer. The
+        // previous engine's own test pinned the same two halves
+        // (`check_postgres_has_no_catalog_level`), and adding a level here to make a
+        // command work would move the tree away from `db_drivers` and from the app's
+        // own `ConnectionKind.levels`.
+        assert!(!capabilities.levels.contains(&BrowseLevel::Database));
+        // What the driver *answers* is checked against a real server, in
+        // `tests/integration.rs::catalogs_lists_databases_even_though_it_is_not_a_tree_level`.
     }
 
     /// The statements the Python driver built, pinned verbatim so the migration

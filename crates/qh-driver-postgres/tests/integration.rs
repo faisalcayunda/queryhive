@@ -193,7 +193,11 @@ async fn the_hard_types_survive_the_round_trip_from_the_server() {
     // ...and the naive column must not have gained one.
     assert!(!rendered(2).unwrap().contains('+'), "{:?}", rendered(2));
     assert_eq!(rendered(3).unwrap(), "2026-01-31");
-    assert!(rendered(4).unwrap().contains("3 days"), "{:?}", rendered(4));
+    // The interval the server sent, in the three parts it sent it as. The Python
+    // engine's psycopg folded `1 year 2 mons` into days before anything could
+    // render it (`"428 days, 4:05:06"` in the live snapshot); a month is not a fixed
+    // number of days, so that fold is the loss `normalize.rs` refuses to make.
+    assert_eq!(rendered(4).unwrap(), "14 months, 3 days, 4:05:06");
 
     // Bytes that are neither valid UTF-8 nor free of NULs.
     assert_eq!(
@@ -214,6 +218,49 @@ async fn the_hard_types_survive_the_round_trip_from_the_server() {
         rows[0][9],
         Value::Text("NULL".into()),
         "the word NULL is not a NULL"
+    );
+}
+
+#[tokio::test]
+async fn an_array_arrives_as_the_servers_own_literal_and_a_uuid_without_quotes() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let mut cursor = session
+        .execute(
+            "SELECT '{1,NULL,3}'::int[] AS a, '{a,NULL,c}'::text[] AS b, \
+             '{{1,2},{3,NULL}}'::int[] AS c, a_uuid FROM type_zoo",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+
+    // The name the server reports for an array column is the one a future parser
+    // would key on, and it is the element's name with a leading underscore — not the
+    // element's. `{{1,2},{3,NULL}}` is why that parser is not written yet: an array
+    // has dimensions, braces inside braces, and elements that may contain commas
+    // inside quotes.
+    let types: Vec<&str> = cursor
+        .columns()
+        .iter()
+        .map(|column| &*column.type_name)
+        .collect();
+    assert_eq!(types, vec!["_int4", "_text", "_int4", "uuid"]);
+
+    let (rows, _) = drain(&mut cursor, 4).await;
+    assert_eq!(
+        rows[0],
+        vec![
+            Value::Text("{1,NULL,3}".into()),
+            Value::Text("{a,NULL,c}".into()),
+            Value::Text("{{1,2},{3,NULL}}".into()),
+            // Bare: the JSON quotes the previous engine wrote came from
+            // `json.dumps(default=str)`, not from PostgreSQL.
+            Value::Text("550e8400-e29b-41d4-a716-446655440000".into()),
+        ],
+        "an array or a uuid stopped being the server's own text"
     );
 }
 
@@ -419,6 +466,16 @@ async fn catalogs_lists_databases_even_though_it_is_not_a_tree_level() {
         !databases.iter().any(|name| name == "template0"),
         "{databases:?}"
     );
+
+    // The same list under the name MySQL gives this level, because that is the other
+    // name a caller may bring: `catalogs` is the command, `database` is what the
+    // level is called on MySQL, and the one list answers both. A caller that renames
+    // the level without this would refuse a command that works.
+    let as_database = session
+        .browse(BrowseLevel::Database, &ObjectPath::new(), false)
+        .await
+        .expect("the database level name should reach the same list");
+    assert_eq!(as_database, databases);
 
     // "Show all" drops the filter, and then a template does appear — which is the
     // difference between the two forms of the statement, not a detail.

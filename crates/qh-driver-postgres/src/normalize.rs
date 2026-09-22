@@ -26,6 +26,39 @@
 //! Never dropped, never defaulted to zero, never a panic. A value that arrives in
 //! a shape nobody expected shows the user the server's own rendering, which is
 //! what someone debugging a query actually wants.
+//!
+//! Three renderings that deliberately differ from the Python engine
+//! --------------------------------------------------------------
+//!
+//! `tests/golden/preview/postgres_type_zoo_live.ndjson` is the previous engine's
+//! own output for `type_zoo`, and `tests/golden/RECORDED.md` puts its cells beside
+//! this one's. Three of those cells differ on purpose, and each was decided here
+//! rather than matched:
+//!
+//! - **`interval` keeps months, days and the clock apart** — `14 months, 3 days,
+//!   4:05:06` where the previous engine wrote `"428 days, 4:05:06"`. psycopg handed
+//!   that engine a `timedelta`, which cannot hold a month, so it folded
+//!   `1 year 2 mons 3 days` into days before the value ever reached the renderer.
+//!   A month is not a fixed number of days, so that is a loss rather than a
+//!   re-spelling: `428 days` cannot be turned back into what the server sent. This
+//!   driver keeps the three parts the server sent separately, and the rendering is
+//!   `qh_core::value::format_interval`'s (see its own doc: the month part is an
+//!   extension, because Python had no way to express one).
+//! - **An array keeps the server's own literal** — `{1,NULL,3}`, with NULL spelled
+//!   PostgreSQL's way, where the previous engine wrote psycopg's JSON list
+//!   `[1, null, 3]`. Neither spelling loses anything, so the question is what reads
+//!   the cell, and nothing parses one as JSON: the app decodes the preview payload
+//!   as `[[String?]]` (`app/Sources/TrinoExporter/App.swift:156`), and the export
+//!   writers stringify `Value::Json` exactly as they stringify `Value::Text`
+//!   (`crates/qh-core/src/render.rs:83` and the fallback arm of `to_json_value` at
+//!   `:146`), so both spellings reach a file as one string. Producing the JSON form
+//!   means writing a PostgreSQL array-literal parser — nested braces, quoted
+//!   elements, escapes, any dimension — to reformat a string nobody parses, so the
+//!   server's text is kept.
+//! - **`uuid` is bare.** The previous engine's quotes were not part of the value:
+//!   `json.dumps(default=str)` wrapped a `uuid.UUID` in JSON quotes, the same
+//!   fallback that put quotes around an interval (delta D-2 in
+//!   `docs/golden-deltas.md`). A UUID has one text form and it has no quotes in it.
 
 use qh_core::{IntervalValue, Value};
 
@@ -84,13 +117,18 @@ pub fn from_text(type_name: &str, text: Option<&str>) -> Value {
         // Key order is preserved by not re-encoding: `json` promises an order and
         // `jsonb` does not, and that difference is the user's to see.
         "json" | "jsonb" => Value::Json(text.into()),
+        // A UUID has one text form and no quotes in it. The Python engine's quotes
+        // were `json.dumps(default=str)`'s, not the server's — see the module doc.
         "uuid" | "text" | "varchar" | "bpchar" | "char" | "name" | "citext" => {
             Value::Text(text.into())
         }
         // Arrays, geometry, `inet`, ranges, and anything PostgreSQL gains later.
         // Kept as text: it renders correctly in the grid and in every exporter,
         // and the user sees the server's own format rather than a guess at
-        // structure. A PostgreSQL array-literal parser is a separate task.
+        // structure. `{1,NULL,3}` is the server's own array output; the Python
+        // engine's `[1, null, 3]` was psycopg's decoding, and nothing downstream
+        // reads a cell as JSON, so there is nothing to decode it for. A PostgreSQL
+        // array-literal parser is a separate task.
         _ => Value::Text(text.into()),
     }
 }
@@ -345,6 +383,13 @@ fn parse_timestamp(text: &str) -> Option<(i64, i32)> {
 }
 
 /// `1 year 2 mons 3 days 04:05:06`, and the shapes PostgreSQL varies between.
+///
+/// Years are folded into months here (`1 year 2 mons` is `14 months`) because
+/// [`IntervalValue`] has no year field, and months rather than days is the fold that
+/// keeps the value: the server sent a calendar interval, and a month is not a fixed
+/// number of days. Folding into days — which is what psycopg's `timedelta` did to
+/// the Python engine — turns `14 months, 3 days` into `428 days` and cannot be
+/// undone.
 fn parse_interval(text: &str) -> Option<IntervalValue> {
     let mut interval = IntervalValue::default();
     let mut tokens = text.split_whitespace().peekable();
@@ -623,6 +668,66 @@ mod tests {
                 days: 0,
                 micros: 30_000_000
             })
+        );
+    }
+
+    #[test]
+    fn the_zoos_interval_keeps_its_months_instead_of_folding_them_into_days() {
+        // tests/golden/preview/postgres_type_zoo_live.ndjson, `an_interval`. The
+        // previous engine wrote `"428 days, 4:05:06"`: psycopg's `timedelta`, with
+        // the months already gone and the JSON quotes still on. This value is the
+        // server's own `1 year 2 mons 3 days 04:05:06`, kept as the three parts it
+        // was sent as and rendered back in the server's own units.
+        let value = from_text("interval", Some("1 year 2 mons 3 days 04:05:06"));
+        assert_eq!(
+            value,
+            Value::Interval(IntervalValue {
+                months: 14,
+                days: 3,
+                micros: 14_706_000_000
+            })
+        );
+        assert_eq!(
+            value.render_text().unwrap(),
+            "14 months, 3 days, 4:05:06",
+            "a month is not a fixed number of days, so the parts stay apart"
+        );
+    }
+
+    #[test]
+    fn an_array_keeps_the_servers_own_literal() {
+        // tests/golden/preview/postgres_type_zoo_live.ndjson, `ints`, `texts` and
+        // `nested`. The previous engine decoded these with psycopg and rendered its
+        // lists as JSON -- `[1, null, 3]` for the first -- while this keeps the
+        // server's text, NULL spelled the server's way. Nothing reads a cell as JSON
+        // (see the module doc), so the decode would buy nothing and cost a
+        // PostgreSQL array-literal parser.
+        // `_int4`, `_text`, `_int4` are the names the server reports for these three
+        // columns, and an array's name is its element's with a leading underscore —
+        // never the element's own name, which is what keeps an array out of the
+        // integer arm above.
+        for (type_name, text) in [
+            ("_int4", "{1,NULL,3}"),
+            ("_text", "{a,NULL,c}"),
+            ("_int4", "{{1,2},{3,NULL}}"),
+        ] {
+            assert_eq!(
+                from_text(type_name, Some(text)),
+                Value::Text(text.into()),
+                "{type_name} {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uuid_is_bare_because_the_quotes_were_never_the_servers() {
+        // tests/golden/preview/postgres_type_zoo_live.ndjson, `a_uuid`. The previous
+        // engine's quotes came from `json.dumps(default=str)`, the same fallback
+        // delta D-2 describes for an interval, not from PostgreSQL.
+        let value = from_text("uuid", Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            value.render_text().unwrap(),
+            "550e8400-e29b-41d4-a716-446655440000"
         );
     }
 
