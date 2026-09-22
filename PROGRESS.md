@@ -198,12 +198,12 @@
   hapus ada **di dalam** record (bukan sebelumnya), dan uji NULL menegaskan kosong di field yang
   sebenarnya berisi `-0.25`. Yang ketiga adalah pola yang sama seperti sebelumnya — uji paralel
   menulis berkas temp yang sama.
-  **`xlsx` dan `xls` tetap belum ditulis**, dan alasannya beda jenis: byte keduanya ditentukan
+  **Saat itu `xlsx` dan `xls` masih belum ditulis**, dan alasannya beda jenis: byte keduanya ditentukan
   `openpyxl` dan `xlwt`, jadi menyamakannya tidak mungkin dan tidak bermakna. Yang bisa
   dijanjikan di sana adalah berkas yang sah dengan nilai sel yang sama — klaim yang lebih lemah
   dan berbeda, dan itu akan dinyatakan begitu.
 - [x] `qh-export`: format **`xlsx`** ditulis tangan — kontainer ZIP dan bagian OOXML-nya.
-  **9 dari 9 format** kini bisa ditulis. **283 uji hijau.**
+  Saat itu **8 dari 9 format** dan **273 uji hijau**; `xls` menyusul di entri bawah.
   ZIP-nya tanpa dependency: entri *stored*, dan yang penting — **lembar kerjanya di-stream
   dengan data descriptor** (flag bit 3), karena CRC dan ukuran sebuah entri stored baru diketahui
   setelah byte terakhirnya ditulis. Itulah yang menjaga memori tetap datar.
@@ -272,7 +272,38 @@
   Satu keputusan untuk mengurangi risiko: **RK tidak dipakai** meski `xlwt` memakainya.
   Saya dua kali salah menurunkan pengkodeannya dari byte; NUMBER menulis f64 apa adanya,
   empat byte lebih besar per sel, tanpa tebakan.
-- [x] **283 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata) seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `qh-export`: **`plan`** — orkestrasi pemecahan bagian, dari `export.py:60-138` yang
+  sebelumnya belum pernah dibaca.
+  Aturannya: batas baris per berkas adalah **yang terkecil** antara batas format itu sendiri
+  (`xls` 65 535, `xlsx` 1 048 575) dan `rows_per_file` milik pemanggil. Bagian pertama bernama
+  apa yang diketik pengguna (`report.csv`); begitu bagian kedua dibuka, yang pertama **diganti
+  nama** jadi `report_part01.csv` dan yang baru jadi `part02`. Pengguna yang dapat satu berkas
+  dapat persis nama yang ia tulis, dan yang dapat empat dapat himpunan bernomor tanpa nomor yang
+  hilang — alternatifnya, `report.csv` lalu `part02`, terbaca seolah `part01` lenyap. Cancel
+  ditanyakan **sebelum** baris berikutnya diambil dan bagian yang sedang ditulis tetap ditutup,
+  jadi ekspor yang dibatalkan adalah berkas sah berisi baris yang sempat datang — bukan CSV
+  dengan baris terakhir yang robek.
+  Verifikasinya tidak memakai aturan di atas sebagai patokan. Uji baru `plan_parity` memuat
+  `exporter/export.py` lewat `importlib` (dua impor yang tidak dibutuhkan `export_rows`
+  di-stub), menjalankan `export_rows` milik engine itu sendiri atas baris yang sama, lalu
+  membandingkan direktorinya dengan milik crate ini **nama per nama dan byte per byte**. Lima
+  kasus — pecah jadi 6 bagian, satu berkas, hasil kosong, format lain, satu baris per berkas —
+  semuanya sama persis.
+  Membaca sumber kebenaran itu menemukan **tiga tempat kosakata crate ini sudah menyimpang**,
+  dan ketiganya sudah diperbaiki:
+  1. Batas `xlsx` adalah `XLSX_MAX_ROWS - 1` = **1 048 575**, bukan 1 048 576. Satu baris terlalu
+     longgar, dan baris itu persis bedanya antara pecah dengan rapi dan ekspor yang ditolak
+     writer.
+  2. Kunci format di engine adalah **`txt`**, bukan `text` — dan kunci itu yang dibawa preferensi
+     tersimpan, flag, atau parameter URL. `name()` kini menjawab `txt`, dan `parse` menerima
+     `text` juga karena itu yang diketik orang.
+  3. `WRITERS` menaruh **`xls` sebelum `xlsx`**. Urutan format adalah urutan yang dilihat di menu.
+  Satu hal yang **tidak** direproduksi: jalur paralel `export.py:96` yang me-render baris di
+  thread. Jalur itu ada untuk mengakali GIL; `render_workers()` mengembalikan 1 pada build CPython
+  biasa, jadi jalur bawaan engine pun sekuensial — dan di sini pekerjaan yang sama sudah berjalan
+  dalam puluhan nanodetik per baris, jadi tidak ada yang perlu diakali. `render_rows` tetap publik
+  kalau suatu hari profiling berkata lain.
+- [x] **301 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
