@@ -30,9 +30,11 @@
 //! they disagree.
 
 mod connections;
+pub mod import;
 pub mod migrate;
 
 pub use connections::{ConnectionGroup, ConnectionKind, ConnectionRecord};
+pub use import::{ImportPlan, ImportReport, ImportedSource, SkippedRow};
 pub use migrate::{AppliedMigration, Migration, MIGRATIONS};
 
 use std::path::Path;

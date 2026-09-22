@@ -52,7 +52,10 @@ fn a_database_survives_being_closed_and_reopened() {
         .unwrap()
         .expect("the row");
     assert_eq!(found, saved);
-    assert_eq!(reopened.schema_version().unwrap(), 1);
+    assert_eq!(
+        reopened.schema_version().unwrap(),
+        qh_storage::migrate::latest_version()
+    );
 }
 
 #[test]

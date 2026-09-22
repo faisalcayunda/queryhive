@@ -45,6 +45,7 @@ qh-sql = { path = "crates/qh-sql" }
 qh-storage = { path = "crates/qh-storage" }
 qh-sync = { path = "crates/qh-sync" }
 thiserror = "2"
+serde_json = { version = "1", features = ["preserve_order"] }
 # The Keychain, and the values that hold a password. `security-framework-sys` is the
 # raw attribute list and `SecItem*` calls; `core-foundation` builds the dictionary
 # they take. See crates/qh-credentials for why the item is spelled out by hand.

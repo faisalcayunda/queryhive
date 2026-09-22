@@ -25,11 +25,18 @@ pub struct Migration {
 
 /// Every migration, oldest first. Append-only: a version that has shipped is never
 /// changed, because some database somewhere has already run it.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "legacy_import",
+        sql: include_str!("../migrations/0002_legacy_import.sql"),
+    },
+];
 
 /// A migration that has run, as the history table remembers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
