@@ -99,10 +99,25 @@
   Catatan penting yang muncul dari riset ini: Trino **tidak punya jaminan antarversi**, jadi
   driver Trino nanti harus diuji terhadap rilis bernomor dan proyek ini tidak boleh mengklaim
   "bekerja dengan Trino" secara umum
-- [x] Lingkungan Trino: VM podman dinaikkan ke 4 GiB, Trino **483** berjalan di
-  `127.0.0.1:58080` dan melayani ~10 detik setelah dinyalakan. Protokol kliennya diverifikasi
-  manual; **belum ada uji otomatis**, jadi tidak ada klaim perilaku Trino yang dipertahankan
-- [x] **171 uji hijau** seluruh workspace, `cargo fmt --all --check` bersih,
+- [x] `crates/qh-driver-trino` — protokol klien Trino ditulis sendiri di atas `reqwest`
+  (ADR-0006), **24 uji unit + 15 uji integrasi** terhadap Trino **483** nyata. Yang ditemukan
+  dengan mengukur, bukan membaca, dan semuanya mengubah kode:
+  - **`decimal` datang sebagai string JSON**, sehingga 38 digit bertahan tanpa lewat `f64`.
+  - **`varbinary` datang sebagai base64**; meneruskan teksnya sebagai byte akan salah dan baru
+    terlihat saat ekspor.
+  - **`timestamp`/`time` kehilangan mikrodetik di protokolnya sendiri.** Server melaporkan
+    `timestamp(6)` lewat `typeof`, tetapi JSON membawa `.123` dari nilai `.123456`. Itu batas
+    hulu yang tidak bisa dipulihkan decoder, dan dicatat karena janji mesin ini adalah tidak
+    membulatkan apa pun.
+  - **Galat datang di halaman poll, bukan di `POST`** — `POST` menjawab 200 dengan `nextUri`.
+  - **`USER_CANCELED` membawa `errorType = USER_ERROR`.** Memetakannya apa adanya akan
+    menampilkan "gagal" kepada pengguna yang menekan stop, jadi namanya diperiksa lebih dulu
+    dan hasilnya `FailureKind::Cancelled`.
+  - **`columns` tidak ada selama `QUEUED`**, jadi `execute` mengembalikan cursor lebih dulu dan
+    kolom menyusul di batch pertama. Ini sengaja menyimpang dari kontrak `Cursor`, dan
+    alasannya persis pelajaran K11: menunggu di sini berarti menunggu seluruh query, dan
+    pemanggil yang belum punya cursor tidak punya apa pun untuk dibatalkan.
+- [x] **210 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
@@ -363,7 +378,6 @@ membuatnya lagi:
    `docs/compatibility.md`, termasuk satu jebakan yang lebih baik diketahui sekarang:
    **`columns` belum ada selama state masih `QUEUED`**, jadi skema tidak boleh diasumsikan
    datang di respons `POST` pertama.
-   Yang **belum**: tidak ada satu pun uji otomatis terhadap Trino. Jadi belum ada klaim
-   perilaku Trino yang bisa dipertahankan, dan setiap pernyataan tentangnya harus menyebut
-   nomor rilis 483. Driver Trino (ADR-0006) kini bisa divalidasi terhadap server nyata — itu
-   pekerjaan berikutnya.
+   **Lanjutannya selesai:** `crates/qh-driver-trino` kini ada dan diuji — 24 uji unit + 15 uji
+   integrasi terhadap rilis 483 yang sama. Yang tetap berlaku: Trino tidak memberi jaminan
+   antarversi, jadi setiap klaim tentangnya harus menyebut nomor rilis.

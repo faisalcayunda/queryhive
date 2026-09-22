@@ -1,0 +1,28 @@
+[package]
+name = "qh-driver-trino"
+version = "0.1.0"
+description = "Trino driver: the HTTP client protocol by hand, one page at a time, with DELETE cancel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+qh-core.workspace = true
+qh-driver.workspace = true
+thiserror.workspace = true
+# default-features = false, and the two features that are actually wanted:
+# `json` for the page bodies, `rustls-tls` so TLS is pure Rust. ADR-0006 chose
+# reqwest with rustls, and no other transport feature is switched on, so nothing
+# here pulls in a second TLS stack by accident.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"

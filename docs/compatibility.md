@@ -14,7 +14,7 @@
 |---|---|---|---|
 | PostgreSQL | **17.11** | Rilis mayor ~1×/tahun, tiap mayor didukung **5 tahun** | [versioning policy](https://www.postgresql.org/support/versioning/) |
 | MySQL | **8.4.11** (Community) | Dua jalur: **LTS** dan **Innovation** | [MySQL Releases](https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/mysql-releases.html) |
-| Trino | **483** | Rilis mingguan, tanpa semver, **tanpa jaminan antarversi** | [diskusi #20032](https://github.com/trinodb/trino/discussions/20032), [release notes](https://trino.io/docs/current/release.html) |
+| Trino | **483** (uji integrasi driver) | Rilis mingguan, tanpa semver, **tanpa jaminan antarversi** | [diskusi #20032](https://github.com/trinodb/trino/discussions/20032), [release notes](https://trino.io/docs/current/release.html) |
 
 "Teruji di sini" berarti seluruh uji integrasi dijalankan terhadapnya. Ia **bukan** klaim
 tentang versi lain: versi lain tidak ditolak, tetapi juga tidak dijanjikan.
@@ -135,10 +135,15 @@ Cara menutupnya sudah jelas dan mekanis, karena uji integrasinya sudah ada:
    kegagalannya.
 4. Perbarui tabel ringkasan dengan hasilnya.
 
-Untuk Trino, versi yang berjalan adalah 483 tetapi **belum ada uji sama sekali** — yang ada
-baru pemeriksaan protokol manual. Karena Trino tidak memberi jaminan antarversi, setiap
+Untuk Trino, versi yang diuji adalah **483**, lewat 15 uji integrasi `qh-driver-trino` yang
+dijalankan terhadap container nyata. Karena Trino tidak memberi jaminan antarversi, setiap
 klaim tentangnya harus menyebut nomor rilis, dan menguji pada rilis lain berarti menjalankan
-ulang pengujiannya pada rilis itu.
+ulang pengujiannya pada rilis itu — bukan mengasumsikan hasilnya berlaku.
+
+Satu batas yang ditemukan saat pengujian itu dan tidak bisa diperbaiki di sisi kami:
+**protokol Trino memotong `timestamp` dan `time` sampai milidetik.** Server melaporkan
+`timestamp(6)` (dikonfirmasi lewat `typeof`) tetapi JSON membawa `.123` dari nilai `.123456`.
+Jadi presisi mikrodetik tidak hilang karena decoder ini, melainkan tidak pernah dikirim.
 
 ## Cara memverifikasi ulang dokumen ini
 

@@ -12,6 +12,7 @@ members = [
     "crates/qh-driver",
     "crates/qh-driver-mysql",
     "crates/qh-driver-postgres",
+    "crates/qh-driver-trino",
     "crates/qh-result-store",
     "crates/qh-sql",
 ]
@@ -28,6 +29,7 @@ qh-core = { path = "crates/qh-core" }
 qh-driver = { path = "crates/qh-driver" }
 qh-driver-mysql = { path = "crates/qh-driver-mysql" }
 qh-driver-postgres = { path = "crates/qh-driver-postgres" }
+qh-driver-trino = { path = "crates/qh-driver-trino" }
 qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
 thiserror = "2"
