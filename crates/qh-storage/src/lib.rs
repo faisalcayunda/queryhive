@@ -84,6 +84,43 @@ pub enum StorageError {
 
     #[error("the row holds {text:?} where an identity belongs: {reason}")]
     BadId { text: String, reason: String },
+
+    #[error("HOME is not set, so there is nowhere to keep the database")]
+    NoHomeDirectory,
+
+    #[error("could not create {path}: {reason}")]
+    Directory { path: std::path::PathBuf, reason: String },
+}
+
+/// The database this engine uses when nobody says otherwise.
+///
+/// Beside `connections.json` in Application Support, which is where the app already keeps
+/// what belongs to it: one directory to back up, and one directory for a user to find when
+/// they have to recover something by hand.
+pub fn default_database_path() -> Option<std::path::PathBuf> {
+    Some(import::legacy_directory()?.join(DATABASE_FILE_NAME))
+}
+
+/// The file name inside that directory.
+pub const DATABASE_FILE_NAME: &str = "queryhive.sqlite3";
+
+/// Open the default database, creating and migrating it if it is not there yet.
+///
+/// Migrating here rather than leaving it to the caller because this is the launch path and
+/// there is nothing else a caller would want to do first: a database that cannot be
+/// migrated is one this engine cannot use, and saying so now is better than at the first
+/// write.
+pub fn open_default() -> Result<Storage, StorageError> {
+    let path = default_database_path().ok_or(StorageError::NoHomeDirectory)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| StorageError::Directory {
+            path: parent.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    }
+    let mut storage = Storage::open(&path)?;
+    storage.migrate()?;
+    Ok(storage)
 }
 
 /// An open local database.
