@@ -14,7 +14,7 @@
 |---|---|---|---|
 | PostgreSQL | **17.11** | Rilis mayor ~1×/tahun, tiap mayor didukung **5 tahun** | [versioning policy](https://www.postgresql.org/support/versioning/) |
 | MySQL | **8.4.11** (Community) | Dua jalur: **LTS** dan **Innovation** | [MySQL Releases](https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/mysql-releases.html) |
-| Trino | **belum pernah dijalankan** | Rilis mingguan, tanpa semver, **tanpa jaminan antarversi** | [diskusi #20032](https://github.com/trinodb/trino/discussions/20032), [release notes](https://trino.io/docs/current/release.html) |
+| Trino | **483** | Rilis mingguan, tanpa semver, **tanpa jaminan antarversi** | [diskusi #20032](https://github.com/trinodb/trino/discussions/20032), [release notes](https://trino.io/docs/current/release.html) |
 
 "Teruji di sini" berarti seluruh uji integrasi dijalankan terhadapnya. Ia **bukan** klaim
 tentang versi lain: versi lain tidak ditolak, tetapi juga tidak dijanjikan.
@@ -96,10 +96,30 @@ umum. Driver Trino harus diuji terhadap rilis tertentu yang disebutkan nomornya,
 itu dicatat di sini saat pengujiannya benar-benar terjadi. Sampai itu, baris Trino di tabel
 ringkasan tetap **belum pernah dijalankan**.
 
-Status sekarang: image `trinodb/trino:latest` sudah diunduh (1,39 GB) tetapi **belum
-pernah dinyalakan**, karena VM podman hanya punya 2 GiB sedangkan Trino sendiri butuh
-sekitar 2 GiB. Jadi tidak ada satu pun uji Trino, dan dokumen ini tidak mengklaim apa pun
-tentangnya.
+Versi yang berjalan di sini: **483**, dari `/v1/info` (`nodeVersion.version`), setelah VM
+podman dinaikkan dari 2 GiB ke 4 GiB. Ia melayani sekitar **sepuluh detik** setelah
+container dijalankan.
+
+Yang sudah diverifikasi adalah **protokol kliennya**, bukan konektor atau SQL lengkap:
+
+| Langkah | Hasil yang terlihat |
+|---|---|
+| `GET /v1/info` | `{"state":"ACTIVE","nodeVersion":{"version":"483"},"coordinator":true}` |
+| `POST /v1/statement` (`SELECT 1 AS n, 'x' AS t`) | 200 dengan `id`, `infoUri`, `nextUri`, dan `stats.state = QUEUED` |
+| `GET nextUri` (poll 1–2) | masih `QUEUED`, **`columns` belum ada**, `data` belum ada |
+| `GET nextUri` (poll 3) | `RUNNING`, `columns` 2 buah, `data = [[1, "x"]]`, `nextUri` masih ada |
+| `GET nextUri` (poll 4) | `FINISHED`, `data` kosong, **`nextUri` tidak ada** |
+
+**Satu hal dari tabel itu yang wajib diingat saat driver-nya ditulis:** `columns` **tidak**
+ada selama state masih `QUEUED`. Skema tidak boleh diasumsikan datang di respons pertama
+`POST`, karena untuk query yang tidak langsung dieksekusi ia memang belum tersedia. Ini
+kelas masalah yang sama dengan yang baru saja ditemukan di driver MySQL — di sana
+`execute` menunggu metadata yang baru datang di akhir, dan akibatnya cancel tidak pernah
+bisa dijangkau. Di sini bentuknya berbeda tetapi jebakannya sejenis, dan sudah diketahui
+sebelum satu baris pun ditulis.
+
+Keempat header yang dipakai proyek ini: `X-Trino-User`, `X-Trino-Catalog`,
+`X-Trino-Schema`, dan `Content-Type: text/plain` pada `POST`.
 
 ## Yang belum ditetapkan
 
@@ -115,8 +135,10 @@ Cara menutupnya sudah jelas dan mekanis, karena uji integrasinya sudah ada:
    kegagalannya.
 4. Perbarui tabel ringkasan dengan hasilnya.
 
-Untuk Trino, langkah nolnya adalah menaikkan memori VM podman dan menyalakan
-`deploy/dev/up.sh trino`; tanpa itu tidak ada yang bisa diukur.
+Untuk Trino, versi yang berjalan adalah 483 tetapi **belum ada uji sama sekali** — yang ada
+baru pemeriksaan protokol manual. Karena Trino tidak memberi jaminan antarversi, setiap
+klaim tentangnya harus menyebut nomor rilis, dan menguji pada rilis lain berarti menjalankan
+ulang pengujiannya pada rilis itu.
 
 ## Cara memverifikasi ulang dokumen ini
 

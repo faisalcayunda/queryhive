@@ -99,6 +99,9 @@
   Catatan penting yang muncul dari riset ini: Trino **tidak punya jaminan antarversi**, jadi
   driver Trino nanti harus diuji terhadap rilis bernomor dan proyek ini tidak boleh mengklaim
   "bekerja dengan Trino" secara umum
+- [x] Lingkungan Trino: VM podman dinaikkan ke 4 GiB, Trino **483** berjalan di
+  `127.0.0.1:58080` dan melayani ~10 detik setelah dinyalakan. Protokol kliennya diverifikasi
+  manual; **belum ada uji otomatis**, jadi tidak ada klaim perilaku Trino yang dipertahankan
 - [x] **171 uji hijau** seluruh workspace, `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
@@ -282,12 +285,20 @@ jadi `Conn` dipindahkan ke **task produsen** yang mengalirkan `ColumnBatch` lewa
 ("channel dengan batas, bukan `queue.Queue` + thread manual").
 
 Satu konsekuensi yang tidak langsung terlihat dan harus diingat: `Cursor::columns()` harus sah
-segera setelah `execute` kembali, sedangkan kolom baru diketahui di dalam task. Karena itu
-`execute` **menunggu pesan pertama** dari produsen — dan itu tidak menunda baris pertama, karena
-deskripsi kolom selalu datang sebelum baris apa pun.
+segera setelah `execute` kembali, sedangkan kolom hanya diketahui di dalam task. Versi pertama
+menjawabnya dengan menunggu pesan pertama dari produsen, dan itu **salah** — catatan aslinya
+mengklaim "deskripsi kolom selalu datang sebelum baris apa pun", padahal untuk query blocking
+MySQL mengirim deskripsi itu saat query *selesai*. Akibatnya `execute` menunggu seluruh query dan
+cancel tidak punya sasaran; terukur 2,002 dtk untuk `SELECT SLEEP(2)`. Perbaikannya (K11):
+deskripsi diambil **lebih dulu** dengan `prep` (COM_STMT_PREPARE, tanpa eksekusi, 915 µs untuk join
+yang butuh >90 dtk bila dijalankan), di luar task produsen. Produsen hanya mengumumkan kolom
+sebagai fallback, untuk statement yang server menolak mendeskripsikannya.
 
 Cancel memakai koneksi kedua yang terpisah, jadi tidak terpengaruh koneksi yang sedang dipinjam
-task. **Tetapi lihat K11**: terbukti untuk `SLEEP`, belum untuk join panjang.
+task. **Ini sempat keliru**: lihat K11 di daftar Known issues — yang rusak ternyata bukan cancel,
+melainkan `execute` yang menunggu seluruh query karena menunggu deskripsi kolom. Kerangkanya tetap
+seperti di atas, tetapi deskripsinya sekarang diambil lebih dulu lewat `prep`, di luar task
+produsen.
 
 Crate kerangka MySQL pernah **dihapus dari workspace** alih-alih dibiarkan berisi `// placeholder`
 (commit `dafd071`). Itu alasan sesi ini menelusuri API sampai ke sumbernya sebelum menulis satu
@@ -346,14 +357,13 @@ membuatnya lagi:
    disiapkan pada Fase 4; sampai tersedia, build memakai ad-hoc signing.
 5. **Kunci EdDSA Sparkle** untuk update bertanda tangan belum ada dan tidak boleh masuk repo;
    dibuat pada Fase 4 dan disimpan sebagai secret CI.
-6. **VM podman hanya punya 2 GiB RAM**, sedangkan Trino single-node butuh sekitar 2 GiB untuk
-   dirinya sendiri. Menaikkan memori VM menghentikan VM dan mengalokasikan lebih banyak RAM
-   host secara permanen, jadi ini saya tinggalkan untuk Anda putuskan — bukan tindakan yang
-   pantas saya ambil sendiri. Image-nya **sudah diunduh** (1,39 GB), jadi tinggal memori.
-   Naikkan dulu, lalu jalankan `deploy/dev/up.sh trino`:
-   ```bash
-   podman machine stop
-   podman machine set --memory 8192
-   podman machine start
-   ```
-   Sampai itu dilakukan, driver Trino (ADR-0006) belum punya validasi terhadap server nyata.
+6. ~~**VM podman hanya punya 2 GiB RAM**~~ **Selesai.** VM dinaikkan ke 4 GiB, dan Trino
+   **483** berjalan di `127.0.0.1:58080` — melayani sekitar **sepuluh detik** setelah container
+   dinyalakan. Protokol kliennya sudah diverifikasi manual dan empat langkahnya tercatat di
+   `docs/compatibility.md`, termasuk satu jebakan yang lebih baik diketahui sekarang:
+   **`columns` belum ada selama state masih `QUEUED`**, jadi skema tidak boleh diasumsikan
+   datang di respons `POST` pertama.
+   Yang **belum**: tidak ada satu pun uji otomatis terhadap Trino. Jadi belum ada klaim
+   perilaku Trino yang bisa dipertahankan, dan setiap pernyataan tentangnya harus menyebut
+   nomor rilis 483. Driver Trino (ADR-0006) kini bisa divalidasi terhadap server nyata — itu
+   pekerjaan berikutnya.

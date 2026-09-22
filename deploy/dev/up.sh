@@ -84,11 +84,10 @@ start_mysql() {
 }
 
 start_trino() {
-  # Not started by default. The podman VM on this machine has 2 GiB of RAM and a
-  # single-node Trino wants roughly twice that before it will serve a query, so
-  # starting it here would fail slowly rather than usefully. See
-  # PROGRESS.md [BUTUH TINDAKAN MANUAL]: raise the VM's memory first, then this
-  # function works unchanged.
+  # Not started by default: a single-node Trino wants roughly 2 GiB of its own,
+  # and starting it alongside the two databases on a small VM fails slowly rather
+  # than usefully. The VM here has been raised to 4 GiB, and it now serves in about
+  # ten seconds. See docs/compatibility.md for what was measured.
   podman rm -f qh-trino >/dev/null 2>&1 || true
   podman run -d --name qh-trino \
     -p "$TRINO_PORT:8080" \
