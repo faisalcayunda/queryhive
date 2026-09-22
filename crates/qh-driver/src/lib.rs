@@ -413,6 +413,20 @@ pub trait Cursor: Send {
     fn columns(&self) -> &[ColumnMeta];
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError>;
+
+    /// How many rows the statement affected, once the server has said.
+    ///
+    /// A statement that writes — a `CREATE TABLE AS SELECT`, an `INSERT`, a `DELETE` —
+    /// can report a count; a `SELECT` cannot, and neither can a `DROP`. `None` is that
+    /// "the server has not said", and it is also the honest answer for a driver whose
+    /// protocol has no such field, which is why it defaults to `None` rather than
+    /// forcing every driver to invent one.
+    ///
+    /// It is only meaningful **after the cursor has been driven to its end**: the
+    /// count arrives in the last page for the protocols that carry it.
+    fn affected_rows(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Why a driver could not be found or registered.

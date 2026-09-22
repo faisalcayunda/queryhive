@@ -73,20 +73,26 @@ dan nama program memang harus berubah, karena yang menjalankan bukan lagi skrip 
 `an_unknown_command_is_one_error_event` membandingkan akhiran itu dan memastikan hanya nama
 programnya yang berbeda.
 
-### D-6 — `to_table` melaporkan `rows: -1` dan tanpa `progress` · **Keterbatasan yang diketahui**
+### D-6 — `to_table`: hitungan baris dari server, kecuali di dua driver · **Sebagian tertutup**
 
-`done.rows` pada snapshot berisi `5` (dari `cursor.rowcount` klien trino, yaitu `updateCount`
-koordinator), dan `progress` mendahuluinya. Engine Rust melaporkan `-1` dan tidak memancarkan
-`progress` sama sekali.
+`done.rows` pada snapshot berisi `5` dari `cursor.rowcount` klien trino, dan `progress` mendahuluinya.
+Engine Rust sekarang memancarkan keduanya dengan bentuk yang sama, dan `to_table_create` sudah naik
+dari "perbedaan yang diterima" menjadi **kasus yang identik** di uji paritas.
 
-Bukti: `tests/golden/to_table/to_table_create.ndjson`.
+Sumber angkanya sudah diukur, bukan diasumsikan: Trino mengirim `updateCount` **di level atas page**,
+bukan di dalam `stats` — `CREATE TABLE AS SELECT` menjawab 25, `INSERT` menjawab 3, dan `SELECT` atau
+`DROP` tidak menjawab apa pun (Trino 483, `deploy/dev`). Field itulah yang dibaca klien Python untuk
+mengisi `rowcount`, jadi inilah yang membuat laporan sebuah penulisan sama dengan yang dulu diberikan
+engine Python. Terhadap server sungguhan: `create` → 25, `append` → 3, `replace` → 2 (DROP tidak
+menghasilkan hitungan, jadi angka yang bertahan adalah milik CREATE).
 
-Sebabnya satu hal saja: trait `Cursor` belum punya cara menanyakan berapa baris yang ditulis
-sebuah statement. `-1` dipilih karena itu **nilai yang sama** yang dipakai `exporter/to_table.py`
-ketika koordinator tidak melaporkan apa pun — bukan tebakan yang menyerupai angka. Yang belum ada:
-satu method opsional di `qh-driver` (diisi driver Trino dari `updateCount` halaman terakhir), lalu
-`progress`/`state` ikut kembali. `state` sendiri berasal dari `stats_callback` klien trino, yang
-tidak dimiliki driver Rust mana pun.
+Yang masih terbuka, dan alasannya berbeda-beda:
+
+| Bagian | Keadaan |
+|---|---|
+| `progress.state` | Selalu `null`. Nilainya dulu datang dari `stats_callback` klien trino (`RUNNING`, `writtenRows`), sebuah aliran yang tidak dimiliki trait `Cursor`. Snapshot juga mencatat `null`, jadi ini setara — tapi bukan aliran progres sungguhan |
+| PostgreSQL | `-1`. `CommandComplete` untuk `CREATE TABLE AS` tidak membawa jumlah baris, jadi `cursor.rowcount` psycopg pun `-1`: ini **paritas**, bukan kekurangan |
+| MySQL | `-1`. Paket OK MySQL membawa `affected_rows`, tapi driver ini belum mem-parse-nya. Ini yang paling mudah ditutup berikutnya |
 
 ### D-7 — Setting yang dibaca lalu diabaikan · **Keterbatasan yang diketahui**
 

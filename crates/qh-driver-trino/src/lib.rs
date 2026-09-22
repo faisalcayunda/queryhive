@@ -85,6 +85,15 @@ struct Page {
     data: Option<Vec<Vec<Json>>>,
     #[serde(default)]
     error: Option<WireError>,
+    /// Rows the statement wrote, when it has a count to report.
+    ///
+    /// **Top level, not inside `stats`** — measured against Trino 483 rather than
+    /// assumed: a `CREATE TABLE AS SELECT` answers with 25, an `INSERT` with 3, and a
+    /// `SELECT` or a `DROP` with nothing at all. It is the field the trino client reads
+    /// to set `cursor.rowcount`, so reading it is what keeps a write's report the same
+    /// number the Python engine would have given.
+    #[serde(default)]
+    update_count: Option<i64>,
     // `stats` carries the state (QUEUED/RUNNING/FINISHED) and a pile of counters.
     // None of it is read here: whether a query has finished is answered by the
     // absence of `nextUri`, which is the protocol's own rule, and the counters have
@@ -455,6 +464,9 @@ impl Session for TrinoSession {
             self.last_id = page.id.clone();
         }
 
+        let affected = page
+            .update_count
+            .and_then(|count| u64::try_from(count).ok());
         let columns = columns_of(&page);
         let pending: VecDeque<Vec<Value>> = match (page.columns.as_deref(), page.data.as_deref()) {
             (Some(wire_columns), Some(rows)) => decode_rows(wire_columns, rows).into(),
@@ -472,6 +484,7 @@ impl Session for TrinoSession {
             columns,
             pending,
             finished,
+            affected,
             row_limit: options.row_limit,
             emitted: 0,
             max_batch_rows: options.max_batch_rows,
@@ -595,6 +608,9 @@ struct TrinoCursor {
     columns: Vec<ColumnMeta>,
     pending: VecDeque<Vec<Value>>,
     finished: bool,
+    /// Rows the statement wrote, when the server has said. The count arrives in the
+    /// last page, so it is only meaningful once the cursor has been drained.
+    affected: Option<u64>,
     row_limit: Option<usize>,
     emitted: usize,
     max_batch_rows: Option<usize>,
@@ -670,6 +686,11 @@ impl TrinoCursor {
         // `running_from(&page)` afterwards would borrow a partially moved value.
         let running = running_from(&page);
         let id = page.id.take();
+        // A negative count is the protocol's way of saying "nothing to report" rather
+        // than -1 rows, so it is not turned into an unsigned one.
+        if let Some(count) = page.update_count {
+            self.affected = u64::try_from(count).ok();
+        }
         self.next_uri = page.next_uri.take();
 
         if self.next_uri.is_none() {
@@ -708,6 +729,10 @@ impl TrinoCursor {
 impl Cursor for TrinoCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        self.affected
     }
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {

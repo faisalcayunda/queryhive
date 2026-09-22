@@ -664,6 +664,9 @@ pub async fn to_table(
     let mut warnings: Vec<String> = Vec::new();
     let mut cancelled = false;
     let mut query_id = None;
+    // Rows the last writing statement reported. A `replace` runs a DROP first, which
+    // reports nothing to count, so the value that survives is the CREATE's.
+    let mut affected: Option<u64> = None;
     for (index, statement) in statements.iter().enumerate() {
         if index == 0 {
             // The connection is open and this statement is next: exactly what a
@@ -692,8 +695,11 @@ pub async fn to_table(
                 .await?;
             // A DDL statement has no rows to read, but it is not finished when
             // `execute` returns: driving the cursor to its end is what waits for the
-            // server to finish the work.
+            // server to finish the work, and what the count arrives with.
             while cursor.next_batch(1_000).await?.is_some() {}
+            if let Some(count) = cursor.affected_rows() {
+                affected = Some(count);
+            }
             Ok(())
         }
         .await;
@@ -714,10 +720,14 @@ pub async fn to_table(
         warnings.push(CANCEL_WARNING.to_owned());
     }
 
-    // `-1` is the Python engine's own value for "the coordinator never said how many
-    // rows this wrote", and it is passed through rather than guessed: a fabricated
-    // 0 would read as "wrote nothing".
-    let rows: i64 = -1;
+    // The server's own count when it has one, and `-1` when it does not — which is the
+    // value `exporter/to_table.py` used for the same silence, so a caller that has
+    // learned to read it sees the same thing from both engines. A fabricated 0 would
+    // read as "wrote nothing".
+    let rows: i64 = match affected {
+        Some(count) => i64::try_from(count).unwrap_or(i64::MAX),
+        None => -1,
+    };
     let progress = Progress::new(settings.number("PROGRESS_MS", PROGRESS_MS_DEFAULT)?);
     // The Python engine's own condition: it counts backwards from -1, so an
     // unreported write compares equal to itself and stays silent — a `progress`

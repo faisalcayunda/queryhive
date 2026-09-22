@@ -62,6 +62,7 @@ const EXACT: &[&str] = &[
     "count",
     "explain",
     "export_csv",
+    "to_table_create",
 ];
 
 /// The cases that differ on purpose, with the reason the difference is acceptable.
@@ -80,11 +81,6 @@ const ACCEPTED: &[&str] = &[
     // both are argued in `docs/golden-deltas.md`, and every other cell of that case —
     // 28 of 30 — matches the snapshot exactly.
     "type_zoo",
-    // `to_table` cannot yet report the rows it wrote: the `Cursor` contract has no
-    // update count, so `done.rows` is -1 where the Python engine read the trino
-    // client's `update_count`. The `progress` event that follows from that count is
-    // absent for the same reason.
-    "to_table_create",
 ];
 
 /// One driven case: its script, its settings, and how to run it.
@@ -107,6 +103,9 @@ struct FakeSession {
     /// Recorded rather than read: a test that cares which statement ran asserts on it.
     executed: Arc<Mutex<Vec<String>>>,
     query_id: Option<String>,
+    /// Rows the statement wrote, when the server has a count to give: a CTAS has one,
+    /// a SELECT does not.
+    affected: Option<u64>,
     columns: Vec<ColumnMeta>,
     rows: Vec<Vec<Value>>,
     names: Vec<String>,
@@ -121,6 +120,7 @@ impl FakeSession {
             // The Python engine's Trino cases reported a query id; the fake ones for
             // PostgreSQL and MySQL reported none, which is what those drivers do.
             query_id: Some("20260101_000000_00000_xxxxx".to_owned()),
+            affected: None,
             columns: Vec::new(),
             rows: Vec::new(),
             names: Vec::new(),
@@ -143,6 +143,11 @@ impl FakeSession {
 
     fn rows(mut self, rows: Vec<Vec<Value>>) -> Self {
         self.rows = rows;
+        self
+    }
+
+    fn affected(mut self, rows: u64) -> Self {
+        self.affected = Some(rows);
         self
     }
 
@@ -199,6 +204,7 @@ impl Session for FakeSession {
             .push(sql.to_owned());
         Ok(Box::new(FakeCursor {
             columns: self.columns.clone(),
+            affected: self.affected,
             batches: if self.rows.is_empty() {
                 VecDeque::new()
             } else {
@@ -242,6 +248,7 @@ impl Session for FakeSession {
 /// The batches the fake cursor hands out, in order.
 struct FakeCursor {
     columns: Vec<ColumnMeta>,
+    affected: Option<u64>,
     batches: VecDeque<ColumnBatch>,
 }
 
@@ -249,6 +256,10 @@ struct FakeCursor {
 impl Cursor for FakeCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        self.affected
     }
 
     async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
@@ -624,6 +635,22 @@ fn cases() -> Vec<Case> {
             )
         },
         Case {
+            id: "to_table_create",
+            folder: "to_table",
+            command: Command::ToTable,
+            settings: {
+                let mut settings = base("TRINO_HOST", "trino.internal");
+                settings.push(("SQL", "SELECT * FROM people"));
+                settings.push(("TARGET_CATALOG", "hive"));
+                settings.push(("TARGET_SCHEMA", "analytics"));
+                settings.push(("TARGET_TABLE", "people_copy"));
+                settings
+            },
+            session: FakeSession::new(DriverKind::Trino)
+                .affected(5)
+                .query_id(Some("20260101_000000_00000_xxxxx")),
+        },
+        Case {
             id: "postgres_schemas",
             folder: "schemas",
             command: Command::Schemas,
@@ -961,47 +988,6 @@ async fn the_accepted_differences_are_what_the_docs_say() {
         ],
         "only the two documented deltas may differ"
     );
-
-    // 3. `to_table` reports -1 rows and no `progress`, because the Cursor contract has
-    //    no update count yet.
-    let to_table = Case {
-        id: "to_table_create",
-        folder: "to_table",
-        command: Command::ToTable,
-        settings: vec![
-            ("TRINO_HOST", "trino.internal"),
-            ("RETRIES", "0"),
-            ("USER", "isal"),
-            ("SQL", "SELECT * FROM people"),
-            ("TARGET_CATALOG", "hive"),
-            ("TARGET_SCHEMA", "analytics"),
-            ("TARGET_TABLE", "people_copy"),
-        ],
-        session: FakeSession::new(DriverKind::Trino).query_id(Some("20260101_000000_00000_xxxxx")),
-    };
-    let actual = recorded(&to_table, None).await.expect("to_table runs");
-    let events: Vec<&str> = actual
-        .iter()
-        .map(|event| event["event"].as_str().unwrap_or("?"))
-        .collect();
-    assert_eq!(events, vec!["step", "step", "done"], "{actual:?}");
-    assert_eq!(actual[2]["rows"].as_i64(), Some(-1));
-    assert_eq!(
-        to_table.session.executed(),
-        vec![
-            "CREATE TABLE \"hive\".\"analytics\".\"people_copy\" AS SELECT * FROM people"
-                .to_owned()
-        ],
-        "the statement the Python engine built, quoted the same way"
-    );
-    let golden = snapshot("to_table_create", "to_table");
-    assert!(
-        golden
-            .iter()
-            .any(|event| event["event"].as_str() == Some("progress")),
-        "the snapshot has the progress event this engine cannot yet produce"
-    );
-    assert_eq!(golden[2]["rows"].as_i64(), Some(5));
 }
 
 /// Every snapshot is either reproduced or written down. An unclassified one is a case
