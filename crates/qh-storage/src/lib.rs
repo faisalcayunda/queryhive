@@ -89,7 +89,10 @@ pub enum StorageError {
     NoHomeDirectory,
 
     #[error("could not create {path}: {reason}")]
-    Directory { path: std::path::PathBuf, reason: String },
+    Directory {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 /// The database this engine uses when nobody says otherwise.

@@ -42,7 +42,7 @@ dipilih di sini. Kolom "bawaan" berarti "nilai yang dipakai bila kunci itu tidak
 | `verify` | `options_json.verify` | `true` |
 | `showAllSchemas` | `options_json.showAllSchemas` | `false` |
 | — (urutan array) | `sort_order` | indeks baris, mulai 0 |
-| — | `secret_ref` | `id` baris itu, apa adanya |
+| — | `secret_ref` | `id` baris itu, dalam ejaan kanoniknya (huruf kecil) |
 | — | `is_production`, `is_read_only`, `group_id` | `0`, `0`, `NULL` |
 | — | `updated_at`, `version` | waktu impor, `1` |
 

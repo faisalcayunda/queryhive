@@ -192,11 +192,32 @@ pub fn plan_json(source: &Path, text: &str, at: i64) -> Result<ImportPlan, Impor
         reason: "the top level is not an array".to_owned(),
     })?;
 
-    let mut connections = Vec::new();
+    let mut connections: Vec<ConnectionRecord> = Vec::new();
     let mut skipped = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         match to_record(row, index, at) {
-            Ok(record) => connections.push(record),
+            Ok(record) => {
+                // Two rows cannot share an identity, and the reason to refuse the second
+                // here rather than let the database decide is what happens *after*: the
+                // rows are written by id and verified by id, so a duplicate would make the
+                // read-back comparison fail against whichever copy won, the marker would
+                // never be written, and every launch would copy the file again and rewrite
+                // the first row forever. Caught in the plan, the import finishes and says
+                // which row it dropped.
+                match connections
+                    .iter()
+                    .position(|kept| kept.meta.id == record.meta.id)
+                {
+                    Some(first) => skipped.push(SkippedRow {
+                        index,
+                        reason: format!(
+                            "the id {} is already used by the row at index {first}",
+                            record.meta.id
+                        ),
+                    }),
+                    None => connections.push(record),
+                }
+            }
             Err(reason) => skipped.push(reason),
         }
     }
@@ -263,30 +284,9 @@ pub fn import_connections(
         }
     }
 
-    // Read back what this import wrote and compare it field for field: a count would not
-    // catch a row written with the wrong options, and this does.
-    //
-    // A row that was **kept** is checked for being present and for nothing else. The merge
-    // decided not to write it, so comparing it against the copy from the file would report
-    // that decision as a failure — which is exactly what an earlier version of this loop
-    // did, on the first run of the test that covers keeping a newer row.
-    let mut missing = Vec::new();
-    let mut mismatched = Vec::new();
-    for record in &plan.connections {
-        match storage.connection(&record.meta.id)? {
-            None => missing.push(record.meta.id.to_string()),
-            Some(stored) if written_ids.contains(&record.meta.id) && stored != *record => {
-                mismatched.push(record.meta.id.to_string());
-            }
-            Some(_) => {}
-        }
-    }
-    if !missing.is_empty() || !mismatched.is_empty() {
-        return Err(ImportError::VerificationFailed {
-            missing,
-            mismatched,
-        });
-    }
+    // The marker below is written only because this passed. Its failing branch leaves no
+    // marker, which is what makes running the import again the retry.
+    verify_written(storage, plan, &written_ids)?;
 
     storage.conn.execute(
         "INSERT INTO legacy_import (source, imported_at, connections, verified) \
@@ -308,6 +308,44 @@ pub fn import_connections(
         verified: true,
         skipped: plan.skipped.clone(),
     })
+}
+
+/// Read back what this import wrote and compare it field for field: a count would not catch
+/// a row written with the wrong options, and this does.
+///
+/// A row that was **kept** is checked for being present and for nothing else. The merge
+/// decided not to write it, so comparing it against the copy from the file would report that
+/// decision as a failure — which is exactly what an earlier version of this loop did, on the
+/// first run of the test that covers keeping a newer row.
+///
+/// A separate function because its failing branch is the one that must never be taken: an
+/// import that compares and finds a difference has to leave no marker, and a branch reachable
+/// only through a store that lost a write is not a branch a test can reach through the
+/// front door.
+fn verify_written(
+    storage: &Storage,
+    plan: &ImportPlan,
+    written_ids: &[SyncId],
+) -> Result<(), ImportError> {
+    let mut missing = Vec::new();
+    let mut mismatched = Vec::new();
+    for record in &plan.connections {
+        match storage.connection(&record.meta.id)? {
+            None => missing.push(record.meta.id.to_string()),
+            Some(stored) if written_ids.contains(&record.meta.id) && stored != *record => {
+                mismatched.push(record.meta.id.to_string());
+            }
+            Some(_) => {}
+        }
+    }
+    if missing.is_empty() && mismatched.is_empty() {
+        Ok(())
+    } else {
+        Err(ImportError::VerificationFailed {
+            missing,
+            mismatched,
+        })
+    }
 }
 
 /// `connections.json.before-import-<millis>`, beside the file it copies.
@@ -465,4 +503,77 @@ pub struct ImportedSource {
     pub source: String,
     pub imported_at: i64,
     pub connections: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConnectionKind;
+
+    fn storage() -> Storage {
+        let mut storage = Storage::in_memory().expect("in-memory database");
+        storage.migrate_at(1_700_000_000_000).expect("migrate");
+        storage
+    }
+
+    fn plan_with_one_row(id: &str) -> ImportPlan {
+        let json = format!(r#"[{{"id": "{id}", "name": "From the file"}}]"#);
+        plan_json(Path::new("/tmp/connections.json"), &json, 1_700_000_000_000).expect("a plan")
+    }
+
+    #[test]
+    fn a_store_that_kept_a_different_row_is_caught_before_the_marker_is_written() {
+        // The branch that must never be taken, reached directly: the row is written with
+        // content the plan does not expect, which is what a store that lost a write would
+        // look like from here.
+        let storage = storage();
+        let mut plan = plan_with_one_row("9db3c0cc-7062-49bb-9d47-62f765275a9b");
+        let mut wrong = plan.connections[0].clone();
+        wrong.name = "Not what the file said".to_owned();
+        wrong.kind = ConnectionKind::Mysql;
+        storage
+            .save_connection(&wrong)
+            .expect("write the wrong row");
+
+        let written = vec![plan.connections[0].meta.id.clone()];
+        match verify_written(&storage, &plan, &written) {
+            Err(ImportError::VerificationFailed {
+                missing,
+                mismatched,
+            }) => {
+                assert!(missing.is_empty(), "{missing:?}");
+                assert_eq!(mismatched, vec![wrong.meta.id.to_string()]);
+            }
+            other => panic!("expected a verification failure, got {other:?}"),
+        }
+
+        // And a row that was never written at all is reported as missing rather than as
+        // different.
+        plan.connections[0].meta.id = SyncId::now();
+        let written = vec![plan.connections[0].meta.id.clone()];
+        match verify_written(&storage, &plan, &written) {
+            Err(ImportError::VerificationFailed {
+                missing,
+                mismatched,
+            }) => {
+                assert_eq!(missing.len(), 1);
+                assert!(mismatched.is_empty(), "{mismatched:?}");
+            }
+            other => panic!("expected a verification failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_that_was_kept_is_not_reported_as_a_failure() {
+        // The same comparison, with the id absent from `written_ids`: the merge decided to
+        // keep what was stored, so the file's copy is not the expected value.
+        let storage = storage();
+        let plan = plan_with_one_row("9db3c0cc-7062-49bb-9d47-62f765275a9b");
+        let mut kept = plan.connections[0].clone();
+        kept.name = "Newer, and stored".to_owned();
+        kept.meta.touch(1_700_000_050_000);
+        storage.save_connection(&kept).expect("write the newer row");
+
+        verify_written(&storage, &plan, &[]).expect("a kept row is verified by being there");
+    }
 }

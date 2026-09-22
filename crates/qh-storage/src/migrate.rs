@@ -76,11 +76,22 @@ pub fn run(conn: &mut Connection, at: i64) -> Result<Vec<AppliedMigration>, Stor
             // has no tables at all; anything else is the Python-era database, whose
             // migration is a separate, verified, backed-up operation
             // (`docs/migrations/python-to-rust.md`) rather than something to guess at.
-            if let Some(table) = first_user_table(conn)? {
-                return Err(StorageError::ForeignDatabase { table });
+            if let Some(object) = first_user_object(conn)? {
+                return Err(StorageError::ForeignDatabase { table: object });
             }
         }
         _ => {
+            // A marker with no history table at all is the shape a foreign database takes
+            // when it happens to carry a `user_version`: nothing of ours has run here, and
+            // `history()` would fail inside SQLite with "no such table", which tells the
+            // user nothing. It is the same disagreement as any other, so it is reported as
+            // one.
+            if !has_table(conn, "schema_migration")? {
+                return Err(StorageError::InconsistentHistory {
+                    user_version: current,
+                    recorded: Vec::new(),
+                });
+            }
             let applied = history(conn)?;
             let versions: Vec<i64> = applied.iter().map(|row| row.version).collect();
             let expected: Vec<i64> = MIGRATIONS
@@ -149,17 +160,34 @@ pub fn history(conn: &Connection) -> Result<Vec<AppliedMigration>, StorageError>
     Ok(applied)
 }
 
-/// The name of any user table, for telling a fresh database from a stranger's.
-fn first_user_table(conn: &Connection) -> Result<Option<String>, StorageError> {
+/// The name of any object this engine did not create, for telling a fresh database from a
+/// stranger's.
+///
+/// Objects rather than tables: a file whose only content is a view is still somebody's
+/// database, and creating our tables inside it would be the same silent takeover as doing it
+/// beside their tables. Indices and triggers are included for the same reason — none of them
+/// can appear in a file we made before the first migration.
+fn first_user_object(conn: &Connection) -> Result<Option<String>, StorageError> {
     let mut statement = conn.prepare(
         "SELECT name FROM sqlite_master \
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+         WHERE type IN ('table', 'view', 'index', 'trigger') \
+           AND name NOT LIKE 'sqlite_%' LIMIT 1",
     )?;
     let mut rows = statement.query([])?;
     match rows.next()? {
         Some(row) => Ok(Some(row.get(0)?)),
         None => Ok(None),
     }
+}
+
+/// Whether a table exists, without asking SQLite to run a statement that would fail.
+fn has_table(conn: &Connection, name: &str) -> Result<bool, StorageError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        rusqlite::params![name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 #[cfg(test)]
@@ -224,6 +252,78 @@ mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert_eq!(user_version(&conn).unwrap(), 0, "nothing was stamped");
+    }
+
+    #[test]
+    fn a_marker_with_no_history_table_is_refused_with_a_reason() {
+        // A foreign database that happens to carry a `user_version`. Without this check the
+        // failure would come out of SQLite as "no such table: schema_migration", which says
+        // nothing about what is actually wrong.
+        let mut conn = database();
+        conn.execute_batch(
+            "CREATE TABLE connections (id TEXT PRIMARY KEY); PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        match run(&mut conn, 1_000) {
+            Err(StorageError::InconsistentHistory {
+                user_version,
+                recorded,
+            }) => {
+                assert_eq!(user_version, 1);
+                assert!(recorded.is_empty());
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_database_that_holds_only_a_view_is_still_somebody_elses() {
+        // Objects, not just tables: a file whose only content is a view is not ours, and
+        // creating our tables inside it is the same silent takeover as doing it beside their
+        // tables.
+        let mut conn = database();
+        conn.execute_batch("CREATE VIEW v AS SELECT 1 AS one;")
+            .unwrap();
+        match run(&mut conn, 1_000) {
+            Err(StorageError::ForeignDatabase { table }) => assert_eq!(table, "v"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(user_version(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_migration_that_fails_leaves_the_database_at_the_previous_version() {
+        // One transaction per version, proven by making the *second* one fail. The starting
+        // point is built by hand, because that is the state an interrupted upgrade leaves:
+        // version 1 applied and recorded, and an object occupying a name the next migration
+        // needs. (A fresh database cannot be used for this: `run` applies every pending
+        // migration in one call, so it would never be at 1 when the collision appears.)
+        let mut conn = database();
+        conn.execute_batch(MIGRATIONS[0].sql).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migration (version, applied_at, name) VALUES (1, 1000, ?1)",
+            rusqlite::params![MIGRATIONS[0].name],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch("CREATE VIEW legacy_import AS SELECT 1 AS one;")
+            .unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 1);
+
+        let collision = run(&mut conn, 2_000);
+        assert!(
+            collision.is_err(),
+            "the collision is a failure, not a silent skip: {collision:?}"
+        );
+        assert_eq!(user_version(&conn).unwrap(), 1, "the marker did not move");
+        assert_eq!(
+            history(&conn).unwrap().len(),
+            1,
+            "and neither did the history"
+        );
+        // What an earlier version did is untouched: rolling back a failed migration must not
+        // roll back the ones that already succeeded.
+        assert!(has_table(&conn, "connection").unwrap());
     }
 
     #[test]

@@ -231,3 +231,15 @@ fn a_merge_keeps_the_newer_revision_whichever_side_it_is_on() {
     );
     assert_eq!(storage.connections().unwrap().len(), 2);
 }
+
+#[test]
+fn a_connection_cannot_point_at_a_group_that_is_not_there() {
+    let (storage, _directory) = storage();
+    // The other half of the ON DELETE clause: a dangling reference is refused at write time,
+    // which is what `foreign_keys = ON` buys and what the schema alone does not.
+    let mut record = sample("In no group");
+    record.group_id = Some(SyncId::now());
+    let refused = storage.save_connection(&record);
+    assert!(refused.is_err(), "a dangling group_id is not a value");
+    assert!(storage.connections().unwrap().is_empty());
+}

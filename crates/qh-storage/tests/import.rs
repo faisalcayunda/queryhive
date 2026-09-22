@@ -360,3 +360,87 @@ fn an_empty_file_is_still_an_import_that_is_done() {
         .is_some());
     assert_eq!(report.summary(), "imported 0 connection(s)");
 }
+
+#[test]
+fn two_rows_in_one_file_cannot_share_an_identity() {
+    // What a duplicate id used to do, found by a verifier rather than by this suite: both
+    // rows were merged under one id, the read-back comparison then failed against whichever
+    // copy won, and because no marker was ever written every launch copied the file again
+    // and rewrote the first row — an import that could never finish. The second row is now
+    // refused in the plan, where the user can see it.
+    let json = r#"[
+      {"id": "9db3c0cc-7062-49bb-9d47-62f765275a9b", "name": "First"},
+      {"id": "9db3c0cc-7062-49bb-9d47-62f765275a9b", "name": "Second"}
+    ]"#;
+    let fixture = fixture(json);
+    let plan = plan_json(&fixture.source, json, 1_700_000_000_000).expect("a plan");
+    assert_eq!(plan.connections.len(), 1);
+    assert_eq!(plan.connections[0].name, "First");
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].index, 1);
+    assert!(
+        plan.skipped[0]
+            .reason
+            .contains("already used by the row at index 0"),
+        "{}",
+        plan.skipped[0].reason
+    );
+
+    // And the import now finishes: it writes the marker, so it is not attempted again.
+    let report = import_connections(&fixture.storage, &plan, 1_700_000_100_000).unwrap();
+    assert_eq!(report.written, 1);
+    assert!(report.verified);
+    assert!(already_imported(&fixture.storage, &fixture.source)
+        .unwrap()
+        .is_some());
+    let second = import_connections(&fixture.storage, &plan, 1_700_000_200_000).unwrap();
+    assert!(second.already_imported);
+    assert_eq!(second.backup, None);
+}
+
+#[test]
+fn an_import_that_cannot_make_its_backup_writes_nothing() {
+    // The guarantee that matters most and had no test: the file is the only copy of what is
+    // being imported, so a failed copy has to stop the import before the first row. The
+    // source directory is made read-only, so the copy beside it cannot be created; the
+    // database lives in a different directory so that only the backup is impossible.
+    use std::os::unix::fs::PermissionsExt;
+
+    let database_directory = tempfile::tempdir().unwrap();
+    let source_directory = tempfile::tempdir().unwrap();
+    let source = source_directory.path().join("connections.json");
+    std::fs::write(&source, REALISTIC).unwrap();
+
+    let mut storage = Storage::open(database_directory.path().join("queryhive.sqlite3")).unwrap();
+    storage.migrate_at(1_700_000_000_000).unwrap();
+    let plan = plan_json(&source, REALISTIC, 1_700_000_000_000).expect("a plan");
+
+    let mut permissions = std::fs::metadata(source_directory.path())
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o500);
+    std::fs::set_permissions(source_directory.path(), permissions).unwrap();
+
+    let result = import_connections(&storage, &plan, 1_700_000_100_000);
+
+    // Restore before asserting anything: a failure here would otherwise leave a directory
+    // the test framework cannot delete.
+    let mut permissions = std::fs::metadata(source_directory.path())
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(source_directory.path(), permissions).unwrap();
+
+    match result {
+        Err(ImportError::Backup { .. }) => {}
+        other => panic!("expected the backup to stop the import, got {other:?}"),
+    }
+    assert!(
+        storage.connections().unwrap().is_empty(),
+        "no row was written"
+    );
+    assert!(
+        already_imported(&storage, &source).unwrap().is_none(),
+        "and no marker, so the import can be retried"
+    );
+}
