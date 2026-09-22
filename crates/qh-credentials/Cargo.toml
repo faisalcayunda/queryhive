@@ -1,0 +1,33 @@
+[package]
+name = "qh-credentials"
+version = "0.1.0"
+description = "Where a saved password lives: one Keychain item per connection, under the service name the app has always used"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The Keychain, directly. `security-framework` and not `keyring`, because the item's
+# attributes are part of the contract with the app that wrote the existing passwords
+# (§3.5 of the blueprint): a convenience layer that picks its own keychain would
+# silently stop reading them.
+#
+# `security-framework-sys` and `core-foundation` are what the item dictionary and the
+# `SecItem*` calls need; the safe wrapper covers the common case but not the whole of
+# it.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+security-framework-sys.workspace = true
+core-foundation.workspace = true
+
+# A password is a value with a shorter life than the string holding it: `SecretString`
+# zeroes its buffer when dropped and refuses to print itself, which is the difference
+# between a password and a `String` that ends up in a log.
+secrecy.workspace = true
+zeroize.workspace = true
+
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"

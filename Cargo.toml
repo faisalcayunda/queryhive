@@ -9,6 +9,7 @@
 resolver = "2"
 members = [
     "crates/qh-core",
+    "crates/qh-credentials",
     "crates/qh-driver",
     "crates/qh-driver-mysql",
     "crates/qh-driver-postgres",
@@ -33,12 +34,21 @@ qh-driver = { path = "crates/qh-driver" }
 qh-driver-mysql = { path = "crates/qh-driver-mysql" }
 qh-driver-postgres = { path = "crates/qh-driver-postgres" }
 qh-driver-trino = { path = "crates/qh-driver-trino" }
+qh-credentials = { path = "crates/qh-credentials" }
 qh-export = { path = "crates/qh-export" }
 qh-ffi = { path = "crates/qh-ffi" }
 qh-rt = { path = "crates/qh-rt" }
 qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
 thiserror = "2"
+# The Keychain, and the values that hold a password. `security-framework-sys` is the
+# raw attribute list and `SecItem*` calls; `core-foundation` builds the dictionary
+# they take. See crates/qh-credentials for why the item is spelled out by hand.
+security-framework = "3"
+security-framework-sys = "2"
+core-foundation = "0.10"
+secrecy = "0.10"
+zeroize = "1"
 
 # Release profile for the FFI artifact.
 #
