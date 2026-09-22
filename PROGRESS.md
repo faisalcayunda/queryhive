@@ -407,6 +407,35 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
    yang kembali `+00:00` dengan instant yang sama. Diperbaiki dengan membuktikan dua arah:
    instant-nya cocok, dan setelah `SET TIME ZONE 'Asia/Jakarta'` offset-nya kembali `+07:00`.
 
+### Verifikasi independen `qh-credentials` + `qh-storage`, dan tiga cacat yang ditemukannya (22 Sep 2026)
+
+Langkah ini dikerjakan agen verifier terpisah, yang tidak menulis kode dan tidak boleh mengubah apa
+pun — tugasnya mencoba **membuktikan klaimnya salah**, bukan membacanya. Hasilnya bukan sertifikat
+kosong: tiga cacat nyata, semuanya di jalur yang tidak disentuh uji yang ada.
+
+Metodenya patut dicatat karena itu yang membuat temuannya berarti: ia membangun harness SQLite
+sementara sendiri di luar repo dan mereproduksi tiap klaim dari nol, bukan menjalankan uji kami lalu
+menyimpulkan "lulus berarti benar". Termasuk membuat migrasi kedua gagal dengan menyiapkan sebuah
+*view* bernama `legacy_import` — bukti langsung bahwa satu transaksi per versi, karena `user_version`
+dan riwayatnya tetap di 1 sementara tabel dari migrasi pertama masih utuh.
+
+| Temuan | Akibat nyatanya | Perbaikan |
+|---|---|---|
+| Database dengan `user_version` tapi **tanpa tabel `schema_migration`** hanya menghasilkan error mentah SQLite `no such table` | Pesan yang tidak menjelaskan apa pun kepada pengguna | Sekarang penolakan yang sama dengan ketidakcocokan penanda lain, beserta alasannya |
+| Berkas yang isinya **hanya sebuah view** (tanpa tabel) tetap dimigrasi di atasnya | Pengambilalihan diam-diam; kebetulan tanpa kehilangan data | Pemeriksaan diperluas dari `type='table'` menjadi objek apa pun — indeks atau trigger pun tidak mungkin ada di berkas buatan kami sebelum migrasi pertama |
+| Dua baris dalam satu `connections.json` dengan **UUID yang sama** membuat impor tak pernah selesai | Keduanya ditulis di bawah satu id, verifikasi gagal terhadap salah satunya, penanda tidak pernah ditulis, jadi tiap peluncuran menyalin berkas lagi dan menulis ulang baris pertama — lingkaran tanpa ujung | Baris kedua ditolak **di dalam plan**, dengan menyebut indeks baris pertama yang telah memakainya, sehingga pengguna melihatnya dan impor selesai |
+
+Verifier juga menunjukkan klaim yang **dinyatakan tapi tidak diuji**, yang sama berbahayanya dengan
+cacat: kegagalan cadangan, cabang verifikasi yang gagal, kegagalan di tengah migrasi, dan referensi
+`group_id` yang menggantung. Keempatnya sekarang punya uji — cabang verifikasi yang gagal bahkan
+lewat fungsi terpisah (`verify_written`), justru karena cabang itu tidak bisa dicapai lewat pintu
+depan, dan itulah alasan ia harus punya uji. Uji `qh-storage` naik dari 28 ke 36.
+
+Satu klaim yang **jujur belum bisa ditutup**, dan verifier menyebutnya apa adanya: bahwa aplikasi
+sungguhan membaca item yang ditulis engine ini. Kesetaraan atributnya sudah dibuktikan dari sumber
+kedua program, tapi pembacaan lintas-program memunculkan dialog izin Keychain — batas yang memang
+tidak bisa dilewati tanpa manusia. Itu tetap tugas manual.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling
