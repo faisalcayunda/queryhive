@@ -482,7 +482,7 @@ kasus yang disebut; sisanya belum berubah.
 | `trino_type_zoo_live` | tipe kolom turun menjadi `timestamp with time zone`/`time`, nilai `.123000` dan `00:00:00` | **tipe kolom identik**; sisa dua sel nilai |
 | `mysql_type_zoo_live` | `a_enum` bertipe `char` | `a_enum` bertipe **`enum`** — flag `ENUM_FLAG` dibaca, bukan kode `254` yang dipakai bersama `CHAR` |
 | `mysql_schemas_live` | `mysql has no schema level` | `mysql has no schema level; use catalogs or tables instead` |
-| `postgres_catalogs_live` | ditolak | sedang dikerjakan |
+| `postgres_catalogs_live` | ditolak (`postgres has no catalog level`) | **identik** dengan snapshot: `{"event":"catalogs","names":["postgres","qh"]}` |
 
 Dua sel yang masih berbeda di `trino_type_zoo_live`, keduanya sudah punya sebab:
 
@@ -491,6 +491,14 @@ Dua sel yang masih berbeda di `trino_type_zoo_live`, keduanya sudah punya sebab:
   **badan teksnya masih berbeda**, karena Trino `INTERVAL DAY TO SECOND` belum punya decoder di
   model nilai ini sehingga engine Rust meneruskan teks wire apa adanya. Itu celah decoder, bukan
   soal kapabilitas, dan menutupnya mengubah setiap grid dan ekspor yang memuat interval.
+
+Penolakan `catalogs` itu ternyata **bukan** di driver. Driver PostgreSQL sudah menjawabnya, dan
+yang menolak lebih dulu adalah gate di `crates/qh-ffi/src/commands.rs`, yang membaca
+`capabilities().levels` -- deskripsi **pohon** -- sebagai "perintah yang dijawab driver". Kedua
+hal itu memang berbeda: daftar database yang bisa dihubungi adalah daftar **pilihan**, bukan
+simpul yang digambar di bawah koneksi, dan mesin lama memaku keduanya sekaligus dalam satu uji
+(`catalogs` menjawab daftar database, sementara `levels` tetap schema-first). Sekarang level
+semacam itu diteruskan ke driver; MySQL tetap menolak `schemas`-nya sebelum menyentuh jaringan.
 
 Dua keputusan yang diambil dari sini, beserta tempatnya:
 
