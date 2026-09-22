@@ -1059,11 +1059,12 @@ satu angka.
 ### 8.1 Pain point pesaing
 
 > **Status riset: SEBAGIAN SELESAI.** Perkakas pencarian sudah ada (`tools/kenari_search.py` —
-> perkakas lokal, lihat `PROGRESS.md`), jadi riset ini bisa dijalankan. Yang tertutup adalah
-> **DBeaver**: empat issue di repo resminya dibuka langsung dan isinya dikutip di tabel.
-> **Navicat dan DataGrip belum.** Sumber yang ditemukan untuk keduanya **ditolak** karena bukan
-> sumber primer; alasan penolakannya dicatat di bawah tabel. §5 poin 9 melarang mengarang sumber,
-> jadi baris yang belum tertutup tetap bertanda belum, bukan diisi dengan sumber lemah.
+> perkakas lokal, lihat `PROGRESS.md`), jadi riset ini bisa dijalankan. **DBeaver** tertutup dari
+> empat issue di repo resminya, **DataGrip** dari tiga issue di YouTrack — semuanya dibuka langsung
+> dan dikutip di tabel. Yang **masih terbuka**: seluruh tiga baris **Navicat**, dan satu baris
+> startup DataGrip. Sumber yang ditemukan untuk yang terbuka **ditolak** karena bukan sumber
+> primer; alasan penolakannya dicatat di bawah tabel. §5 poin 9 melarang mengarang sumber, jadi
+> baris yang belum tertutup tetap bertanda belum, bukan diisi dengan sumber lemah.
 
 Setiap baris menyebut produknya sendiri, supaya yang sudah selesai tidak tertahan oleh yang belum.
 
@@ -1075,6 +1076,9 @@ Setiap baris menyebut produknya sendiri, supaya yang sudah selesai tidak tertaha
 | Pembatalan query tidak responsif | DBeaver | Cancel native per driver < 500 ms (§2.7) | [dbeaver#35474](https://github.com/dbeaver/dbeaver/issues/35474) — "Cancel active query" tidak menghentikan query setelah Retry; pelapor harus mematikannya dari tab lain. Masih direproduksi di Community Edition 25.0.0 | **Terverifikasi** |
 | Hasil besar lambat/membekukan UI | Navicat | Sama seperti baris pertama | — | **Belum terverifikasi** |
 | Proteksi mode production | Navicat | Mode production + read-only (§7.2) | — | **Belum terverifikasi** |
+| Hasil besar lambat/membekukan UI | DataGrip (JVM) | Sama seperti baris pertama | [DBE-25765](https://youtrack.jetbrains.com/issue/DBE-25765) — "IDE freezes while painting database query result cells with an EditorTextFieldCellRenderer (Viewing or editing a result set causes a freeze)" | **Terverifikasi** |
+| Memori membengkak pada hasil besar | DataGrip (JVM) | Spill mmap + batas memori (§2.3) | [DBE-16982](https://youtrack.jetbrains.com/issue/DBE-16982) — "When exporting 10 million conditional data to a csv file, the memory usage is too high, which ultimately leads to no response from the app" | **Terverifikasi** |
+| Query bisa memicu introspeksi seluruh skema | DataGrip (JVM) | Introspeksi tidak ada di jalur kritis query (§2.2) | [DBE-18406](https://youtrack.jetbrains.com/issue/DBE-18406) — eksekusi DDL memicu introspeksi semua skema saat "Auto Sync" aktif, dan opsi itu **default** | **Terverifikasi** |
 | Berat/lambat start pada mesin angkatan lama | DataGrip (JVM) | Cold start < 1 dtk (§6) | — | **Belum terverifikasi** |
 | Harga | Navicat | MIT, gratis (§8.3) | — | **Belum terverifikasi** |
 | Harga | TablePlus | MIT, gratis (§8.3) | [tableplus.com/pricing](https://tableplus.com/pricing) — "One-time purchase, no auto-renewal. Perpetual license (no subscription)." | **Terverifikasi, dan mengoreksi klaim lama** |
@@ -1093,18 +1097,29 @@ mengira kesenjangannya sudah tertutup.
   versi 16 dan sebelumnya tidak bisa membatalkan query. Itu bukan issue tracker resmi Navicat,
   jadi tidak dipakai betapapun isinya terdengar cocok dengan dugaan awal. Forum resmi Navicat
   tidak muncul dalam pencarian yang dijalankan.
-- *DataGrip*: yang muncul adalah halaman dokumentasi JetBrains sendiri tentang *cara mendiagnosis*
-  startup lambat dan konsumsi memori tinggi. Panduan troubleshooting milik vendor menunjukkan
-  masalah itu cukup sering untuk dibuatkan halamannya, tetapi **tidak** menunjukkan DataGrip lebih
-  lambat daripada pembandingnya. Itu kesimpulan yang tidak boleh diambil dari sumber tersebut, dan
-  barisnya karena itu tetap terbuka.
+- *DataGrip, untuk baris startup*: yang muncul adalah halaman dokumentasi JetBrains sendiri tentang
+  *cara mendiagnosis* startup lambat dan konsumsi memori tinggi. Panduan troubleshooting milik
+  vendor menunjukkan masalah itu cukup sering untuk dibuatkan halamannya, tetapi **tidak**
+  menunjukkan DataGrip lebih lambat daripada pembandingnya. Itu kesimpulan yang tidak boleh
+  diambil dari sumber tersebut.
+  Dua baris DataGrip yang lain justru **tertutup** begitu pencarian diarahkan ke YouTrack
+  (`DBE-25765`, `DBE-16982`), dan perbedaan itu menjelaskan aturannya: halaman bantuan bukan
+  bukti, laporan bug di tracker resmi adalah bukti.
+- *DBE-25765 sengaja **tidak** dipakai untuk baris startup.* Judulnya soal freeze saat *melukis sel
+  hasil query*, yang terjadi setelah hasilnya ada — bukan soal waktu nyala. Memakainya untuk
+  startup adalah persis kesalahan yang baris ini hindari: sumber nyata, klaim yang tidak
+  didukungnya.
 
 **Cara menutup sisanya** (langkah persis, agar bisa dijalankan siapa pun):
 
-1. Navicat: cari di forum resmi dan catatan rilis versinya, karena produk ini tidak punya issue
-   tracker publik di GitHub seperti DBeaver.
-2. DataGrip: cari di YouTrack JetBrains (`youtrack.jetbrains.com`, proyek `DBE`) — di sana laporan
-   pengguna adalah sumber primer, berbeda dari halaman bantuan.
+1. **Navicat** — satu-satunya produk yang masih sepenuhnya terbuka, tiga barisnya. Dua pencarian
+   dengan kata kunci forum resmi sudah dijalankan dan **gagal**: yang muncul hanya `global.php.cn`
+   (situs tutorial) dan pertanyaan StackOverflow, keduanya bukan sumber primer. Langkah berikutnya
+   adalah menelusuri langsung forum resmi Navicat dan catatan rilis versinya, karena produk ini
+   tidak punya issue tracker publik seperti `dbeaver/dbeaver` atau YouTrack JetBrains.
+2. **DataGrip startup** — cari di `youtrack.jetbrains.com` dengan kata kunci yang menyebut
+   *startup* atau *indexing*, bukan *freeze*; pencarian yang sudah dijalankan hanya menemukan
+   masalah rendering, bukan waktu nyala.
 3. Catat URL + tanggal akses, lalu ganti setiap baris **Belum terverifikasi** dengan kutipan.
 4. Sampai itu terjadi, baris yang belum tertutup **tidak** dipakai sebagai dasar prioritas produk,
    dan §8.2 mewarisi batasan yang sama.
