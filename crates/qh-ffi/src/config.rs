@@ -11,29 +11,50 @@
 //! The Python engine handed `http_scheme` to the trino client and the `sslmode`
 //! string to psycopg and pymysql, and each library decided what to do with it. The
 //! Rust drivers take a [`TlsMode`] instead, so this module is where that decision
-//! now happens, once:
+//! now happens, once — in libpq's vocabulary, for all three engines, so that one
+//! spelling means one thing:
 //!
 //! | Setting | Trino | PostgreSQL / MySQL |
 //! |---|---|---|
-//! | `http` | [`TlsMode::Disable`] | — |
-//! | `https` | [`TlsMode::Require`] | — |
-//! | `sslmode=disable` | — | [`TlsMode::Disable`] |
-//! | unset | — | [`TlsMode::Prefer`] |
-//! | `sslmode=require` | — | [`TlsMode::Require`] |
-//! | `sslmode=verify-ca`/`verify-full` | — | [`TlsMode::Require`] |
+//! | `sslmode=disable` | [`TlsMode::Disable`] | [`TlsMode::Disable`] |
+//! | `sslmode=prefer` | [`TlsMode::Prefer`] | [`TlsMode::Prefer`] |
+//! | `sslmode=require` | [`TlsMode::RequireNoVerify`] | [`TlsMode::RequireNoVerify`] |
+//! | `sslmode=verify-ca`/`verify-full` | [`TlsMode::Require`] | [`TlsMode::Require`] |
+//! | unset | the scheme: `http` → `Disable`, `https` → `Require` | [`TlsMode::Prefer`] |
 //!
-//! `DB_INSECURE` (or `TRINO_INSECURE`) turned on downgrades a required TLS
-//! connection to [`TlsMode::RequireNoVerify`] — it never turns TLS *off*, which is
-//! the same reading the Python engine's `verify=False` had.
+//! `require` landing on [`TlsMode::RequireNoVerify`] is libpq's meaning and not
+//! this enum's name: libpq's `require` encrypted **without** checking a
+//! certificate, and only `verify-ca`/`verify-full` asked for one to be checked.
+//! `require` must not mean "verify" for one engine and "do not verify" for
+//! another, so it means "do not verify" everywhere.
 //!
-//! # Two rules that look like accidents and are not
+//! **Trino is the one engine with two settings for one decision.** The app stores a
+//! scheme (`http`/`https`) with a `verify` flag beside it, because that is what its
+//! picker offers, and sends `DB_SCHEME` + `DB_INSECURE`; the command line has
+//! `sslmode` like the other two. When both are set, **`sslmode` wins**: it names the
+//! mode outright, where a scheme can only spell two of the four. So
+//! `DB_SCHEME=https DB_SSLMODE=disable` is a plaintext connection and
+//! `DB_SCHEME=http DB_SSLMODE=require` is an encrypted one. The one mode no scheme
+//! and no app field can ask for is [`TlsMode::Prefer`]; `DB_SSLMODE=prefer` (or a
+//! `?sslmode=prefer` in a Trino URL) is the only spelling that reaches it.
+//!
+//! # Three rules that raise the mode and never lower it
 //!
 //! 1. **A password implies TLS on Trino.** Trino refuses BasicAuth over plaintext,
-//!    so a password (or a port of 443/8443) promotes `http` to `https`, and a
-//!    password with neither a port nor a URL moves the port to 443. Removing this
-//!    would produce a connection that cannot authenticate.
-//! 2. **Port 0 means "the driver's default"**, never "port zero". It is resolved by
-//!    the command, which is the layer that knows which driver is in play.
+//!    so a password (or a port of 443/8443) promotes a plaintext mode to
+//!    [`TlsMode::Require`], and a password with neither a port nor a URL moves the
+//!    port to 443. Removing this would produce a connection that cannot
+//!    authenticate. Note what it means for `DB_SSLMODE=disable`: a password outranks
+//!    it, because the coordinator would refuse the connection anyway and refusing it
+//!    here would be the same answer with a worse message.
+//! 2. **`DB_INSECURE` (or `TRINO_INSECURE`) turned on downgrades a required TLS
+//!    connection to [`TlsMode::RequireNoVerify`]** — it never turns TLS *off*, and it
+//!    never lowers a mode to plaintext. The same reading the Python engine's
+//!    `verify=False` had.
+//! 3. **Port 0 means "the driver's default"**, never "port zero". The default
+//!    follows the scheme the mode *starts* on: 8080 for [`TlsMode::Disable`], 443 for
+//!    the other three. [`TlsMode::Prefer`] gets 443 for that reason, and a downgrade
+//!    to http keeps it — the driver's downgrade changes the scheme only.
 
 use thiserror::Error;
 
@@ -203,27 +224,51 @@ impl Parts {
         let tls: TlsMode;
 
         if self.kind == DriverKind::Trino {
-            let scheme = if self.scheme.is_empty() {
-                "http".to_owned()
-            } else {
-                self.scheme.clone()
-            };
-            if scheme != "http" && scheme != "https" {
-                return Err(ConfigError::BadScheme(scheme));
+            // Validated whatever else was set: a scheme that is neither spelling is
+            // refused rather than ignored because `sslmode` happened to win, so a
+            // typo never passes unnoticed.
+            if !self.scheme.is_empty() && self.scheme != "http" && self.scheme != "https" {
+                return Err(ConfigError::BadScheme(self.scheme));
             }
-            // Trino refuses BasicAuth over plaintext, so a password implies TLS; the
-            // standard HTTPS ports do too. Same rule as the Python engine's
-            // `TrinoConfig.__post_init__`.
-            let https = scheme == "https" || self.password.is_some() || port == 443 || port == 8443;
-            tls = if !https {
-                TlsMode::Disable
-            } else if insecure {
-                TlsMode::RequireNoVerify
-            } else {
-                TlsMode::Require
+            // libpq's vocabulary, with the same meanings as the other branch below:
+            // `require` encrypts and does not verify, `verify-ca`/`verify-full` do.
+            // A spelling nobody recognises is refused rather than treated as a
+            // default, for the same reason there.
+            let named = match self.sslmode.as_str() {
+                "" => None,
+                "disable" => Some(TlsMode::Disable),
+                "prefer" => Some(TlsMode::Prefer),
+                "require" => Some(TlsMode::RequireNoVerify),
+                "verify-ca" | "verify-full" => Some(TlsMode::Require),
+                other => return Err(ConfigError::BadSSLMode(other.to_owned())),
             };
+            // `sslmode` wins where it named a mode; otherwise the scheme does, and
+            // `http` is what an absent one has always meant.
+            let mut mode = match named {
+                Some(mode) => mode,
+                None if self.scheme == "https" => TlsMode::Require,
+                None => TlsMode::Disable,
+            };
+            // The two rules from the module docs: a password or a standard HTTPS port
+            // needs TLS on a coordinator that refuses BasicAuth in clear. They raise the
+            // mode, and they raise it even over an explicit `sslmode=disable` -- which is
+            // the Python engine's rule, from its own source (`exporter/drivers.py`: "a
+            // password implies TLS, as do the standard HTTPS ports"). Honouring `disable`
+            // here would send the password in clear to a coordinator that refuses it, so
+            // the user would get a failure about their credentials instead of the
+            // encryption they asked for. `DB_INSECURE` is the other half of the pair: it
+            // lowers verification and never turns TLS off.
+            if mode == TlsMode::Disable && (self.password.is_some() || port == 443 || port == 8443)
+            {
+                mode = TlsMode::Require;
+            }
+            // `DB_INSECURE` drops the certificate check; it never turns TLS off.
+            if insecure && mode != TlsMode::Disable {
+                mode = TlsMode::RequireNoVerify;
+            }
+            tls = mode;
             if port == 0 {
-                port = if https { 443 } else { 8080 };
+                port = if tls == TlsMode::Disable { 8080 } else { 443 };
             }
         } else {
             // The stored vocabulary is libpq's, and it does not mean what our enum's names
@@ -347,6 +392,10 @@ fn from_url(url: &str, overrides: Parts, declared_kind: bool) -> Result<Parts, C
         );
         base.database = parsed.segment(0);
         base.schema = parsed.segment(1);
+        // A Trino URL may carry the same `sslmode` the other two read from theirs, and
+        // it means the same thing here: it outranks the `http`/`https` the URL's own
+        // scheme spells, and `DB_SSLMODE` outranks both (see `overridden_by`).
+        base.sslmode = parsed.query("sslmode");
     } else {
         base.port = Some(parsed.port.unwrap_or(0));
         base.database = parsed.segment(0);
@@ -502,4 +551,251 @@ fn percent_decode(text: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(pairs: &[(&str, &str)]) -> Settings {
+        Settings::from_pairs(pairs.iter().map(|(key, value)| (*key, *value)))
+    }
+
+    /// The connection these settings describe; every case below names a host, so a
+    /// failure here is about TLS and not about a missing one.
+    fn config(pairs: &[(&str, &str)]) -> ConnectionConfig {
+        build(&settings(pairs)).expect("these settings describe a connection")
+    }
+
+    /// The same, for a Trino connection: the host and the driver are already there,
+    /// so each case reads as the one or two settings it is about.
+    fn trino(pairs: &[(&str, &str)]) -> ConnectionConfig {
+        let mut all = vec![("DB_KIND", "trino"), ("DB_HOST", "coordinator")];
+        all.extend_from_slice(pairs);
+        config(&all)
+    }
+
+    /// The mode the settings land on, which is what most of these are about.
+    fn tls_config(pairs: &[(&str, &str)]) -> TlsMode {
+        trino(pairs).tls
+    }
+
+    #[test]
+    fn trino_reads_sslmode_in_libpq_vocabulary() {
+        // The four modes the settings could not all express before. `require` is the
+        // interesting one: encrypt, do not verify — libpq's meaning, and the same one
+        // the postgres branch gives that spelling.
+        for (spelling, expected) in [
+            ("disable", TlsMode::Disable),
+            ("prefer", TlsMode::Prefer),
+            ("require", TlsMode::RequireNoVerify),
+            ("verify-ca", TlsMode::Require),
+            ("verify-full", TlsMode::Require),
+        ] {
+            assert_eq!(
+                tls_config(&[("DB_SSLMODE", spelling)]),
+                expected,
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_sslmode_is_refused_for_trino_too() {
+        // Refused, not treated as a default: a typo in `sslmode` deciding whether the
+        // connection is encrypted is not a decision to make silently.
+        let error = build(&settings(&[
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "coordinator"),
+            ("DB_SSLMODE", "tls"),
+        ]))
+        .unwrap_err();
+        assert_eq!(error, ConfigError::BadSSLMode("tls".to_owned()));
+        assert_eq!(
+            error.to_string(),
+            "unknown sslmode 'tls'; expected disable, prefer, require, verify-ca or verify-full"
+        );
+    }
+
+    #[test]
+    fn a_scheme_that_is_neither_spelling_is_refused_even_when_sslmode_wins() {
+        // `sslmode` outranks the scheme, but the scheme is still read, so a typo in it
+        // cannot ride along unnoticed behind a valid `sslmode`.
+        let error = build(&settings(&[
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "coordinator"),
+            ("DB_SCHEME", "ftp"),
+            ("DB_SSLMODE", "require"),
+        ]))
+        .unwrap_err();
+        assert_eq!(error, ConfigError::BadScheme("ftp".to_owned()));
+    }
+
+    #[test]
+    fn sslmode_outranks_the_scheme_for_trino() {
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "https"), ("DB_SSLMODE", "disable")]),
+            TlsMode::Disable
+        );
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "http"), ("DB_SSLMODE", "require")]),
+            TlsMode::RequireNoVerify
+        );
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "http"), ("DB_SSLMODE", "verify-full")]),
+            TlsMode::Require
+        );
+    }
+
+    #[test]
+    fn the_scheme_still_decides_when_no_sslmode_was_given() {
+        // What the app sends, and what every stored Trino connection sends until the
+        // picker grows a mode: a scheme and nothing else.
+        assert_eq!(tls_config(&[("DB_SCHEME", "http")]), TlsMode::Disable);
+        assert_eq!(tls_config(&[("DB_SCHEME", "https")]), TlsMode::Require);
+        // An absent scheme has always meant http.
+        assert_eq!(tls_config(&[]), TlsMode::Disable);
+    }
+
+    #[test]
+    fn a_password_still_implies_tls() {
+        let with_password = trino(&[("DB_SCHEME", "http"), ("DB_PASSWORD", "secret")]);
+        assert_eq!(with_password.tls, TlsMode::Require);
+        // A password with no port of its own moves it to the HTTPS one.
+        assert_eq!(with_password.port, 443);
+        // Spelled out too: the coordinator would refuse BasicAuth over plaintext, so
+        // `disable` with a password is raised rather than honoured.
+        assert_eq!(
+            tls_config(&[("DB_SSLMODE", "disable"), ("DB_PASSWORD", "secret")]),
+            TlsMode::Require
+        );
+    }
+
+    #[test]
+    fn insecure_never_turns_tls_off() {
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "http"), ("DB_INSECURE", "1")]),
+            TlsMode::Disable
+        );
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "https"), ("DB_INSECURE", "1")]),
+            TlsMode::RequireNoVerify
+        );
+        assert_eq!(
+            tls_config(&[("DB_SSLMODE", "require"), ("DB_INSECURE", "1")]),
+            TlsMode::RequireNoVerify
+        );
+        // `prefer` already does not verify; `DB_INSECURE` makes that explicit and gives
+        // up the fallback, which is what it does for postgres as well.
+        assert_eq!(
+            tls_config(&[("DB_SSLMODE", "prefer"), ("DB_INSECURE", "1")]),
+            TlsMode::RequireNoVerify
+        );
+    }
+
+    #[test]
+    fn the_https_ports_still_imply_tls() {
+        for port in ["443", "8443"] {
+            assert_eq!(
+                tls_config(&[("DB_SCHEME", "http"), ("DB_PORT", port)]),
+                TlsMode::Require,
+                "{port}"
+            );
+        }
+        // Unset scheme, an HTTPS port.
+        assert_eq!(tls_config(&[("DB_PORT", "8443")]), TlsMode::Require);
+    }
+
+    #[test]
+    fn the_default_port_follows_the_mode_the_connection_starts_on() {
+        assert_eq!(trino(&[]).port, 8080);
+        assert_eq!(trino(&[("DB_SSLMODE", "disable")]).port, 8080);
+        assert_eq!(trino(&[("DB_SSLMODE", "prefer")]).port, 443);
+        assert_eq!(trino(&[("DB_SSLMODE", "require")]).port, 443);
+        assert_eq!(trino(&[("DB_SCHEME", "https")]).port, 443);
+    }
+
+    #[test]
+    fn the_apps_scheme_and_verify_are_enough_for_three_of_the_four_modes() {
+        // Everything `Connections.swift` can express, sent as `DB_SCHEME` +
+        // `DB_INSECURE`. Nothing in the app reaches `Prefer`.
+        assert_eq!(tls_config(&[("DB_SCHEME", "http")]), TlsMode::Disable);
+        assert_eq!(tls_config(&[("DB_SCHEME", "https")]), TlsMode::Require);
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "https"), ("DB_INSECURE", "1")]),
+            TlsMode::RequireNoVerify
+        );
+        // The fourth field combination, `http` with verify off, is the same connection
+        // as `http` with verify on: in clear there is nothing to verify.
+        assert_eq!(
+            tls_config(&[("DB_SCHEME", "http"), ("DB_INSECURE", "1")]),
+            TlsMode::Disable
+        );
+    }
+
+    #[test]
+    fn a_trino_url_may_carry_its_own_sslmode() {
+        // The catalog segment is what the documented URL shape has, and `Parsed`
+        // only splits the query off after a path: `host:8080?sslmode=…` with no path
+        // leaves the query inside the authority, which is older than this rule.
+        assert_eq!(
+            config(&[("DB_URL", "trino://coordinator:8080/hive?sslmode=require")]).tls,
+            TlsMode::RequireNoVerify
+        );
+        // `DB_SSLMODE` outranks the URL's own, like every other `DB_*` part does.
+        assert_eq!(
+            config(&[
+                (
+                    "DB_URL",
+                    "trino://coordinator:8080/hive?sslmode=verify-full"
+                ),
+                ("DB_SSLMODE", "disable"),
+            ])
+            .tls,
+            TlsMode::Disable
+        );
+    }
+
+    #[test]
+    fn one_spelling_means_one_thing_across_the_engines() {
+        // The point of the table in the module docs: `require` must not mean "verify"
+        // for postgres and "do not verify" for trino, or a connection moved between
+        // the two would not be the connection the user read.
+        for (spelling, expected) in [
+            ("disable", TlsMode::Disable),
+            ("prefer", TlsMode::Prefer),
+            ("require", TlsMode::RequireNoVerify),
+            ("verify-ca", TlsMode::Require),
+            ("verify-full", TlsMode::Require),
+        ] {
+            assert_eq!(
+                tls_config(&[("DB_SSLMODE", spelling)]),
+                expected,
+                "trino {spelling}"
+            );
+            assert_eq!(
+                config(&[
+                    ("DB_KIND", "postgres"),
+                    ("DB_HOST", "db"),
+                    ("DB_SSLMODE", spelling),
+                ])
+                .tls,
+                expected,
+                "postgres {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_sslmode_keeps_each_engines_own_default() {
+        // Trino's is the app's scheme — clear unless something says otherwise, because
+        // that is what every stored connection has been doing. Postgres's is psycopg's
+        // `prefer`, which is also the driver's own default.
+        assert_eq!(tls_config(&[]), TlsMode::Disable);
+        assert_eq!(tls_config(&[("DB_SCHEME", "https")]), TlsMode::Require);
+        assert_eq!(
+            config(&[("DB_KIND", "postgres"), ("DB_HOST", "db")]).tls,
+            TlsMode::Prefer
+        );
+    }
 }
