@@ -436,6 +436,41 @@ sungguhan membaca item yang ditulis engine ini. Kesetaraan atributnya sudah dibu
 kedua program, tapi pembacaan lintas-program memunculkan dialog izin Keychain — batas yang memang
 tidak bisa dilewati tanpa manusia. Itu tetap tugas manual.
 
+### Seam `DatabaseEngine` di aplikasi, dan di mana ia akan terasa canggung bagi `RustEngine` (22 Sep 2026)
+
+Protokolnya sekarang ada (`app/Sources/TrinoExporter/Support/DatabaseEngine.swift`) dengan satu
+konformer, `PythonEngine`, dan **kesembilan call site engine plus jalur terminasi aplikasi** sudah
+melewatinya. Bentuknya sengaja bentuk yang sudah ada hari ini — perintah, environment, callback
+event, callback exit — bukan permukaan bertipe `descriptors()/browse()/run()` di §1.6, karena
+menjanjikan yang terakhir berarti menjanjikan operasi yang belum bisa dilakukan implementasi mana pun
+di pohon ini. `swift build` dan `swift build -c release` lolos; `swift test` tidak ada targetnya,
+jadi tidak ada uji yang ditambahkan alih-alih membuat target uji untuk satu refactor.
+
+Yang **sengaja tidak** dikerjakan: error type §4.4. Kegagalan berjalan sebagai exit status plus string
+stderr, dan tujuh call site mengambil pesannya dari baris terakhir log itu. Error type dengan medan
+`code` dan `position` yang tidak bisa diisi siapa pun adalah placeholder yang §4.4 larang. Itu
+keputusan yang benar, dan yang membuatnya benar adalah pengukuran: mesin Python hanya memancarkan
+`{"event":"error","message":…}` tanpa code maupun posisi SQL sama sekali.
+
+Enam hal yang akan terasa canggung saat `RustEngine` menggantikannya — dicatat sekarang supaya Fase 2
+tidak menemukannya satu per satu:
+
+1. **`onExit(status, stderr)` adalah tepi paling kasar.** Sukses berarti status 0, gagal berarti kode
+   keluar proses plus log teks, dan tujuh call site mem-parse baris terakhir log itu. Rust/UniFFI
+   tidak punya exit status maupun stderr per operasi — ia punya `Result` bertipe. Callback inilah yang
+   harus diganti lebih dulu, dan itulah sebabnya error type §4.4 tidak bisa dipasang belakangan tanpa
+   menyentuh setiap jalur kegagalan di `AppModel`.
+2. **`command: String` + `env: [String: String]` adalah CLI NDJSON, bukan API domain.** Bentuk
+   environment itu ada semata-mata karena setting (termasuk password) harus lewat environment agar
+   tidak muncul di `ps` (§1.2). FFI menghapus kendala itu.
+3. **`EngineRun` menyatukan cancel dan release.** Bagi Python keduanya `Process.terminate()`;
+   §1.6 memisahkan `cancel` dari `release`, jadi protokol ini wajar tumbuh.
+4. **`terminateAll()` berbentuk siklus hidup proses.** Engine Rust memegang sesi, bukan anak proses.
+5. **Data plane belum ada, dan itu benar.** Mesin sekarang menyerahkan seluruh hasil sebagai
+   `[[String?]]` di dalam event, jadi menjanjikan window sekarang berarti menjanjikan yang tidak bisa
+   ditepati.
+6. Protokolnya masih terikat pada `Event`, yaitu tipe kawat NDJSON.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling
