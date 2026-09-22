@@ -7,19 +7,20 @@
 //!
 //! # Which formats exist today
 //!
-//! Eight of the nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql`, `dbf` and
-//! `xlsx`. Only `xls` is **not**, and asking for it gets an error that says so rather
-//! than a file that is wrong. Its row ceiling is recorded anyway, because the planner
-//! will need it and it is a known fact from the Python source
-//! (`XLS_MAX_ROWS = 65_536`).
+//! All nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql`, `dbf`, `xlsx` and
+//! `xls`.
 //!
-//! `dbf` is different in kind from the other two and that is worth knowing before
-//! comparing them. Its bytes are decided by code — the Python engine wrote it by hand
-//! too — so its output can be and is compared byte for byte with the Python engine's.
+//! The strength of the claim differs by format, and knowing which is which matters more
+//! than a single label.
+//!
+//! `dbf`'s bytes are decided by code — the Python engine wrote it by hand too — so its
+//! output is compared **byte for byte** with the Python engine's output, and that
+//! comparison is a test.
+//!
 //! `xlsx` and `xls` are written by `openpyxl` and `xlwt` in the Python engine, so
-//! matching their bytes is neither possible nor meaningful: what a Rust writer can
-//! promise there is a valid file with the same cell values, which is a weaker and
-//! different claim.
+//! matching their bytes is neither possible nor meaningful. What is claimed there is a
+//! workbook the reference library reads back with the same cell values — verified by
+//! actually doing that: `openpyxl` for `xlsx` and `xlrd` for `xls`.
 //!
 //! [`Format::implemented`] is the honest answer to "can I have this one", and it is
 //! there so a caller can grey out a format instead of discovering the gap by
@@ -46,6 +47,7 @@
 
 mod dbf;
 mod writers;
+mod xls;
 mod xlsx;
 
 use std::io;
@@ -56,6 +58,7 @@ use thiserror::Error;
 
 pub use dbf::DbfWriter;
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
+pub use xls::XlsWriter;
 pub use xlsx::XlsxWriter;
 
 /// One export format.
@@ -155,6 +158,7 @@ impl Format {
                 | Format::Sql
                 | Format::Dbf
                 | Format::Xlsx
+                | Format::Xls
         )
     }
 
@@ -245,9 +249,9 @@ pub enum ExportError {
     /// The format exists in this crate's vocabulary but has no writer yet. Distinct
     /// from a usage error: nothing the caller can change will make it work.
     #[error(
-        "{format} export is not implemented yet. This crate writes text, csv, json, xml, \
-         html, sql, dbf and xlsx; xls needs an OLE2 container and BIFF8 records and is \
-         tracked separately."
+        "{format} export is not implemented yet. Kept for the case of a format being added \
+         to `Format::ALL` before its writer exists, which is exactly when this should be \
+         said rather than producing a file that is wrong."
     )]
     Unsupported { format: &'static str },
 
@@ -320,9 +324,7 @@ pub fn open(
         Format::Sql => Box::new(SqlWriter::new(path, columns, options)?),
         Format::Dbf => Box::new(DbfWriter::new(path, columns, options)?),
         Format::Xlsx => Box::new(XlsxWriter::new(path, columns, options)?),
-        // Refused above, and listed so that adding a writer is a missing arm the
-        // compiler reports rather than a format that silently does nothing.
-        Format::Xls => unreachable!("refused above"),
+        Format::Xls => Box::new(XlsWriter::new(path, columns, options)?),
     })
 }
 
@@ -366,29 +368,19 @@ mod tests {
     }
 
     #[test]
-    fn eight_formats_are_writable_and_one_is_named_but_not_written() {
-        // Stated as a test so that the gap is visible in the suite and not only in a
-        // commit message. Adding a writer turns one of these around.
+    fn every_format_has_a_writer() {
+        // Stated as a test so that a format added without a writer fails here rather
+        // than at the first export.
         assert_eq!(
             Format::ALL
                 .iter()
                 .filter(|format| format.implemented())
                 .count(),
-            8
+            Format::ALL.len()
         );
-        // The one that is left. Named rather than looped over, because a loop of one is
-        // a list pretending to be longer than it is.
-        let format = Format::Xls;
-        assert!(!format.implemented(), "xls is not written yet");
-        assert!(matches!(
-            open(
-                format,
-                Path::new("/tmp/x"),
-                &[ColumnMeta::new("a", "bigint")],
-                &ExportOptions::default()
-            ),
-            Err(ExportError::Unsupported { .. })
-        ));
+        for format in Format::ALL {
+            assert!(format.implemented(), "{} has no writer", format.name());
+        }
     }
 
     #[test]

@@ -203,7 +203,7 @@
   dijanjikan di sana adalah berkas yang sah dengan nilai sel yang sama — klaim yang lebih lemah
   dan berbeda, dan itu akan dinyatakan begitu.
 - [x] `qh-export`: format **`xlsx`** ditulis tangan — kontainer ZIP dan bagian OOXML-nya.
-  **8 dari 9 format** kini bisa ditulis; hanya `xls` yang tersisa. **273 uji hijau.**
+  **9 dari 9 format** kini bisa ditulis. **283 uji hijau.**
   ZIP-nya tanpa dependency: entri *stored*, dan yang penting — **lembar kerjanya di-stream
   dengan data descriptor** (flag bit 3), karena CRC dan ukuran sebuah entri stored baru diketahui
   setelah byte terakhirnya ditulis. Itulah yang menjaga memori tetap datar.
@@ -230,45 +230,49 @@
   Cap baris 1.048.575 (batas 1.048.576 termasuk header) ditegakkan dengan galat, bukan ditulis
   lalu menghasilkan lembar yang ditolak Excel. Stempel waktu DOS di ZIP dipatok 1980-01-01 supaya
   keluarannya reproducible dan uji bisa membandingkan berkas utuh.
-- [ ] `qh-export`: format **`xls`** — **belum ditulis**, dan ini temuannya supaya sesi berikutnya
-  tidak mulai dari nol. Rekognisi struktur sudah lengkap; yang belum adalah mereplikasi blok
-  globals BIFF8 byte per byte.
-  **Alat verifikasi sudah disiapkan** (kunci untuk format ini, karena tanpa pembaca independen
-  klaim apa pun hanya klaim saya): `xlwt` 1.3.0 — pustaka yang sama yang dipakai engine Python —
-  dan `xlrd` 2.0.2 sebagai pembaca independen, keduanya di venv terpisah supaya lingkungan Python
-  Anda tidak tersentuh:
-  `python3 -m venv /tmp/qh-xls-venv && /tmp/qh-xls-venv/bin/pip install xlwt xlrd`
-  **Yang sudah pasti dari membedah keluaran `xlwt`** (bukan dari spesifikasi yang saya ingat):
-  - **OLE2**: sektor 512 byte, header dengan `DIFAT[0]` menunjuk sektor FAT, direktori di sektor
-    tersendiri. Kuncinya: `xlwt` **memadatkan stream Workbook ke tepat 4096 byte** — persis ambang
-    mini-stream — sehingga **mini-FAT tidak pernah diperlukan**. Berkas referensi: 10 sektor =
-    5632 byte. Direktori: 2 entri; `Root Entry` (type 5, child=1) dan `Workbook` (type 2,
-    start=0, size=4096).
-  - **Globals BIFF8**: BOF (0x0809, tipe 0x0005), CODEPAGE (0x0042) = **1200 (UTF-16)**,
-    FONT (0x0031) x9, FORMAT (0x041E) id 164 "General" dan 165 "YYYY-MM-DD", XF (0x00E0) x20,
-    STYLE (0x0293), BOUNDSHEET (0x0085), SST (0x00FC), EOF. **Sel memakai XF indeks 18 (General)
-    dan 19 (tanggal).** Offset worksheet mengikuti rumus yang sudah saya verifikasi:
-    `offset = 1050 + panjang_SST` (= 1412 pada kasus referensi).
-  - **Worksheet**: BOF (tipe 0x0010), DIMENSIONS (0x0200), ROW (0x0208), record sel, EOF.
-  - **Tanggal bukan FORMULA.** Ini temuan yang berguna: `xlwt` menulis tanggal sebagai sel angka
-    biasa dengan XF ber-format tanggal, dan `xlrd` membacanya kembali sebagai `ctype=3` (tanggal).
-    Jadi tidak perlu record FORMULA yang menuntut ekspresi terparse.
-  - **SST**: `cch(2) + flags(1, bit0 = UTF-16) + karakter`. **Dipadatkan ke latin-1 bila semua
-    karakternya < 256**, kalau tidak UTF-16LE — `"café €—"` jadi UTF-16 karena `€`, sementara
-    `"café"` sendirian akan latin-1. Layout FONT 21 byte sudah saya pastikan
-    (`height(2) grbit(2) icv(2) bls(2) sss(2) uls(1) family(1) charset(1) reserved(1) cch(1)
-    grbit2(1) nama`).
-  **Dua hal yang masih menahan, dan keduanya bukan sesuatu yang boleh ditebak:**
-  1. Layout **XF 20 byte** belum saya pastikan field per field, dan XF menentukan apakah sel
-     tampil sebagai angka atau tanggal.
-  2. **SST kontinuasi.** Di atas 8224 byte sebuah record harus dipecah jadi CONTINUE, dan bila
-     batas itu jatuh **di tengah karakter sebuah string**, record lanjutan harus mengulang flag
-     byte string itu. Salah di sini menghasilkan berkas yang Excel tolak.
-  Ditambah satu keputusan yang sudah saya ambil untuk mengurangi risiko: **RK (0x027E) tidak akan
-  dipakai**, meski `xlwt` memakainya. Saya dua kali salah menurunkan pengkodeannya dari byte, dan
-  NUMBER (0x0203) menulis f64 apa adanya — 4 byte lebih besar per sel, tanpa tebakan. Berkasnya
-  tetap sah dan `xlrd` membacanya sama.
-- [x] **273 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `qh-export`: format **`xls`** — kontainer OLE2 dan record BIFF8, ditulis tangan.
+  **9 dari 9 format kini bisa ditulis.** **283 uji hijau.**
+  Verifikasi di sini berbeda jenisnya dari `dbf`. Byte `xls` ditentukan `xlwt` di engine
+  Python, jadi menyamakannya tidak mungkin dan tidak bermakna; yang saya klaim adalah
+  berkas yang **dibaca `xlrd` dengan nilai sel yang sama**, dan saya benar-benar
+  melakukannya: `xlwt` 1.3.0 + `xlrd` 2.0.2 di venv terpisah
+  (`python3 -m venv /tmp/qh-xls-venv && /tmp/qh-xls-venv/bin/pip install xlwt xlrd`).
+  Yang terbukti lewat pembaca luar:
+  - Tanggal kembali sebagai **ctype 3 — tanggal sungguhan**, bukan `46053`. Ini hasil
+    keputusan menulisnya sebagai sel NUMBER dengan XF ber-format tanggal, bukan record
+    FORMULA, dan itulah alasan record FORMULA tidak diperlukan sama sekali.
+  - String 9000 karakter utuh di selnya, melintasi batas record. Jadi CONTINUE bekerja,
+    termasuk aturan yang paling mudah salah: **bila batas itu jatuh di tengah karakter,
+    record lanjutan harus mengulang byte `options`** string tersebut. Aturan itu bukan
+    kesimpulan saya — saya bacanya di `unpack_SST_table` xlrd baris 1448, lalu diuji.
+  - Offset zona waktu **selamat** (`2026-01-31 12:00:00+07:00`): sel tidak bisa membawa
+    offset, jadi instannya tetap teks.
+  - Nama sheet dipotong ke 31 karakter seperti yang dilakukan engine Python.
+  **Memori rata tanpa trik**: `xlwt` memadatkan stream Workbook ke tepat 4096 byte —
+  ambang mini-stream — sehingga tabel alokasi mini tidak pernah diperlukan. Ini bagian
+  paling berbelit dari OLE2, dan bisa dihindari seluruhnya.
+  **Penyangga seluruh sheet itu bawaan format, bukan jalan pintas.** BIFF8 tidak punya
+  mode streaming: sel merujuk tabel string bersama lewat indeks, jadi semua string harus
+  diketahui sebelum baris pertama ditulis. Engine Python menyangga karena alasan yang
+  sama, dan itulah sebabnya `max_rows` ada dan ekspor dipecah jadi bagian.
+  Tiga bug, dan **dua di antaranya hanya bisa ditangkap pembaca luar** — keduanya
+  menghasilkan berkas yang tampak baik-baik saja sampai ada yang mencoba membukanya:
+  1. Record STYLE harus bentuk **built-in** (bit 15 field pertama diset). Tanpa itu xlrd
+     mengiranya style buatan pengguna dan mencari nama string yang tidak ada.
+  2. BOUNDSHEET butuh **byte flag nama** setelah panjangnya. Tanpa itu xlrd membaca huruf
+     pertama nama sebagai flag dan mencoba mendekode sisanya sebagai UTF-16.
+  3. Entri root direktori saya memberi **`left=0, right=0`** — artinya "entri nol", yang
+     bagi root adalah dirinya sendiri, sehingga xlrd rekursi tanpa henti. Nilai yang benar
+     untuk "tidak ada saudara" adalah `0xFFFFFFFF`. Bug ini muncul sebagai
+     `RecursionError` di 31 berkas sekaligus, dan tidak ada uji saya sendiri yang
+     menangkapnya.
+  Ditambah dua bug di uji saya sendiri: kolom ada di byte 2–4 record NUMBER dan XF di
+  4–6 (saya mencampurnya), dan helper `records()` berhenti di EOF pertama — yang
+  merupakan akhir **globals** — sehingga record worksheet tidak pernah terbaca.
+  Satu keputusan untuk mengurangi risiko: **RK tidak dipakai** meski `xlwt` memakainya.
+  Saya dua kali salah menurunkan pengkodeannya dari byte; NUMBER menulis f64 apa adanya,
+  empat byte lebih besar per sel, tanpa tebakan.
+- [x] **283 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata) seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
