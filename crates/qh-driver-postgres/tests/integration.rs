@@ -348,7 +348,7 @@ async fn the_object_tree_and_objects_grid_read_real_metadata() {
     };
 
     let schemas = session
-        .browse(BrowseLevel::Schema, &ObjectPath::new())
+        .browse(BrowseLevel::Schema, &ObjectPath::new(), false)
         .await
         .expect("schemas");
     assert!(schemas.contains(&"public".to_owned()), "{schemas:?}");
@@ -363,7 +363,11 @@ async fn the_object_tree_and_objects_grid_read_real_metadata() {
     );
 
     let tables = session
-        .browse(BrowseLevel::Table, &ObjectPath::new().schema("public"))
+        .browse(
+            BrowseLevel::Table,
+            &ObjectPath::new().schema("public"),
+            false,
+        )
         .await
         .expect("tables");
     assert!(tables.contains(&"wide_500k".to_owned()), "{tables:?}");
@@ -391,19 +395,61 @@ async fn the_object_tree_and_objects_grid_read_real_metadata() {
 }
 
 #[tokio::test]
-async fn a_level_the_driver_does_not_have_is_refused_by_name() {
+async fn catalogs_lists_databases_even_though_it_is_not_a_tree_level() {
     let Some(mut session) = connect().await else {
         eprintln!("{SKIP_HINT}");
         return;
     };
-    // PostgreSQL has no catalog level. Answering with an empty list would look
-    // like "you have no catalogs" instead of "this driver has no such level".
-    let error = session
-        .browse(BrowseLevel::Catalog, &ObjectPath::new())
+
+    // The tree levels are schema and table, because a connection is bound to one
+    // database. But `catalogs` is a question worth answering — it is what a
+    // context picker lists — and the Python engine answered it. Refusing here was
+    // a regression this test now prevents.
+    let databases = session
+        .browse(BrowseLevel::Catalog, &ObjectPath::new(), false)
         .await
-        .expect_err("a catalog browse should be refused");
-    assert!(error.message().contains("catalog"), "{error:?}");
-    assert!(error.message().contains("schema/table"), "{error:?}");
+        .expect("catalogs should list databases, not be refused");
+    assert!(databases.contains(&"qh".to_owned()), "{databases:?}");
+    // Templates and databases that refuse connections are filtered out by
+    // default: offering one would be a choice that cannot be taken.
+    assert!(
+        !databases.iter().any(|name| name == "template0"),
+        "{databases:?}"
+    );
+
+    // "Show all" drops the filter, and then a template does appear — which is the
+    // difference between the two forms of the statement, not a detail.
+    let all = session
+        .browse(BrowseLevel::Catalog, &ObjectPath::new(), true)
+        .await
+        .expect("catalogs with everything");
+    assert!(all.len() >= databases.len(), "{all:?} vs {databases:?}");
+    assert!(all.contains(&"template0".to_owned()), "{all:?}");
+}
+
+#[tokio::test]
+async fn the_system_schemas_are_hidden_unless_they_are_asked_for() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let visible = session
+        .browse(BrowseLevel::Schema, &ObjectPath::new(), false)
+        .await
+        .unwrap();
+    assert!(
+        !visible.iter().any(|name| name.starts_with("pg_")),
+        "{visible:?}"
+    );
+
+    // Someone asking for everything wants `pg_catalog` to appear like any other
+    // schema, so the filter is dropped rather than inverted.
+    let all = session
+        .browse(BrowseLevel::Schema, &ObjectPath::new(), true)
+        .await
+        .unwrap();
+    assert!(all.contains(&"pg_catalog".to_owned()), "{all:?}");
 }
 
 #[tokio::test]

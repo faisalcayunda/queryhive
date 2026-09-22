@@ -255,25 +255,21 @@ impl Session for PostgresSession {
         &mut self,
         level: BrowseLevel,
         path: &ObjectPath,
+        include_system: bool,
     ) -> Result<Vec<String>, EngineError> {
         let sql = match level {
-            BrowseLevel::Schema => SCHEMAS_SQL.to_owned(),
+            // Not an object-tree level: a PostgreSQL connection is bound to one
+            // database, so the tree starts at schemas. It is still a question worth
+            // answering — which databases exist is what a query needs to know
+            // before it is pointed at another one, and it is what a context picker
+            // lists. The Python engine answered it for the same reason.
+            BrowseLevel::Catalog | BrowseLevel::Database => catalogs_sql(include_system),
+            BrowseLevel::Schema => schemas_sql(include_system),
             BrowseLevel::Table => {
                 let schema = path.schema.as_deref().ok_or_else(|| EngineError::Usage {
-                    message: "a schema is required to list tables on PostgreSQL".to_owned(),
+                    message: "DB_SCHEMA is required to list tables on PostgreSQL".to_owned(),
                 })?;
                 tables_sql(schema)
-            }
-            // Declared absent in `capabilities().levels`; refused by name rather
-            // than answered with an empty list, so a caller that ignored the
-            // capability is told instead of misled.
-            other => {
-                return Err(EngineError::Usage {
-                    message: format!(
-                        "PostgreSQL has no {} level; its object tree is schema/table",
-                        other.as_str()
-                    ),
-                })
             }
         };
 
@@ -412,16 +408,47 @@ impl Cursor for PostgresCursor {
     }
 }
 
-/// Schema listing: everything the user owns, without the server's own catalogues.
-const SCHEMAS_SQL: &str = "SELECT nspname FROM pg_catalog.pg_namespace \
-     WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
-     ORDER BY 1";
+/// Every database on the server, for the context picker.
+///
+/// Templates are not real databases and `datallowconn = false` ones refuse
+/// connections, so offering either would be a choice that cannot be taken —
+/// unless the user asked for everything, in which case the filter goes.
+///
+/// These strings are reproduced verbatim from `exporter/drivers.py` so the Rust
+/// driver answers with what the Python engine answered. They are pinned by tests.
+fn catalogs_sql(include_system: bool) -> String {
+    let filter = if include_system {
+        ""
+    } else {
+        "WHERE NOT datistemplate AND datallowconn "
+    };
+    format!("SELECT datname FROM pg_database {filter}ORDER BY 1")
+}
 
+/// The schemas a user browses.
+///
+/// The system schemas are hidden by default, and the backslash escapes the
+/// underscore so `pg\_%` does not also match a schema named `pgx`. "Show all"
+/// drops the filter entirely, because someone asking for everything wants
+/// `pg_catalog` to appear the same as any user schema.
+fn schemas_sql(include_system: bool) -> String {
+    let filter = if include_system {
+        ""
+    } else {
+        "WHERE schema_name NOT LIKE 'pg\\_%' AND schema_name <> 'information_schema' "
+    };
+    format!("SELECT schema_name FROM information_schema.schemata {filter}ORDER BY 1")
+}
+
+/// The tables of one schema.
+///
+/// `table_type = 'BASE TABLE'` is the same set the objects grid means by
+/// `relkind IN ('r', 'p')`, so the tree and the grid cannot disagree about what a
+/// table is.
 fn tables_sql(schema: &str) -> String {
     format!(
-        "SELECT c.relname FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = {} AND c.relkind IN ('r', 'p') ORDER BY 1",
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema = {} AND table_type = 'BASE TABLE' ORDER BY 1",
         quote_literal(schema)
     )
 }
@@ -552,6 +579,63 @@ mod tests {
         );
         // The UI builds the tree from this rather than hard-coding it.
         assert!(!capabilities.levels.contains(&BrowseLevel::Catalog));
+        // But `levels` and what the driver will *answer* are different questions.
+        // The database list is not a tree level, yet it is what a context picker
+        // needs, and the Python engine answered it for that reason. `browse`
+        // answers Catalog rather than refusing it.
+    }
+
+    /// The statements the Python driver built, pinned verbatim so the migration
+    /// cannot quietly change what the tree or the grid asks the server.
+    ///
+    /// The expected strings are the ones `exporter/drivers.py` actually produced —
+    /// taken from running that code, not retyped from reading it.
+    #[test]
+    fn the_metadata_statements_match_the_ones_they_replace() {
+        assert_eq!(
+            catalogs_sql(false),
+            "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY 1"
+        );
+        assert_eq!(
+            catalogs_sql(true),
+            "SELECT datname FROM pg_database ORDER BY 1"
+        );
+
+        assert_eq!(
+            schemas_sql(false),
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name NOT LIKE 'pg\\_%' \
+             AND schema_name <> 'information_schema' ORDER BY 1"
+        );
+        assert_eq!(
+            schemas_sql(true),
+            "SELECT schema_name FROM information_schema.schemata ORDER BY 1"
+        );
+
+        assert_eq!(
+            tables_sql("analytics"),
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'analytics' AND table_type = 'BASE TABLE' ORDER BY 1"
+        );
+
+        assert_eq!(
+            objects_sql("analytics"),
+            "SELECT c.relname, c.oid, pg_get_userbyid(c.relowner), \
+             COALESCE(array_to_string(c.relacl, ', '), '') \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'analytics' AND c.relkind IN ('r', 'p') \
+             ORDER BY c.relname"
+        );
+    }
+
+    #[test]
+    fn the_backslash_in_the_system_schema_filter_actually_reaches_the_server() {
+        // The filter means `pg\_%` with a real backslash, so it does not also
+        // match a user schema named `pgx`. A string that lost the escape looks
+        // identical at a glance and filters the wrong set.
+        let sql = schemas_sql(false);
+        assert!(sql.contains(r"NOT LIKE 'pg\_%'"), "{sql}");
+        assert!(!sql.contains("NOT LIKE 'pg_%'"), "{sql}");
     }
 
     #[test]
@@ -577,7 +661,7 @@ mod tests {
     /// The statements the Python driver built, pinned so the grid looks the same
     /// after the migration.
     #[test]
-    fn the_metadata_statements_match_the_ones_they_replace() {
+    fn the_objects_statement_matches_the_one_it_replaces() {
         assert_eq!(
             objects_sql("analytics"),
             "SELECT c.relname, c.oid, pg_get_userbyid(c.relowner), \
@@ -586,8 +670,6 @@ mod tests {
              WHERE n.nspname = 'analytics' AND c.relkind IN ('r', 'p') \
              ORDER BY c.relname"
         );
-        assert!(tables_sql("analytics").contains("n.nspname = 'analytics'"));
-        assert!(SCHEMAS_SQL.contains("information_schema"));
     }
 
     #[test]

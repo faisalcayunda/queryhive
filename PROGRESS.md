@@ -18,7 +18,7 @@
 | B — Riset web | **Gagal sebagian** | `web_search` mengembalikan HTTP 402 (kuota paket pengguna habis) → [BUTUH TINDAKAN MANUAL] #1. `web_fetch` **berfungsi**: `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
-| D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, dan `qh-driver-postgres` selesai dan hijau; MySQL, Trino, export, credentials, storage, tunnel, FFI belum ada |
+| D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, `qh-driver-postgres`, dan `qh-driver-mysql` selesai dan hijau; Trino, export, credentials, storage, tunnel, FFI belum ada |
 | D — Fase 2, 3, 4 | Belum | |
 
 ---
@@ -89,8 +89,12 @@
   yang menjaga DECIMAL presisi penuh, metadata tipe dari `prepare`, dan **cancel yang sampai ke
   server** lewat `CancelRequest` pada koneksi kedua. **26 uji unit + 12 uji integrasi terhadap
   container**, semuanya lulus
-- [x] **122 uji hijau** seluruh workspace (29 `qh-core` + 10 `qh-driver` + 26 `qh-driver-postgres`
-  + 12 integrasi + 20 `qh-result-store` + 25 `qh-sql`), `cargo fmt --all --check` bersih,
+- [x] `crates/qh-driver-mysql` — driver MySQL: task produsen + channel berbatas, `KILL QUERY`
+  untuk cancel, pembedaan `TEXT`/`BLOB` lewat character set. **28 uji unit + 15 uji integrasi
+  terhadap container**, semuanya lulus
+- [x] `ColumnBatch::slice_rows` di `qh-core`, supaya batas baris yang diminta pemanggil dihormati
+  meskipun produsen membaca dalam batch-nya sendiri
+- [x] **170 uji unit hijau** seluruh workspace, `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
@@ -106,6 +110,22 @@ Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
 | Zona waktu | Instant dipertahankan; setelah `SET TIME ZONE`, dirender ulang sesuai zona sesi (D-3) |
 | TLS | Tiga mode selain `Disable` **ditolak** dengan pesan yang menyebut TLS, bukan turun ke plaintext |
 | Password salah | `FailureKind::Permanent`, dan pesannya tidak memuat password itu |
+
+Yang dibuktikan uji integrasi MySQL terhadap server nyata:
+
+| Bukti | Hasil |
+|---|---|
+| Pembedaan `TEXT` dari `BLOB` | Keduanya tiba sebagai `MYSQL_TYPE_BLOB`; hanya character set (63) yang membedakan. Tanpa itu string kosong menjadi `Bytes([])` — nilai yang berbeda di grid dan di setiap export |
+| DECIMAL presisi penuh | 38 digit utuh, sama seperti PostgreSQL |
+| `DATETIME` tidak dikonversi | `2026-01-31 12:00:00.123456` kembali persis; `TIMESTAMP` dikonversi server ke zona sesi |
+| Batas baris pemanggil | Produsen membaca 1024 baris per batch, pemanggil minta 250, dan menerima tepat `[250, 250, 250, 250]` |
+| Urutan lintas batas batch | id terbaca 1, 2, 3 … lurus menembus beberapa batch produsen |
+| `binary(16)` | 16 byte apa adanya, bukan teks hasil decode yang rusak |
+| ENUM | Label-nya (`ok`), bukan ordinalnya |
+| Cancel | Latensi < 500 ms; `SLEEP` mengembalikan 0 sebagai sinyal interupsi. **Tetapi lihat K11: tidak terbukti untuk join panjang** |
+| Sesudah cancel | `SELECT 1` tetap berhasil — `KILL QUERY`, bukan `KILL CONNECTION` |
+| Database sistem | Disembunyikan kecuali diminta, dan yang disembunyikan tepat empat nama, bukan pola `LIKE` yang bisa menelan database pengguna |
+| Level schema | Ditolak dengan petunjuk yang menyebut apa yang harus dipakai |
 
 Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan di test:
 
@@ -125,16 +145,25 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
    kosong — tiga uji timestamp gagal. Sekarang ia mulai dari tanda terakhir dan membatasi offset
    ke rentang nyata (−12:00…+14:00), sehingga `-31` di `2026-01-31` tidak pernah dibaca sebagai
    offset tiga puluh satu jam.
-6. **Ekspektasi `timestamptz` salah, kodenya benar.** Uji saya mengasumsikan server
+6. **Asumsi tipe kolom MySQL salah.** Versi pertama memetakan `MYSQL_TYPE_BLOB` ke byte. Ternyata
+   MySQL melaporkan kolom `TEXT` sebagai `MYSQL_TYPE_BLOB` juga, sehingga kolom teks kosong menjadi
+   `Bytes([])` alih-alih string kosong. Diperbaiki dengan membaca character set (63 = binary) —
+   nilainya diambil dari `information_schema.COLLATIONS` server, bukan dari ingatan.
+7. **`KILL QUERY` tidak menghentikan join panjang.** Uji yang saya tulis untuk membuktikan jalur
+   error 1317 "lulus" setelah 91 detik hanya karena saya mematikan thread-nya manual dari luar uji.
+   Uji itu **dihapus**, bukan dilonggarkan: uji yang menggantung 90 detik lalu lulus karena alasan
+   yang salah lebih buruk daripada tidak ada uji. Cacatnya dicatat sebagai K11.
+8. **Ekspektasi `timestamptz` salah, kodenya benar.** Uji saya mengasumsikan server
    mengembalikan `+07:00` seperti saat ditulis. PostgreSQL merender di zona waktu **sesi**, jadi
    yang kembali `+00:00` dengan instant yang sama. Diperbaiki dengan membuktikan dua arah:
    instant-nya cocok, dan setelah `SET TIME ZONE 'Asia/Jakarta'` offset-nya kembali `+07:00`.
 
 ## Tugas berikutnya (urutan yang dikerjakan)
 
-1. **Driver MySQL**, mengikuti bentuk `qh-driver-postgres`. Bedanya nyata dan harus dijaga:
-   `KILL QUERY` pada koneksi kedua untuk cancel, `caching_sha2_password`, dan `TIMESTAMP` yang
-   dirender di zona sesi (lihat D-3).
+1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling
+   penting dari daftar ini: cancel yang bekerja untuk sebagian query lebih berbahaya daripada
+   cancel yang tidak ada, karena UI akan mengklaim sudah berhenti padahal belum. Sekalian
+   menjelaskan K12 (30 detik yang tidak dijelaskan di suite MySQL).
 2. **Driver Trino** — protokol HTTP, tanpa pool (ADR-0006). Butuh VM podman dinaikkan dulu.
 3. **TLS PostgreSQL** (K8) — connector `rustls`, lalu `TlsMode::Prefer`/`Require` benar-benar
    berfungsi alih-alih ditolak. Dijadwalkan bersama `qh-credentials`.
@@ -189,7 +218,9 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 | K7 | ~~Driver PostgreSQL belum ada~~ **Selesai** | — | Bentuknya ditentukan temuan API di bawah; celah yang tersisa ada di K8 dan K9 |
 | K8 | **TLS PostgreSQL belum diimplementasikan** | Driver **menolak** `Prefer`/`Require`/`RequireNoVerify` dengan error yang jelas, jadi tidak ada penurunan senyap ke plaintext — tetapi koneksi yang butuh TLS belum bisa dipakai | Butuh connector `rustls` + root store sistem; dijadwalkan bersama `qh-credentials` |
 | K9 | SQL multi-statement ditolak driver | `prepare` mendeskripsikan satu statement; skrip banyak statement gagal dengan pesan yang menyebutkan penyebabnya | Pemanggil memecah dengan `qh-sql::scan`/`strip_terminator`, yang sudah ada dan teruji |
-| K10 | Driver MySQL belum ada | Tidak ada MySQL sama sekali; hanya desainnya yang sudah dikonfirmasi | Rancangan lengkapnya ada di bawah — baca itu lebih dulu, ia menentukan bentuk driver-nya |
+| K10 | ~~Driver MySQL belum ada~~ **Selesai** | — | Rancangannya ternyata bukan extended protocol melainkan task produsen + channel; alasannya di bawah |
+| K11 | **`KILL QUERY` tidak menghentikan join panjang** | Cancel MySQL terbukti bekerja untuk `SLEEP` (latensi < 500 ms, `SLEEP` mengembalikan 0 sebagai sinyal interupsi), tetapi **tidak** untuk `wide_500k a JOIN wide_500k b ON a.id < b.id`: query itu tetap berjalan 91 detik dan baru berhenti ketika thread-nya dimatikan manual dari luar uji | Diselidiki berikutnya. Dugaan yang harus diuji lebih dulu: apakah `KILL QUERY` perlu diulang, apakah statement masih dalam fase yang belum bisa diinterupsi, atau apakah `execute` menunggu metadata lebih lama dari yang diasumsikan |
+| K12 | Suite uji MySQL memakan 30 detik | Satu uji memakai `SELECT SLEEP(30)`; kill-nya terbukti cepat, tetapi suite tetap berjalan 30 detik, sehingga ada yang menunggu sesuatu yang belum dijelaskan | Diukur dan dijelaskan, bukan dibiarkan sebagai kebiasaan |
 
 ### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 
@@ -214,7 +245,7 @@ Versi pertama driver ini **dihapus, bukan dikirim**, karena berjalan di atas sim
 artinya kehilangan tipe kolom yang dilaporkan engine Python. Alasan pencatatan itu ada di commit
 `dafd071`.
 
-### K10 — desain driver MySQL, sudah dikonfirmasi dari sumber crate
+### K10 — desain driver MySQL, dan bagaimana ia akhirnya dibangun
 
 Dibaca langsung dari `~/.cargo/registry/src/*/mysql_async-0.36.2/`, bukan dari ingatan. Crate
 `mysql_async` ter-resolve ke **0.36.2**, jadi versi itu terverifikasi, bukan tebakan.
@@ -227,18 +258,25 @@ Dibaca langsung dari `~/.cargo/registry/src/*/mysql_async-0.36.2/`, bukan dari i
 | `Column::name_str() -> Cow<str>` (`mysql_common-0.35.5/src/packets/mod.rs:406`), `Column::column_type() -> ColumnType` (`:335`) | Nama dan tipe kolom bisa dibaca tanpa menebak. |
 | `Conn::id() -> u32` (`src/conn/mod.rs:195`) | ID koneksi untuk `KILL QUERY` — mekanisme cancel MySQL (blueprint §2.7). |
 | `OptsBuilder`: `ip_or_hostname`, `tcp_port`, `user`, `pass`, `db_name`, `init(Vec<String>)`, `secure_auth`, `stmt_cache_size` | `init` adalah tempat `SET time_zone = ...` bila nanti diinginkan; untuk sekarang zona dibiarkan seperti server memutuskan (lihat D-3). |
-| `Conn::new(...)` | **Belum diverifikasi.** Jangan mengarang tanda tangannya; baca `src/conn/mod.rs` lebih dulu. |
+| `Conn::new<T: Into<Opts>>(opts) -> BoxFuture<'static, Conn>` (`src/conn/mod.rs:947`) | `BoxFuture<'a, T>` di crate ini berarti `Future<Output = Result<T>>`, jadi pemanggilnya menulis `.await?`. Terverifikasi saat implementasi. |
 
-**Rancangan yang harus dipakai:** karena `QueryResult` meminjam koneksi, cursor tidak bisa
-memilikinya. Yang diperlukan adalah **task produsen + channel berbatas**: `Conn` dipindahkan ke
-dalam task, task mengalirkan `ColumnBatch` lewat channel, dan cursor membaca dari channel. Ini
-sekaligus memberi backpressure — persis bentuk yang sudah direncanakan di blueprint §2.3
-("channel dengan batas, bukan `queue.Queue` + thread manual"). Cancel memakai koneksi kedua yang
-terpisah, jadi tidak terpengaruh koneksi yang sedang dipinjam task.
+**Yang akhirnya dibangun:** karena `QueryResult` meminjam koneksi, cursor tidak bisa memilikinya,
+jadi `Conn` dipindahkan ke **task produsen** yang mengalirkan `ColumnBatch` lewat channel berbatas
+(4 batch). Ini sekaligus memberi backpressure — persis bentuk yang direncanakan di blueprint §2.3
+("channel dengan batas, bukan `queue.Queue` + thread manual").
 
-Crate kerangka MySQL **dihapus dari workspace**, bukan dibiarkan berisi `// placeholder`. Alasannya
-sama seperti `dafd071`: stub di jalur pengguna dilarang, dan kerangka kosong yang terlihat seperti
-pekerjaan yang belum selesai lebih membingungkan daripada tidak ada apa-apa.
+Satu konsekuensi yang tidak langsung terlihat dan harus diingat: `Cursor::columns()` harus sah
+segera setelah `execute` kembali, sedangkan kolom baru diketahui di dalam task. Karena itu
+`execute` **menunggu pesan pertama** dari produsen — dan itu tidak menunda baris pertama, karena
+deskripsi kolom selalu datang sebelum baris apa pun.
+
+Cancel memakai koneksi kedua yang terpisah, jadi tidak terpengaruh koneksi yang sedang dipinjam
+task. **Tetapi lihat K11**: terbukti untuk `SLEEP`, belum untuk join panjang.
+
+Crate kerangka MySQL pernah **dihapus dari workspace** alih-alih dibiarkan berisi `// placeholder`
+(commit `dafd071`). Itu alasan sesi ini menelusuri API sampai ke sumbernya sebelum menulis satu
+baris pun: kerangka kosong yang terlihat seperti pekerjaan belum selesai lebih membingungkan
+daripada tidak ada apa-apa.
 
 ## [BUTUH TINDAKAN MANUAL]
 

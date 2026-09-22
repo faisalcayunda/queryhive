@@ -121,6 +121,27 @@ impl ColumnBatch {
     pub fn into_columns(self) -> Vec<Vec<Value>> {
         self.columns
     }
+
+    /// A batch holding only rows `range` of this one.
+    ///
+    /// A driver that reads rows in batches of its own size still has to honour
+    /// the caller's ceiling, so it keeps the remainder and hands back a slice.
+    /// A range past the end is clamped rather than an error, for the same reason
+    /// the store clamps: the caller may be asking for rows that do not exist.
+    pub fn slice_rows(&self, range: std::ops::Range<usize>) -> Result<Self, BatchError> {
+        if self.columns.is_empty() {
+            return Err(BatchError::NoColumns);
+        }
+        let rows = self.rows();
+        let start = range.start.min(rows);
+        let end = range.end.min(rows);
+        let columns = self
+            .columns
+            .iter()
+            .map(|column| column[start..end].to_vec())
+            .collect::<Vec<_>>();
+        Self::new(columns)
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +207,24 @@ mod tests {
         let batch = ColumnBatch::new(vec![column(&[1])]).unwrap();
         assert_eq!(batch.width(), 1);
         assert_eq!(batch.rows(), 1);
+    }
+
+    #[test]
+    fn slicing_keeps_the_columns_aligned() {
+        // Everything below depends on this: a slice that took rows from one
+        // column and not another would silently shift every value.
+        let batch =
+            ColumnBatch::new(vec![column(&[1, 2, 3, 4]), column(&[10, 20, 30, 40])]).unwrap();
+        let sliced = batch.slice_rows(1..3).unwrap();
+        assert_eq!(sliced.rows(), 2);
+        assert_eq!(sliced.columns()[0], vec![Value::Int(2), Value::Int(3)]);
+        assert_eq!(sliced.columns()[1], vec![Value::Int(20), Value::Int(30)]);
+    }
+
+    #[test]
+    fn slicing_past_the_end_is_clamped_not_an_error() {
+        let batch = ColumnBatch::new(vec![column(&[1, 2])]).unwrap();
+        assert_eq!(batch.slice_rows(1..99).unwrap().rows(), 1);
+        assert_eq!(batch.slice_rows(99..100).unwrap().rows(), 0);
     }
 }

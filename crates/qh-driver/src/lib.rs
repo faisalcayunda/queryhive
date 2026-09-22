@@ -339,10 +339,21 @@ pub trait Session: Send {
     ) -> Result<Box<dyn Cursor>, EngineError>;
 
     /// List the children of one level of the object tree.
+    ///
+    /// `include_system` is the "show all" switch, and it exists because two
+    /// drivers hide something by default that a user may legitimately want:
+    /// PostgreSQL hides its system schemas, and MySQL hides the databases it keeps
+    /// for itself. It is a parameter here rather than a per-driver special case the
+    /// caller has to remember, which is how the Python engine arranged it.
+    ///
+    /// A level a driver genuinely does not have is a usage error naming the driver,
+    /// decided **before** anything is opened — not an empty list, which would look
+    /// like "you have none".
     async fn browse(
         &mut self,
         level: BrowseLevel,
         path: &ObjectPath,
+        include_system: bool,
     ) -> Result<Vec<String>, EngineError>;
 
     /// Metadata for the objects at one level, for the objects grid.
@@ -557,6 +568,7 @@ mod tests {
             &mut self,
             _level: BrowseLevel,
             _path: &ObjectPath,
+            _include_system: bool,
         ) -> Result<Vec<String>, EngineError> {
             Ok(vec!["public".to_owned()])
         }

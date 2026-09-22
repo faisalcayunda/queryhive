@@ -1,0 +1,31 @@
+[package]
+name = "qh-driver-mysql"
+version = "0.1.0"
+description = "MySQL driver: streaming batches over a bounded channel, exact decimals, KILL QUERY cancel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+# default-features = false drops the TLS backends, and `minimal-rust` supplies the
+# one feature the crate genuinely needs: a compression backend. `flate2/zlib` (the
+# `minimal` feature) would link the system's zlib; `minimal-rust` uses the pure-Rust
+# backend instead, so the crate has no C dependency to arrange.
+#
+# No TLS backend is compiled in at all, which matches the driver's behaviour: it
+# refuses every TLS mode explicitly rather than connecting in clear, so there is
+# nothing here pretending to encrypt.
+mysql_async = { version = "0.36", default-features = false, features = ["minimal-rust"] }
+qh-core.workspace = true
+qh-driver.workspace = true
+qh-sql.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
