@@ -175,7 +175,34 @@
   Yang **belum**: opsi `encoding` (crate ini menulis UTF-8 saja — writer yang diam-diam
   mengonversi lebih buruk daripada yang mengaku tidak bisa) dan `qh-export::plan` dari
   `export.py:60-138`, yang belum dibaca sehingga belum ditulis.
-- [x] **253 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `qh-export`: format **`dbf`** ditulis tangan, dengan **paritas byte** terhadap engine Python —
+  **261 uji hijau** seluruh workspace. Ini paritas yang bisa dibuktikan, bukan diklaim: `writers.py`
+  hanya memakai stdlib, jadi saya menjalankannya langsung (dimuat lewat `importlib` karena
+  `exporter/__init__.py` menarik `trino` yang tidak terpasang) dan membandingkan keluarannya
+  byte per byte. Tiga byte tanggal di header di-mask, karena keduanya membaca jam.
+  Bentuk berkas yang dipaksakan formatnya: record dibatasi **4000 byte**, jadi lebar kolom teks
+  direncanakan lebih dulu — kolom tetap dijumlahkan, sisanya dibagi rata. Query dengan seratus
+  kolom teks menghasilkan kolom sempit, bukan berkas yang tidak bisa dibuka.
+  Dua aturan yang mengejutkan dan sudah dikunci uji:
+  - `decimal(10,2)` ditulis dengan **enam** desimal (`1.500000`). Aturan Python memberi 6 desimal
+    untuk semua tipe non-integer dan **tidak** melihat skala yang dideklarasikan.
+  - **cp1252**: `U+0000-U+007F` dan `U+00A0-U+00FF` memetakan ke dirinya sendiri, dua puluh tujuh
+    karakter pungtuasi menempati `0x80-0x9F` — sehingga **`U+0080-U+009F` justru tidak bisa
+    dikodekan** dan Python menjawab `?`. Saya sempat mengira rentang itu identitas; cek ke Python
+    membuktikan sebaliknya.
+  Satu **penyimpangan yang disengaja**: Python hanya memeriksa batas record ketika kolom teks
+  memaksa perhitungan anggaran, jadi 255 kolom numerik (255 x 20 = 5100 byte) akan menulis berkas
+  yang ditolak dBase. Di sini ditolak dengan alasan dan saran. Ujinya ada supaya keputusan itu
+  tetap disengaja.
+  Dua bug di uji saya sendiri: terminator header ada di `32 + 32 x jumlah field` sementara flag
+  hapus ada **di dalam** record (bukan sebelumnya), dan uji NULL menegaskan kosong di field yang
+  sebenarnya berisi `-0.25`. Yang ketiga adalah pola yang sama seperti sebelumnya — uji paralel
+  menulis berkas temp yang sama.
+  **`xlsx` dan `xls` tetap belum ditulis**, dan alasannya beda jenis: byte keduanya ditentukan
+  `openpyxl` dan `xlwt`, jadi menyamakannya tidak mungkin dan tidak bermakna. Yang bisa
+  dijanjikan di sana adalah berkas yang sah dengan nilai sel yang sama — klaim yang lebih lemah
+  dan berbeda, dan itu akan dinyatakan begitu.
+- [x] **261 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:

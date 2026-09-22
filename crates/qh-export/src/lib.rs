@@ -7,11 +7,19 @@
 //!
 //! # Which formats exist today
 //!
-//! Six of the nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql`. The three
-//! binary ones — `xlsx`, `xls`, `dbf` — are **not**, and asking for one gets an error
-//! that says so rather than a file that is wrong. Their row ceilings are recorded
-//! anyway, because the planner needs them and they are known facts from the Python
+//! Seven of the nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql` and `dbf`.
+//! The two Excel formats — `xlsx` and `xls` — are **not**, and asking for one gets an
+//! error that says so rather than a file that is wrong. Their row ceilings are recorded
+//! anyway, because the planner will need them and they are known facts from the Python
 //! source (`XLS_MAX_ROWS = 65_536`, `XLSX_MAX_ROWS = 1_048_576`).
+//!
+//! `dbf` is different in kind from the other two and that is worth knowing before
+//! comparing them. Its bytes are decided by code — the Python engine wrote it by hand
+//! too — so its output can be and is compared byte for byte with the Python engine's.
+//! `xlsx` and `xls` are written by `openpyxl` and `xlwt` in the Python engine, so
+//! matching their bytes is neither possible nor meaningful: what a Rust writer can
+//! promise there is a valid file with the same cell values, which is a weaker and
+//! different claim.
 //!
 //! [`Format::implemented`] is the honest answer to "can I have this one", and it is
 //! there so a caller can grey out a format instead of discovering the gap by
@@ -36,6 +44,7 @@
 //!   written, because reading that file is what would make it correct and it has not
 //!   been read.
 
+mod dbf;
 mod writers;
 
 use std::io;
@@ -44,6 +53,7 @@ use std::path::Path;
 use qh_core::{ColumnMeta, Value};
 use thiserror::Error;
 
+pub use dbf::DbfWriter;
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
 
 /// One export format.
@@ -135,7 +145,13 @@ impl Format {
     pub const fn implemented(self) -> bool {
         matches!(
             self,
-            Format::Text | Format::Csv | Format::Json | Format::Xml | Format::Html | Format::Sql
+            Format::Text
+                | Format::Csv
+                | Format::Json
+                | Format::Xml
+                | Format::Html
+                | Format::Sql
+                | Format::Dbf
         )
     }
 
@@ -185,6 +201,8 @@ pub struct ExportOptions {
     pub sql_rows_per_insert: usize,
     /// SQL table name. `None` falls back to the file's stem.
     pub sql_table: Option<String>,
+    /// Width for a `dbf` text column, before the 4000-byte record budget trims it.
+    pub dbf_char_width: usize,
 }
 
 impl Default for ExportOptions {
@@ -206,6 +224,7 @@ impl Default for ExportOptions {
             // fast without building one enormous statement.
             sql_rows_per_insert: 200,
             sql_table: None,
+            dbf_char_width: 254,
         }
     }
 }
@@ -220,8 +239,8 @@ pub enum ExportError {
     /// from a usage error: nothing the caller can change will make it work.
     #[error(
         "{format} export is not implemented yet. This crate writes text, csv, json, xml, \
-         html and sql; the binary formats need their containers written and are tracked \
-         separately."
+         html, sql and dbf; the two Excel formats need their containers written and are \
+         tracked separately."
     )]
     Unsupported { format: &'static str },
 
@@ -292,9 +311,10 @@ pub fn open(
         Format::Xml => Box::new(XmlWriter::new(path, columns, options)?),
         Format::Html => Box::new(HtmlWriter::new(path, columns, options)?),
         Format::Sql => Box::new(SqlWriter::new(path, columns, options)?),
+        Format::Dbf => Box::new(DbfWriter::new(path, columns, options)?),
         // Refused above, and listed so that adding a writer is a missing arm the
         // compiler reports rather than a format that silently does nothing.
-        Format::Xlsx | Format::Xls | Format::Dbf => unreachable!("refused above"),
+        Format::Xlsx | Format::Xls => unreachable!("refused above"),
     })
 }
 
@@ -338,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn six_formats_are_writable_and_three_are_named_but_not_written() {
+    fn seven_formats_are_writable_and_two_are_named_but_not_written() {
         // Stated as a test so that the gap is visible in the suite and not only in a
         // commit message. Adding a writer turns one of these around.
         assert_eq!(
@@ -346,9 +366,9 @@ mod tests {
                 .iter()
                 .filter(|format| format.implemented())
                 .count(),
-            6
+            7
         );
-        for format in [Format::Xlsx, Format::Xls, Format::Dbf] {
+        for format in [Format::Xlsx, Format::Xls] {
             assert!(
                 !format.implemented(),
                 "{} is not written yet",

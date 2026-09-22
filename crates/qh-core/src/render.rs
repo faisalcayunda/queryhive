@@ -288,7 +288,9 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// Howard Hinnant's `civil_from_days`, the inverse of the `days_from_civil` the
 /// Trino driver uses. Exact for every date this type can carry, with no leap-year
 /// table to get wrong.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+/// Public so that `qh-export`'s dbf writer asks the same question of the same code
+/// rather than carrying a second copy of the leap-year rules.
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let days = days + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let day_of_era = days - era * 146_097;
