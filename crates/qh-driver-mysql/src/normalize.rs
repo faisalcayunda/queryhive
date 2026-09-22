@@ -23,7 +23,7 @@
 //! The rule across every function: **an unparseable value keeps its text.** Never
 //! dropped, never defaulted to zero, never a panic.
 
-use mysql_async::consts::ColumnType;
+use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::Value as MyValue;
 use qh_core::Value;
 
@@ -135,7 +135,14 @@ pub fn from_value(column_type: ColumnType, value: Option<&MyValue>, is_binary: b
 /// Kept as the MySQL spelling rather than a friendly label: `decimal(38,10)` says
 /// more to someone debugging a query than `Decimal` does, and the Python engine
 /// showed the server's word too.
+///
+/// The type code alone cannot name every column: an `ENUM`, a `SET`, a `CHAR` and a
+/// `BINARY` all arrive as `MYSQL_TYPE_STRING` (254), so [`flags_name`] is asked
+/// first and the code is only the fallback.
 pub fn type_name(column: &mysql_async::Column) -> String {
+    if let Some(name) = flags_name(column.column_type(), column.flags()) {
+        return name.to_owned();
+    }
     let base = match column.column_type() {
         ColumnType::MYSQL_TYPE_TINY => "tinyint",
         ColumnType::MYSQL_TYPE_SHORT => "smallint",
@@ -165,6 +172,40 @@ pub fn type_name(column: &mysql_async::Column) -> String {
         _ => "unknown",
     };
     base.to_owned()
+}
+
+/// The names the column's **flags** carry, which its type code cannot.
+///
+/// `ENUM` and `SET` are not their own protocol types. MySQL reports both as
+/// `MYSQL_TYPE_STRING` — 254, the same code as `CHAR(36)` and `BINARY(16)` — so a
+/// `SELECT * FROM type_zoo` describes three columns identically and any mapping
+/// from the code alone has to call an enum a `char`. The spelling survives in the
+/// flags the server sets on the column instead, and this is where the driver reads
+/// it. Measured against MySQL 8.4.11 rather than taken from the docs:
+///
+/// ```text
+/// SELECT * FROM type_zoo
+///   a_enum        enum('sad','ok','happy')  254  flags 256        ENUM_FLAG
+///   a_char_uuid   char(36)                  254  flags 0
+///   a_binary_uuid binary(16)                254  flags 128        BINARY_FLAG
+/// ```
+///
+/// The three lines are what `the_flags_tell_an_enum_from_a_char_though_the_type_code_is_the_same`
+/// reads back off the container, bit for bit.
+///
+/// Only a `MYSQL_TYPE_STRING` column is asked about, so an extension outside MySQL
+/// that happens to set the same bit is not renamed by accident.
+fn flags_name(column_type: ColumnType, flags: ColumnFlags) -> Option<&'static str> {
+    if column_type != ColumnType::MYSQL_TYPE_STRING {
+        return None;
+    }
+    if flags.contains(ColumnFlags::ENUM_FLAG) {
+        return Some("enum");
+    }
+    if flags.contains(ColumnFlags::SET_FLAG) {
+        return Some("set");
+    }
+    None
 }
 
 // --------------------------------------------------------------------------- //
@@ -736,6 +777,43 @@ mod tests {
         );
     }
 
+    /// The type chip's name for the three columns MySQL describes identically.
+    ///
+    /// `ENUM`, `CHAR(36)` and `BINARY(16)` all arrive as `MYSQL_TYPE_STRING`, so the
+    /// type code names all three `char` and a user cannot tell an enum from a char.
+    /// The flag is the only thing that separates them; the values are the ones the
+    /// dev server puts on `type_zoo`, read in
+    /// `the_flags_tell_an_enum_from_a_char_though_the_type_code_is_the_same`.
+    #[test]
+    fn an_enum_is_named_by_its_flag_not_by_the_code_it_shares_with_char() {
+        assert_eq!(
+            flags_name(ColumnType::MYSQL_TYPE_STRING, ColumnFlags::ENUM_FLAG),
+            Some("enum")
+        );
+        assert_eq!(
+            flags_name(
+                ColumnType::MYSQL_TYPE_STRING,
+                ColumnFlags::BLOB_FLAG | ColumnFlags::BINARY_FLAG
+            ),
+            None,
+            "a binary column is still a char, not an enum"
+        );
+        assert_eq!(
+            flags_name(ColumnType::MYSQL_TYPE_STRING, ColumnFlags::SET_FLAG),
+            Some("set"),
+            "a SET is spelled by its flag too, since it is 254 as well"
+        );
+        assert_eq!(
+            flags_name(ColumnType::MYSQL_TYPE_STRING, ColumnFlags::empty()),
+            None
+        );
+        // The flag only renames the type code it belongs to.
+        assert_eq!(
+            flags_name(ColumnType::MYSQL_TYPE_BLOB, ColumnFlags::ENUM_FLAG),
+            None
+        );
+    }
+
     #[test]
     fn a_date_converts_from_either_protocol() {
         assert_eq!(
@@ -805,6 +883,23 @@ mod tests {
                 micros: 86_399_999_999
             }
         );
+    }
+
+    /// The time of day, with no JSON quotes around it.
+    ///
+    /// PyMySQL hands MySQL's `TIME` back as a `timedelta`, which the Python engine's
+    /// `to_text` fallback passed through `json.dumps` — so the cell it wrote for
+    /// `type_zoo.a_time` was `"23:59:59.999999"`, quotes included as part of the
+    /// text (`tests/golden/preview/mysql_type_zoo_live.ndjson`). Decoding the value
+    /// is what removes them; this is the same difference `docs/golden-deltas.md`
+    /// records as D-2 for an INTERVAL, and it must not come back.
+    #[test]
+    fn a_time_renders_without_the_json_quotes_the_python_fallback_added() {
+        let rendered = plain(ColumnType::MYSQL_TYPE_TIME, Some(&bytes("23:59:59.999999")))
+            .render_text()
+            .expect("a time has a text form");
+        assert_eq!(rendered, "23:59:59.999999");
+        assert!(!rendered.contains('"'), "quotes are not part of a time");
     }
 
     #[test]

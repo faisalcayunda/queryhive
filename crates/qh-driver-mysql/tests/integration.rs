@@ -14,6 +14,8 @@
 
 use std::time::Instant;
 
+use mysql_async::consts::{ColumnFlags, ColumnType};
+use mysql_async::prelude::Queryable;
 use qh_core::{FailureKind, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions, ObjectPath, Session,
@@ -122,6 +124,97 @@ async fn a_column_arrives_with_the_type_the_server_reported() {
     // MySQL reports the column type with the result, so unlike PostgreSQL there is
     // no separate describe step — but the names still have to be right.
     assert_eq!(types, vec!["bigint", "varchar", "decimal"]);
+}
+
+/// The three columns MySQL describes with the **same** type code, and the flag that
+/// is the only thing telling them apart.
+///
+/// `ENUM`, `CHAR(36)` and `BINARY(16)` all arrive as `MYSQL_TYPE_STRING` — 254 — so
+/// `column_type()` names all three `char`, and the Python engine's DBAPI description
+/// names all three `254`, which is why `tests/golden/RECORDED.md` could not tell the
+/// enum from the char either. The spelling is in the column's flags instead, and
+/// this reads them off the real server rather than from the manual: a column is an
+/// enum only because MySQL 8.4.11 says so in `ENUM_FLAG`.
+///
+/// The raw connection is opened here rather than through the driver because the
+/// flags do not survive into `ColumnMeta` — the driver hands the name on, and this
+/// is the measurement the name is derived from.
+#[tokio::test]
+async fn the_flags_tell_an_enum_from_a_char_though_the_type_code_is_the_same() {
+    let Some(config) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let mut conn = mysql_async::Conn::new(
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(config.host.clone())
+            .tcp_port(config.port)
+            .user(Some(config.user.clone()))
+            .pass(config.password.clone())
+            .db_name(config.database.clone())
+            .prefer_socket(false),
+    )
+    .await
+    .expect("connect to the dev container");
+
+    let result = conn
+        .query_iter("SELECT * FROM type_zoo")
+        .await
+        .expect("describe type_zoo");
+    let described: Vec<(String, ColumnType, ColumnFlags, String)> = result
+        .columns_ref()
+        .iter()
+        .map(|column| {
+            (
+                column.name_str().into_owned(),
+                column.column_type(),
+                column.flags(),
+                qh_driver_mysql::normalize::type_name(column),
+            )
+        })
+        .collect();
+    let _ = conn.disconnect().await;
+
+    let column = |name: &str| {
+        described
+            .iter()
+            .find(|(column, ..)| column == name)
+            .unwrap_or_else(|| panic!("type_zoo has no column {name}: {described:?}"))
+    };
+
+    // The type code on its own cannot name any of the three.
+    for name in ["a_enum", "a_char_uuid", "a_binary_uuid"] {
+        assert_eq!(
+            column(name).1,
+            ColumnType::MYSQL_TYPE_STRING,
+            "{name} is 254, the code CHAR, ENUM and BINARY all share"
+        );
+    }
+
+    // The flag is what separates the enum from the two char columns, and the raw
+    // bits are pinned: 256 on the enum, 0 on the char, 128 (BINARY_FLAG) on the
+    // binary uuid — none of them derived from the type code.
+    let (_, _, flags, type_name) = column("a_enum");
+    assert!(
+        flags.contains(ColumnFlags::ENUM_FLAG),
+        "the server did not set ENUM_FLAG on a_enum: {flags:?}"
+    );
+    assert_eq!(type_name, "enum");
+    assert_eq!(flags.bits(), 256, "measured on the dev container");
+
+    for (name, expected_bits) in [("a_char_uuid", 0u16), ("a_binary_uuid", 128u16)] {
+        let (_, _, flags, type_name) = column(name);
+        assert!(
+            !flags.contains(ColumnFlags::ENUM_FLAG),
+            "{name} must not look like an enum: {flags:?}"
+        );
+        assert_eq!(type_name, "char", "{name}");
+        assert_eq!(
+            flags.bits(),
+            expected_bits,
+            "{name} measured on the container"
+        );
+    }
 }
 
 #[tokio::test]
