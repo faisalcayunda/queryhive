@@ -22,3 +22,10 @@ backup.zip
 
 # Rust build artifacts
 /target
+
+# Secrets. `.env` holds the kenari API key used by tools/kenari_search.py, and it
+# was NOT ignored before this line was added -- which is exactly how a key ends up
+# in a commit. `git check-ignore -v .env` is the test that it stayed covered.
+.env
+.env.*
+!.env.example

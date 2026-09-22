@@ -15,7 +15,7 @@
 | Tahap | Status | Catatan |
 |---|---|---|
 | A — Audit codebase | **Selesai** | §1 blueprint. Diagnosis "fetch lambat" terbagi lima penyebab (P1–P5), semuanya merujuk path file dan sudah diverifikasi ulang terhadap kode. |
-| B — Riset web | **Gagal sebagian** | `web_search` mengembalikan HTTP 402 (kuota paket pengguna habis) → [BUTUH TINDAKAN MANUAL] #1. `web_fetch` **berfungsi**: `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
+| B — Riset web | **Berjalan** | `tools/kenari_search.py` membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
 | D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, `qh-driver-postgres`, dan `qh-driver-mysql` selesai dan hijau; Trino, export, credentials, storage, tunnel, FFI belum ada |
@@ -209,7 +209,7 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 
 | # | Isu | Dampak | Rencana |
 |---|---|---|---|
-| K1 | `web_search` tidak tersedia (HTTP 402, kuota paket habis) | §8.1 (pain point pesaing) tidak punya sumber; riset Tahap B tidak lengkap | [BUTUH TINDAKAN MANUAL] #1 |
+| K1 | ~~`web_search` tidak tersedia~~ **Selesai** | — | `tools/kenari_search.py` memberi pencarian dan pengambilan halaman. Riset Tahap B kini bisa dikerjakan; §8.1 tinggal diisi, bukan lagi terhalang tooling |
 | K2 | ~~Baseline benchmark Python belum ada~~ **Selesai** | — | Terukur untuk PG dan MySQL; Trino tertunda karena memori VM (lihat #4) |
 | K3 | ~~Zoo tipe belum diuji terhadap server nyata~~ **Sebagian selesai** | PostgreSQL sudah tervalidasi uji integrasi; MySQL belum | Snapshot server nyata untuk MySQL masuk tugas berikutnya #1 |
 | K4 | `tools/deps.py` (referensi di `docs/dependencies.md`) belum ada | Tabel dependency masih dibuat manual | Dibuat bersama job CI `cargo deny` |
@@ -280,16 +280,22 @@ daripada tidak ada apa-apa.
 
 ## [BUTUH TINDAKAN MANUAL]
 
-1. **Kuota paket untuk `web_search` habis.** Top up kredit paket, lalu jalankan riset Tahap B:
-   pain point Navicat/DBeaver/TablePlus/DataGrip/Beekeeper (sumber primer: issue tracker resmi
-   masing-masing proyek) dan status dukungan upstream versi PostgreSQL/MySQL/Trino untuk
-   `docs/compatibility.md`. Sampai selesai, klaim di §8.1 tetap `[perlu verifikasi]` dan
-   **tidak** dipakai sebagai dasar prioritas produk.
-2. **Notarisasi & code signing** butuh Apple Developer ID + sertifikat. Skrip dan konfigurasi
+1. ~~Kuota paket untuk `web_search` habis.~~ **Teratasi.** `tools/kenari_search.py` memakai akun
+   kenari pengguna, dan akun itu bersaldo — satu pencarian nyata berhasil. Riset Tahap B kini bisa
+   dijalankan: pain point Navicat/DBeaver/TablePlus/DataGrip/Beekeeper (sumber primer: issue
+   tracker resmi masing-masing proyek) dan status dukungan upstream versi PostgreSQL/MySQL/Trino
+   untuk `docs/compatibility.md`. Klaim di §8.1 tetap `[perlu verifikasi]` **sampai risetnya
+   benar-benar dijalankan** — tooling yang siap bukan riset yang selesai.
+2. **`x_search` belum bisa dipakai**: akun kenari menjawab `plan_limit_reached`, karena pencarian X
+   ditagih dari saldo dan bukan dari kuota paket. Top up saldo kalau pencarian X memang dibutuhkan;
+   `web_search` dan `web_fetch` sudah cukup untuk riset Tahap B.
+3. **Rotasi key kenari.** Key sempat ditempelkan ke dalam percakapan, jadi harus dianggap bocor.
+   Buat key baru di kenari.id, taruh di `.env` (sudah di-gitignore), lalu hapus yang lama.
+4. **Notarisasi & code signing** butuh Apple Developer ID + sertifikat. Skrip dan konfigurasi
    disiapkan pada Fase 4; sampai tersedia, build memakai ad-hoc signing.
-3. **Kunci EdDSA Sparkle** untuk update bertanda tangan belum ada dan tidak boleh masuk repo;
+5. **Kunci EdDSA Sparkle** untuk update bertanda tangan belum ada dan tidak boleh masuk repo;
    dibuat pada Fase 4 dan disimpan sebagai secret CI.
-4. **VM podman hanya punya 2 GiB RAM**, sedangkan Trino single-node butuh sekitar 2 GiB untuk
+6. **VM podman hanya punya 2 GiB RAM**, sedangkan Trino single-node butuh sekitar 2 GiB untuk
    dirinya sendiri. Naikkan dulu, lalu jalankan `deploy/dev/up.sh trino`:
    ```bash
    podman machine stop
