@@ -380,6 +380,28 @@ pub trait Session: Send {
 ///
 /// `next_batch` returning `Ok(None)` means the result is finished. An empty
 /// batch is **not** the end: a driver may legally return one while it waits.
+///
+/// ## When `columns` is valid
+///
+/// When a statement returns rows, `columns` is populated **by the time
+/// `next_batch` returns a batch that contains them**. That is the guarantee
+/// callers may rely on, and it is deliberately weaker than "valid as soon as
+/// `execute` returns", because the stronger promise is not implementable for every
+/// server:
+///
+/// - PostgreSQL and MySQL describe a result set before it runs, so their cursors
+///   fill this in during `execute` and it is never empty.
+/// - Trino describes it when the result set *begins*, which for a blocking query is
+///   when the query *finishes*. Waiting for that inside `execute` would mean
+///   `execute` blocked for the whole query, and a caller holding no cursor has
+///   nothing to cancel — a defect that was measured, not hypothesised: 2.002 s to
+///   `execute` a `SELECT SLEEP(2)`. So a Trino cursor reports an empty slice until
+///   its first batch arrives.
+///
+/// A caller that needs the column list but has no rows yet — a grid drawing its
+/// header before data arrives — must therefore tolerate an empty slice and update
+/// when the first batch lands. A statement with no result set at all (`DDL`, an
+/// `UPDATE`) ends with `Ok(None)` and may leave this empty throughout.
 #[async_trait]
 pub trait Cursor: Send {
     fn columns(&self) -> &[ColumnMeta];

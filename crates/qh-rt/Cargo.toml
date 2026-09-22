@@ -1,0 +1,23 @@
+[package]
+name = "qh-rt"
+version = "0.1.0"
+description = "The tokio runtime and its explicit P-core/E-core QoS mapping for Apple Silicon"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+
+# macOS only. The QoS class API and `sysctlbyname` are what this crate exists for,
+# and both are Darwin-specific; on other platforms the crate still builds and runs,
+# it just has nothing to map.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"

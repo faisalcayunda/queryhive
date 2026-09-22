@@ -117,7 +117,20 @@
     kolom menyusul di batch pertama. Ini sengaja menyimpang dari kontrak `Cursor`, dan
     alasannya persis pelajaran K11: menunggu di sini berarti menunggu seluruh query, dan
     pemanggil yang belum punya cursor tidak punya apa pun untuk dibatalkan.
-- [x] **210 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `crates/qh-rt` — runtime dan pemetaan QoS P-core/E-core (ADR-0010), **7 uji unit**.
+  Jumlah core dibaca dari `hw.perflevel0.physicalcpu` dan `hw.perflevel1.physicalcpu` lewat
+  `sysctlbyname`, bukan dari `available_parallelism()` — yang terakhir itu mengembalikan
+  **total** dan menyebut P-core setara E-core, dan itulah kesalahan yang ADR-0010 ada untuk
+  mencegah. Runtime utama berukuran jumlah P-core dengan QoS `USER_INITIATED`; pool
+  `UTILITY` dan `BACKGROUND` untuk indeks metadata dan spill.
+  Yang penting: kelasnya **dibaca kembali** (`pthread_get_qos_class_np`) dari dalam worker
+  thread, bukan sekadar diminta. Meminta kelas dan mendapatkannya itu dua hal berbeda, dan
+  hanya membaca kembali yang membedakannya — ujinya membuktikan yang kedua.
+  Tiga blok `unsafe`, masing-masing dengan `SAFETY:`, dan `unsafe_code` di-`deny` di tingkat
+  lint sehingga blok keempat tidak bisa ditambahkan tanpa sengaja. Di mesin non-Apple-Silicon
+  crate ini tetap berjalan: pool lambat dapat **1** worker, bukan 0, karena pool tanpa worker
+  berarti indeks metadata yang diam-diam tidak pernah berjalan.
+- [x] **217 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
