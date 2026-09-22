@@ -510,6 +510,44 @@ yang tidak sama; dan sertifikat host **ditolak dengan jelas**, bukan diabaikan.
 Yang **belum** teruji dan disebut apa adanya: jalur "kunci agen diterima" — jalur
 connect/identities/sign-nya berjalan, tapi container ini tidak menerima kunci agen mesin ini.
 
+### TLS: satu keputusan untuk tiga driver, dan satu driver yang tidak bisa ikut (22 Sep 2026)
+
+Tiga agen mengerjakan TLS di tiga crate terpisah. Yang mereka **tidak** boleh putuskan sendiri
+adalah semantik `Prefer`, dan itu terbukti benar: agen PostgreSQL memilih `Prefer` memverifikasi
+sertifikat, dengan alasan yang masuk akal (verifikasi memberi gigi pada aturan "handshake gagal
+bukan alasan untuk jatuh ke plaintext"). Saya **membalikkannya**, karena alasan yang lebih
+menentukan: psycopg dan pymysql tidak memverifikasi di `prefer`, jadi memverifikasi di situ akan
+memutus setiap koneksi yang hari ini bekerja ke server internal bersertifikat sendiri — dengan
+error yang hanya menyebut "TLS handshake". Aturan yang penting tetap utuh: hanya
+`NoClientSslFlagFromServer` yang boleh memicu percobaan ulang tanpa enkripsi, dan handshake yang
+rusak tetap error. Keputusan itu dikirim ke dua agen yang masih berjalan sebagai instruksi, bukan
+diserahkan pada tebakan masing-masing, sehingga tiga driver berperilaku sama.
+
+Konsekuensi tak terhindarkan yang harus dicatat: kosakata `sslmode` milik aplikasi adalah milik
+libpq, yang artinya **tidak** sama dengan nama enum kami. libpq `require` mengenkripsi **tanpa**
+memverifikasi; hanya `verify-ca`/`verify-full` yang meminta sertifikat diperiksa. Karena itu
+pemetaannya sekarang: `disable`→`Disable`, `prefer`/kosong→`Prefer`, `require`→`RequireNoVerify`,
+`verify-ca`/`verify-full`→`Require`. Sebelumnya `require` memetakan ke mode yang memverifikasi —
+artinya upgrade akan menolak server internal bersertifikat sendiri bagi semua orang yang memakai
+`require`. Ejaan yang tidak dikenal sekarang **ditolak**, bukan diam-diam menjadi default: salah
+ketik pada `sslmode` tidak layak menentukan apakah koneksi dienkripsi tanpa memberi tahu siapa pun.
+
+**Perbedaan antar-driver yang tidak bisa dihilangkan hari ini.** PostgreSQL dan (kemungkinan)
+Trino memakai `rustls-platform-verifier`, sehingga CA korporat yang dipasang pengguna di Keychain
+langsung dipercaya. **MySQL tidak bisa**: `mysql_async` 0.36 (dan 0.37.1) menyimpan
+`build_tls_connector` serta cached connector sebagai `pub(crate)`, dan satu-satunya penyetel root
+store mengambil tipe yang tidak di-re-export — probe-nya gagal dengan `E0603`. Jadi untuk MySQL
+`Require` memverifikasi terhadap root bawaan saja, dan pengguna dengan CA korporat mendapat
+**penolakan**, bukan koneksi terpercaya. Agennya menolak mengakalinya dengan verifikasi di muka,
+dan itu keputusan yang benar: memverifikasi lebih dulu lalu menyambung dengan klien yang tidak
+memeriksa adalah lubang TOCTOU. Menutupnya butuh hook dari upstream (atau fork) **plus** medan
+`ssl_ca` di `ConnectionConfig` — pekerjaan tersendiri, bukan tambalan.
+
+Satu celah di sisi aplikasi yang ditemukan dari sini: `Connections.swift:97-105` hanya memberi
+MySQL pilihan `disable`/`require` dengan bawaan `disable`, sedangkan driver-nya berdefault
+`Prefer`. Jadi mode bawaan driver tidak bisa dipilih dari picker — bukan peta yang hilang,
+melainkan kosakata UI yang belum punya kata untuk itu.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 1. **Menyelidiki K11** — `KILL QUERY` yang tidak menghentikan join panjang. Ini yang paling
