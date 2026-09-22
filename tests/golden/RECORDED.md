@@ -469,3 +469,33 @@ that sentence is today.
   Trino throughout this work, and both suites pass when re-run on their own --
   trino 19/19, postgres 14/14, mysql 17/17. Nothing outside `qh-ffi --test
   golden` failed for a reason that has anything to do with these snapshots.
+
+## Setelah perbaikan (23 Sep 2026)
+
+Empat cacat yang dicatat di atas sudah dikerjakan, dan yang berubah diukur ulang terhadap
+server yang sama dengan perintah yang sama. Baris di bawah menggantikan verdict di atas untuk
+kasus yang disebut; sisanya belum berubah.
+
+| kasus | sebelum | sesudah |
+| --- | --- | --- |
+| `trino_explain_live` | 2 event, `SYNTAX_ERROR` pada `;` | **4 event, identik** dengan snapshot |
+| `trino_type_zoo_live` | tipe kolom turun menjadi `timestamp with time zone`/`time`, nilai `.123000` dan `00:00:00` | **tipe kolom identik**; sisa dua sel nilai |
+| `mysql_type_zoo_live` | `a_enum` bertipe `char` | `a_enum` bertipe **`enum`** — flag `ENUM_FLAG` dibaca, bukan kode `254` yang dipakai bersama `CHAR` |
+| `mysql_schemas_live` | `mysql has no schema level` | `mysql has no schema level; use catalogs or tables instead` |
+| `postgres_catalogs_live` | ditolak | sedang dikerjakan |
+
+Dua sel yang masih berbeda di `trino_type_zoo_live`, keduanya sudah punya sebab:
+
+- `tiny_negative`: `-1E-10` melawan `-0.0000000001` — D-1, perbaikan disengaja.
+- `an_interval`: `"3 days, 4:05:06"` melawan `3 04:05:06.000`. D-2 hanya mencakup bagian kutipnya;
+  **badan teksnya masih berbeda**, karena Trino `INTERVAL DAY TO SECOND` belum punya decoder di
+  model nilai ini sehingga engine Rust meneruskan teks wire apa adanya. Itu celah decoder, bukan
+  soal kapabilitas, dan menutupnya mengubah setiap grid dan ekspor yang memuat interval.
+
+Dua keputusan yang diambil dari sini, beserta tempatnya:
+
+- `columns.type` adalah **nama tipe, bukan kode DBAPI** — `docs/golden-deltas.md` D-8. Kasus yang
+  hanya berbeda di medan ini diklasifikasikan oleh entri itu, bukan ditimbang ulang satu per satu.
+- Kedua puluh kasus live tetap di daftar `LIVE` di `crates/qh-ffi/tests/golden.rs`, dengan gigi
+  bahwa setiap id wajib dideklarasikan di `tools/golden/live_cases.py`.
+

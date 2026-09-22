@@ -142,6 +142,27 @@ dengan kutipnya.
 Rust akan merender `3 days, 4:05:06`, tanpa kutip. Isi teksnya sengaja **dipertahankan sama**
 supaya perbedaannya hanya pada kutip — perbedaan yang sekecil mungkin dan mudah diuji.
 
+### D-8 — `columns.type` adalah **nama tipe**, bukan kode DBAPI · **Perbaikan disengaja**
+
+Mesin Python mengirim apa yang diberikan deskripsi DBAPI: sebuah **kode angka** — `23` untuk
+`int4` Postgres, `3` untuk `int` MySQL, `254` untuk kolom enum MySQL. Mesin Rust mengirim
+namanya: `int4`, `int`, `enum`.
+
+Kode itu bukan desain, melainkan sisa dari cara pustaka klien mendeskripsikan kolom: artinya
+berbeda di tiap DBAPI, berubah antar versi pustaka, dan — yang membuatnya tidak bisa
+dipertahankan — **tidak cukup untuk mengatakan apa kolomnya**. MySQL melaporkan `ENUM`, `CHAR`
+dan `BINARY` semuanya sebagai `254`, jadi `254` dan `char` sama-sama berarti "mungkin enum".
+`enum` tidak. Itu satu-satunya dari ketiga selisih di kasus tipe MySQL yang diperbaiki, dan
+perbaikannya membaca flag kolom, bukan kode yang dipakai bersama.
+
+Nama juga satu-satunya dari keduanya yang bisa dipakai pemanggil: aplikasi bisa menampilkannya
+dan bercabang atasnya; sebuah kode angka membuatnya harus menghafal tabel milik pustaka lain.
+
+**Akibatnya pada klasifikasi:** beberapa kasus live berbeda **hanya** di medan ini. Mereka
+diklasifikasikan oleh entri ini, bukan ditimbang ulang satu per satu tiap kali. Peringatannya:
+satu perubahan penamaan di sisi driver menggerakkan beberapa kasus sekaligus, jadi perubahan
+seperti itu dilakukan dengan sadar, bukan sebagai efek samping.
+
 ## Temuan yang sudah ditutup
 
 ### T-1 — Dua aturan berbeda untuk `timestamptz` · **Ditutup 22 Sep 2026**
