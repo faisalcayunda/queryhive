@@ -53,6 +53,7 @@ pub mod plan;
 mod writers;
 mod xls;
 mod xlsx;
+mod zip;
 
 use std::io;
 use std::path::Path;
@@ -65,6 +66,7 @@ pub use plan::{export_rows, ExportOutcome, ExportSpec, Exporter};
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
 pub use xls::XlsWriter;
 pub use xlsx::XlsxWriter;
+pub use zip::bundle;
 
 /// One export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

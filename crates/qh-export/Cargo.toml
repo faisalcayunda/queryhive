@@ -12,6 +12,13 @@ qh-core.workspace = true
 # The JSON writer's own formatting, so that the array form and the render path share
 # one implementation of Python's layout rather than two that drift.
 serde_json = { version = "1", features = ["preserve_order"] }
+# Deflate, for `bundle`'s archive: a multi-part export is downloaded as one zip, and
+# storing it uncompressed would make a 200 MB CSV a 200 MB download. The Rust backend
+# and not the C one, for the same reason the TLS stack is rustls — nothing to link,
+# nothing extra to sign. The archive's bytes are not compared with Python's `zipfile`
+# (two correct deflate implementations may choose different back-references); its
+# contents are.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 thiserror.workspace = true
 
 [lints.rust]

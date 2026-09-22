@@ -229,6 +229,33 @@ impl Exporter {
         Ok(())
     }
 
+    /// Write one row and report progress on the 1000-row floor.
+    ///
+    /// The floor lives here rather than in either caller because there are two of
+    /// them: [`export_rows`] writes from a synchronous iterator, and the engine's
+    /// `export` command writes from an async cursor whose rows arrive a batch at a
+    /// time. Both must report at the same points, or the app's progress bar moves at
+    /// one rate for a file export and another for a pipe.
+    pub fn write_row_with_progress(
+        &mut self,
+        row: &[Value],
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<(), ExportError> {
+        self.write_row(row)?;
+        if self.rows % PROGRESS_EVERY == 0 {
+            progress(self.rows);
+        }
+        Ok(())
+    }
+
+    /// The closing report, so `done` is never preceded by a stale count.
+    ///
+    /// Unconditional, and called even when the export was cancelled: the last thing
+    /// the app hears before `done` is the number of rows actually written.
+    pub fn report_progress(&self, progress: &mut dyn FnMut(u64)) {
+        progress(self.rows);
+    }
+
     /// Close the current part. Safe to call twice.
     ///
     /// Nothing opens a new part afterwards, so this is the end of the export.
@@ -296,7 +323,13 @@ impl Exporter {
         Ok(())
     }
 
-    fn into_outcome(self) -> ExportOutcome {
+    /// Finish the export and hand back what it produced.
+    ///
+    /// Public because an asynchronous caller drives [`Exporter`] itself — the engine's
+    /// `export` command takes its rows from a cursor — and that caller needs the same
+    /// report [`export_rows`] returns. [`Exporter::finish`] must have been called
+    /// first; a part still open is closed by nothing here.
+    pub fn into_outcome(self) -> ExportOutcome {
         ExportOutcome {
             files: self.files,
             rows: self.rows,
@@ -375,7 +408,7 @@ where
 fn feed<'p, E, I>(
     exporter: &mut Exporter,
     rows: I,
-    mut progress: Option<&mut (dyn FnMut(u64) + 'p)>,
+    progress: Option<&'p mut (dyn FnMut(u64) + 'p)>,
     cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), ExportError>
 where
@@ -383,6 +416,14 @@ where
     E: Error + Send + Sync + 'static,
 {
     let mut rows = rows.into_iter();
+    // One reporter for the whole loop, and a no-op when the caller wants none, rather
+    // than a fresh reborrow per row: the row loop needs it mutably on every iteration,
+    // and a per-iteration reborrow is a borrow the compiler cannot see the end of.
+    let mut ignore = |_: u64| {};
+    let report: &mut dyn FnMut(u64) = match progress {
+        Some(report) => report,
+        None => &mut ignore,
+    };
     loop {
         // Asked before the next row is taken, so the row that arrives while the user
         // is clicking Cancel is not half-written into the file.
@@ -392,16 +433,9 @@ where
         }
         let Some(row) = rows.next() else { break };
         let row = row.map_err(ExportError::source)?;
-        exporter.write_row(&row)?;
-        if let Some(report) = progress.as_mut() {
-            if exporter.rows() % PROGRESS_EVERY == 0 {
-                report(exporter.rows());
-            }
-        }
+        exporter.write_row_with_progress(&row, report)?;
     }
-    if let Some(report) = progress.as_mut() {
-        report(exporter.rows());
-    }
+    exporter.report_progress(report);
     Ok(())
 }
 
