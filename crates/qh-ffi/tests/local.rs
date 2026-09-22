@@ -508,16 +508,23 @@ async fn a_refused_level_names_the_commands_that_work_instead() {
         "mysql has no schema level; use catalogs or tables instead"
     );
 
-    // The hint follows the driver, not the engine's name: PostgreSQL has schemas and
-    // tables, and no catalog level of its own.
+    // And the gate does not speak for the driver on a listing level. PostgreSQL's tree
+    // starts at schemas and `catalogs` is a command it answers -- that is the pair the
+    // previous engine's own test asserts -- so the refusal must not happen here, before the
+    // driver is asked. Nothing listens on port 1, so what comes back is the connection
+    // failing: the proof that the command was handed over rather than pre-empted.
     let error = events(
         Command::Catalogs,
-        &[("DB_KIND", "postgres"), ("DB_HOST", "127.0.0.1")],
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "127.0.0.1"),
+            ("DB_PORT", "1"),
+        ],
     )
     .await
-    .expect_err("postgres has no catalog level");
-    assert_eq!(
-        error.message(),
-        "postgres has no catalog level; use schemas or tables instead"
+    .expect_err("nothing listens on port 1");
+    assert!(
+        !matches!(error, CliError::Usage(_)),
+        "a listing level a driver answers has to reach the driver: {error:?}"
     );
 }

@@ -105,6 +105,23 @@ fn level_for(
         .iter()
         .copied()
         .find(|level| capabilities.levels.contains(level))
+        .or_else(|| {
+            // A driver answers a listing level it does not put in its tree, and PostgreSQL is
+            // the case: its tree starts at schemas, and `catalogs` still answers with the
+            // databases on the server. Both halves are deliberate and the previous engine
+            // pins both -- its driver declares `levels = ("schema", "table")` and answers
+            // `catalogs` -- so the question here is which of the two a *command* asks about,
+            // and it is the command. Reading `levels` as "the commands this driver answers"
+            // refuses a command the driver implements, before the driver is ever asked.
+            //
+            // Only a listing level falls through, which keeps the other half intact: a driver
+            // that genuinely has no such level is still refused before anything is opened,
+            // which is what makes that refusal a usage error rather than a failure.
+            accepted
+                .first()
+                .copied()
+                .filter(|level| LISTING_LEVELS.contains(level))
+        })
         .ok_or_else(|| {
             CliError::Usage(format!(
                 "{kind} has no {level_name} level; {}",
@@ -112,6 +129,14 @@ fn level_for(
             ))
         })
 }
+
+/// The levels a driver may answer without declaring them in its tree.
+///
+/// The list of databases a connection can reach is a picker list rather than a node: it is
+/// what the user chooses from, not something the tree draws underneath the connection. A
+/// driver that lists them is right not to call its tree catalog-first, and the command is
+/// still one it answers.
+const LISTING_LEVELS: [BrowseLevel; 2] = [BrowseLevel::Catalog, BrowseLevel::Database];
 
 /// What to use instead, for a refusal to name.
 ///
