@@ -1058,26 +1058,59 @@ satu angka.
 
 ### 8.1 Pain point pesaing
 
-> **Status riset: TIDAK SELESAI.** `web_search` tidak tersedia pada sesi ini (kuota paket
-> pengguna habis — lihat `PROGRESS.md`, [BUTUH TINDAKAN MANUAL]). Tabel di bawah karena itu
-> memuat **hipotesis** yang harus ditutup dengan sumber sebelum dipakai untuk keputusan produk.
-> Setiap baris wajib diberi URL saat riset dijalankan; §5 poin 9 melarang mengarang sumber, jadi
-> kolom Sumber sengaja masih kosong.
+> **Status riset: SEBAGIAN SELESAI.** Perkakas pencarian sudah ada (`tools/kenari_search.py` —
+> perkakas lokal, lihat `PROGRESS.md`), jadi riset ini bisa dijalankan. Yang tertutup adalah
+> **DBeaver**: empat issue di repo resminya dibuka langsung dan isinya dikutip di tabel.
+> **Navicat dan DataGrip belum.** Sumber yang ditemukan untuk keduanya **ditolak** karena bukan
+> sumber primer; alasan penolakannya dicatat di bawah tabel. §5 poin 9 melarang mengarang sumber,
+> jadi baris yang belum tertutup tetap bertanda belum, bukan diisi dengan sumber lemah.
 
-| Pain point yang perlu diverifikasi | Produk yang disebut | Jawaban yang direncanakan di sini | Sumber |
-|---|---|---|---|
-| Hasil besar lambat/membekukan UI | Navicat, DBeaver | Result store Rust + `NSTableView` (§2.3–§2.5) | [perlu verifikasi] |
-| Memori membengkak pada hasil besar | DBeaver (JVM) | Spill mmap + batas memori (§2.3) | [perlu verifikasi] |
-| Tidak ada mode production / proteksi salah-eksekusi | Navicat, DBeaver | Mode production + read-only (§7.2, now in Fase 1) | [perlu verifikasi] |
-| Berat/lambat start pada mesin angkatan lama | DataGrip (JVM) | Cold start < 1 dtk (§6) | [perlu verifikasi] |
-| Pembatalan query tidak responsif | beberapa klien | Cancel native per driver < 500 ms (§2.7) | [perlu verifikasi] |
-| Harga/langganan | Navicat, TablePlus, DataGrip | MIT, gratis (§8.3) | [perlu verifikasi] |
+Setiap baris menyebut produknya sendiri, supaya yang sudah selesai tidak tertahan oleh yang belum.
 
-Cara menutup kesenjangan ini (langkah persis, agar bisa dijalankan siapa pun): jalankan
-`web_search` untuk `<produk> slow large result set issue`, ambil issue tracker resmi sebagai
-sumber primer (mis. repo `dbeaver/dbeaver` issues), catat URL + tanggal akses, lalu ganti setiap
-baris `[perlu verifikasi]` dengan kutipan. Sampai itu terjadi, §8.2 tidak dipakai sebagai dasar
-prioritas produk.
+| Pain point | Produk | Jawaban yang direncanakan | Sumber | Status |
+|---|---|---|---|---|
+| Hasil besar lambat/membekukan UI | DBeaver | Result store Rust + `NSTableView` (§2.3–§2.5) | [dbeaver#34854](https://github.com/dbeaver/dbeaver/issues/34854) — "DBeaver application hang out and freeze, when reaches 25,000 rows of selected data." | **Terverifikasi** |
+| Memori membengkak pada hasil besar | DBeaver (JVM) | Spill mmap + batas memori (§2.3) | [dbeaver#34854](https://github.com/dbeaver/dbeaver/issues/34854) — judulnya `java.lang.OutOfMemoryError: Java heap space` | **Terverifikasi** |
+| Proteksi mode production bisa dilewati | DBeaver | Mode production + read-only (§7.2, kini Fase 1) | [dbeaver#40778](https://github.com/dbeaver/dbeaver/issues/40778) — database bertanda Production + read-only tetap bisa dihapus; maintainer menjawab "I was able to delete a read-only database designated as the production database. Wow!" · [dbeaver#19361](https://github.com/dbeaver/dbeaver/issues/19361) — transaksi tetap tercatat pada koneksi READONLY PRODUCTION | **Terverifikasi, dan lebih tajam dari dugaan** |
+| Pembatalan query tidak responsif | DBeaver | Cancel native per driver < 500 ms (§2.7) | [dbeaver#35474](https://github.com/dbeaver/dbeaver/issues/35474) — "Cancel active query" tidak menghentikan query setelah Retry; pelapor harus mematikannya dari tab lain. Masih direproduksi di Community Edition 25.0.0 | **Terverifikasi** |
+| Hasil besar lambat/membekukan UI | Navicat | Sama seperti baris pertama | — | **Belum terverifikasi** |
+| Proteksi mode production | Navicat | Mode production + read-only (§7.2) | — | **Belum terverifikasi** |
+| Berat/lambat start pada mesin angkatan lama | DataGrip (JVM) | Cold start < 1 dtk (§6) | — | **Belum terverifikasi** |
+| Harga | Navicat | MIT, gratis (§8.3) | — | **Belum terverifikasi** |
+| Harga | TablePlus | MIT, gratis (§8.3) | [tableplus.com/pricing](https://tableplus.com/pricing) — "One-time purchase, no auto-renewal. Perpetual license (no subscription)." | **Terverifikasi, dan mengoreksi klaim lama** |
+| Harga | DataGrip | MIT, gratis (§8.3) | — | **Belum terverifikasi** |
+
+**Koreksi terhadap tabel sebelumnya.** Baris "Harga" menyebut TablePlus sebagai produk
+**berlangganan**. Halaman harga resminya menyatakan sebaliknya: sekali beli, tanpa perpanjangan
+otomatis. Klaim itu dicabut. Ini contoh persis mengapa kolom Sumber wajib diisi — hipotesis yang
+terdengar masuk akal bisa salah arah, dan di sini salahnya justru melemahkan argumen diferensiasi,
+bukan menguatkannya.
+
+**Sumber yang ditolak, dan alasannya.** Ini dicatat supaya tidak ada yang mengulanginya dan
+mengira kesenjangannya sudah tertutup.
+
+- *Navicat*: pencarian hanya memunculkan `global.php.cn`, sebuah situs tutorial, untuk klaim bahwa
+  versi 16 dan sebelumnya tidak bisa membatalkan query. Itu bukan issue tracker resmi Navicat,
+  jadi tidak dipakai betapapun isinya terdengar cocok dengan dugaan awal. Forum resmi Navicat
+  tidak muncul dalam pencarian yang dijalankan.
+- *DataGrip*: yang muncul adalah halaman dokumentasi JetBrains sendiri tentang *cara mendiagnosis*
+  startup lambat dan konsumsi memori tinggi. Panduan troubleshooting milik vendor menunjukkan
+  masalah itu cukup sering untuk dibuatkan halamannya, tetapi **tidak** menunjukkan DataGrip lebih
+  lambat daripada pembandingnya. Itu kesimpulan yang tidak boleh diambil dari sumber tersebut, dan
+  barisnya karena itu tetap terbuka.
+
+**Cara menutup sisanya** (langkah persis, agar bisa dijalankan siapa pun):
+
+1. Navicat: cari di forum resmi dan catatan rilis versinya, karena produk ini tidak punya issue
+   tracker publik di GitHub seperti DBeaver.
+2. DataGrip: cari di YouTrack JetBrains (`youtrack.jetbrains.com`, proyek `DBE`) — di sana laporan
+   pengguna adalah sumber primer, berbeda dari halaman bantuan.
+3. Catat URL + tanggal akses, lalu ganti setiap baris **Belum terverifikasi** dengan kutipan.
+4. Sampai itu terjadi, baris yang belum tertutup **tidak** dipakai sebagai dasar prioritas produk,
+   dan §8.2 mewarisi batasan yang sama.
+
+Tanggal akses seluruh sumber di atas: **2026-09-22**.
+
 
 ### 8.2 Fitur pembeda
 
