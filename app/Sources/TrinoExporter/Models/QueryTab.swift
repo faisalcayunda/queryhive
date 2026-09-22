@@ -368,7 +368,7 @@ final class QueryTab: Identifiable {
     /// Guards a stale reply: a second load updates the token, and the first run's late events are
     /// then ignored instead of overwriting the newer list.
     var objectToken: UUID?
-    var objectProcess: Process?
+    var objectProcess: (any EngineRun)?
 
     var isObjects: Bool { objectScope != nil }
 
@@ -494,15 +494,15 @@ final class QueryTab: Identifiable {
     var startedAt = Date.now
     var finishedAt = Date.now
 
-    var process: Process?
+    var process: (any EngineRun)?
     var runToken = UUID()
-    /// A preview is its own process and its own token: pressing Run while an export is in flight
+    /// A preview is its own run and its own token: pressing Run while an export is in flight
     /// must not be able to cancel the export, or vice versa.
-    var previewProcess: Process?
+    var previewProcess: (any EngineRun)?
     var previewToken = UUID()
-    /// The count is its own process and token too: asking for a total must not disturb the run it
+    /// The count is its own run and token too: asking for a total must not disturb the run it
     /// is asking about.
-    var countProcess: Process?
+    var countProcess: (any EngineRun)?
     var countToken = UUID()
     var cancelled = false
     /// Set while the debounced... no: set when the user has asked to stop but the engine has

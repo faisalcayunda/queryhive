@@ -126,7 +126,7 @@ struct ConnectionEditorSheet: View {
     @State private var showAllSchemas = false
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
-    @State private var testProcess: Process?
+    @State private var testProcess: (any EngineRun)?
     @State private var testRun = UUID()
     @State private var attemptedSave = false
     /// The id a brand-new connection will save under, reused across retries so a Save that fails
@@ -626,7 +626,7 @@ struct ConnectionEditorSheet: View {
         )
         var catalogs = 0
         var message: String?
-        testProcess = Engine.run("test", env: env, onEvent: { event in
+        testProcess = Engine.current.run("test", env: env, onEvent: { event in
             guard testRun == run else { return }
             if event.event == "test" { catalogs = event.catalogCount ?? 0 }
             if event.event == "error" { message = event.message }

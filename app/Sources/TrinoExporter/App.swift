@@ -108,9 +108,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    // A python child left running would keep writing after the window is gone.
+    // An engine child left running would keep writing after the window is gone.
     func applicationWillTerminate(_ notification: Notification) {
-        Engine.running.forEach { $0.terminate() }
+        Engine.current.terminateAll()
     }
 }
 

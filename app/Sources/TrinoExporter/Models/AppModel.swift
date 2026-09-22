@@ -240,7 +240,7 @@ final class AppModel {
         tab.objectToken = token
         tab.objectLoading = true
         tab.objectError = nil
-        tab.objectProcess = Engine.run("objects", env: env, onEvent: { event in
+        tab.objectProcess = Engine.current.run("objects", env: env, onEvent: { event in
             guard tab.objectToken == token else { return }
             switch event.event {
             case "objects":
@@ -755,7 +755,7 @@ final class AppModel {
         // `catalogs` means a catalog for Trino and a database for MySQL; the command is shared
         // because it is the same question ("what is directly under the connection?").
         let catalogNode = connection.kind == .mysql ? TreeNode.database : TreeNode.catalog
-        Engine.run(command, env: env, onEvent: { event in
+        Engine.current.run(command, env: env, onEvent: { event in
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
             case "schemas": node.children = (event.names ?? []).map { TreeNode.schema($0, parent: node) }
@@ -806,7 +806,7 @@ final class AppModel {
         guard var env = try? connectionEnvironment(connection) else { return }
         env["RETRIES"] = "2"
         loadingOptions.insert(key)
-        Engine.run("catalogs", env: env, onEvent: { [weak self] event in
+        Engine.current.run("catalogs", env: env, onEvent: { [weak self] event in
             guard event.event == "catalogs" else { return }
             self?.catalogOptions[connectionID] = event.names ?? []
         }, onExit: { [weak self] _, _ in
@@ -825,7 +825,7 @@ final class AppModel {
         // Blank means "the connection's own database", which is the Postgres case.
         if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
         loadingOptions.insert(key)
-        Engine.run("schemas", env: env, onEvent: { [weak self] event in
+        Engine.current.run("schemas", env: env, onEvent: { [weak self] event in
             guard event.event == "schemas" else { return }
             self?.schemaOptions[key] = event.names ?? []
         }, onExit: { [weak self] _, _ in
@@ -1021,7 +1021,7 @@ final class AppModel {
         var rows: [[String?]] = []
         var truncated = false
         var finished = false
-        tab.previewProcess = Engine.run("preview", env: env, onEvent: { event in
+        tab.previewProcess = Engine.current.run("preview", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
@@ -1095,7 +1095,7 @@ final class AppModel {
         var columns: [Event.Column] = []
         var rows: [[String?]] = []
         var finished = false
-        tab.previewProcess = Engine.run("explain", env: env, onEvent: { event in
+        tab.previewProcess = Engine.current.run("explain", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
@@ -1152,7 +1152,7 @@ final class AppModel {
         tab.countError = nil
         let run = UUID()
         tab.countToken = run
-        tab.countProcess = Engine.run("count", env: env, onEvent: { event in
+        tab.countProcess = Engine.current.run("count", env: env, onEvent: { event in
             guard tab.countToken == run else { return }
             if event.event == "error" { tab.countError = event.message }
             if let count = event.count { tab.totalRows = count }
@@ -1240,7 +1240,7 @@ final class AppModel {
         let run = UUID()
         tab.runToken = run
         var message: String?
-        tab.process = Engine.run(command, env: env, onEvent: { [weak self] event in
+        tab.process = Engine.current.run(command, env: env, onEvent: { [weak self] event in
             guard let self, tab.runToken == run else { return }
             if event.event == "error" { message = event.message }
             self.handle(event, in: tab)

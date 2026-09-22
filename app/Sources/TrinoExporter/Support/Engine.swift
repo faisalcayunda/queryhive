@@ -1,9 +1,16 @@
 import Foundation
 
-/// Launches the bundled Python engine at Contents/Resources/engine/. Shared by the export
-/// flow and the connection editor's Test button, so the launch rules live in exactly one place.
-enum Engine {
-    static var running = Set<Process>()
+/// The bundled Python engine at Contents/Resources/engine/ — the Fase 1 implementation behind
+/// `DatabaseEngine` (ADR-0001). Shared by the export flow and the connection editor's Test button,
+/// so the launch rules live in exactly one place.
+///
+/// A value with no stored state: the children it has started are tracked in `running`, so any
+/// instance can stop them all. It is what makes the migration a seam rather than a rewrite — the
+/// calls the UI makes do not know which engine answers them.
+struct PythonEngine: DatabaseEngine {
+    /// The children this process has started. Private because callers get a handle per run, not the
+    /// set; `terminateAll()` is the only thing the app delegate needs on quit.
+    private static var running = Set<Process>()
 
     private struct Location {
         let python: URL
@@ -27,10 +34,10 @@ enum Engine {
     /// sensitive) are redacted out of stderr and out of `error` event messages before either
     /// reaches the UI.
     @discardableResult
-    static func run(_ command: String, env: [String: String],
-                     onEvent: @escaping (Event) -> Void,
-                     onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> Process? {
-        guard let location = locate() else {
+    func run(_ command: String, env: [String: String],
+             onEvent: @escaping (Event) -> Void,
+             onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? {
+        guard let location = Self.locate() else {
             onExit(-1, "The bundled engine is missing from the app. Rebuild with app/build.sh.")
             return nil
         }
@@ -63,7 +70,7 @@ enum Engine {
             onExit(-1, "Could not start the bundled engine: \(error.localizedDescription)")
             return nil
         }
-        running.insert(process)
+        Self.running.insert(process)
 
         // Values that must never reach the UI, drawn from the env this run got. A secret that
         // is itself a compound value (e.g. "id:secret") also redacts each ':'-split piece long
@@ -121,10 +128,14 @@ enum Engine {
             }
             stderr = redact(stderr)
             DispatchQueue.main.async {
-                running.remove(process)
+                Self.running.remove(process)
                 onExit(process.terminationStatus, stderr)
             }
         }
         return process
+    }
+
+    func terminateAll() {
+        Self.running.forEach { $0.terminate() }
     }
 }
