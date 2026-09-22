@@ -4,9 +4,12 @@
 > satu kategori di bawah. Perbedaan yang belum diklasifikasi berarti regresi, dan membuat
 > pembanding gagal.
 >
-> Status: **dua perbedaan sudah teridentifikasi dari snapshot**, keduanya belum diimplementasikan
-> di Rust (kode Rust baru mulai ditulis). Jadi berkas ini masih catatan kontrak, bukan laporan
-> hasil perbandingan.
+> Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan 11 perintah engine Rust
+> dengan sesi palsu — persis seperti `record.py` men-drive engine Python in-process — lalu
+> membandingkan keluarannya dengan snapshot baris per baris. Hasilnya: **16 kasus identik**, dan 5
+> kasus terklasifikasi di bawah ini. Kasus yang identik tidak disebut lagi di sini; daftarnya ada
+> di `EXACT` pada berkas uji itu, dan sebuah penjaga menolak snapshot baru yang belum masuk salah
+> satu daftar.
 
 ## Aturan
 
@@ -46,6 +49,56 @@ Konsekuensi yang mengikat:
 3. Bentuk yang sama berlaku untuk kolom `timestamp` naive: ia **tidak** boleh
    mendapat offset, dan itu diuji terpisah.
 
+### D-4 — Pesan `error` tanpa nama kelas exception Python · **Perbaikan disengaja**
+
+Engine Python membungkus setiap kegagalan dengan nama kelasnya: `ValueError: SQL or SQL_PATH is
+required`, `OSError: connection refused` (`queryhive_engine.py:1005`).
+
+Bukti: `tests/golden/preview/blank_sql.ndjson` dan `tests/golden/test/connect_failure.ndjson`.
+
+Rust memancarkan pesannya saja. Nama kelas exception bukan bagian dari protokol — yang dibaca app
+adalah teksnya, dan pengguna tidak perlu tahu bahwa kegagalannya dulu datang dari `OSError`.
+
+Yang harus dijaga test: pesannya sendiri tetap sama kata per kata, dan `warnings` tetap ikut pada
+kegagalan yang sudah mengubah sesuatu (DROP dari `replace`).
+
+### D-5 — Baris `usage` memuat nama binary, bukan nama skrip · **Bukan regresi**
+
+`usage: queryhive_engine.py db_drivers|objects|…` menjadi `usage: queryhive-engine …`.
+
+Bukti: `tests/golden/usage/unknown_command.ndjson`.
+
+Yang diurai app adalah **akhiran**-nya (daftar perintah, urutannya tetap), bukan nama program —
+dan nama program memang harus berubah, karena yang menjalankan bukan lagi skrip Python. Uji
+`an_unknown_command_is_one_error_event` membandingkan akhiran itu dan memastikan hanya nama
+programnya yang berbeda.
+
+### D-6 — `to_table` melaporkan `rows: -1` dan tanpa `progress` · **Keterbatasan yang diketahui**
+
+`done.rows` pada snapshot berisi `5` (dari `cursor.rowcount` klien trino, yaitu `updateCount`
+koordinator), dan `progress` mendahuluinya. Engine Rust melaporkan `-1` dan tidak memancarkan
+`progress` sama sekali.
+
+Bukti: `tests/golden/to_table/to_table_create.ndjson`.
+
+Sebabnya satu hal saja: trait `Cursor` belum punya cara menanyakan berapa baris yang ditulis
+sebuah statement. `-1` dipilih karena itu **nilai yang sama** yang dipakai `exporter/to_table.py`
+ketika koordinator tidak melaporkan apa pun — bukan tebakan yang menyerupai angka. Yang belum ada:
+satu method opsional di `qh-driver` (diisi driver Trino dari `updateCount` halaman terakhir), lalu
+`progress`/`state` ikut kembali. `state` sendiri berasal dari `stats_callback` klien trino, yang
+tidak dimiliki driver Rust mana pun.
+
+### D-7 — Setting yang dibaca lalu diabaikan · **Keterbatasan yang diketahui**
+
+| Setting | Mengapa diabaikan |
+|---|---|
+| `RETRIES` | Retry adalah milik lapisan session (blueprint §1.7) yang belum dibangun. Pada koneksi yang putus di tengah ekspor, ini perbedaan perilaku nyata — bukan detail |
+| `ENCODING` | Semua writer engine Rust adalah UTF-8; CSV/teks `cp1252` tidak didukung |
+| `DBF_ENCODING` | Code page `dbf` tetap cp1252 |
+
+Ketiganya tetap **diterima tanpa error**, supaya koneksi tersimpan yang membawanya tidak mendadak
+gagal. Tidak satupun muncul di snapshot, jadi tidak ada kasus uji yang terpengaruh.
+
 ### D-1 — Notasi ilmiah pada DECIMAL kecil · **Perbaikan disengaja**
 
 `Decimal("-0.0000000001")` dirender engine Python sebagai `-1E-10`.
@@ -72,6 +125,25 @@ dengan kutipnya.
 
 Rust akan merender `3 days, 4:05:06`, tanpa kutip. Isi teksnya sengaja **dipertahankan sama**
 supaya perbedaannya hanya pada kutip — perbedaan yang sekecil mungkin dan mudah diuji.
+
+## Temuan yang belum ditutup
+
+### T-1 — Dua aturan berbeda untuk `timestamptz`, dan yang benar ada di sisi ekspor
+
+`crates/qh-core/src/value.rs` (`Value::render_text`) **menambahkan** offset ke `micros` saat
+merender timestamp berzona, sementara `crates/qh-core/src/render.rs` (`to_text`) mencetak `micros`
+apa adanya lalu menempelkan offset-nya.
+
+Yang benar adalah yang kedua: driver menyimpan **jam dinding server** di `micros` dan zonenya di
+`offset_secs` (dipatok uji `crates/qh-driver-trino/src/decode.rs`: `"2026-01-31 12:00:00.123
++07:00"` → `micros = 1_769_860_800_123_000`, `offset_secs = Some(25_200)`), dan hanya dengan
+aturan itu hasilnya sama dengan snapshot (`type_zoo` identik). Aturan di `value.rs` akan
+menghasilkan `19:00:00+07:00` untuk nilai yang sama.
+
+Dampaknya: `qh-result-store` (yang memakai `render_text`) bisa merender `timestamptz` satu zona
+lebih maju daripada jalur ekspor. Belum ada uji yang menangkapnya karena type zoo hanya diuji
+lewat jalur perintah. Dua aturan untuk satu kontrak harus menjadi satu — pekerjaan berikutnya,
+dan `render::to_text` adalah rumah yang benar.
 
 ## Yang belum dapat diverifikasi
 

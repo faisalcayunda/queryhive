@@ -18,7 +18,7 @@
 | B — Riset web | **Berjalan sebagian** | `tools/kenari_search.py` — alat lokal yang **tidak masuk repo** (lihat §Perkakas lokal) — membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. §8.1 kini **terisi sebagian**: empat issue DBeaver dibuka langsung dan dikutip; Navicat dan DataGrip masih terbuka karena sumber yang ditemukan ditolak (bukan sumber primer). Satu klaim lama **dikoreksi**: TablePlus ternyata sekali beli, bukan langganan. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
-| D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, `qh-driver-postgres`, dan `qh-driver-mysql` selesai dan hijau; Trino, export, credentials, storage, tunnel, FFI belum ada |
+| D — Fase 1 | **Hampir selesai** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, ketiga driver, `qh-export` (sembilan format + `plan`), `qh-rt`, dan `qh-ffi` (11 perintah + CLI) selesai dan hijau; yang belum: `qh-credentials`, `qh-storage`, `qh-tunnel`, dan permukaan UniFFI di atas `qh-ffi` |
 | D — Fase 2, 3, 4 | Belum | |
 
 ---
@@ -68,6 +68,35 @@
   `cargo fmt --all --check` bersih, `cargo clippy --workspace --all-targets -- -D warnings` bersih
 - [x] `docs/dependencies.md` dihasilkan dari `cargo metadata` (semuanya MIT/Apache-2.0 →
   konsisten dengan ADR-0002)
+
+### Fase 1 — driver, ekspor, dan entry point
+
+- [x] `crates/qh-driver` — trait `Driver`/`Session`/`Cursor`, `Capabilities`, `ConnectionConfig`
+  (yang `Debug`-nya tidak pernah mencetak password), `DriverRegistry`
+- [x] `crates/qh-driver-trino` — protokol klien ditulis tangan di atas `reqwest`: `POST
+  /v1/statement`, polling `nextUri`, `DELETE` untuk cancel. Tanpa pool (ADR-0006). Kolom boleh
+  kosong sampai batch pertama tiba, dan itu didokumentasikan sebagai batas kontrak, bukan bug
+- [x] `crates/qh-driver-postgres` dan `crates/qh-driver-mysql` — normalisasi tipe per server,
+  cancel sungguhan (`CancelRequest` dan `KILL QUERY`)
+- [x] `crates/qh-export` — sembilan writer streaming. Kekuatan klaimnya berbeda per format dan
+  ditulis apa adanya: `dbf` **byte-per-byte** terhadap `exporter/writers.py` (keduanya menulis
+  byte dengan tangan), `xlsx`/`xls` **terbaca kembali** dengan nilai sel yang sama (`openpyxl`,
+  `xlrd`) karena byte-nya milik `openpyxl`/`xlwt` di sisi Python dan tidak mungkin disamakan
+- [x] `crates/qh-export/src/plan.rs` — pemecahan part `export_rows`, **byte-per-byte** terhadap
+  `exporter/export.py` termasuk penamaan ulang `_part01`
+- [x] `crates/qh-export/src/zip.rs` — satu penulis ZIP untuk dua pemakai: part `xlsx` yang
+  di-*store* dan `bundle` yang di-*deflate*
+- [x] `crates/qh-ffi` — **11 perintah** (`db_drivers|objects|test|catalogs|schemas|tables|export|
+  to_table|preview|count|explain`) sebagai library + binary `queryhive-engine`, plus CLI debug
+  yang dijalankan harness golden. Panic ditangkap di `main` dan menjadi satu event `error`,
+  mengikuti aturan `queryhive_engine.py` bahwa jalur pelaporan error tidak boleh ikut gagal
+- [x] **Uji paritas golden di Rust** (`crates/qh-ffi/tests/golden.rs`): sesi palsu menjawab
+  `execute`/`browse`/`objects`, persis seperti `record.py` men-drive engine Python in-process.
+  **16 kasus identik**, 5 kasus lain terklasifikasi dengan alasannya (lihat
+  `docs/golden-deltas.md`), dan sebuah penjaga menolak snapshot baru yang belum diklasifikasi
+- [x] **355 uji hijau** di seluruh workspace, termasuk uji integrasi terhadap server nyata
+  (Trino 483: 15, PostgreSQL: 13, MySQL: 16), `cargo fmt --all --check` bersih, dan
+  `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 ### Tahap A — lingkungan uji & baseline
 
@@ -397,7 +426,28 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
    lalu `AppModel` dipindah dalam satu langkah.
 6. **Snapshot golden dari server nyata** (container sudah menyala; tabel `type_zoo` sudah ada di
    kedua engine) untuk menutup K3. Perhatikan D-3: setel zona waktu sesi sebelum merekam.
-7. `qh-ffi` + CLI `qh-ffi` setara `preview`, supaya sisi "Rust" di `docs/benchmarks.md` bisa diisi.
+7. ~~`qh-ffi` + CLI setara `preview`~~ **Selesai untuk 11 perintah.** Yang **belum**, dan
+   masing-masing punya rumahnya:
+   - **Permukaan UniFFI** di atas `qh-ffi` (blueprint §3.2). Command-nya sudah library yang bisa
+     dipanggil tanpa stdout, jadi ini pembungkusan, bukan penulisan ulang.
+   - **`Cursor` belum punya update count.** Akibatnya `to_table` melaporkan `rows: -1` dan tidak
+     bisa memancarkan `progress`/`state` (`docs/golden-deltas.md` D-6). Tempatnya: satu method
+     opsional di `qh-driver`, diisi driver Trino dari `updateCount` halaman terakhir. Setelah itu
+     `to_table` bisa setara tanpa perubahan di sisi perintah.
+   - **`RETRIES` dibaca lalu diabaikan.** Retry adalah milik lapisan session (blueprint §1.7),
+     yang belum ada. Ini perbedaan perilaku nyata pada koneksi yang putus di tengah ekspor, jadi
+     dicatat, bukan disembunyikan.
+   - **`ENCODING` dan `DBF_ENCODING`** juga dibaca lalu diabaikan: semua writer engine ini UTF-8
+     dan code page `dbf` tetap cp1252.
+   - **`bundle` (ZIP) memakai deflate `flate2`, bukan zlib `zipfile`.** Isinya identik (nama,
+     byte, CRC), byte arsipnya tidak diklaim sama.
+8. **Menutup T-1** (`docs/golden-deltas.md`): `value.rs` dan `render.rs` masih punya dua aturan
+   berbeda untuk `timestamptz`, dan yang dipakai `qh-result-store` bukan yang cocok dengan
+   snapshot. Satu kontrak, satu implementasi — rumahnya `render::to_text`. Ini bug yang sudah
+   terbukti, bukan kerapian.
+9. **`qh-credentials`** (Keychain `id.data-ecosystem.queryhive` harus dipertahankan supaya
+   password lama tetap terbaca), lalu **`qh-storage`** dan **`qh-tunnel`**. Ini yang tersisa
+   sebelum aplikasi bisa memakai engine Rust untuk menyimpan koneksi.
 
 ## Hasil pengukuran terakhir
 
