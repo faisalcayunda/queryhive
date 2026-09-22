@@ -135,7 +135,11 @@ pub async fn credential(settings: &Settings, out: &mut dyn Emitter) -> Result<()
                 store.delete(&key)?;
                 (false, None)
             }
-            "has" => (store.get(&key)?.is_some(), None),
+            // `contains`, not `get(..).is_some()`: the UI asks this on every sidebar paint,
+            // and answering it by loading the password would pull a secret out of the
+            // Keychain — through whatever prompt the item's access control raises — only to
+            // throw it away. The store's attributes-only query exists for this line.
+            "has" => (store.contains(&key)?, None),
             _ => {
                 let found = store.get(&key)?;
                 // The secret is exposed here and nowhere else, at the one call site whose

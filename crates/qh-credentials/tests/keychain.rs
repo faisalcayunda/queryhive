@@ -86,6 +86,15 @@ fn a_secret_survives_the_real_keychain() {
     store.set(&account, &secret("first")).expect("set");
     assert_eq!(reveal(&store.get(&account).expect("get").unwrap()), "first");
 
+    // The attributes-only query, against the real item: it must find it without asking for
+    // the secret, and it must clean up like everything else here. If macOS gates the query
+    // rather than answering it, this is where that shows up -- as an error, not as a wrong
+    // answer, which is the point of reporting instead of guessing.
+    assert!(store.contains(&account).expect("contains after set"));
+    assert!(!store
+        .contains("00000000-0000-4000-8000-000000000000")
+        .expect("contains"));
+
     // Editing a connection replaces its password, so this must not fail with a
     // duplicate-item error.
     store.set(&account, &secret("second")).expect("overwrite");
@@ -113,6 +122,7 @@ fn a_secret_survives_the_real_keychain() {
 
     store.delete(&account).expect("delete");
     assert!(store.get(&account).expect("get after delete").is_none());
+    assert!(!store.contains(&account).expect("contains after delete"));
     // Deleting again is success: the caller asked for it gone, and it is gone.
     store.delete(&account).expect("delete twice");
 }

@@ -87,6 +87,34 @@ impl SecretStore for KeychainStore {
             Err(error) => Err(macos::refused("delete", error)),
         }
     }
+
+    fn contains(&self, account: &str) -> Result<bool, CredentialError> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+
+        let account = account_key(account);
+        // The search the `passwords` module does not offer: the same three attributes, with
+        // the item's data explicitly not requested. `load_data(false)` is the whole point of
+        // this method -- the query asks the Keychain whether the item is there, not what is
+        // in it -- and `load_attributes(true)` is what makes the call return a result at all,
+        // since a query that asks for nothing answers with nothing.
+        let search = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(crate::SERVICE)
+            .account(&account)
+            .load_refs(false)
+            .load_attributes(true)
+            .load_data(false)
+            .limit(Limit::Max(1))
+            .search();
+        match search {
+            Ok(results) => Ok(!results.is_empty()),
+            Err(error) if macos::is_missing(&error) => Ok(false),
+            // Anything else -- a locked keychain, an item it will not describe -- is reported
+            // rather than guessed at, because "no password is saved" and "the Keychain would
+            // not tell me" are different answers to show a user.
+            Err(error) => Err(macos::refused("check", error)),
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -100,6 +128,10 @@ impl SecretStore for KeychainStore {
     }
 
     fn delete(&self, _account: &str) -> Result<(), CredentialError> {
+        Err(CredentialError::Unsupported)
+    }
+
+    fn contains(&self, _account: &str) -> Result<bool, CredentialError> {
         Err(CredentialError::Unsupported)
     }
 }

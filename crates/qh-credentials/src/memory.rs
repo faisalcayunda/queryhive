@@ -72,6 +72,13 @@ impl SecretStore for MemoryStore {
         entries.remove(&account_key(account));
         Ok(())
     }
+
+    /// A lookup that does not clone the secret out of the map, which is the point of having
+    /// this at all.
+    fn contains(&self, account: &str) -> Result<bool, CredentialError> {
+        let entries = self.lock()?;
+        Ok(entries.contains_key(&account_key(account)))
+    }
 }
 
 impl MemoryStore {
@@ -117,6 +124,27 @@ mod tests {
         store.set("conn", &secret("new")).unwrap();
         assert_eq!(store.len(), 1);
         assert_eq!(reveal(&store.get("conn").unwrap().unwrap()), "new");
+    }
+
+    #[test]
+    fn asking_whether_a_password_is_stored_never_loads_it() {
+        // The contract's new half: `contains` answers the same question as `get(...).is_some()`
+        // without the secret leaving the store.
+        let store = MemoryStore::new();
+        assert!(!store.contains("conn").unwrap());
+        store.set("conn", &secret("hunter2")).unwrap();
+        assert!(store.contains("conn").unwrap());
+        // The app writes upper case and Rust lower: one account, two spellings, and only for
+        // UUID-shaped names -- a name that is not a UUID keeps its case, which is why this is
+        // checked with one rather than with `CONN`.
+        store
+            .set("e621e1f8-c36c-495a-93fc-0c247a3e6e5f", &secret("hunter2"))
+            .unwrap();
+        assert!(store
+            .contains("E621E1F8-C36C-495A-93FC-0C247A3E6E5F")
+            .unwrap());
+        store.delete("conn").unwrap();
+        assert!(!store.contains("conn").unwrap());
     }
 
     #[test]

@@ -108,6 +108,18 @@ pub trait SecretStore: Send + Sync {
     /// Removing something that is not there is success: the caller asked for it gone,
     /// and it is gone.
     fn delete(&self, account: &str) -> Result<(), CredentialError>;
+
+    /// Whether a password is stored, without asking for it.
+    ///
+    /// Separate from [`SecretStore::get`] because "is a password saved for this connection?"
+    /// is a question the UI asks on every render, and answering it by loading the password
+    /// means every render pulls a secret out of the Keychain — through whatever prompt the
+    /// item's access control may raise — to throw it away. On macOS this is a query for the
+    /// item's **attributes only**; the item's data is never returned.
+    ///
+    /// It answers `false` rather than failing when there is no item, for the same reason
+    /// [`SecretStore::get`] answers `None`.
+    fn contains(&self, account: &str) -> Result<bool, CredentialError>;
 }
 
 /// The account string one connection's secret lives under.
