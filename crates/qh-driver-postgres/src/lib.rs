@@ -33,15 +33,35 @@
 //!
 //! ## TLS
 //!
-//! Only [`TlsMode::Disable`] is implemented. Every other mode is **refused with a
-//! clear error** rather than quietly falling back to plaintext: a client that
-//! accepts `require` and then talks in clear is worse than one that says it
-//! cannot yet, because the user would never find out. `tokio-postgres` needs a
-//! `rustls` connector for this and that work is tracked separately.
+//! All four [`TlsMode`]s are implemented, by the `rustls` connector in [`tls`]:
+//!
+//! - `Disable` never negotiates TLS.
+//! - `Prefer` tries TLS and falls back to plaintext **only when the server
+//!   answers the SSLRequest with "no"**. A server that offers TLS and then fails
+//!   the handshake is an error, never a quiet downgrade: a downgrade the other
+//!   end can trigger is what an attacker on the network does, and a session that
+//!   silently became readable is worse than one that failed.
+//! - `Require` is TLS with the certificate verified against the platform's own
+//!   root store.
+//! - `RequireNoVerify` is TLS with verification turned off, which is what an
+//!   attacker on the network needs in order to read everything on the
+//!   connection. It is reachable only by asking for it on one connection, and
+//!   the UI warns in those words.
+//!
+//! Where the roots come from, and why it matters: [`tls::platform_verifier`]
+//! verifies against the operating system's store — on macOS the Keychain — so a
+//! corporate CA a user installed keeps working without this program shipping a
+//! copy of it. [`tls::verifier_with_roots`] is the same path with a root store
+//! named by the caller, which is how the tests prove both halves of verification
+//! without a CA in the machine's store.
 
 #![forbid(unsafe_code)]
 
 pub mod normalize;
+pub mod tls;
+
+use std::error::Error as _;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -51,6 +71,7 @@ use qh_driver::{
     ObjectPath, ObjectsPage, Session, TlsMode,
 };
 use qh_sql::strip_terminator;
+use rustls::client::danger::ServerCertVerifier;
 use tokio_postgres::{Client, NoTls, SimpleQueryStream, Statement};
 
 /// PostgreSQL.
@@ -110,21 +131,40 @@ impl Driver for PostgresDriver {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
-        if config.tls != TlsMode::Disable {
-            return Err(EngineError::Usage {
-                message: format!(
-                    "PostgreSQL TLS is not implemented yet, and {:?} would otherwise connect in \
-                     clear. Set this connection to disable TLS, or wait for the rustls connector.",
-                    config.tls
-                ),
-            });
-        }
+        // A real connection verifies against the platform's own root store, which
+        // is the Keychain on macOS — that is what makes a corporate CA the user
+        // installed work. Tests come in through `connect_with_verifier` below,
+        // because no test can put a CA in that store.
+        self.connect_with_verifier(config, tls::platform_verifier()?)
+            .await
+    }
+}
 
+impl PostgresDriver {
+    /// [`Driver::connect`], with the certificate verifier named by the caller.
+    ///
+    /// Production passes [`tls::platform_verifier`]. The parameter exists so the
+    /// verifying path can be tested at all: the tests bring up a server whose
+    /// certificate is signed by a CA they generated, and verify it against a root
+    /// store holding exactly that CA — the same code path, with a store the test
+    /// controls instead of the machine's.
+    ///
+    /// The verifier is used by `Prefer` and `Require`. `RequireNoVerify` ignores
+    /// it, because that mode is defined by verifying nothing — and `Disable`
+    /// never reaches a handshake to verify.
+    pub async fn connect_with_verifier(
+        &self,
+        config: &ConnectionConfig,
+        verifier: Arc<dyn ServerCertVerifier>,
+    ) -> Result<Box<dyn Session>, EngineError> {
         let mut pg = tokio_postgres::Config::new();
         pg.host(&config.host)
             .port(config.port)
             .user(&config.user)
-            .application_name("QueryHive");
+            .application_name("QueryHive")
+            // Spelled out per mode rather than left at `tokio-postgres`'s
+            // default, so which mode is on the wire is decided here.
+            .ssl_mode(tls::ssl_mode(config.tls));
         if let Some(database) = &config.database {
             pg.dbname(database);
         }
@@ -132,33 +172,77 @@ impl Driver for PostgresDriver {
             pg.password(password);
         }
 
-        let (client, connection) =
-            pg.connect(NoTls)
-                .await
-                .map_err(|error| EngineError::Connect {
-                    message: format!("{}: {error}", config.redacted()),
-                    kind: classify_connect_error(&error),
-                })?;
-
-        // The connection future drives the socket; if it stops, every query on
-        // this client fails. It is spawned rather than awaited because awaiting
-        // it would block forever.
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                // Nothing to surface to: whoever holds the client will see a
-                // failure on its next query. Kept as a comment rather than a log
-                // call because this crate has no tracing subscriber yet.
-                let _ = error;
+        match config.tls {
+            TlsMode::Disable => open(&pg, config, NoTls).await,
+            // `Prefer` encrypts when the server offers it and does **not** verify the
+            // certificate. That is psycopg's behaviour, and therefore what an existing
+            // connection to an internal, self-signed server depends on: verifying here
+            // would break those connections on upgrade with an error that says only
+            // "TLS handshake". The mode is still not `RequireNoVerify` — `ssl_mode`
+            // decides that, and only `Prefer` may continue in clear when the server
+            // declines TLS entirely.
+            TlsMode::Prefer => {
+                let connector = tls::connector(tls::unverified_client_config()?);
+                open(&pg, config, connector).await
             }
-        });
-
-        let cancel_token = client.cancel_token();
-        Ok(Box::new(PostgresSession {
-            client,
-            cancel_token,
-            config: config.clone(),
-        }))
+            // The one verifying mode: a certificate the platform store does not hold is a
+            // failure, and so is a server that declines TLS.
+            TlsMode::Require => {
+                let connector = tls::connector(tls::verified_client_config(verifier)?);
+                open(&pg, config, connector).await
+            }
+            TlsMode::RequireNoVerify => {
+                let connector = tls::connector(tls::unverified_client_config()?);
+                open(&pg, config, connector).await
+            }
+        }
     }
+}
+
+/// Open the connection, and hand back a session around it.
+///
+/// Generic over the connector because the modes install different ones — the
+/// rustls connector for three of them, `NoTls` for `Disable` — and everything
+/// after the handshake is identical. The connection future has to be spawned
+/// here, whichever connector it came from.
+async fn open<T>(
+    pg: &tokio_postgres::Config,
+    config: &ConnectionConfig,
+    tls: T,
+) -> Result<Box<dyn Session>, EngineError>
+where
+    T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
+    T::TlsConnect: Send,
+    T::Stream: Send + 'static,
+    <<T as tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>>::TlsConnect as tokio_postgres::tls::TlsConnect<tokio_postgres::Socket>>::Future:
+        Send + 'static,
+{
+    let (client, connection) = pg
+        .connect(tls)
+        .await
+        .map_err(|error| EngineError::Connect {
+            message: format!("{}: {error}", config.redacted()),
+            kind: classify_connect_error(&error),
+        })?;
+
+    // The connection future drives the socket; if it stops, every query on
+    // this client fails. It is spawned rather than awaited because awaiting
+    // it would block forever.
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            // Nothing to surface to: whoever holds the client will see a
+            // failure on its next query. Kept as a comment rather than a log
+            // call because this crate has no tracing subscriber yet.
+            let _ = error;
+        }
+    });
+
+    let cancel_token = client.cancel_token();
+    Ok(Box::new(PostgresSession {
+        client,
+        cancel_token,
+        config: config.clone(),
+    }))
 }
 
 /// A live PostgreSQL connection.
@@ -488,15 +572,39 @@ fn describe_columns(statement: &Statement) -> (Vec<ColumnMeta>, Vec<String>) {
 /// Whether a connection failure is worth retrying.
 ///
 /// A server-reported error — bad credentials, an unknown database — will not
-/// succeed on a second attempt, so it is permanent. Anything else is a network
-/// condition and is retried with backoff, the same distinction the Python engine
-/// drew for queries.
+/// succeed on a second attempt, so it is permanent. So is a TLS handshake that
+/// failed, and for the same reason: a certificate this machine does not trust
+/// will not become trusted by asking again. Anything else is a network condition
+/// and is retried with backoff, the same distinction the Python engine drew for
+/// queries.
 fn classify_connect_error(error: &tokio_postgres::Error) -> FailureKind {
-    if error.as_db_error().is_some() {
+    if error.as_db_error().is_some() || is_tls_failure(error) {
         FailureKind::Permanent
     } else {
         FailureKind::Transient
     }
+}
+
+/// Whether the failure came out of the TLS handshake.
+///
+/// `tokio-postgres` keeps the reason in the error's source chain rather than in
+/// its kind: what it hands back is the `io::Error` the connector produced. The
+/// rustls error underneath that is looked for by type, because matching on the
+/// message text would break on the next wording change — and `io::Error::source`
+/// reports the *inner* error's cause rather than the inner error itself, so
+/// `get_ref` is the only way to reach it.
+fn is_tls_failure(error: &tokio_postgres::Error) -> bool {
+    let Some(source) = error.source() else {
+        return false;
+    };
+    let Some(io_error) = source.downcast_ref::<std::io::Error>() else {
+        return source.is::<rustls::Error>();
+    };
+    io_error.get_ref().is_some_and(|inner| {
+        // A certificate the handshake refused, or a hostname that cannot be a
+        // TLS name — neither becomes usable by connecting again.
+        inner.is::<rustls::Error>() || inner.is::<rustls::pki_types::InvalidDnsNameError>()
+    })
 }
 
 /// Map a failure while describing a statement.

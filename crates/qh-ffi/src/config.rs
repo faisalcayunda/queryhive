@@ -92,6 +92,9 @@ pub enum ConfigError {
     #[error("DB_SCHEME must be http or https, got '{0}'")]
     BadScheme(String),
 
+    #[error("unknown sslmode '{0}'; expected disable, prefer, require, verify-ca or verify-full")]
+    BadSSLMode(String),
+
     #[error("cannot read a host out of '{0}'")]
     NoUrlHost(String),
 
@@ -223,12 +226,22 @@ impl Parts {
                 port = if https { 443 } else { 8080 };
             }
         } else {
+            // The stored vocabulary is libpq's, and it does not mean what our enum's names
+            // suggest: libpq's `require` encrypts **without** verifying, and only
+            // `verify-ca`/`verify-full` ask for the certificate to be checked. Mapping
+            // `require` onto our verifying mode would refuse every internal, self-signed
+            // server that works today, which is the one upgrade nobody forgives.
             let required = match self.sslmode.as_str() {
                 "disable" => TlsMode::Disable,
-                "require" | "verify-ca" | "verify-full" => TlsMode::Require,
-                // `prefer` is psycopg's own default, and it is what a driver does
-                // when nobody said anything: encrypt when the server offers it.
-                _ => TlsMode::Prefer,
+                "require" => TlsMode::RequireNoVerify,
+                "verify-ca" | "verify-full" => TlsMode::Require,
+                // psycopg's own default, and what a driver does when nobody said anything:
+                // encrypt when the server offers it.
+                "" | "prefer" => TlsMode::Prefer,
+                // A spelling nobody recognises is refused rather than treated as a default:
+                // a typo in `sslmode` deciding whether the connection is encrypted is not a
+                // decision to make silently.
+                other => return Err(ConfigError::BadSSLMode(other.to_owned())),
             };
             tls = if insecure && required != TlsMode::Disable {
                 TlsMode::RequireNoVerify

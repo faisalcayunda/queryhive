@@ -45,8 +45,11 @@ fn config() -> Option<ConnectionConfig> {
         )
         .password("qh-dev-only")
         .database("qh")
-        // The driver refuses every other mode until the rustls connector exists,
-        // so this is not a shortcut: it is the only mode that is implemented.
+        // The dev container here is the one from `deploy/dev/up.sh`, which serves
+        // no TLS at all, so the tests about queries ask for no TLS either. What the
+        // driver does with the other three modes is `tests/tls.rs`'s subject, and
+        // the two modes that interact with a server without TLS are checked at the
+        // bottom of this file.
         .tls(TlsMode::Disable),
     )
 }
@@ -509,18 +512,59 @@ async fn a_bad_password_is_a_permanent_failure_not_a_retry_loop() {
 }
 
 #[tokio::test]
-async fn tls_is_refused_rather_than_silently_downgraded() {
+async fn prefer_falls_back_to_plaintext_against_a_server_that_does_not_offer_tls() {
+    // The one case where a fallback is correct, and it needs a real server to prove
+    // it: this container runs with `ssl = off`, so it answers the SSLRequest with
+    // "no" and `Prefer` is allowed to continue in clear. `tests/tls.rs` covers the
+    // other case — a server that offers TLS and then fails the handshake — where
+    // falling back would be the downgrade an attacker triggers.
+    let Some(config) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let mut session = PostgresDriver::new()
+        .connect(&config.tls(TlsMode::Prefer))
+        .await
+        .expect("Prefer should connect to a server that does not offer TLS");
+
+    // Prefer, not a lie: the session really is in clear, which is what the mode
+    // allows when the server declined. Asked of the server, so a fallback that
+    // quietly did not happen would also be caught.
+    let mut cursor = session
+        .execute(
+            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+    let batch = cursor
+        .next_batch(1)
+        .await
+        .expect("next_batch")
+        .expect("a row");
+    assert_eq!(
+        batch.value(0, 0),
+        Some(&Value::Bool(false)),
+        "this container does not serve TLS; if it now does, this test and the config \\
+         above need to move to tests/tls.rs"
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn require_refuses_a_server_that_does_not_offer_tls() {
+    // The opposite decision from the same server: `Require` must not fall back,
+    // because the user asked for TLS. The error is the mode working.
     let Some(config) = config() else {
         eprintln!("{SKIP_HINT}");
         return;
     };
 
-    for mode in [TlsMode::Prefer, TlsMode::Require, TlsMode::RequireNoVerify] {
-        let error = PostgresDriver::new()
-            .connect(&config.clone().tls(mode))
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{mode:?} was accepted, which would connect in clear"));
-        assert!(error.message().contains("TLS"), "{mode:?}: {error:?}");
-    }
+    let error = PostgresDriver::new()
+        .connect(&config.tls(TlsMode::Require))
+        .await
+        .err()
+        .expect("Require connected to a server that does not offer TLS");
+
+    assert!(error.message().contains("TLS"), "{error:?}");
 }
