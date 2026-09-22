@@ -28,24 +28,47 @@
 //!
 //! ## TLS
 //!
-//! Only [`TlsMode::Disable`] is implemented. Every other mode is **refused with a
-//! clear error** rather than quietly falling back to plaintext — the same rule as
-//! the PostgreSQL driver, and for the same reason.
+//! All four `TlsMode`s are implemented, through `mysql_async`'s `rustls`
+//! backend:
+//!
+//! - `Disable` never offers the capability, so nothing can turn the connection
+//!   into an encrypted one behind the user's back.
+//! - `Prefer` encrypts when the server offers TLS, without checking the
+//!   certificate — the same meaning pymysql's `prefer` had, so an internal server
+//!   with a self-signed certificate keeps connecting. It falls back to plaintext
+//!   for one server answer only — a handshake packet with no `CLIENT_SSL`
+//!   capability, which is the server saying it cannot do TLS, decided before a
+//!   single TLS byte is sent. A handshake that *fails* is an error: anyone who can
+//!   break a handshake would otherwise get a silent downgrade for free, which is
+//!   the whole reason the two are told apart, and turning verification off does
+//!   not weaken that rule.
+//! - `Require` asks for TLS and verifies the certificate, so it fails against a
+//!   server it cannot authenticate.
+//! - `RequireNoVerify` is `Prefer`'s configuration without its fallback: encrypt,
+//!   verify nothing, and only when the user asked for that mode on the connection.
+//!
+//! A verified connection is checked against the roots `mysql_async` compiles in
+//! (the `webpki-roots` bundle) and against the host that was dialled. The platform
+//! trust store is **not** reachable from `mysql_async` 0.36's API, so a corporate
+//! CA installed in the Keychain is refused rather than trusted; [`tls`] records
+//! exactly why and what would close it. That module also holds the mode-to-
+//! configuration mapping, public so it can be tested directly.
 
 #![forbid(unsafe_code)]
 
 pub mod normalize;
+pub mod tls;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts, OptsBuilder};
+use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Session, TlsMode,
+    ObjectPath, ObjectsPage, Session,
 };
 use qh_sql::strip_terminator;
 use tokio::sync::mpsc;
@@ -115,26 +138,31 @@ impl Driver for MysqlDriver {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
-        if config.tls != TlsMode::Disable {
-            return Err(EngineError::Usage {
-                message: format!(
-                    "MySQL TLS is not implemented yet, and {:?} would otherwise connect in clear. \
-                     Set this connection to disable TLS, or wait for the TLS backend.",
-                    config.tls
-                ),
-            });
-        }
-
-        let opts = build_opts(config);
         // Connect once here rather than lazily, so a bad host or password is
         // reported by `connect` — where the UI shows it — instead of surfacing
         // later as a query that mysteriously returns nothing.
-        let conn = Conn::new(opts.clone())
-            .await
-            .map_err(|error| EngineError::Connect {
-                message: format!("{}: {error}", config.redacted()),
-                kind: classify_connect_error(&error),
-            })?;
+        //
+        // The `Opts` that worked is the one the session keeps for its later
+        // connections, so a `Prefer` connection that fell back to plaintext does
+        // not re-attempt TLS against a server that has already said it cannot do
+        // it.
+        let mut opts = build_opts(config, tls::ssl_opts(config.tls));
+        let conn = match Conn::new(opts.clone()).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                if !tls::may_fall_back(config.tls, &error) {
+                    return Err(connect_failure(config, &error));
+                }
+                // `Prefer`, and the server's handshake said it has no TLS. Ask
+                // again without it: connecting in clear is what that mode asks
+                // for here, and it is the server's own capability flags that
+                // decided it — not a handshake that failed.
+                opts = build_opts(config, None);
+                Conn::new(opts.clone())
+                    .await
+                    .map_err(|error| connect_failure(config, &error))?
+            }
+        };
         let connection_id = Arc::new(AtomicU32::new(conn.id()));
         Ok(Box::new(MysqlSession {
             opts,
@@ -144,7 +172,7 @@ impl Driver for MysqlDriver {
     }
 }
 
-fn build_opts(config: &ConnectionConfig) -> Opts {
+fn build_opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
     let mut builder = OptsBuilder::default()
         .ip_or_hostname(config.host.clone())
         .tcp_port(config.port)
@@ -153,6 +181,11 @@ fn build_opts(config: &ConnectionConfig) -> Opts {
         // in a container the socket usually is not there. Forced off so the
         // configured address is the address used.
         .prefer_socket(false);
+    // Absent means the connection is deliberately in clear: `mysql_async` never
+    // offers a capability it was not given options for.
+    if let Some(tls) = tls {
+        builder = builder.ssl_opts(Some(tls));
+    }
     if let Some(password) = &config.password {
         builder = builder.pass(Some(password.clone()));
     }
@@ -808,11 +841,35 @@ fn quote_literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
+/// The error a failed `connect` reports, with what it means for a caller.
+///
+/// A refused certificate gets its own wording, because the sentence a user needs
+/// is that the connection **did not** happen in clear — the same failure an
+/// attacker would produce, reported rather than resolved by falling back.
+fn connect_failure(config: &ConnectionConfig, error: &mysql_async::Error) -> EngineError {
+    let message = match tls::certificate_rejection(error) {
+        Some(why) => format!(
+            "{}: the server's certificate was not accepted ({why}); the connection was not made \
+             in clear",
+            config.redacted()
+        ),
+        None => format!("{}: {error}", config.redacted()),
+    };
+    EngineError::Connect {
+        message,
+        kind: classify_connect_error(error),
+    }
+}
+
 fn classify_connect_error(error: &mysql_async::Error) -> FailureKind {
     match error {
         // The server answered and refused: wrong password, unknown database,
         // host not allowed. Retrying cannot help.
         mysql_async::Error::Server(_) => FailureKind::Permanent,
+        // A certificate this client will not accept does not become acceptable
+        // by trying again: the trust store or the mode has to change. Reported
+        // as permanent so a caller does not burn retries on it.
+        error if tls::certificate_rejection(error).is_some() => FailureKind::Permanent,
         _ => FailureKind::Transient,
     }
 }
@@ -992,8 +1049,12 @@ mod tests {
         assert!(snippet(&"x".repeat(200)).ends_with('…'));
     }
 
-    // `classify_connect_error` and `map_query_error` are not unit-tested here:
-    // `mysql_async::Error` cannot be constructed outside the crate. Both are
-    // exercised against a live server in `tests/integration.rs`, which produces a
-    // real authentication failure, a real syntax error, and a real KILL QUERY.
+    // `map_query_error` is not unit-tested here: `mysql_async::Error` cannot be
+    // constructed outside the crate for most variants. It is exercised against a
+    // live server in `tests/integration.rs`, which produces a real authentication
+    // failure, a real syntax error, and a real KILL QUERY.
+    //
+    // `classify_connect_error` and `connect_failure` are pinned in `src/tls.rs`
+    // for the one variant that *can* be built from outside (a rejected
+    // certificate) and against a live server in `tests/tls.rs` for the rest.
 }

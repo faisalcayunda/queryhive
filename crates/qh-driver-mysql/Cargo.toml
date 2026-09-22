@@ -9,23 +9,35 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-# default-features = false drops the TLS backends, and `minimal-rust` supplies the
-# one feature the crate genuinely needs: a compression backend. `flate2/zlib` (the
-# `minimal` feature) would link the system's zlib; `minimal-rust` uses the pure-Rust
-# backend instead, so the crate has no C dependency to arrange.
+# default-features = false drops the TLS backends, so the TLS ones this driver now
+# uses are named explicitly: `rustls-tls` is the backend (rustls + tokio-rustls +
+# the `webpki-roots` bundle), `tls12` keeps TLS 1.2 servers reachable, and `ring`
+# picks the crypto provider — the alternative, `aws-lc-rs`, drags in a C build.
+# `minimal-rust` is the compression backend, unchanged: pure Rust, so the crate
+# still has no C dependency to arrange.
 #
-# No TLS backend is compiled in at all, which matches the driver's behaviour: it
-# refuses every TLS mode explicitly rather than connecting in clear, so there is
-# nothing here pretending to encrypt.
-mysql_async = { version = "0.36", default-features = false, features = ["minimal-rust"] }
+# Which roots `rustls` verifies against, and why the platform store cannot be
+# plugged in, is in `src/tls.rs`.
+mysql_async = { version = "0.36", default-features = false, features = [
+    "minimal-rust",
+    "rustls-tls",
+    "tls12",
+    "ring",
+] }
 qh-core.workspace = true
 qh-driver.workspace = true
 qh-sql.workspace = true
+# The same `rustls` `mysql_async` builds against, and no more of it than that: the
+# crate is named here so a certificate rejection can be recognised as one
+# (`rustls::Error::InvalidCertificate`) instead of being reported as a generic
+# handshake failure. `default-features = false` matches `mysql_async`'s own
+# requirement, which is what keeps `aws-lc-rs` out of the build.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "sync"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -40,8 +40,11 @@ fn config() -> Option<ConnectionConfig> {
         )
         .password("qh-dev-only")
         .database("qh")
-        // The driver refuses every other mode until a TLS backend is compiled in,
-        // so this is the only mode that exists rather than a shortcut.
+        // Everything here is about the protocol, the types and the statements, not
+        // about encryption, and the development container's certificate is the one
+        // MySQL generates for itself on first start — which no root store trusts.
+        // The TLS modes have their own suite in `tests/tls.rs` and their own
+        // containers, so this one stays in clear deliberately.
         .tls(TlsMode::Disable),
     )
 }
@@ -639,19 +642,68 @@ async fn a_bad_password_is_a_permanent_failure_not_a_retry_loop() {
     );
 }
 
+/// The development container offers TLS with the certificate MySQL generated for
+/// itself when it first initialised — trustworthy to nobody, which is the shape of
+/// the deployment this product actually meets.
+///
+/// The two TLS modes that mean different things are told apart here: `Prefer` uses
+/// that certificate without checking who signed it, so an internal server keeps
+/// working, and it does so *encrypted* — `Ssl_cipher` is the server's own account of
+/// the session, not the client's silence about an error. `Require` refuses the same
+/// certificate. This is the driver-level twin of `tests/tls.rs`, which runs the same
+/// pair against a certificate this repository signed itself.
 #[tokio::test]
-async fn tls_is_refused_rather_than_silently_downgraded() {
+async fn prefer_uses_a_certificate_nothing_signed_and_require_refuses_it() {
     let Some(config) = config() else {
         eprintln!("{SKIP_HINT}");
         return;
     };
 
-    for mode in [TlsMode::Prefer, TlsMode::Require, TlsMode::RequireNoVerify] {
-        let error = MysqlDriver::new()
-            .connect(&config.clone().tls(mode))
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{mode:?} was accepted, which would connect in clear"));
-        assert!(error.message().contains("TLS"), "{mode:?}: {error:?}");
+    let mut session = MysqlDriver::new()
+        .connect(&config.clone().tls(TlsMode::Prefer))
+        .await
+        .expect("an internal server with a self-signed certificate must still connect");
+    let cipher = cipher_in_use(&mut session).await;
+    assert!(
+        !cipher.is_empty(),
+        "Prefer connected to a server that offers TLS without encrypting"
+    );
+    let _ = session.close().await;
+
+    let error = MysqlDriver::new()
+        .connect(&config.clone().tls(TlsMode::Require))
+        .await
+        .err()
+        .expect("Require verifies, and nothing signed this certificate");
+    assert!(error.message().contains("certificate"), "{error:?}");
+    assert_eq!(error.failure_kind(), FailureKind::Permanent, "{error:?}");
+
+    // And the plaintext connection `Require` refused to fall back to, so the
+    // refusal was the driver's choice rather than the container's.
+    let session = MysqlDriver::new()
+        .connect(&config)
+        .await
+        .expect("the container accepts plaintext, so the refusal above was a choice");
+    let _ = session.close().await;
+}
+
+/// The cipher the server says the session is using, or the empty string when the
+/// connection is in clear.
+///
+/// `SHOW STATUS LIKE 'Ssl_cipher'` returns `Variable_name`, `Value`: the second
+/// column is the answer, and the first is the literal `Ssl_cipher` either way.
+async fn cipher_in_use(session: &mut Box<dyn Session>) -> String {
+    let mut cursor = session
+        .execute("SHOW STATUS LIKE 'Ssl_cipher'", &ExecuteOptions::default())
+        .await
+        .expect("execute SHOW STATUS");
+    let batch = cursor
+        .next_batch(10)
+        .await
+        .expect("next_batch")
+        .expect("SHOW STATUS returns a row");
+    match batch.value(0, 1) {
+        Some(Value::Text(value)) => value.to_string(),
+        other => panic!("expected the variable's value, got {other:?}"),
     }
 }
