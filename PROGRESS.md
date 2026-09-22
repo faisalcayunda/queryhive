@@ -146,7 +146,36 @@
   persis seperti `writers.py:58` dan "Sama" di blueprint §1.7. Ekspor JSON karena itu kehilangan
   presisi desimal. Saya tidak memperbaikinya diam-diam — mengubahnya akan membuat dua engine
   menghasilkan bentuk yang berbeda, dan bentuk teks yang eksak masih tersedia di writer lain.
-- [x] **229 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `crates/qh-export` — **6 dari 9 writer** streaming (paritas `writers.py`): `text`, `csv`,
+  `json`, `xml`, `html`, `sql`, dengan **24 uji unit**. Tiga format biner (`xlsx`, `xls`, `dbf`)
+  **belum ditulis**, dan itu dinyatakan: `Format::implemented()` menjawabnya, `open()`
+  mengembalikan galat yang menyebutkan apa yang ada, dan batas baris tipe itu tetap dicatat
+  karena angkanya diketahui dari sumber Python (`XLS_MAX_ROWS = 65_536`,
+  `XLSX_MAX_ROWS = 1_048_576`). Jadi antarmuka bisa mematikan tiga menu, bukan menawarkannya
+  lalu gagal.
+  Aturan yang diambil dari sumber, bukan ditebak:
+  - **`html.escape`, bukan `xml.sax.saxutils.escape`** — modul Python mengimpor yang pertama,
+    dan writer XML memakai fungsi yang sama. Jadi elemen XML menulis `&quot;` dan `&#x27;`,
+    yang tidak lazim untuk XML. Dipertahankan: mengubahnya akan membuat dua engine menghasilkan
+    bentuk berbeda.
+  - `QUOTE_MINIMAL` (kutip hanya bila ada delimiter, quotechar, atau line terminator), kutip di
+    dalam digandakan, `\r\n` sebagai line terminator, BOM bila diminta.
+  - JSON memakai separator `", "` dan `": "` bahkan tanpa indentasi, dan bentuk array memberi
+    awalan dua spasi pada **setiap** baris.
+  - `render_rows` hanya untuk format yang barisnya mandiri — `text`, `csv`, `xml`, `html`. Itu
+    tepat empat format yang Python tandai `renderable = True`; `json` dan `sql` membawa status
+    per baris. Sebuah uji menegaskan bahwa merender per potongan menghasilkan byte yang sama
+    dengan merender semuanya sekaligus.
+  Dua bug nyata, keduanya ditangkap uji:
+  - **`serde_json::Map` mengurutkan kunci.** Kolom ekspor keluar **urut abjad**, bukan urutan
+    query — ekspor yang salah dengan cara yang terbaca sebagai benar. `serde_json` kini memakai
+    fitur `preserve_order`.
+  - Uji paralel menulis berkas temp yang sama karena namanya hanya dari format, sehingga uji
+    membandingkan hasil uji lain.
+  Yang **belum**: opsi `encoding` (crate ini menulis UTF-8 saja — writer yang diam-diam
+  mengonversi lebih buruk daripada yang mengaku tidak bisa) dan `qh-export::plan` dari
+  `export.py:60-138`, yang belum dibaca sehingga belum ditulis.
+- [x] **253 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:

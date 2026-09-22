@@ -1,0 +1,18 @@
+[package]
+name = "qh-export"
+version = "0.1.0"
+description = "Streaming export writers: text, csv, json, xml, html, sql"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-core.workspace = true
+# The JSON writer's own formatting, so that the array form and the render path share
+# one implementation of Python's layout rather than two that drift.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

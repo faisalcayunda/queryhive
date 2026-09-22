@@ -122,6 +122,11 @@ pub fn to_json_value(value: &Value) -> Json {
         Value::Text(text) => Json::String(text.to_string()),
         Value::Array(items) => Json::Array(items.iter().map(to_json_value).collect()),
         Value::Row(items) => Json::Array(items.iter().map(to_json_value).collect()),
+        // `preserve_order` is on in Cargo.toml for this reason: a `serde_json::Map` is
+        // a sorted map by default, so a Trino map and an exported row would both come
+        // out in alphabetical key order instead of the order the server sent. Python's
+        // dicts keep insertion order, and an export that reorders columns is wrong in
+        // a way that reads as correct.
         Value::Map(entries) => {
             let mut object = JsonMap::new();
             for (key, entry) in entries {
