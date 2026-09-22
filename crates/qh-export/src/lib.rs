@@ -36,16 +36,20 @@
 //! 2. **`bytes` are hex in text and `X'..'` in SQL**, not base64. See `qh-core::render`
 //!    for the same distinction one layer down.
 //!
+//! [`plan`] is the layer above: it decides how many files an export becomes and what
+//! they are called.
+//!
 //! # What is deliberately not here yet
 //!
 //! - `encoding`: the Python engine could write any codec with `errors="replace"`.
 //!   This crate writes UTF-8. A writer that silently re-encoded would be worse than
 //!   one that cannot, so there is no option pretending otherwise.
-//! - `qh-export::plan`, the part-splitting orchestration from `export.py:60-138`. Not
-//!   written, because reading that file is what would make it correct and it has not
-//!   been read.
+//! - `bundle`, which zipped a multi-part export into one download. It needs a
+//!   deflate implementation, and a stored-only zip of a 2 GB export is not an
+//!   improvement on four files.
 
 mod dbf;
+pub mod plan;
 mod writers;
 mod xls;
 mod xlsx;
@@ -57,6 +61,7 @@ use qh_core::{ColumnMeta, Value};
 use thiserror::Error;
 
 pub use dbf::DbfWriter;
+pub use plan::{export_rows, ExportOutcome, ExportSpec, Exporter};
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
 pub use xls::XlsWriter;
 pub use xlsx::XlsxWriter;
@@ -70,16 +75,17 @@ pub enum Format {
     Xml,
     Html,
     Sql,
-    /// Not implemented. See [`Format::implemented`].
     Xlsx,
-    /// Not implemented.
     Xls,
-    /// Not implemented.
     Dbf,
 }
 
 impl Format {
     /// Every format the Python engine offered, in the order it listed them.
+    ///
+    /// The order is the Python source's `WRITERS` order, `xls` before `xlsx` included:
+    /// it is the order a format menu shows, and a menu that reorders itself between the
+    /// two engines is a small thing a user still notices.
     pub const ALL: [Format; 9] = [
         Format::Text,
         Format::Csv,
@@ -87,14 +93,20 @@ impl Format {
         Format::Xml,
         Format::Html,
         Format::Sql,
-        Format::Xlsx,
         Format::Xls,
+        Format::Xlsx,
         Format::Dbf,
     ];
 
+    /// The format's own name, which is the key the Python engine filed it under.
+    ///
+    /// So `Text` is `txt`, not `text`: a saved preference, a command-line flag and a
+    /// URL parameter all carry `txt`, and answering with a different word here would
+    /// break every one of them. [`Format::parse`] takes `text` as well, because that is
+    /// what a person types.
     pub const fn name(self) -> &'static str {
         match self {
-            Format::Text => "text",
+            Format::Text => "txt",
             Format::Csv => "csv",
             Format::Json => "json",
             Format::Xml => "xml",
@@ -123,21 +135,29 @@ impl Format {
 
     /// Case-insensitive, because a format arrives from a menu, a URL or a command
     /// line and none of those agree on case.
+    ///
+    /// `text` is accepted as well as [`Format::name`]'s `txt`: one is what the Python
+    /// engine filed the format under and the other is what a person writes, and a
+    /// lookup that took only one of them would be a trap for whoever guessed the other.
     pub fn parse(name: &str) -> Option<Self> {
         let name = name.trim().to_ascii_lowercase();
+        let name = if name == "text" { "txt" } else { &name };
         Self::ALL.into_iter().find(|format| format.name() == name)
     }
 
     /// Data rows per file before the export splits into parts.
     ///
     /// `None` for the streaming formats, which have no ceiling — Python's
-    /// `Writer.max_rows`. The two Excel numbers are sheets' own limits, header
-    /// included, and are why a sheet is split at all: BIFF8 has no streaming mode, so
-    /// a whole sheet is buffered.
+    /// `Writer.max_rows`. The two Excel writers are the ones that set it, and they set
+    /// it to the sheet's row limit **less the header row**: `XLS_MAX_ROWS - 1` and
+    /// `XLSX_MAX_ROWS - 1`. Reading the constants instead of the writers would be a row
+    /// too generous, and that row is the difference between a clean split and an export
+    /// the writer refuses. Both numbers are why a sheet is split at all: BIFF8 has no
+    /// streaming mode, so a whole sheet is buffered.
     pub const fn max_rows(self) -> Option<usize> {
         match self {
-            Format::Xls => Some(65_535),
-            Format::Xlsx => Some(1_048_576),
+            Format::Xls => Some(65_536 - 1),
+            Format::Xlsx => Some(1_048_576 - 1),
             _ => None,
         }
     }
@@ -257,6 +277,22 @@ pub enum ExportError {
 
     #[error("{message}")]
     Usage { message: String },
+
+    /// The row source failed partway through.
+    ///
+    /// Kept apart from [`ExportError::Usage`] because they call for different
+    /// responses: a usage error is the caller's to fix, and this one is not — the
+    /// query died, or the connection did. It carries the original error rather than
+    /// its text so that a caller can still see what kind of failure it was.
+    #[error("the row source failed: {0}")]
+    Source(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl ExportError {
+    /// Wrap a failure from whatever is feeding rows in.
+    pub fn source(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        ExportError::Source(Box::new(error))
+    }
 }
 
 /// One writer, open on a file.
@@ -267,6 +303,14 @@ pub trait Writer: Send {
     /// Finish the file. Called once, and a writer that needs a trailer writes it
     /// here (`</RECORDS>`, `]`, the last `INSERT`).
     fn finish(&mut self) -> Result<(), ExportError>;
+
+    /// How many values were cut to fit a field, for the formats that can be forced to
+    /// cut one. `dbf` fields are fixed width, which is the case this exists for; a
+    /// format that never truncates answers zero, as the Python engine's
+    /// `getattr(writer, "truncated", 0)` does.
+    fn truncated(&self) -> usize {
+        0
+    }
 }
 
 /// Render rows to text without touching a writer, for the parallel path.
@@ -355,12 +399,24 @@ mod tests {
 
     #[test]
     fn every_format_the_python_engine_had_is_named_here() {
-        assert_eq!(Format::ALL.len(), 9);
-        for name in [
-            "text", "csv", "json", "xml", "html", "sql", "xlsx", "xls", "dbf",
-        ] {
-            assert!(Format::parse(name).is_some(), "{name} should parse");
+        // The Python source's `WRITERS` keys, in `WRITERS` order. Written out here
+        // rather than derived, so that renaming one on this side has to be a deliberate
+        // edit to this list too.
+        let python_keys = [
+            "txt", "csv", "json", "xml", "html", "sql", "xls", "xlsx", "dbf",
+        ];
+        assert_eq!(Format::ALL.len(), python_keys.len());
+        let names: Vec<&str> = Format::ALL.iter().map(|format| format.name()).collect();
+        assert_eq!(
+            names, python_keys,
+            "the names and their order are the engine's"
+        );
+        for name in python_keys {
+            assert_eq!(Format::parse(name).map(Format::name), Some(name));
         }
+        // `txt` is the engine's key and `text` is what a person writes. A lookup that
+        // took only one of them would be a trap for whoever guessed the other.
+        assert_eq!(Format::parse("text"), Some(Format::Text));
         // Case does not matter: this arrives from a menu, a URL or a command line.
         assert_eq!(Format::parse("CSV"), Some(Format::Csv));
         assert_eq!(Format::parse("  Json "), Some(Format::Json));
@@ -385,10 +441,15 @@ mod tests {
 
     #[test]
     fn the_row_ceilings_are_the_sheets_own_limits() {
-        // From the Python source, and they are why a sheet is split at all: BIFF8 has
-        // no streaming mode, so the whole sheet is buffered.
-        assert_eq!(Format::Xls.max_rows(), Some(65_535));
-        assert_eq!(Format::Xlsx.max_rows(), Some(1_048_576));
+        // From the Python source, which writes `max_rows = XLS_MAX_ROWS - 1` and
+        // `XLSX_MAX_ROWS - 1`: the header counts against the sheet, so the data-row
+        // ceiling is one less than the sheet limit. They are also why a sheet is split
+        // at all -- BIFF8 has no streaming mode, so the whole sheet is buffered.
+        assert_eq!(Format::Xls.max_rows(), Some(65_536 - 1));
+        assert_eq!(Format::Xlsx.max_rows(), Some(1_048_576 - 1));
+        // And one less than the writers' own internal guard, which refuses at the sheet
+        // limit: the planner must always split before the writer has to refuse.
+        assert!(Format::Xlsx.max_rows().unwrap() < 1_048_576);
         // The streaming formats have no ceiling to record.
         for format in [
             Format::Text,

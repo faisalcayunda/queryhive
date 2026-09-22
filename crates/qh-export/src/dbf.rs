@@ -225,6 +225,12 @@ impl Writer for DbfWriter {
         Ok(())
     }
 
+    /// The count the planner reports to the user, so a `dbf` export that cut a value
+    /// says so instead of leaving it to be found in the file.
+    fn truncated(&self) -> usize {
+        self.truncated
+    }
+
     fn finish(&mut self) -> Result<(), ExportError> {
         self.out.write_all(&[0x1a])?; // EOF marker
         self.out.flush()?;
