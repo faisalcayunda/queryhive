@@ -15,7 +15,7 @@
 | Tahap | Status | Catatan |
 |---|---|---|
 | A — Audit codebase | **Selesai** | §1 blueprint. Diagnosis "fetch lambat" terbagi lima penyebab (P1–P5), semuanya merujuk path file dan sudah diverifikasi ulang terhadap kode. |
-| B — Riset web | **Berjalan** | `tools/kenari_search.py` membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
+| B — Riset web | **Berjalan** | `tools/kenari_search.py` — alat lokal yang **tidak masuk repo** (lihat §Perkakas lokal) — membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
 | D — Fase 1 | **Sedang dikerjakan** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, `qh-driver-postgres`, dan `qh-driver-mysql` selesai dan hijau; Trino, export, credentials, storage, tunnel, FFI belum ada |
@@ -209,7 +209,7 @@ Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
 
 | # | Isu | Dampak | Rencana |
 |---|---|---|---|
-| K1 | ~~`web_search` tidak tersedia~~ **Selesai** | — | `tools/kenari_search.py` memberi pencarian dan pengambilan halaman. Riset Tahap B kini bisa dikerjakan; §8.1 tinggal diisi, bukan lagi terhalang tooling |
+| K1 | ~~`web_search` tidak tersedia~~ **Selesai** | — | Alat lokal `tools/kenari_search.py` memberi pencarian dan pengambilan halaman. Riset Tahap B kini bisa dikerjakan; §8.1 tinggal diisi, bukan lagi terhalang tooling |
 | K2 | ~~Baseline benchmark Python belum ada~~ **Selesai** | — | Terukur untuk PG dan MySQL; Trino tertunda karena memori VM (lihat #4) |
 | K3 | ~~Zoo tipe belum diuji terhadap server nyata~~ **Sebagian selesai** | PostgreSQL sudah tervalidasi uji integrasi; MySQL belum | Snapshot server nyata untuk MySQL masuk tugas berikutnya #1 |
 | K4 | `tools/deps.py` (referensi di `docs/dependencies.md`) belum ada | Tabel dependency masih dibuat manual | Dibuat bersama job CI `cargo deny` |
@@ -278,9 +278,35 @@ Crate kerangka MySQL pernah **dihapus dari workspace** alih-alih dibiarkan beris
 baris pun: kerangka kosong yang terlihat seperti pekerjaan belum selesai lebih membingungkan
 daripada tidak ada apa-apa.
 
+## Perkakas lokal (sengaja tidak masuk repo)
+
+`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
+dikirim produk. Karena itu ia **di-gitignore** dan tidak ada di repo — alasannya sama seperti skrip
+sekali pakai tidak di-commit: pohon repo seharusnya menggambarkan produknya.
+
+Konsekuensi yang harus diingat: **clone baru tidak punya file ini.** Yang perlu diketahui untuk
+membuatnya lagi:
+
+- Memanggil endpoint kenari secara langsung, karena `kenari:web_search` adalah server tool yang
+  normalnya dipakai lewat array `tools` pada request chat — tidak berguna bagi skrip atau agent
+  yang ingin hasilnya sebagai data.
+- Bentuk yang sudah diverifikasi terhadap API hidup, bukan dari dokumentasi saja:
+  `POST /v1/web/search` → `{"results":[{"title","url","content"}]}`;
+  `POST /v1/web/fetch` → `{"title","content"}`;
+  `POST /v1/x/search` → `{"answer","citations"}`, dan saat saldo kurang →
+  `{"error":{"code":"plan_limit_reached"}}` dengan **HTTP 429**.
+- 429 itu penting: kode terstruktur di body lebih tepat daripada status HTTP. Mengklasifikasikan
+  dari status saja membuat batas penagihan terlihat seperti rate limit, dan pemanggil akan
+  mengulanginya selamanya. Klien mengecek kode body lebih dulu, dan `rate_limited` asli tetap
+  dianggap bisa diulang.
+- Key dibaca dari `KENARI_API_KEY`, fallback ke `.env` di akar repo. Keduanya di luar version
+  control. `.env` **tidak** di-gitignore sebelum ini — itu diperbaiki bersamaan.
+
+`x_search` belum bisa dipakai: ditagih dari saldo, bukan dari kuota paket, dan saldonya kurang.
+
 ## [BUTUH TINDAKAN MANUAL]
 
-1. ~~Kuota paket untuk `web_search` habis.~~ **Teratasi.** `tools/kenari_search.py` memakai akun
+1. ~~Kuota paket untuk `web_search` habis.~~ **Teratasi.** Alat lokal `tools/kenari_search.py` memakai akun
    kenari pengguna, dan akun itu bersaldo — satu pencarian nyata berhasil. Riset Tahap B kini bisa
    dijalankan: pain point Navicat/DBeaver/TablePlus/DataGrip/Beekeeper (sumber primer: issue
    tracker resmi masing-masing proyek) dan status dukungan upstream versi PostgreSQL/MySQL/Trino

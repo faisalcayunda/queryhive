@@ -23,9 +23,19 @@ backup.zip
 # Rust build artifacts
 /target
 
-# Secrets. `.env` holds the kenari API key used by tools/kenari_search.py, and it
+# Secrets. `.env` holds the kenari API key used by the local search helper, and it
 # was NOT ignored before this line was added -- which is exactly how a key ends up
 # in a commit. `git check-ignore -v .env` is the test that it stayed covered.
 .env
 .env.*
-!.env.example
+
+# Internal development tooling, deliberately kept out of the repository.
+# `tools/kenari_search.py` is a local helper for researching while the app is
+# being built. It is not something the project ships, so it does not belong in
+# the tree that describes the product -- the same reason a scratch script is not
+# committed. It stays on disk and reads its key from the `.env` above.
+#
+# Consequence worth remembering: a fresh clone does not have this file. What it
+# does is documented in PROGRESS.md, so it can be recreated rather than
+# discovered missing.
+tools/kenari_search.py
