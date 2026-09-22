@@ -7,11 +7,11 @@
 //!
 //! # Which formats exist today
 //!
-//! Seven of the nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql` and `dbf`.
-//! The two Excel formats — `xlsx` and `xls` — are **not**, and asking for one gets an
-//! error that says so rather than a file that is wrong. Their row ceilings are recorded
-//! anyway, because the planner will need them and they are known facts from the Python
-//! source (`XLS_MAX_ROWS = 65_536`, `XLSX_MAX_ROWS = 1_048_576`).
+//! Eight of the nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql`, `dbf` and
+//! `xlsx`. Only `xls` is **not**, and asking for it gets an error that says so rather
+//! than a file that is wrong. Its row ceiling is recorded anyway, because the planner
+//! will need it and it is a known fact from the Python source
+//! (`XLS_MAX_ROWS = 65_536`).
 //!
 //! `dbf` is different in kind from the other two and that is worth knowing before
 //! comparing them. Its bytes are decided by code — the Python engine wrote it by hand
@@ -46,6 +46,7 @@
 
 mod dbf;
 mod writers;
+mod xlsx;
 
 use std::io;
 use std::path::Path;
@@ -55,6 +56,7 @@ use thiserror::Error;
 
 pub use dbf::DbfWriter;
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
+pub use xlsx::XlsxWriter;
 
 /// One export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -152,6 +154,7 @@ impl Format {
                 | Format::Html
                 | Format::Sql
                 | Format::Dbf
+                | Format::Xlsx
         )
     }
 
@@ -203,6 +206,9 @@ pub struct ExportOptions {
     pub sql_table: Option<String>,
     /// Width for a `dbf` text column, before the 4000-byte record budget trims it.
     pub dbf_char_width: usize,
+    /// Worksheet name for `xlsx` and `xls`. `None` is `Sheet1`, and the format's
+    /// 31-character limit is applied rather than refused.
+    pub sheet: Option<String>,
 }
 
 impl Default for ExportOptions {
@@ -225,6 +231,7 @@ impl Default for ExportOptions {
             sql_rows_per_insert: 200,
             sql_table: None,
             dbf_char_width: 254,
+            sheet: None,
         }
     }
 }
@@ -239,7 +246,7 @@ pub enum ExportError {
     /// from a usage error: nothing the caller can change will make it work.
     #[error(
         "{format} export is not implemented yet. This crate writes text, csv, json, xml, \
-         html, sql and dbf; the two Excel formats need their containers written and are \
+         html, sql, dbf and xlsx; xls needs an OLE2 container and BIFF8 records and is \
          tracked separately."
     )]
     Unsupported { format: &'static str },
@@ -312,9 +319,10 @@ pub fn open(
         Format::Html => Box::new(HtmlWriter::new(path, columns, options)?),
         Format::Sql => Box::new(SqlWriter::new(path, columns, options)?),
         Format::Dbf => Box::new(DbfWriter::new(path, columns, options)?),
+        Format::Xlsx => Box::new(XlsxWriter::new(path, columns, options)?),
         // Refused above, and listed so that adding a writer is a missing arm the
         // compiler reports rather than a format that silently does nothing.
-        Format::Xlsx | Format::Xls => unreachable!("refused above"),
+        Format::Xls => unreachable!("refused above"),
     })
 }
 
@@ -358,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn seven_formats_are_writable_and_two_are_named_but_not_written() {
+    fn eight_formats_are_writable_and_one_is_named_but_not_written() {
         // Stated as a test so that the gap is visible in the suite and not only in a
         // commit message. Adding a writer turns one of these around.
         assert_eq!(
@@ -366,24 +374,21 @@ mod tests {
                 .iter()
                 .filter(|format| format.implemented())
                 .count(),
-            7
+            8
         );
-        for format in [Format::Xlsx, Format::Xls] {
-            assert!(
-                !format.implemented(),
-                "{} is not written yet",
-                format.name()
-            );
-            assert!(matches!(
-                open(
-                    format,
-                    Path::new("/tmp/x"),
-                    &[ColumnMeta::new("a", "bigint")],
-                    &ExportOptions::default()
-                ),
-                Err(ExportError::Unsupported { .. })
-            ));
-        }
+        // The one that is left. Named rather than looped over, because a loop of one is
+        // a list pretending to be longer than it is.
+        let format = Format::Xls;
+        assert!(!format.implemented(), "xls is not written yet");
+        assert!(matches!(
+            open(
+                format,
+                Path::new("/tmp/x"),
+                &[ColumnMeta::new("a", "bigint")],
+                &ExportOptions::default()
+            ),
+            Err(ExportError::Unsupported { .. })
+        ));
     }
 
     #[test]

@@ -202,7 +202,35 @@
   `openpyxl` dan `xlwt`, jadi menyamakannya tidak mungkin dan tidak bermakna. Yang bisa
   dijanjikan di sana adalah berkas yang sah dengan nilai sel yang sama — klaim yang lebih lemah
   dan berbeda, dan itu akan dinyatakan begitu.
-- [x] **261 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `qh-export`: format **`xlsx`** ditulis tangan — kontainer ZIP dan bagian OOXML-nya.
+  **8 dari 9 format** kini bisa ditulis; hanya `xls` yang tersisa. **273 uji hijau.**
+  ZIP-nya tanpa dependency: entri *stored*, dan yang penting — **lembar kerjanya di-stream
+  dengan data descriptor** (flag bit 3), karena CRC dan ukuran sebuah entri stored baru diketahui
+  setelah byte terakhirnya ditulis. Itulah yang menjaga memori tetap datar.
+  Dua keputusan yang dinyatakan, bukan disembunyikan:
+  - **Timestamp berzona menjadi teks.** Sel tidak bisa membawa offset, dan menulis instannya
+    tanpa zona adalah konversi diam-diam.
+  - **Timestamp ditulis sebagai serial Excel dengan number format**, bukan sebagai teks. Serial
+    tanpa format tampil sebagai `45922` — lebih buruk daripada teks — jadi `styles.xml` ada
+    justru untuk itu. Serial `46053 + 0.5` saya verifikasi memang jatuh di 2026-01-31 12:00.
+  Verifikasi berlapis, dan yang terakhir bukan kode saya sendiri:
+  1. Uji Rust membaca kembali ZIP-nya lewat central directory dan memeriksa **CRC** setiap entri
+     terhadap datanya.
+  2. Python `zipfile.testzip()` + `ElementTree.parse()` atas **19 berkas yang dihasilkan**:
+     semua bagian bisa diparse, setiap bagian dideklarasikan di `[Content_Types].xml`, setiap
+     `Override` benar-benar ada, relasi menunjuk berkas yang ada, dan setiap indeks gaya sel
+     ada di `cellXfs`. 19 valid, 0 rusak.
+  3. **openpyxl 3.1.5 — pustaka yang sama yang dipakai engine Python — membaca berkasnya** dan
+     mengembalikan nilai yang benar: timestamp kembali sebagai `datetime(2026,1,31,12,0)`
+     (bukan angka), `1.5` sebagai angka, spasi tepi **tetap utuh** (itu yang dibuktikan
+     `xml:space="preserve"`), karakter kontrol hilang, dan NULL menjadi `None`.
+  Satu bug nyata ditangkap uji: referensi sel di baris header ditulis `r="A"` **tanpa nomor
+  baris** — berkas yang Excel tolak. Penyebabnya saya sendiri, saat menghapus parameter yang
+  tampak tidak terpakai.
+  Cap baris 1.048.575 (batas 1.048.576 termasuk header) ditegakkan dengan galat, bukan ditulis
+  lalu menghasilkan lembar yang ditolak Excel. Stempel waktu DOS di ZIP dipatok 1980-01-01 supaya
+  keluarannya reproducible dan uji bisa membandingkan berkas utuh.
+- [x] **273 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:
