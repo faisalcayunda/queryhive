@@ -441,10 +441,12 @@ Temuan nyata dari proses ini, semuanya diperbaiki di kode dan bukan disesuaikan 
      dan code page `dbf` tetap cp1252.
    - **`bundle` (ZIP) memakai deflate `flate2`, bukan zlib `zipfile`.** Isinya identik (nama,
      byte, CRC), byte arsipnya tidak diklaim sama.
-8. **Menutup T-1** (`docs/golden-deltas.md`): `value.rs` dan `render.rs` masih punya dua aturan
-   berbeda untuk `timestamptz`, dan yang dipakai `qh-result-store` bukan yang cocok dengan
-   snapshot. Satu kontrak, satu implementasi — rumahnya `render::to_text`. Ini bug yang sudah
-   terbukti, bukan kerapian.
+8. ~~Menutup T-1~~ **Selesai 22 Sep 2026.** Ternyata bukan sekadar dua renderer: decoder Trino dan
+   PostgreSQL juga memakai konvensi `micros` yang berbeda (jam dinding vs instant). Modelnya
+   disatukan ke milik Python — instant + zona — decoder Trino mengikuti, dan `value.rs` sekarang
+   hanya meneruskan ke `render::to_text`. Duplikasi 338 baris hilang, aturan float yang setia
+   diangkat, dan buktinya diukur terhadap PostgreSQL dengan zona sesi `Asia/Jakarta`
+   (`docs/golden-deltas.md` T-1).
 9. **`qh-credentials`** (Keychain `id.data-ecosystem.queryhive` harus dipertahankan supaya
    password lama tetap terbaca), lalu **`qh-storage`** dan **`qh-tunnel`**. Ini yang tersisa
    sebelum aplikasi bisa memakai engine Rust untuk menyimpan koneksi.

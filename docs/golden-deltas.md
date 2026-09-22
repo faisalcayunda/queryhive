@@ -132,9 +132,9 @@ dengan kutipnya.
 Rust akan merender `3 days, 4:05:06`, tanpa kutip. Isi teksnya sengaja **dipertahankan sama**
 supaya perbedaannya hanya pada kutip — perbedaan yang sekecil mungkin dan mudah diuji.
 
-## Temuan yang belum ditutup
+## Temuan yang sudah ditutup
 
-### T-1 — Dua aturan berbeda untuk `timestamptz`, dan yang benar ada di sisi ekspor
+### T-1 — Dua aturan berbeda untuk `timestamptz` · **Ditutup 22 Sep 2026**
 
 `crates/qh-core/src/value.rs` (`Value::render_text`) **menambahkan** offset ke `micros` saat
 merender timestamp berzona, sementara `crates/qh-core/src/render.rs` (`to_text`) mencetak `micros`
@@ -151,12 +151,36 @@ lebih maju daripada jalur ekspor. Belum ada uji yang menangkapnya karena type zo
 lewat jalur perintah. Dua aturan untuk satu kontrak harus menjadi satu — pekerjaan berikutnya,
 dan `render::to_text` adalah rumah yang benar.
 
-**Diperkuat server sungguhan (22 Sep 2026).** `SELECT * FROM type_zoo` di PostgreSQL dengan zona
-sesi UTC mengembalikan `2026-01-31 05:00:00.123456+00:00` untuk nilai yang ditulis sebagai
-`12:00+07:00`. Artinya server melaporkan **jam dinding di zona sesi** beserta offsetnya — persis
-konvensi yang dipatok uji decoder Trino. Aturan `render.rs` mencetaknya apa adanya (benar); aturan
-`value.rs` akan menambahkan offset itu sekali lagi dan mencetak `12:00:00+00:00` (salah, dan
-kebetulan terlihat "benar" kalau mata mengharapkan jam Jakarta).
+**Bukan hanya dua renderer: dua decoder juga berbeda.** Trino menyimpan **jam dinding** di
+`micros` dan zonenya di `offset_secs`; PostgreSQL menyimpan **instant** (`parse_timestamp`
+mengurangi offsetnya). Dua konvensi berarti tidak ada satu aturan render yang benar untuk
+keduanya, jadi yang harus disatukan lebih dulu adalah **model nilainya**.
+
+Yang dipilih adalah model Python, dan model itu **instant + zona**: sebuah `datetime` adalah satu
+instant dengan `tzinfo`, dan `isoformat(sep=" ")` mencetak jam dinding *di zona itu*. Maka
+`2026-01-31 12:00:00+07:00` disimpan sebagai 05:00Z dengan offset 25200 — yang sudah dilakukan
+PostgreSQL — dan decoder Trino diubah untuk mengurangi offsetnya. Renderer-nya kini satu: `micros`
+digeser ke zona yang dilaporkan sebelum tanggal dan jamnya diambil, lalu offsetnya dicetak.
+
+**Bukti hidup (22 Sep 2026).** Zona default database dev diubah ke `Asia/Jakarta`, dan baris yang
+sama di `type_zoo` dirender:
+
+| Zona sesi | Keluaran engine |
+|---|---|
+| `UTC` | `2026-01-31 05:00:00.123456+00:00` |
+| `Asia/Jakarta` | `2026-01-31 12:00:00.123456+07:00` |
+
+Instant yang sama, ditampilkan di zona yang dilaporkan server — persis perilaku Python. Zona
+container dikembalikan ke default setelah pengukuran. Aturan lama di jalur ekspor akan mencetak
+`05:00:00.123456+07:00` untuk baris kedua: jam UTC yang dilabeli `+07:00`, meleset tujuh jam
+tanpa terlihat salah.
+
+**Yang ikut dibersihkan.** Duplikasi yang menyebabkan perbedaan ini dihapus: `Value::render_text`
+kini memanggil [`qh_core::render::to_text`], dan 338 baris salinan kedua di `value.rs` (termasuk
+`format_float` yang tidak setia, `format_sequence`/`format_map`, dan `civil_from_days`) hilang.
+Aturan float yang setia dari `value.rs` — termasuk pergantian ke notasi eksponen di ambang Python
+(1e16 ke atas, di bawah 1e-4) — diangkat ke `render.rs`, jadi catatan lama di modul itu yang
+menyebut eksponen sebagai "divergensi yang dicatat" tidak berlaku lagi.
 
 ## Yang belum dapat diverifikasi
 

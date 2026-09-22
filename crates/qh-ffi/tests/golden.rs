@@ -333,11 +333,11 @@ fn type_zoo() -> Vec<Vec<Value>> {
         }
     }
 
-    // `2026-01-31 12:00` as the server's own wall clock: `micros` is that wall time and
-    // `offset_secs` is the zone it was reported in, which is the convention the Trino
-    // decoder's tests pin (`crates/qh-driver-trino/src/decode.rs`).
+    // `2026-01-31 12:00:00.123456+07:00` as a driver reports it: `micros` is the
+    // instant (05:00:00.123456Z) and `offset_secs` is the zone to show it in, which is
+    // the convention all three decoders share (`docs/golden-deltas.md` T-1).
     let aware = Value::Timestamp {
-        micros: 1_769_860_800_123_456,
+        micros: 1_769_835_600_123_456,
         offset_secs: Some(25_200), // +07:00
     };
     let naive = Value::Timestamp {

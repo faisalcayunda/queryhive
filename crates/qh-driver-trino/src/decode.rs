@@ -321,9 +321,15 @@ fn parse_time_micros(text: &str) -> Option<i64> {
 
 /// `"2026-01-31 12:00:00.123"`, optionally with `" UTC"` or `"+07:00"`.
 ///
-/// The wall-clock reading is kept in `micros` and the offset is returned
-/// separately, rather than the value being normalised to UTC: normalising is what
-/// loses the `+07:00` the user asked the server for.
+/// **`micros` is the instant**, and the zone travels beside it in `offset_secs`
+/// rather than being folded in and forgotten. That is the model Python's `datetime`
+/// has — an instant plus a `tzinfo` — and therefore the model the snapshots were
+/// recorded with: the server says `12:00 +07:00`, the instant is 05:00Z, and a
+/// renderer asked for `+07:00` prints 12:00 again.
+///
+/// The alternative, keeping the wall clock in `micros`, is what PostgreSQL's decoder
+/// used to disagree with this one about. Two drivers with two conventions and one
+/// renderer cannot both be right; `docs/golden-deltas.md` T-1 has the details.
 fn parse_timestamp(text: &str, has_zone: bool) -> Option<(i64, Option<i32>)> {
     let text = text.trim();
     let (rest, offset_secs) = if has_zone {
@@ -336,7 +342,12 @@ fn parse_timestamp(text: &str, has_zone: bool) -> Option<(i64, Option<i32>)> {
     let (date_text, time_text) = rest.split_once(' ')?;
     let days = i64::from(parse_date(date_text)?);
     let time_micros = parse_time_micros(time_text)?;
-    Some((days * 86_400_000_000 + time_micros, offset_secs))
+    let wall_micros = days * 86_400_000_000 + time_micros;
+    // Subtracting the offset is what turns the wall clock into the instant. A
+    // zone-less timestamp keeps its reading, which is the same thing with an offset
+    // of zero.
+    let micros = wall_micros - i64::from(offset_secs.unwrap_or(0)) * 1_000_000;
+    Some((micros, offset_secs))
 }
 
 /// Split `"2026-01-31 12:00:00.123 UTC"` into its wall clock and offset.
@@ -534,10 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_keep_the_wall_clock_and_the_offset_separately() {
-        // Noon on 2026-01-31 as wall-clock micros, with the zone kept beside it
-        // rather than folded in -- folding is what loses the +07:00 the user asked
-        // the server for.
+    fn timestamps_keep_the_instant_and_the_zone_separately() {
+        // Noon on 2026-01-31 in UTC, which is the same instant the next case shows as
+        // 19:00+07:00 and as 12:00+07:00 when the zone it was reported in is applied.
+        // The zone travels beside the instant rather than being folded in and lost.
         let utc = decode(
             "timestamp with time zone",
             &json("\"2026-01-31 12:00:00.123 UTC\""),
@@ -550,6 +561,9 @@ mod tests {
             }
         );
 
+        // The same reading as 12:00 in +07:00 is 05:00Z: seven hours earlier as an
+        // instant, which is what a value has to mean for two zones to agree about the
+        // moment they describe.
         let plus_seven = decode(
             "timestamp with time zone",
             &json("\"2026-01-31 12:00:00.123 +07:00\""),
@@ -557,9 +571,14 @@ mod tests {
         assert_eq!(
             plus_seven,
             Value::Timestamp {
-                micros: 1_769_860_800_123_000,
+                micros: 1_769_835_600_123_000,
                 offset_secs: Some(25_200)
             }
+        );
+        // And the reading is what comes back out: the instant shown in its own zone.
+        assert_eq!(
+            plus_seven.render_text().as_deref(),
+            Some("2026-01-31 12:00:00.123000+07:00")
         );
     }
 

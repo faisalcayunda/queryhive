@@ -49,9 +49,11 @@
 //!    reproducing an implementation detail, so nested bytes render as hex here,
 //!    consistently with the top level.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map as JsonMap, Value as Json};
 
-use crate::value::Value;
+use crate::value::{IntervalValue, Value};
 
 /// The canonical text form of a value, or `None` for a NULL.
 ///
@@ -75,7 +77,7 @@ pub fn to_text(value: &Value) -> Option<String> {
         } => format_timestamp(*micros, *offset_secs),
         Value::Date { days } => format_date(*days),
         Value::Time { micros } => format_time(*micros),
-        Value::Interval(interval) => crate::value::format_interval(*interval),
+        Value::Interval(interval) => format_interval(*interval),
         // Kept verbatim: Postgres `jsonb` does not promise key order but `json`
         // does, and re-encoding would throw away the difference the user can see.
         Value::Json(text) => text.to_string(),
@@ -147,26 +149,61 @@ pub fn to_json_value(value: &Value) -> Json {
     }
 }
 
-/// A float the way Python's `str()` writes it, for the magnitudes where the two
-/// agree.
+/// A float the way Python's `str()` writes it.
 ///
-/// Rust's `{}` produces the shortest string that round-trips, which is the same
-/// guarantee Python's repr gives; what differs is when either switches to exponent
-/// form. See the module note: the divergence is recorded, not hidden.
+/// Three rules, each of which a naive implementation gets wrong:
+///
+/// - a whole value keeps its point (`1.0`, not `1`), so a float column does not
+///   change shape from row to row;
+/// - the sign of zero survives — the snapshot holds `-0.0`, and `0.0 == -0.0` is
+///   true in every language that has the type, so this cannot be recovered later;
+/// - a large or tiny magnitude switches to exponent form, at Python's own
+///   thresholds (1e16 up, 1e-5 down), because `str(1e20)` is `1e+20`.
 pub fn format_float(number: f64) -> String {
     if number.is_nan() {
         return "nan".to_owned();
     }
     if number.is_infinite() {
-        return if number > 0.0 { "inf" } else { "-inf" }.to_owned();
+        return if number.is_sign_negative() {
+            "-inf".to_owned()
+        } else {
+            "inf".to_owned()
+        };
     }
+    if number == 0.0 {
+        return if number.is_sign_negative() {
+            "-0.0".to_owned()
+        } else {
+            "0.0".to_owned()
+        };
+    }
+
+    // The decimal exponent of the leading digit, which is what Python's repr looks at
+    // when it decides between `123.0` and `1.23e+02`.
+    let magnitude = number.abs().log10().floor() as i32;
+    if !(-4..16).contains(&magnitude) {
+        return format_scientific(number);
+    }
+
     let mut text = format!("{number}");
-    // Rust writes a whole number as `1`, Python as `1.0`. A reader comparing the
-    // two exports sees that immediately, so it is matched here.
-    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+    if !text.contains('.') {
         text.push_str(".0");
     }
     text
+}
+
+/// `1.5e+20`-style text: Rust's `{:e}` with Python's exponent spelling.
+fn format_scientific(number: f64) -> String {
+    let rusty = format!("{number:e}"); // 1.5e20, 1.5e-7
+    let Some((mantissa, exponent)) = rusty.split_once('e') else {
+        return rusty;
+    };
+    let (sign, digits) = match exponent.strip_prefix('-') {
+        Some(rest) => ('-', rest),
+        None => ('+', exponent),
+    };
+    // A two-digit minimum, like Python: `e+07`, not `e+7`.
+    format!("{mantissa}e{sign}{digits:0>2}")
 }
 
 /// `unscaled / 10^scale` as text, with the scale's trailing zeros kept.
@@ -229,14 +266,27 @@ pub fn format_time(micros: i64) -> String {
 
 /// A point in time as `YYYY-MM-DD HH:MM:SS[.ffffff][±HH:MM]`.
 ///
-/// The offset is rendered from what the server reported rather than normalising to
-/// UTC first: normalising is what loses the `+07:00` the user asked the database
-/// for.
+/// **`micros` is the instant, and the offset says which zone to show it in.** That is
+/// the model Python's `datetime` has — a datetime object is an instant plus a
+/// `tzinfo`, and `isoformat(sep=" ")` prints the wall clock *in that zone* followed by
+/// the offset — so it is the model the snapshots were recorded with. `2026-01-31
+/// 12:00:00+07:00` is therefore stored as 05:00Z with an offset of 25200, and printed
+/// back as 12:00+07:00.
+///
+/// A value with no zone is the wall clock it holds, with no suffix: a naive
+/// `TIMESTAMP` must not acquire a `+00:00` it was never given.
 pub fn format_timestamp(micros: i64, offset_secs: Option<i32>) -> String {
+    // Moved into the reported zone before the day and the time are taken out of it, so
+    // that a value near midnight lands on the day the user's calendar shows rather
+    // than the UTC one.
+    let local = match offset_secs {
+        Some(offset) => micros + i64::from(offset) * 1_000_000,
+        None => micros,
+    };
     // Floored division, so a value before the epoch lands on the right day rather
     // than one day later with a positive remainder.
-    let days = micros.div_euclid(86_400_000_000);
-    let within_day = micros.rem_euclid(86_400_000_000);
+    let days = local.div_euclid(86_400_000_000);
+    let within_day = local.rem_euclid(86_400_000_000);
 
     let mut text = format!("{} {}", format_date(days as i32), format_time(within_day));
     if let Some(offset) = offset_secs {
@@ -248,6 +298,70 @@ pub fn format_timestamp(micros: i64, offset_secs: Option<i32>) -> String {
             (offset % 3600) / 60
         ));
     }
+    text
+}
+
+/// `3 days, 4:05:06` — Python's `str(timedelta)`, which is what `to_text` reached
+/// through `json.dumps(default=str)`.
+///
+/// The three parts stay apart: a month is not a fixed number of days and a day is not
+/// a fixed number of microseconds once daylight saving is involved, so they are never
+/// collapsed into one number. Python had no month part at all — a `timedelta` cannot
+/// express one — so that part is an extension rather than a match, and it reads the
+/// way the rest of the line does.
+///
+/// The JSON quotes Python's fallback wrapped around the string are dropped: delta D-2.
+pub fn format_interval(interval: IntervalValue) -> String {
+    let mut text = String::new();
+    if interval.months != 0 {
+        let _ = write!(
+            text,
+            "{} month{}",
+            interval.months,
+            if interval.months.abs() == 1 { "" } else { "s" }
+        );
+    }
+    if interval.days != 0 {
+        if !text.is_empty() {
+            text.push_str(", ");
+        }
+        let _ = write!(
+            text,
+            "{} day{}",
+            interval.days,
+            if interval.days.abs() == 1 { "" } else { "s" }
+        );
+    }
+
+    let negative = interval.micros < 0;
+    let magnitude = interval.micros.unsigned_abs();
+    let seconds = magnitude / 1_000_000;
+    let sub_second = magnitude % 1_000_000;
+    // The hour is deliberately not zero-padded: Python's `str(timedelta)` prints
+    // `3 days, 4:05:06` and `4:05:06`, never `04:05:06`, and the snapshot holds that
+    // wording. Minutes and seconds are padded.
+    let time = if sub_second == 0 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    } else {
+        format!(
+            "{}:{:02}:{:02}.{sub_second:06}",
+            seconds / 3600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    };
+    if !text.is_empty() {
+        text.push_str(", ");
+    }
+    if negative {
+        text.push('-');
+    }
+    text.push_str(&time);
     text
 }
 
@@ -425,7 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn an_offset_is_rendered_from_what_the_server_reported() {
+    fn one_instant_is_shown_in_the_zone_the_server_reported() {
+        // The instant is 2026-01-31T12:00:00.123456Z, and each assertion shows it in
+        // the zone standing beside it. That is what Python's
+        // `datetime.isoformat(sep=" ")` printed for the object the engine held, and
+        // what a driver's `micros` plus `offset_secs` has to mean for the two to agree.
         let micros = 1_769_860_800_123_456;
         assert_eq!(
             to_text(&Value::Timestamp {
@@ -441,7 +559,7 @@ mod tests {
                 offset_secs: Some(25_200)
             })
             .as_deref(),
-            Some("2026-01-31 12:00:00.123456+07:00")
+            Some("2026-01-31 19:00:00.123456+07:00")
         );
         assert_eq!(
             to_text(&Value::Timestamp {
@@ -449,7 +567,7 @@ mod tests {
                 offset_secs: Some(-18_000)
             })
             .as_deref(),
-            Some("2026-01-31 12:00:00.123456-05:00")
+            Some("2026-01-31 07:00:00.123456-05:00")
         );
         // No zone, no suffix: a `TIMESTAMP` must not acquire a `+00:00` it was never
         // given.
@@ -531,6 +649,11 @@ mod tests {
         assert_eq!(format_float(-0.25), "-0.25");
         assert_eq!(format_float(f64::INFINITY), "inf");
         assert_eq!(format_float(f64::NAN), "nan");
+        // Python's own thresholds: 1e16 and up, and below 1e-4.
+        assert_eq!(format_float(1e20), "1e+20");
+        assert_eq!(format_float(1.5e-7), "1.5e-07");
+        assert_eq!(format_float(1e15), "1000000000000000.0");
+        assert_eq!(format_float(0.0001), "0.0001");
     }
 
     #[test]
