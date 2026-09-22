@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `to_json_value` returns a real JSON value rather than a hand-rolled enum: the thing
+# it feeds is a JSON writer, and a second representation would only be one more thing
+# to keep in step.
+serde_json = "1"
 thiserror.workspace = true
 
 [lints.rust]

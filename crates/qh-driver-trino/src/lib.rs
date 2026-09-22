@@ -798,39 +798,13 @@ fn decode_rows(columns: &[WireColumn], rows: &[Vec<Json>]) -> Vec<Vec<Value>> {
 ///
 /// This grid is a listing, not data, so a NULL is the empty string and every value
 /// is rendered rather than carried.
+///
+/// The rendering itself is `qh-core`'s, which is the point: a `varbinary` is hex
+/// here, in the grid, and in an export alike, and there is one place that decides
+/// it. An earlier draft of this file had its own copy, along with its own decimal
+/// formatter -- a second answer to a question that already had one.
 fn value_to_text(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Text(text) => text.to_string(),
-        Value::Bool(flag) => flag.to_string(),
-        Value::Int(number) => number.to_string(),
-        Value::UInt(number) => number.to_string(),
-        Value::Float(number) => number.to_string(),
-        Value::Decimal { unscaled, scale } => format_decimal(*unscaled, *scale),
-        Value::Json(text) => text.to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
-fn format_decimal(unscaled: i128, scale: u8) -> String {
-    if scale == 0 {
-        return unscaled.to_string();
-    }
-    let negative = unscaled < 0;
-    let digits = unscaled.unsigned_abs().to_string();
-    let scale = usize::from(scale);
-    let padded = if digits.len() <= scale {
-        format!("{}{}", "0".repeat(scale - digits.len() + 1), digits)
-    } else {
-        digits
-    };
-    let split = padded.len() - scale;
-    format!(
-        "{}{}.{}",
-        if negative { "-" } else { "" },
-        &padded[..split],
-        &padded[split..]
-    )
+    qh_core::to_text(value).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,12 +1044,21 @@ mod tests {
     }
 
     #[test]
-    fn decimals_render_with_their_scale_intact() {
-        // The grid shows this text, so `1.50` must not become `1.5`.
-        assert_eq!(format_decimal(150, 2), "1.50");
-        assert_eq!(format_decimal(-125, 2), "-1.25");
-        assert_eq!(format_decimal(100, 0), "100");
-        assert_eq!(format_decimal(1, 6), "0.000001");
+    fn a_grid_cell_is_the_text_form_and_a_null_is_empty() {
+        // The grid is a listing, not data: every value is rendered, and a NULL is
+        // the empty string rather than a missing cell.
+        assert_eq!(value_to_text(&Value::Null), "");
+        assert_eq!(value_to_text(&Value::Int(42)), "42");
+        // Hex, because that is `qh-core`'s answer for bytes, and it is the same one
+        // an export gives.
+        assert_eq!(value_to_text(&Value::Bytes(vec![0x00, 0xff])), "00ff");
+        assert_eq!(
+            value_to_text(&Value::Timestamp {
+                micros: 0,
+                offset_secs: None
+            }),
+            "1970-01-01 00:00:00"
+        );
     }
 
     #[test]

@@ -130,7 +130,23 @@
   lint sehingga blok keempat tidak bisa ditambahkan tanpa sengaja. Di mesin non-Apple-Silicon
   crate ini tetap berjalan: pool lambat dapat **1** worker, bukan 0, karena pool tanpa worker
   berarti indeks metadata yang diam-diam tidak pernah berjalan.
-- [x] **217 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
+- [x] `qh-core::render` — rendering nilai ke teks dan ke JSON (paritas `writers.py:38` dan `:58`),
+  **12 uji unit** baru (43 di `qh-core`). Aturannya diambil dari sumber Python dan dari Python itu
+  sendiri, bukan dari tebakan: mikrodetik **dihilangkan bila nol** (`12:00:00`, bukan
+  `12:00:00.000000`), offset ditulis `±HH:MM`, dan `bytes` menjadi **hex** — bukan base64. Yang
+  terakhir itu jebakan yang nyata: Trino mengirim `varbinary` sebagai base64 *di kawat*, sedangkan
+  bentuk kanonik yang dilihat pengguna di berkas adalah hex. Dua hal berbeda, dan driver Trino yang
+  tadinya punya salinan formatter sendiri sekarang memakai yang ini.
+  Tiga hal **sengaja tidak** direproduksi, dan dicatat di modulnya alih-alih dibiarkan ditemukan:
+  teks float (Python menulis `1e+30`, Rust menulis angka penuh — keduanya round-trip, tapi berbeda),
+  `INTERVAL` (klien `trino` tidak terpasang di sini sehingga tidak ada yang bisa ditanya: **belum
+  terverifikasi**, bukan diklaim setara), dan `bytes` di dalam array (Python menulis repr
+  `b'\x00\xff'`, di sini hex).
+  Satu hal **dipertahankan justru karena lossy**: `to_json_value` mengubah `Decimal` menjadi float,
+  persis seperti `writers.py:58` dan "Sama" di blueprint §1.7. Ekspor JSON karena itu kehilangan
+  presisi desimal. Saya tidak memperbaikinya diam-diam — mengubahnya akan membuat dua engine
+  menghasilkan bentuk yang berbeda, dan bentuk teks yang eksak masih tersedia di writer lain.
+- [x] **229 uji hijau** seluruh workspace (dengan PostgreSQL, MySQL, dan Trino nyata), `cargo fmt --all --check` bersih,
   `cargo clippy --workspace --all-targets -- -D warnings` bersih
 
 Yang dibuktikan uji integrasi terhadap server nyata, bukan diasumsikan:

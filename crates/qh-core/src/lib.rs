@@ -19,8 +19,13 @@
 
 mod batch;
 mod error;
+// Public as a module as well as through the re-exports below: `qh-export` needs the
+// individual format helpers (`format_decimal`, `hex_encode`) to build a writer that
+// renders cells without going through a `String` first.
+pub mod render;
 mod value;
 
 pub use batch::{BatchError, ColumnBatch, ColumnMeta};
 pub use error::{EngineError, FailureKind};
+pub use render::{to_json_value, to_text};
 pub use value::{unsupported, IntervalValue, Value};
