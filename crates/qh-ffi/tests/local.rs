@@ -486,3 +486,38 @@ async fn credential_round_trips_through_the_real_keychain() {
     let after = credential_action(None, &account, "has", None).await;
     assert_eq!(after["exists"], json!(false));
 }
+
+/// A refusal names what to use instead, not only what does not exist.
+///
+/// The previous engine's refusal carried the hint and this one did not, which left the
+/// user to guess that `catalogs` is where MySQL keeps its databases. The sentence is built
+/// from the levels the driver declares rather than written per engine, so it stays right
+/// for a driver that gains or loses a level without anyone editing a string.
+#[tokio::test]
+async fn a_refused_level_names_the_commands_that_work_instead() {
+    // MySQL declares a database level and a table level, so `schemas` is the command with
+    // nowhere to go -- and the two that work are the two the sentence names.
+    let error = events(
+        Command::Schemas,
+        &[("DB_KIND", "mysql"), ("DB_HOST", "127.0.0.1")],
+    )
+    .await
+    .expect_err("mysql has no schema level");
+    assert_eq!(
+        error.message(),
+        "mysql has no schema level; use catalogs or tables instead"
+    );
+
+    // The hint follows the driver, not the engine's name: PostgreSQL has schemas and
+    // tables, and no catalog level of its own.
+    let error = events(
+        Command::Catalogs,
+        &[("DB_KIND", "postgres"), ("DB_HOST", "127.0.0.1")],
+    )
+    .await
+    .expect_err("postgres has no catalog level");
+    assert_eq!(
+        error.message(),
+        "postgres has no catalog level; use schemas or tables instead"
+    );
+}

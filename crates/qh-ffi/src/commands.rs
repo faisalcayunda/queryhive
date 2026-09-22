@@ -105,7 +105,48 @@ fn level_for(
         .iter()
         .copied()
         .find(|level| capabilities.levels.contains(level))
-        .ok_or_else(|| CliError::Usage(format!("{kind} has no {level_name} level")))
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "{kind} has no {level_name} level; {}",
+                instead_of(kind, &capabilities.levels)
+            ))
+        })
+}
+
+/// What to use instead, for a refusal to name.
+///
+/// A refusal that only says what failed leaves the user to guess which of the other
+/// commands answers their question, and the previous engine did not: it named the two
+/// that work. This is built from the levels the driver declared rather than written out
+/// per driver, so a driver that gains or loses a level gets the right sentence without
+/// anyone remembering to edit one.
+///
+/// The driver has wording of its own for the same situation (`crates/qh-driver-mysql`'s
+/// `browse` arm: "catalogs lists its databases and tables lists their tables"), and this
+/// is deliberately a second sentence rather than the same one. The driver knows the nouns
+/// -- a database is a database -- and this knows the command names, which is what a user
+/// of the command line types. Each says only what it can know, so the two cannot drift
+/// into contradicting each other.
+fn instead_of(kind: DriverKind, levels: &[BrowseLevel]) -> String {
+    let mut commands: Vec<&str> = Vec::new();
+    for level in levels {
+        // A catalog and a database are the same command: the driver picks which of the two
+        // it has, and the user types `catalogs` either way.
+        let command = match level {
+            BrowseLevel::Catalog | BrowseLevel::Database => "catalogs",
+            BrowseLevel::Schema => "schemas",
+            BrowseLevel::Table => "tables",
+        };
+        if !commands.contains(&command) {
+            commands.push(command);
+        }
+    }
+    match commands.as_slice() {
+        [] => format!("{kind} lists no level at all"),
+        [only] => format!("use {only} instead"),
+        [first, second] => format!("use {first} or {second} instead"),
+        [rest @ .., last] => format!("use {} or {last} instead", rest.join(", ")),
+    }
 }
 
 /// SQL, or the contents of `SQL_PATH`; neither being set is a usage error.
