@@ -327,7 +327,7 @@ fn format_time(micros: i64) -> String {
 /// The only difference is that Python's `json.dumps(..., default=str)` wrapped it
 /// in JSON quotes; that is delta D-2 in `docs/golden-deltas.md` and is kept to a
 /// single, obvious change.
-fn format_interval(interval: IntervalValue) -> String {
+pub(crate) fn format_interval(interval: IntervalValue) -> String {
     let mut text = String::new();
     if interval.months != 0 {
         let _ = write!(

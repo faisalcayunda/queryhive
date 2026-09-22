@@ -37,10 +37,12 @@
 //!    (`1000000000000000000000000000000`). Both round-trip, and matching Python
 //!    exactly would mean reimplementing its repr algorithm. The divergence is
 //!    limited to floats with an exponent.
-//! 2. **`INTERVAL`.** The Python engine's rendering could not be established here —
-//!    the `trino` client is not installed in this environment, so there was nothing
-//!    to ask. [`to_text`] renders the three fields the value actually carries, and
-//!    this note is the marker that it is unverified rather than confirmed.
+//! 2. **`INTERVAL` is verified, and deliberately different in one way.** Python's
+//!    `to_text` fell through to `json.dumps(default=str)` for a `timedelta`, which put
+//!    the *string* `"3 days, 4:05:06"` — JSON quotes included — in the cell. The text
+//!    is kept and the quotes are dropped; that is delta D-2 in
+//!    `docs/golden-deltas.md`, and the rendering lives in
+//!    [`crate::value::format_interval`] so there is one implementation of it.
 //! 3. **A `json` value nested inside an array or map.** Python's `json.dumps` falls
 //!    back to `str()` for an object it cannot serialise, so a `bytes` inside an
 //!    array comes out as Python's repr (`b'\\x00\\xff'`). Reproducing a repr is
@@ -49,7 +51,7 @@
 
 use serde_json::{Map as JsonMap, Value as Json};
 
-use crate::value::{IntervalValue, Value};
+use crate::value::Value;
 
 /// The canonical text form of a value, or `None` for a NULL.
 ///
@@ -73,7 +75,7 @@ pub fn to_text(value: &Value) -> Option<String> {
         } => format_timestamp(*micros, *offset_secs),
         Value::Date { days } => format_date(*days),
         Value::Time { micros } => format_time(*micros),
-        Value::Interval(interval) => format_interval(interval),
+        Value::Interval(interval) => crate::value::format_interval(*interval),
         // Kept verbatim: Postgres `jsonb` does not promise key order but `json`
         // does, and re-encoding would throw away the difference the user can see.
         Value::Json(text) => text.to_string(),
@@ -247,31 +249,6 @@ pub fn format_timestamp(micros: i64, offset_secs: Option<i32>) -> String {
         ));
     }
     text
-}
-
-/// The three fields an interval carries.
-///
-/// Unverified against the Python engine — see the module note. Rendered as
-/// `<months>-<days> <H:MM:SS>` only because that is a shape a reader can act on;
-/// it is not claimed to be what the Python engine wrote.
-pub fn format_interval(interval: &IntervalValue) -> String {
-    let sign = if interval.micros < 0 { "-" } else { "" };
-    let micros = interval.micros.unsigned_abs();
-    let seconds = micros / 1_000_000;
-    format!(
-        "{}{}-{} {}{}:{:02}:{:02}",
-        sign,
-        interval.months,
-        interval.days,
-        if interval.months < 0 || interval.days < 0 {
-            "-"
-        } else {
-            ""
-        },
-        seconds / 3600,
-        (seconds % 3600) / 60,
-        seconds % 60
-    )
 }
 
 /// Lowercase hex, which is what Python's `bytes.hex()` produces.
