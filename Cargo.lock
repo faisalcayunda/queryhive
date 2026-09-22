@@ -2343,6 +2343,7 @@ dependencies = [
  "async-trait",
  "qh-core",
  "qh-driver",
+ "qh-sql",
  "rcgen",
  "reqwest",
  "rustls",

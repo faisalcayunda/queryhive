@@ -5,20 +5,29 @@
 //! encoding matters more than the rest, so it is stated here rather than
 //! discovered later:
 //!
-//! **`timestamp` and `time` lose everything below a millisecond.** Measured
-//! against Trino 483, a value the server itself reports as `timestamp(6)`:
+//! **`timestamp` and `time` arrive at the precision the client asked for.** Trino
+//! encodes these two into JSON at the precision the *client says it can read*, and
+//! the request header that says so is `X-Trino-Client-Capabilities`. Measured
+//! against Trino 483, one header apart and nothing else:
 //!
 //! ```text
-//! SELECT CAST('2026-01-31 12:00:00.123456' AS TIMESTAMP(6))
-//!   typeof(...)  ->  "timestamp(6)"          (the value really is microsecond)
-//!   encoded      ->  "2026-01-31 12:00:00.123"   (456 microseconds gone)
+//! SELECT TIMESTAMP '2026-01-31 12:00:00.123456 +07:00', TIME '23:59:59.999999'
+//!
+//! without PARAMETRIC_DATETIME:
+//!   types: "timestamp with time zone", "time"
+//!   data:  "2026-01-31 12:00:00.123 +07:00", "00:00:00.000"
+//! with PARAMETRIC_DATETIME:
+//!   types: "timestamp(6) with time zone", "time(6)"
+//!   data:  "2026-01-31 12:00:00.123456 +07:00", "23:59:59.999999"
 //! ```
 //!
-//! This is the protocol, not this decoder: the digits are not transmitted, so no
-//! decoder here can recover them and no comment claiming full fidelity would be
-//! true. `TIME(6)` behaves the same way. It is recorded because the engine's
-//! promise elsewhere is that nothing is quietly rounded, and for Trino that
-//! promise has an upstream edge.
+//! `23:59:59.999999` arriving as `00:00:00.000` is the same rounding seen from the
+//! other side: 999.999 ms carries into the next second. The server holds
+//! microseconds either way — `typeof(CAST('…123456' AS TIMESTAMP(6)))` reports
+//! `timestamp(6)` in both cases — so nothing is lost here; the announcement is what
+//! decides, and `crate::CLIENT_CAPABILITIES` is where this driver makes it. Both
+//! encodings are decoded by the same code, which is the reason `base_type` strips a
+//! parameter list without losing a `with time zone` suffix that sits behind it.
 //!
 //! The rest of the encodings were taken the same way — by asking a real server
 //! and reading what came back, never from prose:
@@ -33,7 +42,12 @@
 //! | `map(K,V)` | object — keys arrive stringified, whatever `K` is |
 //! | `row(...)` | array |
 //! | `date` | `"2026-01-31"` |
-//! | `timestamp with time zone` | `"2026-01-31 12:00:00.123 UTC"` |
+//! | `timestamp(6) with time zone` | `"2026-01-31 12:00:00.123456 +07:00"` |
+//! | `time(6)` | `"23:59:59.999999"` |
+//!
+//! The two precision-bearing rows are what the capability buys; without it the same
+//! value arrives typed `timestamp with time zone` / `time` and rounded, and both
+//! spellings decode through the same branches below.
 
 use qh_core::Value;
 use serde_json::Value as Json;
@@ -528,19 +542,64 @@ mod tests {
     }
 
     #[test]
-    fn the_millisecond_truncation_in_the_protocol_is_visible_and_not_pretended_away() {
-        // The server reports timestamp(6) and transmits milliseconds. This test
-        // pins what arrives, so that if Trino ever starts sending microseconds it
-        // fails and someone updates the note at the top of this file rather than
-        // leaving a stale claim in it.
-        let value = decode("timestamp(6)", &json("\"2026-01-31 12:00:00.123\""));
+    fn a_parametric_timestamp_and_time_keep_all_six_digits() {
+        // What the coordinator sends once the client announces
+        // `PARAMETRIC_DATETIME` (`crate::CLIENT_CAPABILITIES`): the precision
+        // travels in the type text *and* in the value, so the decoder has to strip
+        // `(6)` from the type without losing it from the digits.
         assert_eq!(
-            value,
+            decode("timestamp(6)", &json("\"2026-01-31 12:00:00.123456\"")),
             Value::Timestamp {
-                micros: 1_769_860_800_123_000,
+                micros: 1_769_860_800_123_456,
                 offset_secs: None
-            },
-            "milliseconds only, as measured"
+            }
+        );
+        assert_eq!(
+            decode(
+                "timestamp(6) with time zone",
+                &json("\"2026-01-31 12:00:00.123456 +07:00\"")
+            ),
+            Value::Timestamp {
+                micros: 1_769_835_600_123_456,
+                offset_secs: Some(25_200)
+            }
+        );
+        // 23:59:59.999999 rendered back is the value that would round up into the
+        // next second if the announcement were dropped: 86_399_999_999 µs, not
+        // zero.
+        assert_eq!(
+            decode("time(6)", &json("\"23:59:59.999999\"")),
+            Value::Time {
+                micros: 86_399_999_999
+            }
+        );
+
+        // A parameterised type nested in another one goes through `arguments`
+        // before `base_type`, which is the second place a `(6)` could be mistaken
+        // for the end of the type name.
+        assert_eq!(
+            decode(
+                "array(timestamp(6) with time zone)",
+                &json("[\"2026-01-31 12:00:00.123456 +07:00\"]")
+            ),
+            Value::Array(vec![Value::Timestamp {
+                micros: 1_769_835_600_123_456,
+                offset_secs: Some(25_200)
+            }])
+        );
+    }
+
+    #[test]
+    fn a_parametric_type_name_still_reduces_to_the_branch_it_matches() {
+        // `base_type` is the one place the `(6)` is removed, and every branch above
+        // shares it, so `time(6)` has to reach the `time` arm and
+        // `timestamp(6) with time zone` the zoned one. The unprefixed cases are
+        // pinned next door; what is added here is the parameter a client that
+        // announced `PARAMETRIC_DATETIME` is answered with.
+        assert_eq!(base_type("time(6)"), "time");
+        assert_eq!(
+            base_type("timestamp(6) with time zone"),
+            "timestamp with time zone"
         );
     }
 

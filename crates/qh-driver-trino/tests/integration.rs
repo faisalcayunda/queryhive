@@ -170,37 +170,92 @@ async fn a_decimal_keeps_every_digit_through_the_real_protocol() {
 }
 
 #[tokio::test]
-async fn the_protocol_truncates_timestamps_to_milliseconds_and_this_pins_that() {
+async fn the_announced_capability_buys_microseconds_through_the_real_protocol() {
     let Some(mut session) = connect().await else {
         eprintln!("{SKIP_HINT}");
         return;
     };
-    // The server holds microseconds -- `typeof` says so -- and the JSON does not
-    // carry them. Measured here so the limit is a pinned fact about the wire
-    // rather than a claim in a comment: if Trino ever starts sending them, this
-    // fails and the note in the decoder gets updated instead of going stale.
-    let rows = rows(
-        &mut session,
-        "SELECT CAST('2026-01-31 12:00:00.123456' AS TIMESTAMP(6)), \
-         typeof(CAST('2026-01-31 12:00:00.123456' AS TIMESTAMP(6)))",
-    )
-    .await;
+    // The server holds microseconds and *reports* them only to a client that says
+    // it can read them: `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`.
+    // Measured on 483, that one header apart and nothing else:
+    //
+    //   without: "timestamp with time zone" / "time"
+    //            "2026-01-31 12:00:00.123 +07:00" / "00:00:00.000"
+    //   with:    "timestamp(6) with time zone" / "time(6)"
+    //            "2026-01-31 12:00:00.123456 +07:00" / "23:59:59.999999"
+    //
+    // So both halves below are a claim about the header rather than about the
+    // decoder: drop it from the request and the server stops putting `(6)` in the
+    // type and stops sending the digits, and this fails on the type name first.
+    // The third value is the one that shows why the header is not cosmetic --
+    // 999.999 ms rounds up into the next second, so the downgrade is not a
+    // truncation the grid could be read past.
+    let mut cursor = session
+        .execute(
+            "SELECT TIMESTAMP '2026-01-31 12:00:00.123456 +07:00' AS tz_aware, \
+             TIMESTAMP '2026-01-31 12:00:00.123456' AS tz_naive, \
+             TIME '23:59:59.999999' AS a_time",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+
+    let batch = cursor
+        .next_batch(16)
+        .await
+        .expect("next_batch")
+        .expect("a batch");
+
+    let columns: Vec<(String, String)> = cursor
+        .columns()
+        .iter()
+        .map(|column| (column.name.to_string(), column.type_name.to_string()))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            (
+                "tz_aware".to_owned(),
+                "timestamp(6) with time zone".to_owned()
+            ),
+            ("tz_naive".to_owned(), "timestamp(6)".to_owned()),
+            ("a_time".to_owned(), "time(6)".to_owned()),
+        ],
+        "the server only reports these type names to a client that announced \
+         PARAMETRIC_DATETIME"
+    );
 
     assert_eq!(
-        rows[0][1],
-        Value::Text("timestamp(6)".into()),
-        "the server's value really is microsecond precision"
+        batch.columns()[0],
+        vec![Value::Timestamp {
+            micros: 1_769_835_600_123_456,
+            offset_secs: Some(25_200),
+        }]
     );
-    match rows[0][0] {
-        Value::Timestamp { micros, .. } => {
-            assert_eq!(
-                micros % 1_000_000,
-                123_000,
-                "milliseconds only: the .123456 the server holds arrives as .123"
-            );
-        }
-        ref other => panic!("expected a timestamp, got {other:?}"),
-    }
+    assert_eq!(
+        batch.columns()[1],
+        vec![Value::Timestamp {
+            micros: 1_769_860_800_123_456,
+            offset_secs: None,
+        }]
+    );
+    assert_eq!(
+        batch.columns()[2],
+        vec![Value::Time {
+            micros: 86_399_999_999,
+        }]
+    );
+
+    // And the text a grid shows keeps all six digits, in the zone the server
+    // reported the value in.
+    assert_eq!(
+        batch.columns()[0][0].render_text().as_deref(),
+        Some("2026-01-31 12:00:00.123456+07:00")
+    );
+    assert_eq!(
+        batch.columns()[2][0].render_text().as_deref(),
+        Some("23:59:59.999999")
+    );
 }
 
 #[tokio::test]
@@ -452,16 +507,27 @@ async fn the_callers_row_ceiling_is_honoured_across_pages() {
 }
 
 #[tokio::test]
-async fn explain_returns_the_servers_own_plan() {
+async fn explain_returns_the_servers_own_plan_without_the_callers_terminator() {
     let Some(mut session) = connect().await else {
         eprintln!("{SKIP_HINT}");
         return;
     };
-    let statement = session.explain_statement("SELECT 1");
+    // The caller wrote SQL, so their statement ends the way SQL may end: with a
+    // `;`. Trino answers `EXPLAIN SELECT 1;` with a SYNTAX_ERROR on the `;`
+    // (measured on 483), so the terminator has to be gone before the request is
+    // sent -- which is where the live golden case found it was not.
+    let statement = session.explain_statement("SELECT 1;");
     assert_eq!(statement, "EXPLAIN SELECT 1");
     let rows = rows(&mut session, &statement).await;
     // Trino's plan is one text column, one row per plan line.
     assert!(!rows.is_empty(), "a plan should have at least one line");
+    assert!(
+        !rows.iter().any(|row| row.iter().any(|value| matches!(
+            value,
+            Value::Text(text) if text.contains("SYNTAX_ERROR")
+        ))),
+        "a syntax error must not be able to arrive as a plan: {rows:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

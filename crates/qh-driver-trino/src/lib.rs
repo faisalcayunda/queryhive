@@ -28,11 +28,20 @@
 //! that, and `execute` returns immediately. Columns are guaranteed present by the
 //! time the first batch is returned, which is when a grid can actually use them.
 //!
-//! ## What the protocol does not carry
+//! ## The precision the coordinator sends, and who decides it
 //!
-//! `timestamp` and `time` lose everything below a millisecond — see [`decode`] for
-//! the measurement. That is an upstream edge on this engine's promise of not
-//! quietly rounding anything, and it is recorded rather than hidden.
+//! Trino encodes `timestamp`/`time` into the JSON result at the precision the
+//! *client says it can read*, and the client says so with one request header,
+//! `X-Trino-Client-Capabilities`. Without it, a value the server itself reports
+//! as `timestamp(6)` arrives rounded to milliseconds and typed `timestamp`; with
+//! `PARAMETRIC_DATETIME` in the header, the declared precision travels and
+//! `12:00:00.123456` arrives intact. Measured on 483, same query, same second,
+//! nothing else different — [`decode`] carries the two encodings side by side.
+//!
+//! So the header is not decoration: a request path that forgets it silently gets a
+//! downgraded answer back, with no error to notice. It is applied in one private
+//! helper, `with_shared_headers`, that every statement-protocol request goes
+//! through.
 //!
 //! ## TLS
 //!
@@ -81,6 +90,7 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Session, TlsMode,
 };
+use qh_sql::strip_terminator;
 use serde::Deserialize;
 use serde_json::Value as Json;
 
@@ -94,6 +104,34 @@ pub use rustls::RootCertStore;
 /// hundred-millisecond query from being noticed as slow while not hammering a
 /// coordinator that is genuinely still planning.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What this client tells the coordinator it can decode.
+///
+/// `PARAMETRIC_DATETIME` decides the JSON *encoding* of `timestamp` and `time`: the
+/// coordinator rounds them to milliseconds and strips the declared precision from
+/// the type name unless the client that asked for the page announced it can read
+/// the parametric form. Measured on Trino 483, one header apart and nothing else:
+///
+/// ```text
+/// without: types ['timestamp with time zone', 'time']
+///          data  [['2026-01-31 12:00:00.123 +07:00', '00:00:00.000']]
+/// with:    types ['timestamp(6) with time zone', 'time(6)']
+///          data  [['2026-01-31 12:00:00.123456 +07:00', '23:59:59.999999']]
+/// ```
+///
+/// `23:59:59.999999` arriving as `00:00:00.000` is the same rounding seen from the
+/// other side: 999.999 ms carries into the next second.
+///
+/// The Python engine's client sends `NUMBER,PARAMETRIC_DATETIME,SESSION_AUTHORIZATION`
+/// (trino-python-client 0.339), and the two extra names describe that client's own
+/// features rather than anything on the wire. Measured on 483: announcing all three
+/// produces byte-identical answers to announcing this one, `BOGUS` alone is ignored,
+/// and `BOGUS,PARAMETRIC_DATETIME` still buys microseconds. So the honest, smallest
+/// set is what is sent.
+const CLIENT_CAPABILITIES: &str = "PARAMETRIC_DATETIME";
+
+/// The header [`CLIENT_CAPABILITIES`] travels in.
+const CLIENT_CAPABILITIES_HEADER: &str = "X-Trino-Client-Capabilities";
 
 // ---------------------------------------------------------------------------
 // The wire types
@@ -424,6 +462,26 @@ fn non_empty(text: &str) -> Option<String> {
     }
 }
 
+/// The headers every request to the coordinator carries.
+///
+/// One function because [`CLIENT_CAPABILITIES`] is invisible when it is missing: a
+/// request without it is answered with the same types and values downgraded to
+/// milliseconds, and nothing reports an error. So the capability is attached where
+/// the request is built, not left to each call site to remember — the statement's
+/// `POST`, every page poll, and the `DELETE` that cancels all pass through here.
+///
+/// The poll does not *have* to carry it on 483: measured, a POST with the header
+/// followed by a poll without it still returned `timestamp(6)` and
+/// `12:00:00.123456`, because the coordinator settles the encoding when the
+/// statement is created. It is sent anyway — the header is part of what this client
+/// is, the reference client sends it on every request, and a coordinator that read
+/// it per response would otherwise downgrade the middle of a result set.
+fn with_shared_headers(request: reqwest::RequestBuilder, user: &str) -> reqwest::RequestBuilder {
+    request
+        .header("X-Trino-User", user)
+        .header(CLIENT_CAPABILITIES_HEADER, CLIENT_CAPABILITIES)
+}
+
 // ---------------------------------------------------------------------------
 // The session
 // ---------------------------------------------------------------------------
@@ -480,11 +538,11 @@ impl TrinoSession {
     /// Split out so `post` can try it once, decide, and try again if — and only
     /// if — the peer turned out not to speak TLS.
     async fn send_post(&self, sql: &str) -> Result<reqwest::Response, reqwest::Error> {
-        let mut request = self
-            .client
-            .post(format!("{}/v1/statement", self.base))
-            .header("X-Trino-User", &self.user)
-            .header("Content-Type", "text/plain");
+        let mut request = with_shared_headers(
+            self.client.post(format!("{}/v1/statement", self.base)),
+            &self.user,
+        )
+        .header("Content-Type", "text/plain");
         if !self.catalog.is_empty() {
             request = request.header("X-Trino-Catalog", &self.catalog);
         }
@@ -777,10 +835,7 @@ impl Session for TrinoSession {
         } else {
             running.next_uri
         };
-        let response = self
-            .client
-            .delete(&target)
-            .header("X-Trino-User", &self.user)
+        let response = with_shared_headers(self.client.delete(&target), &self.user)
             .send()
             .await
             .map_err(|error| EngineError::Query {
@@ -842,20 +897,21 @@ impl TrinoCursor {
             return Ok(());
         };
 
-        let response = self
-            .client
-            .get(&uri)
-            .header("X-Trino-User", &self.user)
-            .header("X-Trino-Catalog", &self.catalog)
-            .header("X-Trino-Schema", &self.schema)
-            .send()
-            .await
-            .map_err(|error| EngineError::Query {
-                message: format!("could not fetch the next page: {error}"),
-                code: None,
-                kind: FailureKind::Transient,
-                position: None,
-            })?;
+        let response = with_shared_headers(
+            self.client
+                .get(&uri)
+                .header("X-Trino-Catalog", &self.catalog)
+                .header("X-Trino-Schema", &self.schema),
+            &self.user,
+        )
+        .send()
+        .await
+        .map_err(|error| EngineError::Query {
+            message: format!("could not fetch the next page: {error}"),
+            code: None,
+            kind: FailureKind::Transient,
+            position: None,
+        })?;
 
         let status = response.status();
         let text = response.text().await.map_err(|error| EngineError::Query {
@@ -1117,13 +1173,19 @@ fn objects_sql(catalog: &str, schema: &str) -> Result<String, EngineError> {
     ))
 }
 
-/// `EXPLAIN` in front of the statement.
+/// `EXPLAIN` in front of the statement, with the caller's terminator dropped.
 ///
 /// Trino's plan comes back as one text column, one row per plan line — unlike
 /// Postgres, which returns a single `QUERY PLAN` text column holding the whole
 /// plan. A free function so it can be asserted without standing up a session.
+///
+/// The `;` goes before the statement is sent, exactly as it does for PostgreSQL
+/// and MySQL and through the same `strip_terminator`: measured on 483,
+/// `EXPLAIN SELECT 1;` is answered `SYNTAX_ERROR: line 1:39: mismatched input ';'`,
+/// so a caller who ended their statement the way SQL allows got a syntax error for
+/// it. Only a real terminator goes — a `;` inside a literal is data.
 fn explain_sql(sql: &str) -> String {
-    format!("EXPLAIN {sql}")
+    format!("EXPLAIN {}", strip_terminator(sql))
 }
 
 /// A string literal with single quotes doubled, which is SQL's own escaping.
@@ -1201,8 +1263,37 @@ mod tests {
     }
 
     #[test]
-    fn explain_is_the_servers_own_plan() {
+    fn explain_is_the_servers_own_plan_without_the_callers_terminator() {
         assert_eq!(explain_sql("SELECT 1"), "EXPLAIN SELECT 1");
+        // Trino rejects `EXPLAIN SELECT 1;` with a SYNTAX_ERROR on the `;`
+        // (measured on 483, `line 1:39`). The caller wrote SQL, so the terminator
+        // goes -- and only a real one: `strip_terminator` is what knows a `;`
+        // inside a literal is data rather than a separator.
+        assert_eq!(explain_sql("SELECT 1;"), "EXPLAIN SELECT 1");
+        assert_eq!(explain_sql("SELECT 1;  \n"), "EXPLAIN SELECT 1");
+        assert_eq!(explain_sql("SELECT 'a;b;'"), "EXPLAIN SELECT 'a;b;'");
+        assert_eq!(
+            explain_sql("SELECT 1; -- trailing;"),
+            "EXPLAIN SELECT 1 -- trailing"
+        );
+        // Two statements: the caller asked about both, and stripping would change
+        // the question rather than tidy it.
+        assert_eq!(
+            explain_sql("SELECT 1; SELECT 2"),
+            "EXPLAIN SELECT 1; SELECT 2"
+        );
+    }
+
+    #[test]
+    fn the_announced_capability_is_the_one_that_keeps_microseconds() {
+        // The coordinator reads this header to decide how to encode `timestamp`
+        // and `time`: without it, the same query comes back typed `timestamp` and
+        // rounded to milliseconds. Trino 483 acts on `PARAMETRIC_DATETIME` and
+        // ignores the names it does not know (measured: `BOGUS` alone changes
+        // nothing, `BOGUS,PARAMETRIC_DATETIME` still buys microseconds), so this
+        // one name is the whole announcement.
+        assert_eq!(CLIENT_CAPABILITIES_HEADER, "X-Trino-Client-Capabilities");
+        assert_eq!(CLIENT_CAPABILITIES, "PARAMETRIC_DATETIME");
     }
 
     #[test]

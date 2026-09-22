@@ -11,6 +11,10 @@ repository.workspace = true
 async-trait = "0.1"
 qh-core.workspace = true
 qh-driver.workspace = true
+# `strip_terminator` for `explain`: Trino rejects the caller's trailing `;` the
+# same way PostgreSQL and MySQL do, and the shared scanner is what tells a real
+# terminator from a `;` inside a literal. One implementation, not a second copy.
+qh-sql.workspace = true
 thiserror.workspace = true
 # default-features = false, and the two features that are actually wanted:
 # `json` for the page bodies, `rustls-tls` so TLS is pure Rust. ADR-0006 chose
