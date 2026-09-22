@@ -1058,13 +1058,14 @@ satu angka.
 
 ### 8.1 Pain point pesaing
 
-> **Status riset: SEBAGIAN SELESAI.** Perkakas pencarian sudah ada (`tools/kenari_search.py` —
+> **Status riset: HAMPIR SELESAI.** Perkakas pencarian sudah ada (`tools/kenari_search.py` —
 > perkakas lokal, lihat `PROGRESS.md`), jadi riset ini bisa dijalankan. **DBeaver** tertutup dari
-> empat issue di repo resminya, **DataGrip** dari tiga issue di YouTrack — semuanya dibuka langsung
-> dan dikutip di tabel. Yang **masih terbuka**: seluruh tiga baris **Navicat**, dan satu baris
-> startup DataGrip. Sumber yang ditemukan untuk yang terbuka **ditolak** karena bukan sumber
-> primer; alasan penolakannya dicatat di bawah tabel. §5 poin 9 melarang mengarang sumber, jadi
-> baris yang belum tertutup tetap bertanda belum, bukan diisi dengan sumber lemah.
+> empat issue di repo resminya, **DataGrip** dari lima issue di YouTrack (tiga lama + dua soal
+> waktu nyala), dan **Navicat** dari halaman harga resminya — semuanya dibuka langsung dan dikutip
+> di tabel. Yang **masih terbuka**: dua baris **Navicat** (hasil besar, dan proteksi mode
+> production). Sumber yang ditemukan untuk yang terbuka **ditolak** karena bukan sumber primer;
+> alasan penolakannya dicatat di bawah tabel. §5 poin 9 melarang mengarang sumber, jadi baris yang
+> belum tertutup tetap bertanda belum, bukan diisi dengan sumber lemah.
 
 Setiap baris menyebut produknya sendiri, supaya yang sudah selesai tidak tertahan oleh yang belum.
 
@@ -1079,16 +1080,43 @@ Setiap baris menyebut produknya sendiri, supaya yang sudah selesai tidak tertaha
 | Hasil besar lambat/membekukan UI | DataGrip (JVM) | Sama seperti baris pertama | [DBE-25765](https://youtrack.jetbrains.com/issue/DBE-25765) — "IDE freezes while painting database query result cells with an EditorTextFieldCellRenderer (Viewing or editing a result set causes a freeze)" | **Terverifikasi** |
 | Memori membengkak pada hasil besar | DataGrip (JVM) | Spill mmap + batas memori (§2.3) | [DBE-16982](https://youtrack.jetbrains.com/issue/DBE-16982) — "When exporting 10 million conditional data to a csv file, the memory usage is too high, which ultimately leads to no response from the app" | **Terverifikasi** |
 | Query bisa memicu introspeksi seluruh skema | DataGrip (JVM) | Introspeksi tidak ada di jalur kritis query (§2.2) | [DBE-18406](https://youtrack.jetbrains.com/issue/DBE-18406) — eksekusi DDL memicu introspeksi semua skema saat "Auto Sync" aktif, dan opsi itu **default** | **Terverifikasi** |
-| Berat/lambat start pada mesin angkatan lama | DataGrip (JVM) | Cold start < 1 dtk (§6) | — | **Belum terverifikasi** |
-| Harga | Navicat | MIT, gratis (§8.3) | — | **Belum terverifikasi** |
+| Berat/lambat start pada mesin angkatan lama | DataGrip (JVM) | Cold start < 1 dtk (§6) | [DBE-25865](https://youtrack.jetbrains.com/issue/DBE-25865) — "Loading Data Sources..." takes well over a minute every time I start DataGrip (laporan 2026) · [DBE-13764](https://youtrack.jetbrains.com/issue/DBE-13764) — "it takes a long time for IDE to start responding because it gets stuck at 'Loading Data Sources...'" (diperbaiki di rilis 2021.2) | **Terverifikasi, sebabnya bukan mesin lama** |
+| Harga | Navicat | MIT, gratis (§8.3) | [Navicat Premium Plan](https://www.navicat.com/en/store/navicat-premium-plan) — "Enterprise Perpetual License … USD 1,299 … per license (Reseller Price)", plus langganan bulanan/tahunan. Catatan: edisi **Premium Lite** gratis (maks. 5 akun per organisasi), jadi klaim "berbayar" berlaku untuk Navicat Premium | **Terverifikasi** |
 | Harga | TablePlus | MIT, gratis (§8.3) | [tableplus.com/pricing](https://tableplus.com/pricing) — "One-time purchase, no auto-renewal. Perpetual license (no subscription)." | **Terverifikasi, dan mengoreksi klaim lama** |
-| Harga | DataGrip | MIT, gratis (§8.3) | — | **Belum terverifikasi** |
+| Harga | DataGrip | MIT, gratis (§8.3) | [jetbrains.com/datagrip/buy](https://www.jetbrains.com/datagrip/buy/) — harga pada data halaman itu: "US $10.90" per bulan untuk personal, "US $259.00" per tahun / "US $25.90" per bulan untuk commercial | **Terverifikasi** |
 
 **Koreksi terhadap tabel sebelumnya.** Baris "Harga" menyebut TablePlus sebagai produk
 **berlangganan**. Halaman harga resminya menyatakan sebaliknya: sekali beli, tanpa perpanjangan
 otomatis. Klaim itu dicabut. Ini contoh persis mengapa kolom Sumber wajib diisi — hipotesis yang
 terdengar masuk akal bisa salah arah, dan di sini salahnya justru melemahkan argumen diferensiasi,
 bukan menguatkannya.
+
+**Koreksi pada baris startup DataGrip.** Baris itu menyebut "mesin angkatan lama" sebagai sebabnya.
+Dua sumber yang menutupnya menyebut sebab lain: jumlah data source dan jumlah tabel di proyek,
+bukan usia mesin — pelapor `DBE-13764` menjalankannya di Mac 16 core, dan `DBE-25865` tetap terjadi
+tanpa koneksi jaringan. Klaim "startup lambat" berdiri; keterangan "pada mesin angkatan lama"
+dicabut.
+
+**Dua kutipan diperiksa ulang, dan dua-duanya perlu dibetulkan.** Ini bagian dari aturan yang sama:
+kolom Sumber diisi supaya bisa diperiksa, dan memeriksanya berarti membukanya lagi.
+
+- Baris **Navicat** semula menunjuk halaman `/en/8-category-en-us/709-navicat-premium-plan.html`,
+  yang **menjawab 404** saat dibuka kembali. Harga yang dikutip ada di halaman store resminya
+  (`/en/store/navicat-premium-plan`), dan tautannya sudah diganti ke halaman itu. Angkanya sendiri
+  benar: `USD 1,299` per lisensi perpetual edisi Enterprise, dengan keterangan `(Reseller Price)`.
+- Baris **DataGrip** mengutip `$10.90 per month` sebagai harga *commercial*. Data harga di halaman
+  pembelian menunjukkan angka itu untuk pemakaian **personal** (bulanan); commercial adalah
+  `US $259.00` per tahun atau `US $25.90` per bulan. Kutipannya dibetulkan. Klaimnya sendiri tidak
+  terpengaruh — dengan harga berapa pun di atas nol, produk itu tetap berbayar sementara jawaban
+  yang direncanakan adalah "MIT, gratis" — tapi kutipan yang salah label adalah kutipan yang salah.
+- Klaim "lisensi Non-Commercial bertanda Free" **dicabut** dari baris itu: halaman pembelian yang
+  dikutip hanya memuat dua bagian harga (personal dan commercial), jadi bagian itu tidak didukung
+  sumbernya. Yang didukung halaman itu adalah harganya.
+
+Keadaan issue yang dikutip juga dicatat apa adanya: `DBE-25865` berstatus **Incomplete** (dan
+`Finished In Sprint: 2026.2`), sedangkan `DBE-13764` berstatus **Fixed** dan tersedia sejak
+**2021.2**. Baris startup yang sudah ditutup tidak menyembunyikan itu, supaya pembaca bisa menilai
+sendiri seberapa kuat buktinya.
 
 **Sumber yang ditolak, dan alasannya.** Ini dicatat supaya tidak ada yang mengulanginya dan
 mengira kesenjangannya sudah tertutup.
@@ -1097,6 +1125,18 @@ mengira kesenjangannya sudah tertutup.
   versi 16 dan sebelumnya tidak bisa membatalkan query. Itu bukan issue tracker resmi Navicat,
   jadi tidak dipakai betapapun isinya terdengar cocok dengan dugaan awal. Forum resmi Navicat
   tidak muncul dalam pencarian yang dijalankan.
+- *Navicat, untuk dua baris yang masih terbuka* (hasil besar, dan proteksi mode production).
+  Pencarian lanjutan 2026-09-22 juga buntu: `forums.navicat.com` tidak bisa dibuka, dan
+  `community.navicat.com` menyatakan sendiri "The site is under maintenance" lalu mengarahkan ke
+  `help.navicat.com`. Pencarian di pusat bantuan resmi untuk `slow`, `performance`, dan `memory`
+  tidak memunculkan apa pun soal hasil besar atau mode production — yang keluar hanya artikel soal
+  kredensial, tipe data SQLite, dan privilege server. Halaman catatan rilis resminya hanya memuat
+  "Fixed slow rendering of Geometry data in Table Viewer", yakni rendering *Geometry* di Table
+  Viewer, bukan hasil besar secara umum. Manual resminya menawarkan `Open Table (Quick)` dengan
+  alasan "Faster performance for opening the graphical table, as BLOB fields (images) will not be
+  loaded until you click on the cell" — itu soal pemuatan BLOB, bukan hasil besar. Navicat tidak
+  punya issue tracker publik, jadi tidak ada sumber primer yang layak dikutip untuk kedua baris
+  ini; keduanya tetap bertanda belum.
 - *DataGrip, untuk baris startup*: yang muncul adalah halaman dokumentasi JetBrains sendiri tentang
   *cara mendiagnosis* startup lambat dan konsumsi memori tinggi. Panduan troubleshooting milik
   vendor menunjukkan masalah itu cukup sering untuk dibuatkan halamannya, tetapi **tidak**
@@ -1104,7 +1144,8 @@ mengira kesenjangannya sudah tertutup.
   diambil dari sumber tersebut.
   Dua baris DataGrip yang lain justru **tertutup** begitu pencarian diarahkan ke YouTrack
   (`DBE-25765`, `DBE-16982`), dan perbedaan itu menjelaskan aturannya: halaman bantuan bukan
-  bukti, laporan bug di tracker resmi adalah bukti.
+  bukti, laporan bug di tracker resmi adalah bukti. Baris startup menyusul lewat jalur yang sama
+  (`DBE-25865`, `DBE-13764`); halaman bantuan itu tetap tidak dipakai.
 - *DBE-25765 sengaja **tidak** dipakai untuk baris startup.* Judulnya soal freeze saat *melukis sel
   hasil query*, yang terjadi setelah hasilnya ada — bukan soal waktu nyala. Memakainya untuk
   startup adalah persis kesalahan yang baris ini hindari: sumber nyata, klaim yang tidak
@@ -1112,16 +1153,13 @@ mengira kesenjangannya sudah tertutup.
 
 **Cara menutup sisanya** (langkah persis, agar bisa dijalankan siapa pun):
 
-1. **Navicat** — satu-satunya produk yang masih sepenuhnya terbuka, tiga barisnya. Dua pencarian
-   dengan kata kunci forum resmi sudah dijalankan dan **gagal**: yang muncul hanya `global.php.cn`
-   (situs tutorial) dan pertanyaan StackOverflow, keduanya bukan sumber primer. Langkah berikutnya
-   adalah menelusuri langsung forum resmi Navicat dan catatan rilis versinya, karena produk ini
-   tidak punya issue tracker publik seperti `dbeaver/dbeaver` atau YouTrack JetBrains.
-2. **DataGrip startup** — cari di `youtrack.jetbrains.com` dengan kata kunci yang menyebut
-   *startup* atau *indexing*, bukan *freeze*; pencarian yang sudah dijalankan hanya menemukan
-   masalah rendering, bukan waktu nyala.
-3. Catat URL + tanggal akses, lalu ganti setiap baris **Belum terverifikasi** dengan kutipan.
-4. Sampai itu terjadi, baris yang belum tertutup **tidak** dipakai sebagai dasar prioritas produk,
+1. **Navicat** — dua barisnya masih terbuka (hasil besar, proteksi mode production), dan ini
+   satu-satunya produk yang tersisa. Jalur forum resmi sudah ditempuh dan buntu: `forums.navicat.com`
+   tidak bisa dibuka, `community.navicat.com` sedang maintenance, dan `help.navicat.com` tidak
+   memuat artikel yang relevan. Jalur yang tersisa hanyalah arsip catatan rilis versi lama dan
+   tiket dukungan, yang tidak publik.
+2. Catat URL + tanggal akses, lalu ganti setiap baris **Belum terverifikasi** dengan kutipan.
+3. Sampai itu terjadi, baris yang belum tertutup **tidak** dipakai sebagai dasar prioritas produk,
    dan §8.2 mewarisi batasan yang sama.
 
 Tanggal akses seluruh sumber di atas: **2026-09-22**.
