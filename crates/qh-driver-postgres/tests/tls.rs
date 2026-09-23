@@ -13,7 +13,9 @@
 //! never be in the machine's Keychain, so those tests go through
 //! [`PostgresDriver::connect_with_verifier`] with a root store they build from the
 //! file — the same code path as production, with a store the test controls. They are
-//! gated on `QH_TEST_POSTGRES=1` and print why they skip when it is unset.
+//! gated on `QH_TEST_POSTGRES=1` **and** on the container answering on 55433, and a
+//! test that cannot run says which of the two is missing and returns: a suite that
+//! went red because a container was not up would teach a reader to ignore red.
 //!
 //! The tests that need a server **without** TLS, or one that says "no" to the
 //! TLS negotiation, run against a socket this file opens itself, because the
@@ -31,6 +33,7 @@
 //!   still refuses to speak in clear.
 //! - `Prefer` falls back to plaintext only when the server itself declines TLS.
 
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +46,7 @@ use rustls::RootCertStore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SKIP_HINT: &str =
-    "skipped: set QH_TEST_POSTGRES=1 with crates/qh-driver-postgres/tests/tls/up.sh running";
+    "skipped: set QH_TEST_POSTGRES=1 with crates/qh-driver-postgres/tests/tls/up.sh running on 55433";
 
 /// The first four bytes of a PostgreSQL message are its length; the next four are
 /// its code. These two codes are the whole negotiation:
@@ -54,25 +57,54 @@ const SKIP_HINT: &str =
 const SSL_REQUEST_CODE: u32 = 80877103;
 const PROTOCOL_VERSION_3: u32 = 196608;
 
-/// The TLS container's settings. Same shape as the plaintext fixture in
-/// `tests/integration.rs`, on the port `tests/tls/up.sh` publishes.
+/// Whether something is listening, asked of the OS rather than of the driver.
+///
+/// A raw TCP connect and never `PostgresDriver::connect`: a driver that cannot
+/// connect must be a failure and not a skip, or this gate would hide the exact
+/// defect the suite exists to catch.
+fn listening(host: &str, port: u16) -> bool {
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok())
+}
+
+/// The TLS container's settings, or `None` — having said why — when its tests
+/// cannot run.
+///
+/// Two gates, and the second is not a convenience. `qh-pg-tls` is a second
+/// PostgreSQL, and this machine's container VM (3.6 GiB, shared with the dev
+/// containers and their fixtures) cannot hold it alongside them, so the fixture is
+/// usually deliberately down. Gating on `QH_TEST_POSTGRES=1` alone would then make
+/// this suite red for a reason that is not a defect — and a suite that is red
+/// because a container is not running teaches a reader to ignore red, which is the
+/// same failure as a test that always passes. So the container's own reachability
+/// is checked and its absence is printed, the way the switch's absence is.
 fn tls_config(mode: TlsMode) -> Option<ConnectionConfig> {
     if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return None;
+    }
+    let host = std::env::var("QH_PG_TLS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
+    let port = std::env::var("QH_PG_TLS_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(55433);
+    if !listening(&host, port) {
+        eprintln!(
+            "skipped: nothing listening on {host}:{port}, where qh-pg-tls serves the \
+             certificate these tests check; start it with \
+             crates/qh-driver-postgres/tests/tls/up.sh"
+        );
         return None;
     }
     Some(
-        ConnectionConfig::new(
-            DriverKind::Postgres,
-            std::env::var("QH_PG_TLS_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-            std::env::var("QH_PG_TLS_PORT")
-                .ok()
-                .and_then(|port| port.parse().ok())
-                .unwrap_or(55433),
-            "qh",
-        )
-        .password("qh-dev-only")
-        .database("qh")
-        .tls(mode),
+        ConnectionConfig::new(DriverKind::Postgres, host.as_str(), port, "qh")
+            .password("qh-dev-only")
+            .database("qh")
+            .tls(mode),
     )
 }
 
@@ -155,7 +187,6 @@ async fn require_verifies_a_certificate_the_named_store_holds() {
     // so a store holding that CA must accept it — and the server must confirm the
     // session really is encrypted, which is the part a fallback would fake.
     let Some(config) = tls_config(TlsMode::Require) else {
-        eprintln!("{SKIP_HINT}");
         return;
     };
     let verifier = tls::verifier_with_roots(store_with("ca.crt")).expect("a verifier");
@@ -178,7 +209,6 @@ async fn require_refuses_a_certificate_the_store_does_not_trust() {
     // failure is the feature — a client that accepted this certificate would
     // accept anything an attacker on the network put in front of it.
     let Some(config) = tls_config(TlsMode::Require) else {
-        eprintln!("{SKIP_HINT}");
         return;
     };
     let verifier = tls::verifier_with_roots(store_with("other-ca.crt")).expect("a verifier");
@@ -262,7 +292,6 @@ async fn the_platform_store_is_what_decides_when_no_verifier_is_named() {
     // had stopped verifying, this test would pass a certificate that no store
     // holds, and the failure above would be a test of nothing.
     let Some(config) = tls_config(TlsMode::Require) else {
-        eprintln!("{SKIP_HINT}");
         return;
     };
 
@@ -286,7 +315,6 @@ async fn require_no_verify_connects_to_the_certificate_require_refused() {
     // verifier passed here is deliberately one that would refuse: the mode ignores
     // it, because the mode is "do not verify".
     let Some(config) = tls_config(TlsMode::RequireNoVerify) else {
-        eprintln!("{SKIP_HINT}");
         return;
     };
     let refusing_verifier =
@@ -303,7 +331,6 @@ async fn prefer_connects_without_verifying_and_still_comes_up_encrypted() {
     // the server's own report that the session is encrypted, because a silent fallback to
     // plaintext would also raise no error.
     let Some(config) = tls_config(TlsMode::Prefer) else {
-        eprintln!("{SKIP_HINT}");
         return;
     };
     let refusing_verifier =
