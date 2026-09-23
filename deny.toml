@@ -1,0 +1,64 @@
+# cargo-deny configuration.
+#
+# `cargo deny check licenses` is the enforcement point for the licence policy that
+# ADR-0002 sets (MIT retained) and ADR-0011 extends (one narrow exception). The
+# allow-list below is exactly ADR-0002's, so a licence added here without an ADR is
+# a policy change made in a config file, which is the failure mode this comment
+# exists to prevent.
+#
+#     cargo deny check licenses
+
+[licenses]
+# ADR-0002, "Konsekuensi": cargo-deny is configured to allow MIT, Apache-2.0,
+# BSD-3-Clause, ISC, Unicode-3.0 and Zlib, and every new exception goes through an
+# ADR. This list is that list, unchanged.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# The one exception, narrowed to the crate family it was written for.
+#
+# ADR-0011 records why MPL-2.0 is acceptable here: it is file-level copyleft, the
+# workspace neither modifies nor copies any uniffi file, and a larger work that
+# merely uses the library may carry any licence it likes (MPL-2.0 section 3.3).
+#
+# It is an `exceptions` entry rather than a line in `allow` on purpose: MPL-2.0 is
+# permitted for `uniffi` and the crates it brings, and for nothing else. An
+# unrelated crate that arrives MPL-2.0 licensed must still fail this check and
+# argue for itself in an ADR, exactly as uniffi did.
+#
+# The eight names are written out because cargo-deny's package specs have no
+# wildcard for a crate name — `crate = "uniffi*"` is a literal name that matches
+# nothing, and it fails loudly (`license-exception-not-encountered`) rather than
+# silently. They are exactly the eight crates `cargo metadata` reports as MPL-2.0
+# in this graph, all at 0.32.1. A uniffi upgrade that introduces a *ninth*
+# `uniffi_*` crate will therefore fail this check until it is listed here and
+# ADR-0011 has been re-read: that is deliberate, and it is the fail-closed
+# direction.
+# No `version` constraint on these entries: a routine `cargo update` of uniffi
+# keeps the same crate names and the same licence, and a check that has to be
+# edited on every bump is a check people learn to delete.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "uniffi" },
+    { allow = ["MPL-2.0"], crate = "uniffi_bindgen" },
+    { allow = ["MPL-2.0"], crate = "uniffi_core" },
+    { allow = ["MPL-2.0"], crate = "uniffi_internal_macros" },
+    { allow = ["MPL-2.0"], crate = "uniffi_macros" },
+    { allow = ["MPL-2.0"], crate = "uniffi_meta" },
+    { allow = ["MPL-2.0"], crate = "uniffi_pipeline" },
+    { allow = ["MPL-2.0"], crate = "uniffi_udl" },
+]
+
+# NOT covered, on purpose: `CDLA-Permissive-2.0` on `webpki-roots` 0.26.11 and
+# 1.0.9 and `webpki-root-certs` 1.0.9 (the Mozilla CA root data, reached through
+# `reqwest`/`hyper-rustls`, `mysql_async` and `rustls-platform-verifier`).
+# ADR-0002's allow-list does not include it and no ADR has granted it, so
+# `cargo deny check licenses` fails on those three packages today. Whether to
+# grant a second exception is a separate licence decision with its own ADR —
+# writing it into this file without one is exactly the silent broadening the
+# `exceptions` block above is shaped to prevent.
