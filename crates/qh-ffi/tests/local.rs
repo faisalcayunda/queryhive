@@ -519,6 +519,10 @@ async fn a_refused_level_names_the_commands_that_work_instead() {
             ("DB_KIND", "postgres"),
             ("DB_HOST", "127.0.0.1"),
             ("DB_PORT", "1"),
+            // `RETRIES=0` because the default would retry this connect five times and
+            // spend the full 62 s of backoff to prove the same sentence — that the
+            // command reached the driver. See `crates/qh-ffi/src/retry.rs`.
+            ("RETRIES", "0"),
         ],
     )
     .await

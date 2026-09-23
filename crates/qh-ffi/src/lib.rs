@@ -38,13 +38,16 @@
 //! them, so their events are not frozen by the golden harness — the app is their only
 //! other reader.
 //!
-//! # Two things that are deliberately not here
+//! # Two things that are deliberately not in a command
 //!
-//! - **No retry loop.** The Python engine wrapped its queries in `QueryStream`'s
-//!   retry policy; in this engine retries belong to the session layer
-//!   (`docs/architecture/rust-engine-blueprint.md` section 1.7), which is not built
-//!   yet. `RETRIES` is read and ignored rather than accepted and silently applied
-//!   elsewhere — `docs/golden-deltas.md` records it.
+//! - **Retries are not written into a command.** The Python engine wrapped its queries
+//!   in `QueryStream`'s retry policy, and in this engine that belongs to the session
+//!   layer (`docs/architecture/rust-engine-blueprint.md` section 1.7) — so it is
+//!   [`retry`], one wrapper around the session and the cursor, and every command that
+//!   reads takes its session from there. What is retried, what is not, and why, is the
+//!   module note on [`retry`]; the short version is that `RETRIES` now means what it
+//!   meant to the previous engine, and a row already written to a file is never fetched
+//!   a second time.
 //! - **No `to_table` update count.** `Cursor` has no way to ask the server how many
 //!   rows a statement affected, so `to_table`'s `done` reports `-1`, which is the
 //!   Python engine's own value for "the coordinator never said".
@@ -84,6 +87,7 @@ pub mod env;
 pub mod events;
 pub mod local;
 pub mod progress;
+pub mod retry;
 pub mod sql_ident;
 // The scaffolding has to be generated in the crate root: it defines the `UniFfiTag` the
 // other derivations name, and the module path it records is the namespace the bindings

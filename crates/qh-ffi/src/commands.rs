@@ -36,6 +36,7 @@ use crate::config;
 use crate::env::Settings;
 use crate::events::{event, Emitter};
 use crate::progress::{Progress, PROGRESS_MS_DEFAULT};
+use crate::retry::{self, RetryPolicy};
 use crate::sql_ident::{qualified, reference, slots, SlotStyle};
 use crate::{CancelFlag, CliError, Engine};
 
@@ -271,10 +272,19 @@ fn format_opts(settings: &Settings, name: &str) -> Result<ExportOptions, CliErro
     options.dbf_char_width = usize::try_from(settings.number("DBF_CHAR_WIDTH", 254)?)
         .map_err(|_| CliError::Usage("DBF_CHAR_WIDTH must be a positive number".to_owned()))?;
     options.title = Some(name.to_owned());
-    // `ENCODING` and `DBF_ENCODING` are read by the Python engine and are accepted
-    // here without effect: every writer in this engine is UTF-8, and the dBase
-    // writer's own code page is fixed at cp1252. They are still not *errors*, so a
-    // stored connection carrying them keeps working — see docs/golden-deltas.md.
+    // The two code-page settings the Python engine read here. A blank value keeps the
+    // format's own default, the convention `DELIMITER` uses just above: UTF-8 for `txt`
+    // and `csv`, cp1252 for `dbf`, which is what `ExportOptions` already carries. An
+    // unknown name is refused by name when the writer opens -- before a file exists --
+    // the shape `DELIMITER` and `DBF_CHAR_WIDTH` are refused in.
+    let encoding = settings.raw("ENCODING", "");
+    if !encoding.is_empty() {
+        options.encoding = encoding;
+    }
+    let dbf_encoding = settings.raw("DBF_ENCODING", "");
+    if !dbf_encoding.is_empty() {
+        options.dbf_encoding = dbf_encoding;
+    }
     Ok(options)
 }
 
@@ -312,18 +322,37 @@ fn row_of(batch: &ColumnBatch, index: usize) -> Vec<Value> {
 /// List one level and close the session.
 ///
 /// Takes the session rather than borrowing it because closing consumes it — that is
-/// the shape of `Session::close`, so that a driver cannot be left half-open.
+/// the shape of `Session::close`, so that a driver cannot be left half-open. The
+/// listing itself goes through [`retry::browse`], which is why the policy comes in.
 async fn browse_session(
+    policy: &RetryPolicy,
     mut session: Box<dyn Session>,
     level: BrowseLevel,
     path: &ObjectPath,
     include_system: bool,
 ) -> Result<Vec<String>, CliError> {
-    let names = session.browse(level, path, include_system).await?;
+    let names = retry::browse(&mut session, policy, level, path, include_system).await?;
     // Best effort: a close that fails after the names are in hand must not turn a
     // successful listing into an error the user sees.
     let _ = session.close().await;
     Ok(names)
+}
+
+/// A session, and the retry policy `RETRIES` asked for.
+///
+/// The policy is returned rather than kept inside the session because a retry is a
+/// property of the *calls* a command makes, not of the session: the commands that read
+/// pass it to [`retry::execute`], and the one that writes deliberately does not — see
+/// [`crate::retry`]. Reading the setting in one place is what keeps `RETRIES` from being
+/// read two ways.
+async fn open(
+    settings: &Settings,
+    engine: &dyn Engine,
+    config: &ConnectionConfig,
+) -> Result<(Box<dyn Session>, RetryPolicy), CliError> {
+    let policy = RetryPolicy::from_settings(settings)?;
+    let session = retry::connect(engine, config, &policy).await?;
+    Ok((session, policy))
 }
 
 // --------------------------------------------------------------------------- //
@@ -366,14 +395,14 @@ pub async fn test(
     engine: &dyn Engine,
 ) -> Result<(), CliError> {
     let config = connection(settings, engine)?;
-    let session = engine.connect(&config).await?;
+    let (session, policy) = open(settings, engine, &config).await?;
     let level = session
         .capabilities()
         .levels
         .first()
         .copied()
         .ok_or_else(|| CliError::Usage(format!("{} has no top level to list", config.kind)))?;
-    let names = browse_session(session, level, &path_for(&config), false).await?;
+    let names = browse_session(&policy, session, level, &path_for(&config), false).await?;
     out.emit(
         event("test")
             .field("ok", true)
@@ -405,8 +434,8 @@ async fn browse_command(
     // statements return everything already. One switch at the command rather than a
     // per-driver special case the caller has to remember.
     let include_system = settings.flag("DB_ALL_SCHEMAS", false);
-    let session = engine.connect(&config).await?;
-    let names = browse_session(session, level, &path_for(&config), include_system).await?;
+    let (session, policy) = open(settings, engine, &config).await?;
+    let names = browse_session(&policy, session, level, &path_for(&config), include_system).await?;
     out.emit(event(command).field("names", names).build())?;
     Ok(())
 }
@@ -473,8 +502,8 @@ pub async fn objects(
     engine: &dyn Engine,
 ) -> Result<(), CliError> {
     let config = connection(settings, engine)?;
-    let mut session = engine.connect(&config).await?;
-    let page = session.objects(&path_for(&config)).await?;
+    let (mut session, policy) = open(settings, engine, &config).await?;
+    let page = retry::objects(&mut session, &policy, &path_for(&config)).await?;
     let _ = session.close().await;
     out.emit(
         event("objects")
@@ -507,16 +536,17 @@ pub async fn export(
     let config = connection(settings, engine)?;
 
     out.emit(event("step").field("step", "connect").build())?;
-    let mut session = engine.connect(&config).await?;
-    let mut cursor = session
-        .execute(
-            &sql,
-            &ExecuteOptions {
-                max_batch_rows: Some(batch_size),
-                row_limit: None,
-            },
-        )
-        .await?;
+    let (mut session, policy) = open(settings, engine, &config).await?;
+    let mut cursor = retry::execute(
+        &mut session,
+        &policy,
+        &sql,
+        &ExecuteOptions {
+            max_batch_rows: Some(batch_size),
+            row_limit: None,
+        },
+    )
+    .await?;
 
     // The first batch is taken before anything is announced, because the columns are
     // only guaranteed once a batch has arrived: a Trino cursor reports none until
@@ -605,6 +635,10 @@ pub async fn export(
 /// rows that were already written. The 1000-row progress floor is not here: it
 /// lives in `qh-export::plan`, which the synchronous export path uses too, so both
 /// callers report at the same points.
+///
+/// A transient failure while fetching the next page does not reach this loop: the
+/// cursor retries it (see [`crate::retry`]), and what the writer already wrote is never
+/// fetched twice — the page that failed is the page that is asked for again.
 async fn pump(
     exporter: &mut Exporter,
     cursor: &mut Box<dyn Cursor>,
@@ -732,7 +766,11 @@ pub async fn to_table(
     };
 
     out.emit(event("step").field("step", "connect").build())?;
-    let mut session = engine.connect(&config).await?;
+    // The connect is retried; the statements below are not, and deliberately so: a
+    // `DROP`/`CREATE TABLE AS`/`INSERT` is not safe to re-issue blind, so this command
+    // calls `session.execute` and never `retry::execute`. `crate::retry` has the whole
+    // argument.
+    let (mut session, _policy) = open(settings, engine, &config).await?;
 
     let mut warnings: Vec<String> = Vec::new();
     let mut cancelled = false;
@@ -846,7 +884,8 @@ pub async fn preview(
     let config = connection(settings, engine)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
-    let (rows, truncated, query_id) = stream_rows(out, engine, &config, &sql, Some(limit)).await?;
+    let (rows, truncated, query_id) =
+        stream_rows(settings, out, engine, &config, &sql, Some(limit)).await?;
     out.emit(
         event("done")
             .field("rows", rows)
@@ -873,17 +912,18 @@ pub async fn explain(
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
 
-    let mut session = engine.connect(&config).await?;
+    let (mut session, policy) = open(settings, engine, &config).await?;
     let statement = session.explain_statement(&sql);
-    let mut cursor = session
-        .execute(
-            &statement,
-            &ExecuteOptions {
-                max_batch_rows: Some(PREVIEW_BATCH),
-                row_limit: None,
-            },
-        )
-        .await?;
+    let mut cursor = retry::execute(
+        &mut session,
+        &policy,
+        &statement,
+        &ExecuteOptions {
+            max_batch_rows: Some(PREVIEW_BATCH),
+            row_limit: None,
+        },
+    )
+    .await?;
     let primed = cursor.next_batch(PREVIEW_BATCH).await?;
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
@@ -906,24 +946,26 @@ pub async fn explain(
 /// for the grid to paint, and neither may grow a second copy of the batching rule.
 /// They differ only in the cap, which is what `limit: None` means.
 async fn stream_rows(
+    settings: &Settings,
     out: &mut dyn Emitter,
     engine: &dyn Engine,
     config: &ConnectionConfig,
     sql: &str,
     limit: Option<u64>,
 ) -> Result<(u64, bool, Option<String>), CliError> {
-    let mut session = engine.connect(config).await?;
-    let mut cursor = session
-        .execute(
-            sql,
-            &ExecuteOptions {
-                // The batch size is also the fetch size, so a flush that happens
-                // early never asks the coordinator for more rows than the cap shows.
-                max_batch_rows: Some(PREVIEW_BATCH),
-                row_limit: None,
-            },
-        )
-        .await?;
+    let (mut session, policy) = open(settings, engine, config).await?;
+    let mut cursor = retry::execute(
+        &mut session,
+        &policy,
+        sql,
+        &ExecuteOptions {
+            // The batch size is also the fetch size, so a flush that happens
+            // early never asks the coordinator for more rows than the cap shows.
+            max_batch_rows: Some(PREVIEW_BATCH),
+            row_limit: None,
+        },
+    )
+    .await?;
     // The first batch is taken before anything is sent, because `columns` is the one
     // event the grid cannot do without and a Trino cursor has none until a page
     // carrying them has arrived. This is the same wait the Python engine did before
@@ -1038,10 +1080,14 @@ pub async fn count(
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
 
-    let mut session = engine.connect(&config).await?;
-    let mut cursor = session
-        .execute(&statement, &ExecuteOptions::default())
-        .await?;
+    let (mut session, policy) = open(settings, engine, &config).await?;
+    let mut cursor = retry::execute(
+        &mut session,
+        &policy,
+        &statement,
+        &ExecuteOptions::default(),
+    )
+    .await?;
     let mut rows: Vec<Value> = Vec::new();
     // The count is one row; reading to the end anyway would be a second statement's
     // worth of waiting for a number that is already in hand.
