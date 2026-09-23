@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_export_live",
+  "command": "export",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "The CSV writer fed by PyMySQL's real decoding: the `start` columns carry MySQL's own column type codes, and `done` reports the real row count and the file's real byte size -- a different size from Postgres's for the same statement, which is the point of freezing both. The path is masked to <TMP>, the size is not."
+}

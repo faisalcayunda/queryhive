@@ -23,6 +23,12 @@ were then compared against the Rust engine rather than re-recorded. A run that
 caught Trino down recorded nothing at all and said so, which is the behaviour a
 recorder needs.
 
+Re-checked on 23 September 2026, when `live_cases.py` gained its read-only
+default and the two `export` cases: all twenty-two cases below re-ran against
+the same three servers and matched byte for byte (22/22). The two new ones are
+the first live case for `export`; "What could not be recorded" says why
+`to_table` still has none.
+
 ## Servers recorded against
 
 | engine | server | how the version was read |
@@ -58,29 +64,30 @@ answers with a usage error, so there is nothing to record but the refusal.
 | `count` | case (`count`) | capable, uncovered | capable, uncovered |
 | `explain` | case (`explain`) | capable, uncovered | capable, uncovered |
 
-**After** (adding the twenty live cases):
+**After** (adding the twenty-two live cases):
 
 | command | trino | postgres | mysql |
 | --- | --- | --- | --- |
 | `db_drivers` | case | -- | -- |
 | `test` | case | capable, **still uncovered** | capable, **still uncovered** |
-| `catalogs` | case (in-process only) | **live case** | case + **live case** |
+| `catalogs` | case (in-process only) | **live case** | case (in-process only) |
 | `schemas` | case (in-process only) | case (in-process only) | **live refusal** |
 | `tables` | case (in-process only) | **live case** | **live case** |
 | `objects` | case + **live case** | case + **live case** | case + **live case** |
-| `export` | case | capable, **still uncovered** | capable, **still uncovered** |
+| `export` | case | **live case** | **live case** |
 | `to_table` | case | capable, **still uncovered** | capable, **still uncovered** |
 | `preview` | 5 cases + **2 live** | **2 live cases** | **2 live cases** |
 | `count` | case + **live case** | **live case** | **live case** |
 | `explain` | case + **live case** | **live case** | **live case** |
 
-Still missing, in the order worth closing: `export` and `to_table` against
-Postgres and MySQL (their writers are engine-side, but the temp paths, the row
-counts and the file-size events are all real server facts); `test` against both;
-and a live `catalogs`/`schemas`/`tables` for Trino, which today is in-process
-only. `db_drivers` needs nothing live: it reads settings, not a server.
+Still missing, in the order worth closing: `to_table` against Postgres and
+MySQL -- and unlike `export`, that hole is now a decision with a reason rather
+than an omission, since recording it does measurable damage (see the next
+section); `test` against both; and a live `catalogs`/`schemas`/`tables` for
+Trino, which today is in-process only. `db_drivers` needs nothing live: it reads
+settings, not a server.
 
-## How to re-record
+## How to check, and how to re-record
 
     deploy/dev/up.sh                       # postgres, mysql and trino up
     uv venv --python 3.14 /tmp/qh-golden-venv
@@ -89,9 +96,18 @@ only. `db_drivers` needs nothing live: it reads settings, not a server.
         tzlocal zstandard 'trino>=0.330' --no-deps
     uv pip install --python $V 'psycopg[binary]' pymysql
     uv pip install --python $V urllib3 certifi idna charset-normalizer six
-    $V tools/golden/live_cases.py            # all
-    $V tools/golden/live_cases.py --list     # what
-    $V tools/golden/live_cases.py <case-id>  # one
+    $V tools/golden/live_cases.py                       # check every case -- writes nothing
+    $V tools/golden/live_cases.py <case-id>             # check one case
+    $V tools/golden/live_cases.py --list                # what the cases are
+    $V tools/golden/live_cases.py --record <case-id>    # record one that has no snapshot
+    $V tools/golden/live_cases.py --record --force      # replace existing snapshots, on purpose
+
+A bare invocation writes nothing: it re-runs each case and diffs the stdout
+against the snapshot on disk, so a case that already exists cannot be lost by
+typing the command without an argument. Recording is `--record`, and even then a
+snapshot that already exists is refused by name unless `--force` says the
+replacement is deliberate -- a recorded live case is the only copy of what a real
+server answered. Recording a case that has no snapshot yet needs no extra flag.
 
 Those are the exact install steps that produced these snapshots. `trino` goes in
 with `--no-deps` on purpose (see the header of `requirements.txt`: its dependency
@@ -117,6 +133,7 @@ be frozen as if it were an answer.
 | `postgres_objects_live` | `objects` | postgres | 1 | The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string. |
 | `postgres_count_live` | `count` | postgres | 3 | `count`'s wrapper run by Postgres itself on 500,000 real rows, so the number is the server's rather than a fake cursor's. |
 | `postgres_explain_live` | `explain` | postgres | 4 | Postgres answers EXPLAIN with one `QUERY PLAN` text column; this freezes the real column name, the real plan text and the absence of `truncated`. |
+| `postgres_export_live` | `export` | postgres | 5 | The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs, the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to `<TMP>`; the size is not -- it is the bytes the writer produced from the values psycopg handed over. |
 | `mysql_type_zoo_live` | `preview` | mysql | 4 | The same hard types again, as MySQL decodes them: decimal(38,10), datetime and timestamp kept distinct, a time PyMySQL hands back as an object, json re-ordered by the server, a blob with a NUL and 0xFF, an enum label, a char(36) and a binary(16) uuid, a NULL, an empty string and the four characters NULL. The `columns` type is MySQL's column type code. |
 | `mysql_batching_live` | `preview` | mysql | 5 | 250 real rows through the 200-row preview batch: the boundary, the second batch and `truncated: true`. |
 | `mysql_tables_live` | `tables` | mysql | 1 | MySQL's SHOW TABLES FROM `qh`, quoted with backticks, in the server's own order. |
@@ -124,6 +141,7 @@ be frozen as if it were an answer.
 | `mysql_schemas_live` | `schemas` | mysql | 1 | The one browse command MySQL has no level for: a usage error naming the driver, raised before the network is touched. |
 | `mysql_count_live` | `count` | mysql | 3 | The count wrapper on MySQL over 500,000 real rows. |
 | `mysql_explain_live` | `explain` | mysql | 4 | MySQL is the driver whose EXPLAIN is not one text column: a real multi-column plan table, which is why `explain` emits preview's protocol rather than a plan shape. |
+| `mysql_export_live` | `export` | mysql | 5 | The CSV writer fed by PyMySQL's real decoding: the `start` columns carry MySQL's own column type codes, and `done` reports the real row count and the file's real byte size -- 398 bytes against Postgres's 508 for the same statement, which is the point of freezing both. |
 | `trino_nation_live` | `preview` | trino | 4 | The real Trino decoder on tpch.tiny.nation: bigint, varchar, and a NULL comment that must arrive as JSON null rather than "None". |
 | `trino_type_zoo_live` | `preview` | trino | 4 | Trino's own decoding of the types that matter, from expressions rather than a table: a decimal(38,10) with its digits intact, a tiny negative decimal, a timestamp with a zone, a naive timestamp, a date, a time, an interval, a NULL and an empty string. |
 | `trino_batching_live` | `preview` | trino | 5 | 250 real tpch rows -- a bigint, the tpch connector's `double` totalprice and a date -- cut by the 200-row batch rule, so the boundary, the second batch and `truncated: true` are all frozen. tpch's generated orderkeys are sparse (1..7, then 32..39, ...), so the second batch starts at 801 rather than at 201: the row *number* is what the cap counts, not the key. |
@@ -131,10 +149,12 @@ be frozen as if it were an answer.
 | `trino_count_live` | `count` | trino | 3 | The count wrapper run by the coordinator over tpch.tiny.orders. |
 | `trino_explain_live` | `explain` | trino | 4 | A real Trino plan: one varchar column, one row per plan line, fetched through EXPLAIN with the caller's semicolon stripped. |
 
-`<VENV>` below is the interpreter with the client packages; `tools/golden/
-live_cases.py --markdown` prints this section again from the case table, so it
-cannot drift from what was run. Every setting is explicit and `RETRIES=0` keeps
-the engine from reconnecting under a dead server (`deploy/dev/qh-pg-old.sh` and
+`<VENV>` below is the interpreter with the client packages, and `<TMP>` the temp
+root the recorder masks (`export` writes into `<TMP>/qh-golden-<case>/`).
+`tools/golden/live_cases.py --markdown` prints this case table and these command
+lines from the same table the recorder runs, so neither can drift from what was
+actually run. Every setting is explicit and `RETRIES=0` keeps the engine from
+reconnecting under a dead server (`deploy/dev/qh-pg-old.sh` and
 `qh-mysql-old.sh` are the variants that run the real servers instead of the
 containers).
 
@@ -159,6 +179,9 @@ containers).
     # postgres_explain_live
     DB_DATABASE=qh DB_HOST=127.0.0.1 DB_KIND=postgres DB_PASSWORD=qh-dev-only DB_PORT=55432 DB_SCHEMA=public DB_SSLMODE=disable DB_USER=qh RETRIES=0 SQL='SELECT * FROM type_zoo WHERE id = 1' <VENV>/bin/python -s -u app/engine/queryhive_engine.py explain
 
+    # postgres_export_live
+    DB_DATABASE=qh DB_HOST=127.0.0.1 DB_KIND=postgres DB_PASSWORD=qh-dev-only DB_PORT=55432 DB_SCHEMA=public DB_SSLMODE=disable DB_USER=qh FORMAT=csv NAME=type_zoo OUT_DIR=<TMP>/qh-golden-postgres_export_live RETRIES=0 SQL='SELECT * FROM type_zoo' <VENV>/bin/python -s -u app/engine/queryhive_engine.py export
+
     # mysql_type_zoo_live
     DB_DATABASE=qh DB_HOST=127.0.0.1 DB_KIND=mysql DB_PASSWORD=qh-dev-only DB_PORT=53306 DB_USER=qh RETRIES=0 SQL='SELECT * FROM type_zoo' <VENV>/bin/python -s -u app/engine/queryhive_engine.py preview
 
@@ -179,6 +202,9 @@ containers).
 
     # mysql_explain_live
     DB_DATABASE=qh DB_HOST=127.0.0.1 DB_KIND=mysql DB_PASSWORD=qh-dev-only DB_PORT=53306 DB_USER=qh RETRIES=0 SQL='SELECT * FROM type_zoo WHERE id = 1' <VENV>/bin/python -s -u app/engine/queryhive_engine.py explain
+
+    # mysql_export_live
+    DB_DATABASE=qh DB_HOST=127.0.0.1 DB_KIND=mysql DB_PASSWORD=qh-dev-only DB_PORT=53306 DB_USER=qh FORMAT=csv NAME=type_zoo OUT_DIR=<TMP>/qh-golden-mysql_export_live RETRIES=0 SQL='SELECT * FROM type_zoo' <VENV>/bin/python -s -u app/engine/queryhive_engine.py export
 
     # trino_nation_live
     DB_DATABASE=tpch DB_HOST=127.0.0.1 DB_KIND=trino DB_PORT=58080 DB_SCHEMA=tiny DB_USER=queryhive RETRIES=0 SQL='SELECT nationkey, name, regionkey, comment FROM tpch.tiny.nation ORDER BY nationkey' <VENV>/bin/python -s -u app/engine/queryhive_engine.py preview
@@ -211,6 +237,15 @@ Two things for each case, and the second one is easy to forget.
    Postgres and MySQL cases the `columns` event carries the type code the
    Python engine emits (`"23"`, `"1700"`, `"3"`, `"246"`, ...) and the `rows`
    event carries the decoded values one by one.
+
+### The two new `export` cases are not listed yet
+
+`postgres_export_live` and `mysql_export_live` were recorded on 23 September
+2026 and have **not** been compared against the Rust engine. Until each id is in
+one of the three lists in `crates/qh-ffi/tests/golden.rs`,
+`a_new_snapshot_cannot_be_ignored` fails on the first one it reaches. `LIVE` is
+the list that needs no `Case` behind it: being there only asks that the id be
+declared in `tools/golden/live_cases.py`, which both are.
 
 ### Reproduced today -- put these in `EXACT`
 
@@ -257,21 +292,31 @@ server sent -- the Rust engine reproduces exactly, so if the promise is the type
 name they move to `EXACT` as soon as the `Case` scripts the name, and if the
 promise is the code they stay `ACCEPTED` and the mapping runs the other way.
 
-### Expected failure until then
+### The one expected failure today
 
 `cargo test -p qh-ffi --test golden` fails with one panic, naming whichever
-unclassified case it reaches first:
+unclassified case it reaches first -- on 23 September 2026, that is the new
+`mysql_export_live`:
 
     ---- a_new_snapshot_cannot_be_ignored stdout ----
-    thread 'a_new_snapshot_cannot_be_ignored' (445018) panicked at crates/qh-ffi/tests/golden.rs:1021:13:
-    postgres_catalogs_live is in the snapshot but is neither reproduced nor listed as an accepted difference
+    thread 'a_new_snapshot_cannot_be_ignored' (1216905) panicked at crates/qh-ffi/tests/golden.rs:1083:9:
+    mysql_export_live is in the snapshot but is neither reproduced in process, nor listed as an accepted difference, nor declared a live case
     note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
-    test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured
+    test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured
 
-`every_exact_case_matches_the_python_snapshot` passes today and will keep
-passing: it counts only the ids in `EXACT`, and the existing twenty-one cases are
-untouched. The other three tests in that file pass.
+(The line number and the pass count move while that file is being edited; the
+failure is the same one.)
+
+Putting the two ids below in `LIVE` there is the whole fix; nothing in this
+directory has to change again.
+
+    "postgres_export_live",
+    "mysql_export_live",
+
+`every_exact_case_matches_the_python_snapshot` passes and will keep passing: it
+counts only the ids in `EXACT`, and neither new case is in it. The other three
+tests in that file pass.
 
 ## Divergences against real servers
 
@@ -437,13 +482,66 @@ fact that the Python engine's error event carries the exception class. The
 hint is the sentence the app shows the user, so this case is the record of what
 that sentence is today.
 
+### Postgres: `to_table` reports a write the server never commits
+
+Found while deciding whether a live `to_table` case was worth recording. The
+engine reports success; the table is not there:
+
+    $ DB_KIND=postgres DB_HOST=127.0.0.1 DB_PORT=55432 DB_USER=qh DB_PASSWORD=qh-dev-only \
+        DB_DATABASE=qh DB_SCHEMA=public DB_SSLMODE=disable RETRIES=0 SQL='SELECT * FROM type_zoo' \
+        TARGET_SCHEMA=public TARGET_TABLE=golden_postgres_to_table_live WRITE_MODE=replace \
+        <VENV>/bin/python -s -u app/engine/queryhive_engine.py to_table
+    {"event": "step", "step": "connect"}
+    {"event": "step", "step": "write"}
+    {"event": "done", "rows": -1, "table": "public.golden_postgres_to_table_live", "mode": "replace",
+     "query_id": null, "cancelled": false,
+     "warnings": ["dropped the existing table public.golden_postgres_to_table_live"]}
+
+    $ <VENV>/bin/python -c "... SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+    ['type_zoo', 'wide_500k']
+
+`exporter/drivers.py`'s Postgres `connect()` builds `psycopg.connect(...)` with
+no `autocommit` and `exporter/to_table.py` never calls `commit()`, so the
+connection closes at the end of the run and the server rolls the CTAS back. The
+`-1` is the visible half of the same fact: psycopg's `rowcount` for a CTAS is
+`-1`, so the count is lost along with the table. MySQL is the opposite on both
+points -- its DDL commits implicitly and its CTAS reports the rows written -- and
+the contrast is what a live case would have pinned. The engine's own docstring
+("the database runs the SELECT and commits the result itself") is not true for
+this driver.
+
 ## What could not be recorded
 
-- **`export` and `to_table` on Postgres and MySQL.** Both engines implement
-  them for both drivers, and both were left out on purpose: their stdout carries
-  paths and sizes, not values, so a live case would freeze little that the
-  in-process `export_csv` and `to_table_create` do not already. They are the
-  biggest remaining hole in the matrix if the parent wants it closed.
+- **`export` on Postgres and MySQL -- closed on 23 September 2026.** The reason
+  given here before ("their stdout carries paths and sizes, not values") was
+  wrong. `done` carries the real row count and the file's real byte size, and
+  `start` carries the driver's own column type codes -- none of which the
+  in-process `export_csv` can produce, because it hands the writer rows a case
+  wrote down. `postgres_export_live` and `mysql_export_live` are recorded in
+  `tests/golden/export/`: the same `SELECT * FROM type_zoo` writes 508 bytes of
+  Postgres CSV against 398 of MySQL CSV, and the two `start` events disagree on
+  every type on the wire.
+- **`to_table` on Postgres and MySQL -- re-examined, and still not recorded.**
+  This one was tried against both servers. Each attempt failed for a reason that
+  writing the file anyway would not fix:
+  - *MySQL.* The write commits -- MySQL's DDL is implicitly committed -- so
+    `golden_mysql_to_table_live` stayed in `qh` and changed two snapshots that
+    already existed: `mysql_tables_live` (SHOW TABLES) and `mysql_objects_live`
+    (information_schema.TABLES) both went from `ok` to `DIFF` on the next check.
+    A case whose execution rewrites another case's expected output is worse than
+    a hole, and re-recording those two to expect the artifact would make them
+    depend on whether this case had run first.
+  - *Postgres.* The write does **not** commit. `done` reports
+    `"table": "public.golden_postgres_to_table_live"` and exit 0, and `pg_tables`
+    afterwards lists only `type_zoo` and `wide_500k`. Freezing that event would
+    enshrine a success the server contradicts -- the mistake the recorder
+    already refuses to make for a connection failure. The defect and its cause
+    are in the divergences above.
+  What a `to_table` case would pin -- the driver-built statement, the
+  `public.<table>` / `qh.<table>` spelling, and the count the server reports
+  (`-1` on Postgres against the written count on MySQL) -- is pinned by nothing
+  today. Closing it needs the Postgres commit defect and the MySQL shared-table
+  problem solved first.
 - **`test` on Postgres and MySQL.** The in-process `test_probe` covers the
   event; a live run would add only the real `catalog_count`.
 - **Live Trino `catalogs`, `schemas` and `tables`.** These stay in-process only.
@@ -507,6 +605,16 @@ Dua keputusan yang diambil dari sini, beserta tempatnya:
 
 - `columns.type` adalah **nama tipe, bukan kode DBAPI** — `docs/golden-deltas.md` D-8. Kasus yang
   hanya berbeda di medan ini diklasifikasikan oleh entri itu, bukan ditimbang ulang satu per satu.
-- Kedua puluh kasus live tetap di daftar `LIVE` di `crates/qh-ffi/tests/golden.rs`, dengan gigi
-  bahwa setiap id wajib dideklarasikan di `tools/golden/live_cases.py`.
+- Kasus live tetap di daftar `LIVE` di `crates/qh-ffi/tests/golden.rs`, dengan gigi bahwa setiap id
+  wajib dideklarasikan di `tools/golden/live_cases.py`. Dua puluh sudah di sana sejak 22 Sep; dua
+  kasus `export` baru belum (lihat bawah).
+
+Dua kasus `export` live menyusul 23 Sep 2026 -- `postgres_export_live` dan `mysql_export_live`, satu
+per server untuk `SELECT * FROM type_zoo` yang sama -- sehingga celah `export` di matriks di atas
+tertutup; keduanya sudah diverifikasi ulang (22/22 kasus cocok). Keduanya **belum** ada di daftar
+`LIVE`, jadi `a_new_snapshot_cannot_be_ignored` gagal dan menyebut `mysql_export_live` lebih dulu
+sampai dua id itu ditambahkan. `to_table` untuk Postgres dan MySQL **tidak** direkam; dua sebabnya
+terukur dan ada di "What could not be recorded" (MySQL meninggalkan tabel yang langsung mengubah dua
+snapshot lain; Postgres tidak pernah commit, jadi snapshot-nya akan memakukan keberhasilan yang
+dibantah server).
 

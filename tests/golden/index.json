@@ -105,6 +105,14 @@
   },
   {
     "captures": "stdout",
+    "case": "mysql_export_live",
+    "command": "export",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "The CSV writer fed by PyMySQL's real decoding: the `start` columns carry MySQL's own column type codes, and `done` reports the real row count and the file's real byte size -- a different size from Postgres's for the same statement, which is the point of freezing both. The path is masked to <TMP>, the size is not."
+  },
+  {
+    "captures": "stdout",
     "case": "mysql_objects",
     "command": "objects",
     "event_lines": 1,
@@ -190,6 +198,14 @@
     "event_lines": 4,
     "exit_code": 0,
     "notes": "Postgres answers EXPLAIN with one `QUERY PLAN` text column; this freezes the real column name, the real plan text and the absence of `truncated`."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_export_live",
+    "command": "export",
+    "event_lines": 5,
+    "exit_code": 0,
+    "notes": "The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs, the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to <TMP>; the size is not -- it is a fact about the bytes the writer produced from the values psycopg handed over."
   },
   {
     "captures": "stdout",

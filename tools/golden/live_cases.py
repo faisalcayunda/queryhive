@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Record golden snapshots of the Python engine against the *real* dev servers.
+"""Check or record golden snapshots of the Python engine against the *real* dev servers.
 
-    <venv>/bin/python tools/golden/live_cases.py            # every live case
-    <venv>/bin/python tools/golden/live_cases.py pg_type_zoo_live
+    <venv>/bin/python tools/golden/live_cases.py                        # check every case
+    <venv>/bin/python tools/golden/live_cases.py postgres_count_live    # check one case
+    <venv>/bin/python tools/golden/live_cases.py --record <case-id>     # record a new case
+    <venv>/bin/python tools/golden/live_cases.py --record --force       # re-record on purpose
     <venv>/bin/python tools/golden/live_cases.py --list
 
 Why this exists
@@ -23,6 +25,35 @@ the same way `record.py` does (and with the same normalisation: see
 `normalise`). Nothing is hand-written: a case that cannot run is reported and
 recorded not at all.
 
+What it does by default
+-----------------------
+Nothing is written. Each selected case is run again against the server it was
+recorded from and its stdout is diffed, line for line, against the snapshot on
+disk (`record.diff_lines`, the same comparison `compare.py` uses for the
+in-process cases). Every key must match except the ones `normalise` masks --
+`elapsed_ms`, `query_id` and temp paths. A case that cannot run at all (a
+container down, a client package not importable) is reported as such rather
+than as a difference: "could not ask" is not "the answer changed".
+
+What `--record` writes
+----------------------
+`tests/golden/<command>/<case>.ndjson` and `<case>.meta.json`, exactly like the
+in-process cases, so `crates/qh-ffi/tests/golden.rs` finds them the same way.
+`index.json` is rebuilt from every `.meta.json` in the tree, so recording here
+never drops the in-process cases and re-recording those never drops these. Case
+ids end in `_live` so the two sets stay visible as what they are.
+
+What it will overwrite
+----------------------
+Only `--record` writes, and only for the cases named (or every case, if none is
+named). A snapshot that already exists is *not* replaced by that alone: the run
+refuses before touching a server, names the files it would have lost, and exits
+2, unless `--force` says the replacement is deliberate. A case that has no
+snapshot yet is written with no extra flag -- recording a new case is the
+normal use. Recorded snapshots are the only copy of what the previous engine
+answered against a real server, which is why a bare invocation cannot destroy
+them.
+
 Requirements
 ------------
 The engine's real client packages have to be importable by the interpreter that
@@ -34,21 +65,12 @@ up:
 
 `check_tools()` says exactly what is missing rather than producing a snapshot of
 a traceback.
-
-Where the files go
-------------------
-`tests/golden/<command>/<case>.ndjson` plus a `.meta.json`, exactly like the
-in-process cases, so `crates/qh-ffi/tests/golden.rs` finds them the same way.
-`index.json` is rebuilt from every `.meta.json` in the tree, so recording here
-never drops the in-process cases and re-recording those never drops these. Case
-ids end in `_live` so the two sets stay visible as what they are.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -129,8 +151,16 @@ class LiveCase:
         return values
 
     def command_line(self) -> str:
-        """The exact shell command line the snapshot was recorded with."""
-        parts = [f"{key}={_quote_shell(value)}" for key, value in sorted(self.env_map().items())]
+        """The exact shell command line the snapshot was recorded with.
+
+        The temp root is printed as `<TMP>`, the same token `normalise` stores,
+        because an `export` case's OUT_DIR is a real directory under it and the
+        document this feeds has to be the same on every machine.
+        """
+        parts = [
+            f"{key}={_quote_shell(str(value).replace(tempfile.gettempdir(), '<TMP>'))}"
+            for key, value in sorted(self.env_map().items())
+        ]
         return " ".join(parts + [sys.executable, "-s", "-u", "app/engine/queryhive_engine.py",
                                  self.command])
 
@@ -138,6 +168,19 @@ class LiveCase:
 def _quote_shell(value: str) -> str:
     text = str(value)
     return "'" + text.replace("'", "'\\''") + "'" if any(c in text for c in " '\"$") else text
+
+
+def _export_dir(case_id: str) -> str:
+    """The `export` case's output directory: under the temp root, named for the case.
+
+    Fixed rather than `mkdtemp` because the path is part of the snapshot. The
+    recorder masks the temp root into `<TMP>`, so the stored path is
+    `<TMP>/qh-golden-<case>/type_zoo.csv` on every run -- while the random
+    suffix `mkdtemp` adds would differ every time and make the diff noise. Named
+    after the case so two export cases can never overwrite each other's files,
+    and under the temp root so nothing lands in the working tree.
+    """
+    return str(Path(tempfile.gettempdir()) / f"qh-golden-{case_id}")
 
 
 def cases() -> list[LiveCase]:
@@ -212,6 +255,20 @@ def cases() -> list[LiveCase]:
             "the real column name, the real plan text and the absence of `truncated`.",
             sql="SELECT * FROM type_zoo WHERE id = 1",
         ),
+        LiveCase(
+            "postgres_export_live",
+            "export",
+            "postgres",
+            PG,
+            "The CSV writer fed by psycopg's real decoding rather than a fake cursor's "
+            "rows: the `start` columns carry the server's own type OIDs, the header is "
+            "the table's, and `done` reports the real row count and the file's real "
+            "byte size. The path is masked to <TMP>; the size is not -- it is a fact "
+            "about the bytes the writer produced from the values psycopg handed over.",
+            sql="SELECT * FROM type_zoo",
+            env={"FORMAT": "csv", "NAME": "type_zoo",
+                 "OUT_DIR": _export_dir("postgres_export_live")},
+        ),
         # -- MySQL --------------------------------------------------------- #
         LiveCase(
             "mysql_type_zoo_live",
@@ -278,6 +335,20 @@ def cases() -> list[LiveCase]:
             "multi-column plan table, which is why `explain` emits preview's protocol "
             "rather than a plan shape",
             sql="SELECT * FROM type_zoo WHERE id = 1",
+        ),
+        LiveCase(
+            "mysql_export_live",
+            "export",
+            "mysql",
+            MYSQL,
+            "The CSV writer fed by PyMySQL's real decoding: the `start` columns carry "
+            "MySQL's own column type codes, and `done` reports the real row count and "
+            "the file's real byte size -- a different size from Postgres's for the same "
+            "statement, which is the point of freezing both. The path is masked to "
+            "<TMP>, the size is not.",
+            sql="SELECT * FROM type_zoo",
+            env={"FORMAT": "csv", "NAME": "type_zoo",
+                 "OUT_DIR": _export_dir("mysql_export_live")},
         ),
         # -- Trino --------------------------------------------------------- #
         LiveCase(
@@ -356,10 +427,16 @@ LIVE_IDS: tuple[str, ...] = tuple(case.case_id for case in cases())
 
 
 def check_tools() -> list[str]:
-    """What is missing before a live run can mean anything, as plain sentences."""
+    """What is missing before a live run can mean anything, as plain sentences.
+
+    The interpreter that matters is the one running this script, so each import
+    is asked of `sys.executable` -- not of a `python3` found on PATH, which may
+    be a different interpreter entirely and whose absence (or whose stubs) would
+    otherwise skip the check without saying so.
+    """
     problems = []
     for module in ("trino", "psycopg", "pymysql"):
-        if shutil.which("python3") and subprocess.run(
+        if subprocess.run(
             [sys.executable, "-c", f"import {module}"], capture_output=True
         ).returncode:
             problems.append(f"{module} is not importable by {sys.executable}")
@@ -390,7 +467,14 @@ def run_case(case: LiveCase) -> tuple[int, str, str]:
 
 
 def collect(only: list[str] | None = None) -> tuple[dict[str, dict], list[str]]:
-    """Run every case and return ({case_id: {meta, lines}}, failures)."""
+    """Run every case and return ({case_id: {meta, lines}}, failures).
+
+    The mask goes on before the first case runs, not at write time: an `export`
+    case really does write into a directory under the temp root, and a check has
+    to normalise those paths exactly as the recording that produced the snapshot
+    did, or every export case would diff on its own path.
+    """
+    record.add_roots(tempfile.gettempdir())
     results: dict[str, dict] = {}
     failures: list[str] = []
     for case in cases():
@@ -436,11 +520,49 @@ def collect(only: list[str] | None = None) -> tuple[dict[str, dict], list[str]]:
     return results, failures
 
 
-def record_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None) -> int:
-    """Record the selected live cases and rebuild the index from the whole tree."""
-    # The one path a live case could leak: nothing here writes files, but the
-    # temp root is masked anyway so the two recorders normalise identically.
-    record.add_roots(tempfile.gettempdir())
+def snapshot_paths(case: LiveCase, destination: Path = GOLDEN_DIR) -> tuple[Path, Path]:
+    """The two files a recorded case owns: its event lines and its metadata."""
+    folder = destination / case.folder
+    return folder / f"{case.case_id}.ndjson", folder / f"{case.case_id}.meta.json"
+
+
+def _show(path: Path) -> str:
+    """A path for a message: repo-relative when it is in the repo, absolute when not.
+
+    `destination` is a parameter, so a caller (a test, or a run against a scratch
+    tree) can point it outside the repo -- and `relative_to` raises rather than
+    saying so.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def record_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None,
+                force: bool = False) -> int:
+    """Record the selected live cases and rebuild the index from the whole tree.
+
+    A snapshot that already exists is refused, by name and before a server is
+    touched, unless `force` was asked for: these files are the only copy of what
+    a real server answered, so replacing one has to be a decision rather than
+    what happens when `--record` is typed without a case in mind. A case that
+    has never been recorded is written with no extra flag -- that is the normal
+    use of this tool, and it has nothing to lose.
+    """
+    selected = [case for case in cases() if only is None or case.case_id in only]
+    existing = [
+        path
+        for case in selected
+        for path in snapshot_paths(case, destination)
+        if path.exists()
+    ]
+    if existing and not force:
+        for path in existing:
+            print(f"refusing to replace {_show(path)}", file=sys.stderr)
+        print("a recorded snapshot is the only copy of a real server's answer; "
+              "pass --force to overwrite it on purpose", file=sys.stderr)
+        return 2
     results, failures = collect(only)
     if failures:
         for failure in failures:
@@ -459,7 +581,49 @@ def record_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None) -
             encoding="utf-8",
         )
     record.rebuild_index(destination)
+    print(f"recorded {len(results)} case(s): {', '.join(sorted(results))}")
     return 0
+
+
+def compare_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None) -> int:
+    """Re-run the selected cases and diff them against the snapshots on disk.
+
+    Read-only, and the default: nothing here opens a file for writing, so a
+    bare invocation cannot lose a snapshot. A case that could not run at all --
+    a container down, a client package missing -- is reported as a failure
+    rather than as a difference, because "could not ask the server" is not "the
+    answer changed", and the two must never be read alike.
+    """
+    results, failures = collect(only)
+    for failure in failures:
+        print(f"FAILED {failure}", file=sys.stderr)
+    diffs = 0
+    missing = 0
+    checked = 0
+    for case in cases():
+        if only is not None and case.case_id not in only:
+            continue
+        if case.case_id not in results:
+            continue  # already reported as a failure; a run that did not happen is not a diff
+        checked += 1
+        path = snapshot_paths(case, destination)[0]
+        if not path.is_file():
+            missing += 1
+            print(f"MISSING {case.case_id}: no snapshot at {_show(path)}; "
+                  f"record it with: live_cases.py --record {case.case_id}")
+            continue
+        expected = path.read_text(encoding="utf-8").splitlines()
+        problems = record.diff_lines(expected, results[case.case_id]["lines"], full=False)
+        if problems:
+            diffs += 1
+            print(f"DIFF {case.case_id}")
+            for problem in problems:
+                print(f"     {problem}")
+        else:
+            print(f"ok   {case.case_id}")
+    print(f"\n{checked - diffs - missing}/{checked} live cases match"
+          + (f" ({len(failures)} could not run)" if failures else ""))
+    return 1 if diffs or missing or failures else 0
 
 
 def markdown() -> int:
@@ -497,23 +661,66 @@ def _folder_of(case_id: str) -> str:
     return ""
 
 
+USAGE = """usage: live_cases.py [--list | --markdown | --record [--force] [case-id ...]]
+
+  (no arguments)   check every case against its snapshot -- reads only, writes nothing
+  <case-id> ...    check only those cases
+
+  --record         record the named cases (or all of them) into tests/golden/.
+                   Refuses to replace a snapshot that already exists.
+  --force          with --record: replace the existing snapshots anyway. This
+                   overwrites tests/golden/<command>/<case-id>.ndjson and its
+                   .meta.json, and rebuilds index.json -- nothing else is removed.
+
+  --list           print the case table and exit
+  --markdown       print the RECORDED.md case section and exit
+  -h, --help       print this and exit
+"""
+# The flags. Anything starting with `-` and not in here is a mistake worth
+# naming rather than silently ignoring: a typo'd `--recordd` that recorded
+# nothing is exactly the kind of accident this tool no longer allows.
+FLAGS = ("--record", "--force", "--list", "--markdown", "-h", "--help")
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in argv or "--help" in argv:
+        print(USAGE, end="")
+        return 0
     if "--list" in argv:
         for case in cases():
             print(f"{case.case_id:28s} {case.command:8s} {case.engine}")
         return 0
     if "--markdown" in argv:
         return markdown()
+
+    known = {case.case_id for case in cases()}
+    selected = [arg for arg in argv if not arg.startswith("-")]
+    unknown = [arg for arg in argv if arg.startswith("-") and arg not in FLAGS]
+    if unknown:
+        print(f"unknown option(s): {' '.join(unknown)}", file=sys.stderr)
+        print(USAGE, end="", file=sys.stderr)
+        return 2
+    missing = [case_id for case_id in selected if case_id not in known]
+    if missing:
+        print(f"no such case: {', '.join(missing)}", file=sys.stderr)
+        print(USAGE, end="", file=sys.stderr)
+        return 2
+    if "--force" in argv and "--record" not in argv:
+        print("--force only means something with --record", file=sys.stderr)
+        print(USAGE, end="", file=sys.stderr)
+        return 2
+
     problems = check_tools()
     if problems:
         for problem in problems:
-            print(f"cannot record: {problem}", file=sys.stderr)
+            print(f"cannot run: {problem}", file=sys.stderr)
         return 2
-    code = record_live(only=[arg for arg in argv if not arg.startswith("-")] or None)
-    if code == 0:
-        print(f"recorded the live cases into {GOLDEN_DIR.relative_to(ROOT)}")
-    return code
+
+    only = selected or None
+    if "--record" in argv:
+        return record_live(only=only, force="--force" in argv)
+    return compare_live(only=only)
 
 
 if __name__ == "__main__":

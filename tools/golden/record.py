@@ -131,6 +131,44 @@ def normalise(stdout: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# compare
+# --------------------------------------------------------------------------- #
+
+
+def diff_lines(expected: list[str], actual: list[str], full: bool) -> list[str]:
+    """Line differences between two normalised event streams, as sentences.
+
+    Lives here, next to `normalise`, because both readers of a snapshot need the
+    same answer to "did it move": `compare.py` for the in-process cases and
+    `live_cases.py` for the ones recorded against a real server. Two copies of
+    this would drift, and the one that drifted would be the one nobody read.
+    """
+    problems: list[str] = []
+    if len(expected) != len(actual):
+        problems.append(f"event count {len(expected)} -> {len(actual)}")
+    for index, (want, got) in enumerate(zip(expected, actual)):
+        if want == got:
+            continue
+        if full:
+            problems.append(f"line {index + 1}:\n  golden: {want}\n  now:    {got}")
+            continue
+        try:
+            want_event, got_event = json.loads(want), json.loads(got)
+        except json.JSONDecodeError:
+            problems.append(f"line {index + 1}: one side is not JSON")
+            continue
+        keys = sorted(set(want_event) | set(got_event))
+        changed = [key for key in keys if want_event.get(key) != got_event.get(key)]
+        problems.append(f"line {index + 1}: keys differ: {', '.join(changed)}")
+    # Lines only on one side still have to be reported when the counts differ.
+    for index in range(min(len(expected), len(actual)), max(len(expected), len(actual))):
+        side = "golden" if index < len(expected) else "now"
+        line = expected[index] if index < len(expected) else actual[index]
+        problems.append(f"line {index + 1} ({side} only): {line}")
+    return problems
+
+
+# --------------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------------- #
 

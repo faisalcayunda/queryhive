@@ -18,7 +18,6 @@ stop the build rather than be smoothed over.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -47,33 +46,6 @@ def load_recorded(destination: Path = GOLDEN_DIR) -> dict[str, list[str]]:
     return found
 
 
-def diff_lines(expected: list[str], actual: list[str], full: bool) -> list[str]:
-    """Line differences, with the first differing JSON keys called out."""
-    problems: list[str] = []
-    if len(expected) != len(actual):
-        problems.append(f"event count {len(expected)} -> {len(actual)}")
-    for index, (want, got) in enumerate(zip(expected, actual)):
-        if want == got:
-            continue
-        if full:
-            problems.append(f"line {index + 1}:\n  golden: {want}\n  now:    {got}")
-            continue
-        try:
-            want_event, got_event = json.loads(want), json.loads(got)
-        except json.JSONDecodeError:
-            problems.append(f"line {index + 1}: one side is not JSON")
-            continue
-        keys = sorted(set(want_event) | set(got_event))
-        changed = [key for key in keys if want_event.get(key) != got_event.get(key)]
-        problems.append(f"line {index + 1}: keys differ: {', '.join(changed)}")
-    # Lines only on one side still have to be reported when the counts differ.
-    for index in range(min(len(expected), len(actual)), max(len(expected), len(actual))):
-        side = "golden" if index < len(expected) else "now"
-        line = expected[index] if index < len(expected) else actual[index]
-        problems.append(f"line {index + 1} ({side} only): {line}")
-    return problems
-
-
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     full = "--full" in argv
@@ -90,13 +62,15 @@ def main(argv=None) -> int:
                 # Recorded against a real server by tools/golden/live_cases.py:
                 # this tool drives the engine with a fake cursor and cannot
                 # re-derive it, so it is reported rather than counted as a
-                # failure. Re-record it with that tool instead.
-                print(f"live {case_id}: real-server snapshot, re-record with live_cases.py")
+                # failure. Re-record it with that tool instead -- which refuses
+                # to replace the snapshot unless `--record` asks for it.
+                print(f"live {case_id}: real-server snapshot, re-record with "
+                      f"live_cases.py --record {case_id} --force")
                 continue
             print(f"MISSING case {case_id}: in the snapshot but no longer recorded")
             failed += 1
             continue
-        problems = diff_lines(golden[case_id], fresh[case_id]["lines"], full)
+        problems = record.diff_lines(golden[case_id], fresh[case_id]["lines"], full)
         if problems:
             failed += 1
             print(f"DIFF {case_id}")
