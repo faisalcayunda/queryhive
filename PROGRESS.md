@@ -4,7 +4,9 @@
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
 
 - **Branch aktif:** `feat/rust-engine` (dibuat dari `main` @ `602bfb7`)
-- **Fase aktif:** **Fase 0 hampir selesai** → dilanjutkan ke **Fase 1** (core engine Rust)
+- **Fase aktif:** **Fase 1 hampir selesai** — `qh-tunnel` sudah tersambung; Fase 2 (aplikasi
+  berjalan di atas `RustEngine`) belum dimulai, dan itulah yang tersisa sebelum mesin Python
+  bisa dibuang
 - **Mesin:** macOS arm64, `rustc 1.98.1`, `cargo 1.98.1`, Swift 6.2.3, podman (VM
   `podman-machine-default` sudah start, `podman ps` bersih tanpa container)
 
@@ -17,8 +19,8 @@
 | A — Audit codebase | **Selesai** | §1 blueprint. Diagnosis "fetch lambat" terbagi lima penyebab (P1–P5), semuanya merujuk path file dan sudah diverifikasi ulang terhadap kode. |
 | B — Riset web | **Berjalan sebagian** | `tools/kenari_search.py` — alat lokal yang **tidak masuk repo** (lihat §Perkakas lokal) — membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. §8.1 kini **terisi sebagian**: empat issue DBeaver dibuka langsung dan dikutip; Navicat dan DataGrip masih terbuka karena sumber yang ditemukan ditolak (bukan sumber primer). Satu klaim lama **dikoreksi**: TablePlus ternyata sekali beli, bukan langganan. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
-| D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
-| D — Fase 1 | **Hampir selesai** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, ketiga driver, `qh-export` (sembilan format + `plan`), `qh-rt`, dan `qh-ffi` (14 perintah + CLI) selesai dan hijau, termasuk permukaan UniFFI, `qh-credentials`, `qh-storage` dan `qh-sync` yang kini tersambung ke `qh-ffi`; yang belum: `qh-tunnel` **ada dengan ujinya, tetapi tidak ada satu pun crate yang bergantung padanya** — grep `qh-tunnel` di seluruh `Cargo.toml` hanya menemukan baris anggota workspace, jadi perintah tunnel belum bisa dijangkau pengguna |
+| D — Fase 0 | **Selesai** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `EngineContract` + `MockEngine` ✅ — target ujinya kini benar-benar jalan (16/16, `5e5a985`). Yang tetap belum: **seam injeksi**, jadi `MockEngine` ada dan diuji tetapi belum bisa disuntikkan dari kode aplikasi (`Support/DatabaseEngine.swift:14-17`) |
+| D — Fase 1 | **Hampir selesai** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, ketiga driver, `qh-export` (sembilan format + `plan`), `qh-rt`, dan `qh-ffi` (14 perintah + CLI) selesai dan hijau, termasuk permukaan UniFFI, `qh-credentials`, `qh-storage` dan `qh-sync` yang tersambung ke `qh-ffi`; `qh-tunnel` kini juga tersambung — `qh-driver` memberi `TunnelConfig`, `qh-ffi` mem-parse `SSH_*` dan membuka tunnel di `connect` (`7465ec0`, `ed60c4e`, 543 uji lulus). Yang belum untuk Fase 2: FFI belum men-stream event, belum mengekspor entry point cancel, dan belum punya tipe event/handle result-set |
 | D — Fase 2, 3, 4 | Belum | |
 
 ---
@@ -474,7 +476,7 @@ tidak menemukannya satu per satu:
 ### `qh-tunnel`: tunnel SSH, `known_hosts`, dan cacat di dependensinya sendiri (22 Sep 2026)
 
 Crate-nya ada dan hijau: 21 uji unit + 8 uji terhadap `sshd` sungguhan di container
-(`deploy/qh-sshd-run.sh`, port 52222). Yang dibangun adalah `known_hosts` sendiri — parsing,
+(`deploy/dev/qh-sshd-run.sh`, port 52222). Yang dibangun adalah `known_hosts` sendiri — parsing,
 pencocokan nama host, entri ter-hash, wildcard dan negasi, `@revoked`, `@cert-authority` —
 lalu `russh` untuk transportnya, dengan verifikasi host key **sebelum autentikasi** dan TOFU
 sebagai **dua panggilan** (laporkan "host tidak dikenal beserta fingerprint-nya", lalu terima
@@ -666,27 +668,47 @@ Angka baseline yang terekam 22 Sep sekitar 6–8% lebih optimistis pada throughp
 138.405 untuk PG), jadi memakai berkas rekaman sebagai penyebut akan melebih-lebihkan kemenangan
 Rust. Karena itu kedua sisi dijalankan ulang hari ini, bukan dibandingkan dengan rekaman.
 
-### Belum tervalidasi / belum selesai
+### Status validasi (diperbarui 23 Sep 2026, sesi handoff)
 
-- **`swift test` belum pernah dijalankan di mesin ini:** toolchain-nya tidak menemukan modul
-  `XCTest` (`error: no such module 'XCTest'`), jadi target uji baru di `app/Tests/` **belum
-  dieksekusi sama sekali** walaupun `swift build` hijau. Jangan memperlakukannya sebagai lulus.
-- **`cargo deny check licenses` GAGAL, dan itu disengaja.** `deny.toml` + ADR-0011 mencatat
-  pengecualian MPL-2.0 untuk delapan crate `uniffi` sebagai `exceptions` per crate. Yang masih
-  ditolak: `CDLA-Permissive-2.0` pada `webpki-roots` 0.26.11, `webpki-roots` 1.0.9 dan
-  `webpki-root-certs` 1.0.9 — data sertifikat root Mozilla lewat rustls. Dibiarkan gagal supaya
-  tuntutannya keputusan pemilik (ADR pengecualian, atau melepas root store bawaan rustls), bukan
-  perubahan diam-diam di berkas konfigurasi.
-- **`qh-tunnel` tidak bisa dijangkau:** tidak ada crate yang bergantung padanya, jadi perintah
-  tunnel belum sampai ke pengguna.
-- ADR-0007: aplikasi memberi `allow-unsigned-executable-memory` dan `disable-library-validation`,
-  dan ADR-0007 sendiri mensyaratkan pengecualian itu dicatat di ADR baru — belum ada.
-- Kosakata TLS empat mode belum punya rumah di `docs/`; satu-satunya penjelasan ada di doc modul
-  `crates/qh-ffi/src/config.rs` dan `crates/qh-driver/src/lib.rs`.
-- Daftar berkas `app/Sources/TrinoExporter/` di `README.md` belum lengkap sejak beberapa berkas
-  baru muncul.
-- Bacaan balik password lewat `qh-credentials` masih perlu diuji manual (butuh GUI + dialog
+Enam dari tujuh item di daftar lama tertutup hari itu, masing-masing dengan perintah yang
+membuktikannya. Semua dijalankan di branch `feat/rust-engine`, di atas basis `598deb8`.
+
+| Item | Keadaan | Bukti |
+|---|---|---|
+| `swift test` | **Lulus, 16/16.** Dua cacat ditemukan, satu menyembunyikan yang lain: target clang `qh_ffiFFI` hanya berisi header dan modulemap sehingga tidak menghasilkan object file sementara SwiftPM tetap menuntut `qh_ffiFFI.o` (build hijau palsu karena `.o` basi), dan target uji ternyata belum pernah terkompilasi sama sekali | `rm -rf app/.build && swift build` exit 0, lalu `swift test` → 16 tes, 0 gagal (`5e5a985`) |
+| `cargo deny check licenses` | **Hijau.** CDLA-Permissive-2.0 dapat ADR sendiri plus tiga entri `exceptions` per-crate dengan versi eksak; `allow` tidak dilebarkan | `cargo deny check licenses` → `licenses ok` (`9917da9`, ADR-0012) |
+| `qh-tunnel` tidak bisa dijangkau | **Tersambung.** `qh-driver` mendapat `TunnelConfig`/`TunnelAuth`, `qh-ffi` mem-parse kosakata `SSH_*` dan membuka tunnel di `connect` | `cargo test --workspace` → 543 lulus, naik dari 530 (`7465ec0`, `ed60c4e`) |
+| ADR-0007 butuh ADR pengecualian | **Ada.** ADR-0014 mencatat dua entitlements, alternatif yang ditolak, dan risiko yang diterima | `4b03d18` |
+| Kosakata TLS belum punya rumah di `docs/` | **Ada rumah.** `docs/tls-modes.md` | `4b03d18` |
+| Daftar berkas `app/Sources/` di `README.md` | **Lengkap.** Empat belas berkas yang hilang ditambahkan, plus target uji, `Generated/`, dan empat skrip build | `README.md` § Layout |
+| Sapu bersih folder | **Selesai.** `check.js` (944 baris) dan `assets/trino-mascot.png` dihapus; `deploy/qh-sshd-run.sh` → `deploy/dev/` dengan `REPO` diperbaiki | `QH_TEST_SSH=1 cargo test -p qh-tunnel` → 29 lulus, 8 uji sshd benar-benar jalan (`62d9882`) |
+
+Ketahuan juga hari itu, di luar daftar: `app/build-ffi.sh` menulis binding ke root repo karena
+`GENERATED="Generated"` relatif sementara generator dijalankan di subshell yang sudah `cd` ke
+root, sehingga `mv` gagal dengan "No such file or directory"; dan `Engine.current` masih
+`PythonEngine()` (`Support/DatabaseEngine.swift:65`), jadi `app/dist/QueryHive.app` memang masih
+memuat mesin Python. `RustEngine` sudah ada dan lulus kontraknya, tetapi belum bisa dipasang:
+FFI belum men-stream event, belum punya entry point cancel, dan belum punya tipe event atau
+handle result-set.
+
+Yang **masih** terbuka:
+
+- **Validasi tunnel end-to-end belum dijalankan.** Saat sesi itu container `qh-sshd-dev` mati,
+  jadi `QH_TEST_SSH=1 cargo test -p qh-tunnel` gagal 8 dengan `Connection refused (os error 61)`.
+  Bukan regresi: 21 uji unit lulus, dan `cargo test --workspace` tetap hijau karena uji sshd
+  skip tanpa env itu. Perlu container hidup, dan container tidak dinyalakan sendiri.
+- **Komparasi golden live belum dijalankan ulang setelah tunnel disambungkan.** Ketiga container
+  dev juga mati saat itu. Perbandingan terakhir yang lulus 22/22 terjadi sebelum tunnel masuk,
+  jadi angka itu belum mencerminkan commit hari ini.
+- **Bacaan balik password lewat `qh-credentials` masih perlu uji manual** (butuh GUI + dialog
   Keychain).
+- **Hook `orchestrator_guard` punya dua salinan** (`~/.claude/hooks/` dan
+  `~/.minimax/plugins/claude-adapt/hooks/claude-scripts/`); yang dimuat harness ini yang kedua,
+  jadi mengedit yang pertama tidak berpengaruh. Kewajiban argumen `model` dihapus dari keduanya
+  beserta aturan 5, karena harness yang tidak mewarisi model orchestrator menolak setiap nilai
+  dengan "must use provider/model syntax", sehingga syarat itu jalan buntu. Ujinya
+  (`test_orchestrator_guard.py`) diselaraskan dan lulus 21/21. Catatan: `~/.claude` adalah repo
+  git tersendiri, jadi perubahan di sana perlu commit sendiri atau akan tersapu.
 
 ### Sapu bersih dan struktur folder
 
@@ -704,10 +726,13 @@ dan penghapusannya menyatu dengan perubahan `Engine.current = RustEngine()`.
 
 ## Tugas berikutnya (urutan yang dikerjakan)
 
-> **Catatan handoff (akhir sesi 23 Sep 2026):** item 1–5 di bawah ini sudah selesai atau
-> digantikan; daftar yang masih berlaku ada di §Status handoff. Sisanya: keputusan lisensi CDLA,
-> menyambungkan `qh-tunnel`, ADR-0007, rumah dokumen untuk kosakata TLS, dan sapu bersih +
-> struktur folder -- ditambah dua hal yang butuh tangan manusia (item 6).
+> **Catatan handoff (akhir sesi 23 Sep 2026, diperbarui):** lima hal yang dulu dicatat di sini
+> sebagai sisa -- keputusan lisensi CDLA, menyambungkan `qh-tunnel`, ADR-0007, rumah dokumen untuk
+> kosakata TLS, dan sapu bersih + struktur folder -- **semuanya sudah tertutup**. Bukti per item ada
+> di §Status validasi. Daftar bernomor di bawah **belum diaudit ulang** pada sesi itu, jadi jangan
+> memperlakukannya sebagai "yang benar-benar belum" tanpa memeriksa pohonnya: sebagian sudah
+> dikerjakan (mis. `ENCODING`/`DBF_ENCODING` lewat `b570a9a`, kasus live ekspor lewat `923880f`).
+> Sumber kebenaran yang diperbarui ada di §Status handoff.
 
 Daftar ini diperbarui 23 Sep 2026. Sembilan item sebelumnya sudah selesai -- termasuk K11 dan K12
 yang justru bukan soal cancel sama sekali, melainkan `execute` yang menunggu deskripsi kolom
@@ -772,7 +797,10 @@ Tiga temuan yang mengubah prioritas:
 Angka mentah ada di `deploy/dev/bench-results.jsonl`; tabel di `docs/benchmarks.md` dihasilkan
 dari berkas itu oleh `--report-only`, jadi tidak ada angka yang ditulis tangan.
 
-Engine Rust: **[belum diukur]** — belum punya CLI setara `preview`.
+Engine Rust: **sudah diukur** — lihat §Hasil benchmark di §Status handoff. Ringkasnya, pada
+`wide_500k` PostgreSQL: 2.626 ms vs Python 4.236 ms (1,61×), baris pertama 11 ms vs 624 ms, dan
+peak RSS 9,1 MB vs 544,7 MB. Throughput-nya yang tidak menang (1,38×), dan ADR-0013 mencatat
+kenapa itu tidak akan berubah lewat protokol ini.
 
 ## Known issues
 

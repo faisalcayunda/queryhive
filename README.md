@@ -275,30 +275,51 @@ exporter/
   static/      the UI, single self-contained file
 app/
   DESIGN.md                 the native app's design contract and engine protocol
-  Package.swift             SwiftPM target producing the QueryHive executable
+  Package.swift             SwiftPM targets: the executable, the generated bindings, the C
+                            module they call, and the test target
   Sources/TrinoExporter/
     App.swift               @main, the engine's Event type, notices
+    Support/DatabaseEngine.swift  the DatabaseEngine/EngineRun contract and the Engine.current seam
+    Support/Engine.swift    PythonEngine: launches the bundled engine, decodes its JSON events
+    Support/EngineWire.swift  the NDJSON event wire format, decoded by both engines
+    Support/RustEngine.swift  RustEngine: the same contract over UniFFI, not wired in yet
     Support/Theme.swift     the CleanMyMac design system: Tone, Hue, glass, HubButton, the comb
     Support/ThemeStore.swift  the appearance choice: AppTheme, AccentChoice, ThemeStore, presets
-    Support/Engine.swift    launches the bundled engine, decodes its JSON events
+    Support/AppIcon.swift   the app icon, drawn in code
+    Support/DriverLogos.swift  database brand marks, generated from assets/drivers/*.svg
+    Support/NavicatImport.swift  reads connections out of a Navicat .ncx export
+    Support/Snapshot.swift  renders the shell to a PNG for design review
     Models/AppModel.swift   connections, object tree, tabs, run orchestration
     Models/QueryTab.swift   one query tab: SQL, destination, format options, log, run state
     Models/SchemaTree.swift one lazily-loaded tree node (connection/catalog/schema/table)
     Models/Connections.swift saved coordinators + Keychain + Trino URL parsing
+    Models/Shortcuts.swift  the actions a key can be bound to
+    Models/SQLSuggestions.swift  suggestion model, ranking kinds, the Trino keyword list
     Views/RootView.swift    the shell: title strip, tree, workspace, status bar
     Views/SidebarTree.swift the object tree
     Views/Workspace.swift   tab strip, toolbar, format popover, seams
     Views/SQLEditor.swift   NSTextView-backed editor: caret tracking, key interception
+    Views/SQLSyntax.swift   colours the editor by what each token is
     Views/SuggestionPopup.swift  the completion list and its caret-anchored placement
-    Models/SQLSuggestions.swift  suggestion model, ranking kinds, the Trino keyword list
+    Views/ResultGrid.swift  the rows a Run fetched, as an NSTableView
+    Views/ContextCascade.swift  the toolbar's connection and level breadcrumb
+    Views/ExportSettings.swift  where an export goes, behind one button
     Views/Panels.swift      the Log / Columns / Files panel
     Views/ConnectionsViews.swift  connection picker, colour swatches, editor sheet
-  exporter/to_table.py        CTAS / INSERT INTO ... SELECT, executed by the database
-  exporter/drivers.py         Trino / PostgreSQL / MySQL: quoting, levels, connect
+    Views/SettingsView.swift  the Settings window: Appearance and Keyboard
+  Tests/TrinoExporterTests/  EngineContractTests, EventDecodingTests, RustEngineTests, plus the
+                            MockEngine and EngineContract they share
   engine/queryhive_engine.py  JSON-event CLI the app drives (db_drivers, objects, test, catalogs, schemas, tables, export, to_table, preview, count, explain)
+  Generated/                UniFFI output, committed: the Swift bindings, the C header, the
+                            modulemap, and the one translation unit build-ffi.sh writes
   build-engine.sh             builds the bundled standalone CPython + pinned packages
-  build.sh                    builds app/dist/QueryHive.app
+  build-ffi.sh                builds libqh_ffi --release and regenerates Generated/
+  build.sh                    builds app/dist/QueryHive.app, copying ../exporter into the bundle
+                              beside the engine
+  build-dmg.sh                wraps that .app in a DMG, with optional Developer ID + notarization
+  QueryHive.entitlements      the entitlements the hardened runtime needs (ADR-0014)
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code
+  make-driver-logos.sh        regenerates Support/DriverLogos.swift from assets/drivers/*.svg
 app.py         launcher used by both run_local.sh and the pywebview .app bundle
 ```
 
