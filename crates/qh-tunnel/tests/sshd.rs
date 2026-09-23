@@ -1,7 +1,7 @@
 //! Integration tests against a real `sshd` in a container.
 //!
 //! ```bash
-//! deploy/qh-sshd-run.sh
+//! deploy/dev/qh-sshd-run.sh
 //! QH_TEST_SSH=1 cargo test -p qh-tunnel --test sshd
 //! ```
 //!

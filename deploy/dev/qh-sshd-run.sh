@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # A real sshd in a container, for the qh-tunnel integration tests.
 #
-#   deploy/qh-sshd-run.sh          # start qh-sshd-dev and a throwaway client key
-#   deploy/qh-sshd-run.sh --down   # remove only qh-sshd-dev
+#   deploy/dev/qh-sshd-run.sh          # start qh-sshd-dev and a throwaway client key
+#   deploy/dev/qh-sshd-run.sh --down   # remove only qh-sshd-dev
 #
 # Then:
 #
