@@ -2370,6 +2370,7 @@ name = "qh-ffi"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "qh-core",
  "qh-credentials",
  "qh-driver",
@@ -2381,6 +2382,7 @@ dependencies = [
  "qh-sql",
  "qh-storage",
  "qh-sync",
+ "qh-tunnel",
  "secrecy",
  "serde_json",
  "tempfile",

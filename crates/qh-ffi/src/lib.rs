@@ -89,6 +89,7 @@ pub mod local;
 pub mod progress;
 pub mod retry;
 pub mod sql_ident;
+pub mod tunnel;
 // The scaffolding has to be generated in the crate root: it defines the `UniFfiTag` the
 // other derivations name, and the module path it records is the namespace the bindings
 // come out under.
@@ -251,18 +252,36 @@ pub trait Engine: Send + Sync {
 }
 
 /// The three drivers, wired together.
+///
+/// `settings` rides along for one reason: the tunnel is established as part of
+/// `connect` (blueprint §3.2, and the phase-1 note that the tunnel is built "before
+/// the UI touches it"), and a key passphrase is read from the `SSH_*` settings at
+/// the moment the tunnel opens. The bastion *description* lives on
+/// [`ConnectionConfig::tunnel`], parsed once by [`config::build`]; what stays here
+/// is only the secret that never enters the config type. The alternative — pushing
+/// raw settings into every `Engine` implementation — would make the trait about
+/// configuration rather than drivers.
 pub struct RealEngine {
     trino: qh_driver_trino::TrinoDriver,
     postgres: qh_driver_postgres::PostgresDriver,
     mysql: qh_driver_mysql::MysqlDriver,
+    settings: Settings,
 }
 
 impl RealEngine {
+    /// An engine reading the process environment: the CLI's shape.
     pub fn new() -> Self {
+        Self::with_settings(Settings::from_env())
+    }
+
+    /// An engine over explicit settings: the FFI surface's shape, where a caller
+    /// has no environment to set and a password in one is a password in `ps`.
+    pub fn with_settings(settings: Settings) -> Self {
         Self {
             trino: qh_driver_trino::TrinoDriver::new(),
             postgres: qh_driver_postgres::PostgresDriver::new(),
             mysql: qh_driver_mysql::MysqlDriver::new(),
+            settings,
         }
     }
 }
@@ -288,7 +307,152 @@ impl Engine for RealEngine {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
-        self.driver(config.kind).connect(config).await
+        let Some(description) = &config.tunnel else {
+            // No SSH_HOST was set: the connection goes straight, exactly as before.
+            return self.driver(config.kind).connect(config).await;
+        };
+
+        let bastion =
+            tunnel::bastion(description, &self.settings).map_err(|error| EngineError::Usage {
+                message: error.to_string(),
+            })?;
+        let opened = qh_tunnel::Tunnel::open(
+            &bastion,
+            qh_tunnel::Target::new(config.host.clone(), config.port),
+        )
+        .await;
+        let tunnel = match opened {
+            Ok(tunnel) => tunnel,
+            // A refused host key is permanent by definition: retrying without a
+            // person's answer would present the same fingerprint to the same
+            // refusal, so the retry layer must not see this as transient.
+            Err(error) => {
+                return Err(EngineError::Connect {
+                    message: tunnel::describe(&error),
+                    kind: qh_core::FailureKind::Permanent,
+                })
+            }
+        };
+        // The tunnel is open and forwarding: the driver now talks to the loopback
+        // endpoint, and the tunnel forwards to the database the config named.
+        // `retarget` reads the target off the config before rewriting it, so the
+        // two cannot disagree.
+        let mut through = config.clone();
+        let _ = tunnel::retarget(&mut through, tunnel.local_port());
+        let session = self.driver(config.kind).connect(&through).await?;
+        // The tunnel is handed to the session, not closed here: a driver with a
+        // persistent connection (PostgreSQL's pool, MySQL's connection) reconnects
+        // for cancel and for pooled checkout for as long as the session lives, and
+        // every one of those connections must arrive through the tunnel. The
+        // session owns it now, and its drop stops the forwarding.
+        Ok(Box::new(TunnelledSession::new(session, tunnel)))
+    }
+}
+
+/// A session reached through an SSH tunnel.
+///
+/// The wrapper exists to own the tunnel's lifetime, and for almost nothing else:
+/// every method delegates, so the session the commands drive is the driver's own,
+/// unchanged. The tunnel closes after the inner session does — struct fields drop
+/// in declaration order — so no forward is asked of a bastion connection that is
+/// already gone.
+///
+/// The session sits behind a tokio mutex for one mechanical reason:
+/// `Session::cancel` takes `&self`, and an `async` `&self` method's future must be
+/// `Send`, which needs the wrapper to be `Sync` — and `Box<dyn Session>` is only
+/// `Send`. The lock never serialises anything in practice, because safe Rust
+/// already forbids holding `&mut self` (an `execute`) and `&self` (a `cancel`) on
+/// one session at the same time; a driver's cancel reaches the server through a
+/// *separate* connection for exactly that reason (see the module note in
+/// `retry.rs`). The mutex is the compiler's evidence of what aliasing already
+/// guaranteed, chosen over an `unsafe impl Sync` because this crate forbids unsafe
+/// code.
+struct TunnelledSession {
+    inner: tokio::sync::Mutex<Box<dyn Session>>,
+    // Mirrored at construction: `capabilities` is documented on the trait as
+    // readable before connecting, so it cannot change with session state, and the
+    // `&self` accessor cannot lock — `blocking_lock` panics inside a runtime and
+    // these are called from async code (`retry.rs:250`). `query_id` is the one
+    // accessor that genuinely moves, and it is mirrored after every `execute` —
+    // the only method that changes it.
+    capabilities: qh_driver::Capabilities,
+    query_id: Option<String>,
+    #[allow(dead_code)] // Held for its Drop, never read.
+    tunnel: qh_tunnel::Tunnel,
+}
+
+impl TunnelledSession {
+    fn new(inner: Box<dyn Session>, tunnel: qh_tunnel::Tunnel) -> Self {
+        let capabilities = inner.capabilities();
+        Self {
+            capabilities,
+            query_id: None,
+            inner: tokio::sync::Mutex::new(inner),
+            tunnel,
+        }
+    }
+}
+
+#[async_trait]
+impl Session for TunnelledSession {
+    fn capabilities(&self) -> qh_driver::Capabilities {
+        self.capabilities.clone()
+    }
+
+    fn query_id(&self) -> Option<String> {
+        self.query_id.clone()
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        options: &qh_driver::ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
+        let cursor = self.inner.lock().await.execute(sql, options).await?;
+        // The id arrived with the statement: mirror it so `query_id` stays
+        // lock-free for the events that report it.
+        self.query_id = self.inner.lock().await.query_id();
+        Ok(cursor)
+    }
+
+    async fn browse(
+        &mut self,
+        level: qh_driver::BrowseLevel,
+        path: &qh_driver::ObjectPath,
+        include_system: bool,
+    ) -> Result<Vec<String>, EngineError> {
+        self.inner
+            .lock()
+            .await
+            .browse(level, path, include_system)
+            .await
+    }
+
+    async fn objects(
+        &mut self,
+        path: &qh_driver::ObjectPath,
+    ) -> Result<qh_driver::ObjectsPage, EngineError> {
+        self.inner.lock().await.objects(path).await
+    }
+
+    fn explain_statement(&self, sql: &str) -> String {
+        match self.inner.try_lock() {
+            Ok(session) => session.explain_statement(sql),
+            // Contended is unreachable in practice: a caller cannot hold `&mut
+            // self` (an `execute` in flight) and `&self` (this call) on one
+            // session at the same time. If that ever changed, the statement is
+            // still spelled the way all three drivers spell it rather than not at
+            // all — and the contended case is the one to revisit, not the spelling.
+            Err(_) => format!("EXPLAIN {sql}"),
+        }
+    }
+
+    async fn cancel(&self) -> Result<(), EngineError> {
+        self.inner.lock().await.cancel().await
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), EngineError> {
+        self.inner.into_inner().close().await
     }
 }
 

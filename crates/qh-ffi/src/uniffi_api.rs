@@ -196,7 +196,7 @@ pub fn run(command: EngineCommand, settings: Vec<Setting>) -> Result<Vec<String>
         })?;
 
     let mut capture = Capture::new();
-    let engine = RealEngine::new();
+    let engine = RealEngine::with_settings(settings.clone());
     let cancel = CancelFlag::new();
 
     runtime

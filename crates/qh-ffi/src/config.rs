@@ -61,6 +61,7 @@ use thiserror::Error;
 use qh_driver::{ConnectionConfig, DriverKind, TlsMode};
 
 use crate::env::{parse_flag, SettingError, Settings};
+use crate::tunnel::{self, TunnelConfigError};
 
 /// The `DB_*` name, then the older `TRINO_*` name it supersedes.
 ///
@@ -121,6 +122,13 @@ pub enum ConfigError {
 
     #[error(transparent)]
     Setting(#[from] SettingError),
+
+    /// The `SSH_*` settings described no usable bastion. Kept beside the other
+    /// config failures rather than raised from `connect`, because they are decided
+    /// by reading settings, before the network is touched — the same rule as the
+    /// variants above.
+    #[error(transparent)]
+    Tunnel(#[from] TunnelConfigError),
 }
 
 /// Resolve the connection described by `settings`.
@@ -198,7 +206,12 @@ pub fn build(settings: &Settings) -> Result<ConnectionConfig, ConfigError> {
         resolved.port = Some(443);
     }
 
-    resolved.into_config(insecure)
+    let mut config = resolved.into_config(insecure)?;
+    // The bastion rides on the config it tunnells: the engine opens the tunnel as
+    // part of `connect` (blueprint §3.2), so the description has to arrive where the
+    // connect happens. `SSH_HOST` absent leaves this `None` and nothing changes.
+    config.tunnel = tunnel::settings(settings)?;
+    Ok(config)
 }
 
 /// The connection as its individual parts, before the TLS and scheme rules run.

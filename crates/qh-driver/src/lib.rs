@@ -33,6 +33,10 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
 use thiserror::Error;
 
+mod tunnel;
+
+pub use tunnel::{TunnelAuth, TunnelConfig};
+
 /// Which server a driver speaks to.
 ///
 /// A closed enum rather than a string: the UI switches on it to pick icons,
@@ -227,6 +231,13 @@ pub struct ConnectionConfig {
     /// Skip certificate verification. Only reachable when the user turned it on
     /// for this connection, and the UI says so.
     pub insecure: bool,
+    /// The SSH bastion to reach this database through, when one is configured.
+    ///
+    /// The engine (not the driver) acts on this: it opens the tunnel before
+    /// connecting and hands the driver `127.0.0.1` and the tunnel's local port as
+    /// `host`/`port`. A driver that saw the bastion would have to know SSH, which
+    /// is exactly what keeping the field at this level avoids.
+    pub tunnel: Option<TunnelConfig>,
 }
 
 impl ConnectionConfig {
@@ -246,6 +257,7 @@ impl ConnectionConfig {
             schema: None,
             tls: TlsMode::Prefer,
             insecure: false,
+            tunnel: None,
         }
     }
 

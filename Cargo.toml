@@ -45,6 +45,7 @@ qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
 qh-storage = { path = "crates/qh-storage" }
 qh-sync = { path = "crates/qh-sync" }
+qh-tunnel = { path = "crates/qh-tunnel" }
 thiserror = "2"
 serde_json = { version = "1", features = ["preserve_order"] }
 # The Keychain, and the values that hold a password. `security-framework-sys` is the
