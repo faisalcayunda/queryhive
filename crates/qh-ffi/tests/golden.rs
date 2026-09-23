@@ -95,6 +95,7 @@ const LIVE: &[&str] = &[
     "postgres_objects_live",
     "postgres_count_live",
     "postgres_explain_live",
+    "postgres_export_live",
     "mysql_type_zoo_live",
     "mysql_batching_live",
     "mysql_tables_live",
@@ -102,6 +103,7 @@ const LIVE: &[&str] = &[
     "mysql_schemas_live",
     "mysql_count_live",
     "mysql_explain_live",
+    "mysql_export_live",
     "trino_nation_live",
     "trino_type_zoo_live",
     "trino_batching_live",
@@ -1044,63 +1046,125 @@ async fn the_accepted_differences_are_what_the_docs_say() {
 fn a_new_snapshot_cannot_be_ignored() {
     let golden = root().join("tests/golden");
     let mut found = 0;
-    let mut folders: Vec<PathBuf> = std::fs::read_dir(&golden)
-        .expect("the snapshot directory")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_dir())
-        .collect();
-    folders.sort();
-
-    for folder in folders {
-        for entry in std::fs::read_dir(&folder).expect("a case folder") {
+    // Every snapshot, at any depth. Reading only the first level of folders meant a file one
+    // directory deeper, or one sitting loose in the corpus root, was never looked at -- and an
+    // unclassified snapshot that passes is the one thing this test exists to prevent.
+    let mut snapshots: Vec<PathBuf> = Vec::new();
+    let mut pending = vec![golden];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("a snapshot directory") {
             let path = entry.expect("an entry").path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("ndjson") {
-                continue;
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("ndjson") {
+                snapshots.push(path);
             }
-            let case_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .expect("a case name")
-                .to_owned();
-            assert!(
-                EXACT.contains(&case_id.as_str())
-                    || ACCEPTED.contains(&case_id.as_str())
-                    || LIVE.contains(&case_id.as_str()),
-                "{case_id} is in the snapshot but is neither reproduced in process, nor listed as \
-                 an accepted difference, nor declared a live case"
-            );
-            // One list only. A case that is both reproduced here and declared live would be
-            // checked twice with two different meanings, and the second check would be the
-            // one nobody reads.
-            let listed = [
-                EXACT.contains(&case_id.as_str()),
-                ACCEPTED.contains(&case_id.as_str()),
-                LIVE.contains(&case_id.as_str()),
-            ]
-            .into_iter()
-            .filter(|listed| *listed)
-            .count();
-            assert_eq!(listed, 1, "{case_id} is in more than one list");
-            // The teeth of `LIVE`: being here is not a place to park a snapshot. The case has
-            // to be declared in the tool that can run it against the real server again, so a
-            // file dropped in with no command line behind it fails right here.
-            if LIVE.contains(&case_id.as_str()) {
-                let declared = std::fs::read_to_string(root().join("tools/golden/live_cases.py"))
-                    .expect("the live case table");
-                assert!(
-                    declared.contains(&case_id),
-                    "{case_id} is listed as a live snapshot but is not declared in \
-                     tools/golden/live_cases.py, so nothing can reproduce it"
-                );
-            }
-            found += 1;
         }
+    }
+    snapshots.sort();
+
+    // The cases the tool declares, parsed rather than substring-matched. `contains` was the guard
+    // and it was the wrong shape: `catalogs_live` is a substring of `postgres_catalogs_live`, so a
+    // case with no command line behind it passed the check that exists to catch exactly that.
+    let declared_ids = declared_case_ids(
+        &std::fs::read_to_string(root().join("tools/golden/live_cases.py"))
+            .expect("the live case table"),
+    );
+    assert!(
+        !declared_ids.is_empty(),
+        "no case id could be read out of tools/golden/live_cases.py; if that file's shape changed, \
+         this check has to follow it rather than pass for the wrong reason"
+    );
+
+    for path in snapshots {
+        let case_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("a case name")
+            .to_owned();
+        assert!(
+            EXACT.contains(&case_id.as_str())
+                || ACCEPTED.contains(&case_id.as_str())
+                || LIVE.contains(&case_id.as_str()),
+            "{case_id} is in the snapshot but is neither reproduced in process, nor listed as \
+             an accepted difference, nor declared a live case"
+        );
+        // One list only. A case that is both reproduced here and declared live would be
+        // checked twice with two different meanings, and the second check would be the
+        // one nobody reads.
+        let listed = [
+            EXACT.contains(&case_id.as_str()),
+            ACCEPTED.contains(&case_id.as_str()),
+            LIVE.contains(&case_id.as_str()),
+        ]
+        .into_iter()
+        .filter(|listed| *listed)
+        .count();
+        assert_eq!(listed, 1, "{case_id} is in more than one list");
+        // The teeth of `LIVE`: being here is not a place to park a snapshot. The case has
+        // to be declared in the tool that can run it against the real server again, so a
+        // file dropped in with no command line behind it fails right here.
+        if LIVE.contains(&case_id.as_str()) {
+            assert!(
+                declared_ids.iter().any(|declared| declared == &case_id),
+                "{case_id} is listed as a live snapshot but is not declared in \
+                 tools/golden/live_cases.py, so nothing can reproduce it"
+            );
+        }
+        found += 1;
     }
     assert_eq!(
         found,
         EXACT.len() + ACCEPTED.len() + LIVE.len(),
         "every listed case must exist in the snapshot"
     );
+}
+
+/// The case ids `tools/golden/live_cases.py` declares.
+///
+/// An id is the first argument of a `LiveCase(...)` call -- sometimes on the line after it, which
+/// is why this reads past the parenthesis for the first string literal instead of matching a whole
+/// call on one line. A definition is skipped, since `class LiveCase(...)` would otherwise
+/// contribute whatever literal happens to follow it.
+///
+/// Why this is a parse and not a `contains`: a case id that happens to be a substring of another
+/// one must not count as declared, and `contains` said it did.
+fn declared_case_ids(source: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("LiveCase(") {
+        let before = &rest[..at];
+        rest = &rest[at + "LiveCase(".len()..];
+        if before.trim_end().ends_with("class") {
+            continue;
+        }
+        let Some(quote) = rest.find('"') else { break };
+        let after = &rest[quote + 1..];
+        let Some(end) = after.find('"') else { break };
+        ids.push(after[..end].to_owned());
+        rest = &after[end..];
+    }
+    ids
+}
+
+/// The guard exists to catch a snapshot nobody can reproduce, so it has to catch a case id that
+/// merely *looks* declared. `catalogs_live` is a substring of `postgres_catalogs_live`, and before
+/// this was a parse that was enough to pass the check.
+#[test]
+fn a_declared_case_id_is_matched_exactly_and_not_as_a_substring() {
+    let source = "class LiveCase(NamedTuple):\n    id: str\n\n\nLiveCase(\n    \
+                  \"postgres_catalogs_live\",\n    \"catalogs\",\n)\n";
+    let ids = declared_case_ids(source);
+    assert_eq!(ids, vec!["postgres_catalogs_live".to_owned()]);
+    assert!(!ids.iter().any(|id| id == "catalogs_live"));
+    assert!(ids.iter().any(|id| id == "postgres_catalogs_live"));
+}
+
+/// And a table whose shape this cannot read is a failure rather than a silent pass, which is what
+/// the caller's non-empty assertion turns it into.
+#[test]
+fn a_declaration_table_that_cannot_be_read_yields_nothing_rather_than_guessing() {
+    assert!(declared_case_ids("LiveCase = namedtuple('LiveCase', 'id')\n").is_empty());
 }
 
 fn lines(events: &[Json]) -> String {
