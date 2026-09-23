@@ -95,12 +95,13 @@ struct PythonEngine: DatabaseEngine {
         }
 
         DispatchQueue.global().async {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
             var buffer = Data()
             var unparsed: [String] = []
             func tryDecode(_ data: Data) {
-                if var event = try? decoder.decode(Event.self, from: data) {
+                // The decode itself lives in `EngineWire` because `RustEngine` reads the same
+                // lines out of the FFI's return value, and the two must not disagree about what
+                // one means.
+                if var event = EngineWire.event(in: data) {
                     if let message = event.message { event.message = redact(message) }
                     DispatchQueue.main.async { onEvent(event) }
                 } else {
