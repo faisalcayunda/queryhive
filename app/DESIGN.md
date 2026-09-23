@@ -762,9 +762,11 @@ connections file and the Keychain are never touched.
 
 ## Engine CLI (`app/engine/queryhive_engine.py`)
 
-Commands: `db_drivers`, `test`, `catalogs`, `schemas`, `tables`, `export`, `to_table`. Every
-stdout line is one compact JSON object. Every failure, including a usage error, emits
-`{"event": "error", "message": ...}` and exits 1. Tracebacks go to stderr.
+Commands: `db_drivers`, `objects`, `test`, `catalogs`, `schemas`, `tables`, `export`, `to_table`,
+`preview`, `count`, `explain` — the keys of `queryhive_engine.py`'s `commands` dict, which is also
+the order its usage line prints. Every stdout line is one compact JSON object. Every failure,
+including a usage error, emits `{"event": "error", "message": ...}` and exits 1. Tracebacks go to
+stderr.
 
 Settings come from environment variables only, so a password never appears in a process listing.
 The app additionally never puts the password inside a URL, so a URL echoed back in an error

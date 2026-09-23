@@ -27,10 +27,18 @@ setiap dependency diverifikasi kompatibel secara otomatis dengan `cargo-deny`.
 
 Tujuan produk (§2) adalah "alternatif open source yang lebih baik" yang dipakai dari developer
 individu sampai tim perusahaan. MIT memaksimalkan adopsi tanpa syarat tambahan, dan seluruh
-kandidat dependency utama (`tokio`, `tokio-postgres`, `mysql_async`, `rustls`, `uniffi`,
-`rusqlite`, `secrecy`, `zeroize`, `thiserror`, `tracing`) berada di jalur MIT/Apache-2.0 sehingga
-tidak ada konflik. `cargo-deny` akan menolak apa pun yang copyleft atau berlisensi tidak dikenal,
+kandidat dependency utama (`tokio`, `tokio-postgres`, `mysql_async`, `rustls`, `rusqlite`,
+`secrecy`, `zeroize`, `thiserror`, `tracing`) berada di jalur MIT/Apache-2.0 sehingga tidak ada
+konflik. `cargo-deny` akan menolak apa pun yang copyleft atau berlisensi tidak dikenal,
 jadi keputusan ini juga ditegakkan secara otomatis, bukan hanya dinyatakan.
+
+**Koreksi (sesi migrasi, setelah ADR-0004):** satu kandidat yang semula dihitung di jalur itu
+tidak berada di sana. `uniffi` — yang dipilih ADR-0004 untuk control plane dan karena itu ada di
+graf — berlisensi **MPL-2.0**, copyleft level file: baris yang sudah dibandingkan di tabel Opsi di
+atas, dan **bukan** salah satu lisensi di daftar izin `cargo-deny` pada bagian Konsekuensi
+(`cargo metadata --format-version 1`; `docs/dependencies.md` mencatatnya per crate). Jadi
+pengecualian yang diminta bagian Konsekuensi ("setiap pengecualian baru harus melalui ADR") belum
+dibuat; sampai itu ada, daftar izin di bawah belum mencerminkan graf yang sebenarnya.
 
 Ketiadaan hibah paten eksplisit (satu-satunya keunggulan nyata Apache-2.0) dinilai dapat
 diterima: proyek ini tidak memiliki portofolio paten dan tidak berencana mengajukan tuntutan

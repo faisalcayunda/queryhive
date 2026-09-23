@@ -377,10 +377,15 @@ dijalankan terhadap container nyata. Karena Trino tidak memberi jaminan antarver
 klaim tentangnya harus menyebut nomor rilis, dan menguji pada rilis lain berarti menjalankan
 ulang pengujiannya pada rilis itu — bukan mengasumsikan hasilnya berlaku.
 
-Satu batas yang ditemukan saat pengujian itu dan tidak bisa diperbaiki di sisi kami:
-**protokol Trino memotong `timestamp` dan `time` sampai milidetik.** Server melaporkan
-`timestamp(6)` (dikonfirmasi lewat `typeof`) tetapi JSON membawa `.123` dari nilai `.123456`.
-Jadi presisi mikrodetik tidak hilang karena decoder ini, melainkan tidak pernah dikirim.
+Satu batas yang semula tampak milik protokol ternyata milik klien ini sendiri:
+**presisi mikrodetik tidak hilang di server, melainkan tidak pernah diminta.** Server
+melaporkan `timestamp(6)` dan mengirim nilai penuh hanya kepada klien yang mengiklankan
+kapabilitasnya; tanpa `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME` ia menurunkan
+pengkodean JSON ke milidetik (`.123` dari `.123456`). Driver ini kini mengirim header itu
+(`crates/qh-driver-trino/src/lib.rs`, `CLIENT_CAPABILITIES`), dan snapshot dari server nyata
+membuktikannya: `tests/golden/preview/trino_type_zoo_live.ndjson` membawa
+`2026-01-31 12:00:00.123456+07:00` dan `23:59:59.999999`, sementara `tests/golden/RECORDED.md`
+memuat permintaan yang sama dengan dan tanpa header sebagai pembandingnya.
 
 ## Cara memverifikasi ulang dokumen ini
 

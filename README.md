@@ -295,7 +295,7 @@ app/
     Views/ConnectionsViews.swift  connection picker, colour swatches, editor sheet
   exporter/to_table.py        CTAS / INSERT INTO ... SELECT, executed by the database
   exporter/drivers.py         Trino / PostgreSQL / MySQL: quoting, levels, connect
-  engine/queryhive_engine.py  JSON-event CLI the app drives (db_drivers, test, catalogs, schemas, tables, export, to_table)
+  engine/queryhive_engine.py  JSON-event CLI the app drives (db_drivers, objects, test, catalogs, schemas, tables, export, to_table, preview, count, explain)
   build-engine.sh             builds the bundled standalone CPython + pinned packages
   build.sh                    builds app/dist/QueryHive.app
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code

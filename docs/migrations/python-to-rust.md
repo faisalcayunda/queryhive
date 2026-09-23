@@ -102,11 +102,12 @@ Urutannya tetap, dan setiap langkah punya alasannya:
 - **`query_history`, `saved_query`, `session_restore`.** Berkas lama tidak memuatnya; riwayat
   query era Python tidak pernah dipersistensi ke berkas ini. Kalau ternyata ada di suatu tempat,
   itu impor terpisah dengan verifikasinya sendiri.
-- **Pemanggilnya.** `qh-storage` belum tersambung ke `qh-ffi`, jadi impor ini belum dipanggil
-  aplikasi pada peluncuran. Yang ada sekarang: fungsinya, jaminannya, dan 9 uji terhadap berkas
-  sungguhan di `crates/qh-storage/tests/import.rs`. Menyambungkannya ke `qh-ffi` adalah langkah
-  berikutnya, dan pada saat itu sifat idempoten di atas yang membuatnya aman dijalankan tiap
-  peluncuran.
+- **Aplikasinya belum memanggilnya.** Sambungan engine-nya sudah ada: `qh-ffi` bergantung pada
+  `qh-storage` dan menyediakan perintah `import_connections` (`crates/qh-ffi/src/lib.rs`, yang
+  menjalankan `crates/qh-ffi/src/local.rs`), jadi impor ini bisa dipanggil dari CLI hari ini.
+  Yang belum: aplikasi Swift memanggilnya pada peluncuran — itu langkah UI berikutnya, dan sifat
+  idempoten di atas yang membuatnya aman dijalankan tiap peluncuran. Yang ada sekarang: fungsinya,
+  jaminannya, dan 11 uji terhadap berkas sungguhan di `crates/qh-storage/tests/import.rs`.
 - **Berkas yang rusak.** Aplikasi memindahkan `connections.json` yang tidak bisa di-decode ke
   `connections.json.broken-<detik>`; importer ini tidak menyentuh berkas sama sekali (selain
   menyalinnya), jadi keduanya tidak saling berebut berkas yang sama. Bila berkasnya tidak bisa

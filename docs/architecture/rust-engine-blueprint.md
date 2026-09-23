@@ -589,8 +589,10 @@ setiap crate. Tabel di bawah adalah **pilihan**, bukan versi.
 | UUID | `uuid` (fitur `v7`) | ULID | UUIDv7 menyimpan urutan waktu sehingga indeks SQLite tumbuh monoton — dibutuhkan §5 poin 7. |
 | Waktu | `jiff` atau `time` | `chrono` | Diputuskan saat implementasi berdasarkan dukungan presisi + offset; yang wajib adalah penyimpanan offset asli, bukan konversi ke UTC lalu kehilangan offset (§1.8). Pilihan dicatat di `docs/dependencies.md`. |
 
-Semua crate di atas berlisensi MIT/Apache-2.0 kecuali yang akan ditandai `cargo-deny`; hasil
-`cargo deny check licenses` adalah sumber kebenarannya (§5 poin 8), bukan tabel ini.
+Semua crate di atas berlisensi MIT/Apache-2.0 kecuali `uniffi`, yang **MPL-2.0** dan belum ada di
+daftar izin `cargo-deny` ADR-0002 (lihat ADR-0002 dan `docs/dependencies.md`), serta crate apa pun
+yang akan ditandai `cargo-deny`; hasil `cargo deny check licenses` adalah sumber kebenarannya
+(§5 poin 8), bukan tabel ini.
 
 ### 3.2 Struktur Cargo workspace
 
@@ -921,7 +923,7 @@ public actor RustEngine: DatabaseEngine {
 | Integrasi | `Engine.swift` men-spawn proses | `app/Package.swift` menambah `binaryTarget(name: "QueryHiveFFI", path: "../target/ffi/QueryHiveFFI.xcframework")` |
 | Profil | — | `release`: `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"` (catatan: `panic = "abort"` **tidak boleh** dipakai untuk build yang memakai firewall panic — jadi profil FFI memakai `panic = "unwind"`; keputusan dicatat di ADR-0009) |
 | Otorisasi | ad-hoc sign | hardened runtime, entitlements, code signing, notarisasi → **[BUTUH TINDAKAN MANUAL]** (butuh Apple Developer ID) |
-| Jalur debug | — | binary `qh-ffi` tetap menyediakan CLI NDJSON 11 perintah, sehingga harness golden dapat membandingkan engine Rust dengan snapshot Python tanpa UI |
+| Jalur debug | — | binary `qh-ffi` tetap menyediakan CLI NDJSON 14 perintah — 11 yang lama ditambah `connections`, `import_connections` dan `credential` (`crates/qh-ffi/src/lib.rs`, `COMMANDS`) — sehingga harness golden dapat membandingkan engine Rust dengan snapshot Python tanpa UI |
 
 Yang dihapus dari proses build begitu runtime Python tidak diperlukan: `app/build-engine.sh`,
 `app/engine/`, `app/engine-requirements.txt`, `requirements.txt`, `requirements-trino.txt`,

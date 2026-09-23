@@ -28,10 +28,15 @@ Keduanya tidak bisa dipenuhi bersamaan: **`panic = "abort"` membuat `catch_unwin
 
 ## Keputusan
 
-**`panic = "unwind"` untuk seluruh graf kompilasi yang masuk XCFramework**, dengan `catch_unwind`
-di **setiap** entry point `#[uniffi::export]` lewat helper `guard()` (blueprint §4.3). Binary CLI
-`qh-ffi` (dipakai harness golden, tidak masuk aplikasi) memakai `panic = "abort"` karena tidak ada
-batas FFI yang harus dilindungi — kestabilannya justru lebih baik bila crash terlihat jelas.
+**`panic = "unwind"` untuk seluruh graf kompilasi**, dengan `catch_unwind` di **setiap** entry
+point `#[uniffi::export]` lewat helper `guard()` (blueprint §4.3). Rencana awal di ADR ini —
+memberi binary CLI `qh-ffi` (yang dipakai harness golden dan tidak masuk aplikasi) `panic = "abort"`
+karena tidak ada batas FFI yang harus dilindungi — tidak dijalankan dan tidak bisa dijalankan
+seperti ditulis: profil `panic` berlaku untuk seluruh graf kompilasi, persis alasan di baris ketiga
+tabel Opsi di bawah. Yang ada di pohon hari ini satu profil, `panic = "unwind"` (`Cargo.toml`,
+`[profile.release]`), dan binary CLI-nya pun butuh unwinding karena ia menjalankan perintahnya di
+dalam `catch_unwind` supaya panic menjadi `error` event alih-alih backtrace tanpa JSON
+(`crates/qh-ffi/src/main.rs`).
 
 ## Alasan
 
@@ -51,5 +56,8 @@ yang sepadan di sini.
 - Panic tetap dicatat dengan span `qh_ffi::panic` pada level `error`, karena panic berarti **bug
   kami**, bukan kesalahan pengguna — ia harus terlihat di log dan bisa dilampirkan ke bug report,
   bukan diam-diam menjadi pesan error biasa.
-- Kebijakan `unsafe` (§7.4) tetap berlaku: `#![forbid(unsafe_code)]` di semua crate kecuali
-  `qh-ffi`, `qh-result-store`, dan `qh-rt`, dan setiap blok `unsafe` wajib berkomentar `// SAFETY:`.
+- Kebijakan `unsafe` (§7.4) tetap berlaku: setiap blok `unsafe` wajib berkomentar `// SAFETY:`.
+  Daftar pengecualian yang semula ditulis di sini tidak bertahan terhadap kode: `qh-result-store`
+  memakai `#![forbid(unsafe_code)]` dan tidak memuat `unsafe` sama sekali, dan satu-satunya blok
+  `unsafe` di workspace hari ini ada di `qh-rt` (pengaturan QoS). `qh-ffi` juga tidak memuat blok
+  `unsafe` sendiri — permukaan FFI-nya dihasilkan `uniffi` (`grep -rn "unsafe " crates/*/src/`).
