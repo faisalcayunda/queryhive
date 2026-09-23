@@ -205,7 +205,7 @@
     "command": "export",
     "event_lines": 5,
     "exit_code": 0,
-    "notes": "The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs, the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to <TMP>; the size is not -- it is a fact about the bytes the writer produced from the values psycopg handed over."
+    "notes": "The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs (the seeded `mood` enum's masked to `<OID>` for the reason above), the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to <TMP>; the size is not -- it is a fact about the bytes the writer produced from the values psycopg handed over."
   },
   {
     "captures": "stdout",
@@ -221,7 +221,7 @@
     "command": "objects",
     "event_lines": 1,
     "exit_code": 0,
-    "notes": "The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string."
+    "notes": "The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string. The OID cell is masked to `<OID>` for the reason above; the column list that names it is not."
   },
   {
     "captures": "stdout",
@@ -245,7 +245,7 @@
     "command": "preview",
     "event_lines": 4,
     "exit_code": 0,
-    "notes": "The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports."
+    "notes": "The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports; the identifier of the seeded `mood` enum is masked to `<OID>` because it climbs every time the seed is replayed."
   },
   {
     "captures": "stdout",

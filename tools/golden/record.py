@@ -81,6 +81,72 @@ VOLATILE_KEYS = {
     "query_id": "<QUERY_ID>",
 }
 
+# The first object identifier a PostgreSQL server hands out to an object *it* did
+# not create: system catalogues get 1..16383 (`pg_class`'s `FirstNormalObjectId`),
+# anything a client makes starts at 16384 and climbs one per object *per cluster*.
+# That is the reason this exists. `deploy/dev/up.sh` drops and recreates its
+# containers on every start and replays the seed, so the counter keeps rising and
+# a snapshot that froze the number starts failing the moment anyone re-seeds --
+# not because the engine changed, but because the server had made more objects in
+# the meantime. The identifier is the server's bookkeeping, not the engine's
+# answer. Measured on the live fixture cluster (23 Sep 2026): the highest system
+# OID was 13665 and the lowest user OID 32820, so the floor separates the two.
+USER_OID_FLOOR = 16384
+
+
+def _is_user_oid(value: Any) -> bool:
+    """True for a bare decimal string at or above the first user-assigned OID.
+
+    Digits and nothing else: the drivers render an OID as text, and requiring the
+    digits means a value that merely looks numeric (`"0x4000"`, `"16384.0"`, a row
+    count that happens to be large) is never mistaken for one. `isascii` first,
+    because `str.isdigit()` is true of digits `int()` then refuses (a superscript,
+    an Arabic-Indic numeral), and this must not raise on a value a server sent.
+
+    At most ten digits, because an OID is PostgreSQL's 4-byte unsigned integer
+    (`pg_class.oid`, `description.type_code`): a longer run of digits is data that
+    happens to be numeric, and masking it would hide a real answer. The floor is
+    what keeps the mask narrow -- a `count` result, a row number or a timestamp
+    above 16384 is likewise a real answer and stays in the snapshot untouched.
+    """
+    if not isinstance(value, str) or not value.isascii() or not value.isdigit():
+        return False
+    return 1 <= len(value) <= 10 and int(value) >= USER_OID_FLOOR
+
+
+def _mask_identity_oids(event: dict) -> dict:
+    """Replace the OIDs a server assigned with a token, in the two places they appear.
+
+    Deliberately narrow, because everywhere else a five-digit number is data:
+
+    * `columns[*].type` -- the type OID the driver reports as a string. This is the
+      one that moves for the type zoo: the seeded `mood` enum and the `type_zoo`
+      table's row type are recreated by every seed.
+    * `data[*][i]`, but only when `object_columns[i]` is `"OID"` -- the object
+      browser's own column list says which cell holds an identifier, so no other
+      driver's rows (`MySQL`'s "Engine"/"Rows", Trino's "Type"/"Name") are touched.
+      The column *list* is left alone: it is part of the protocol, and freezing it
+      is the point.
+
+    Called after the per-key pass, because both decisions need a sibling key
+    (`columns`, `object_columns`) rather than the value on its own.
+    """
+    columns = event.get("columns")
+    if isinstance(columns, list):
+        for column in columns:
+            if isinstance(column, dict) and _is_user_oid(column.get("type")):
+                column["type"] = "<OID>"
+    names = event.get("object_columns")
+    rows = event.get("data")
+    if isinstance(names, list) and isinstance(rows, list):
+        for index, name in enumerate(names):
+            if name != "OID":
+                continue
+            for row in rows:
+                if isinstance(row, list) and index < len(row) and _is_user_oid(row[index]):
+                    row[index] = "<OID>"
+    return event
+
 # A real tmp path differs on every run and would make every diff noisy.
 PLACEHOLDERS = ("<TMP>",)
 
@@ -126,6 +192,7 @@ def normalise(stdout: str) -> list[str]:
             continue
         event = json.loads(line)  # raises if the engine emitted a non-JSON line
         normalised = {key: _normalise_value(key, value) for key, value in event.items()}
+        normalised = _mask_identity_oids(normalised)
         lines.append(json.dumps(normalised, ensure_ascii=False, sort_keys=True))
     return lines
 

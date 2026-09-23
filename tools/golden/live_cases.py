@@ -31,7 +31,10 @@ Nothing is written. Each selected case is run again against the server it was
 recorded from and its stdout is diffed, line for line, against the snapshot on
 disk (`record.diff_lines`, the same comparison `compare.py` uses for the
 in-process cases). Every key must match except the ones `normalise` masks --
-`elapsed_ms`, `query_id` and temp paths. A case that cannot run at all (a
+`elapsed_ms`, `query_id`, temp paths, and the object identifiers the server itself
+assigned (they climb every time `deploy/dev/up.sh` replays its seed, so freezing
+them freezes the cluster's history rather than the engine's answer). A case that
+cannot run at all (a
 container down, a client package not importable) is reported as such rather
 than as a difference: "could not ask" is not "the answer changed".
 
@@ -199,7 +202,9 @@ def cases() -> list[LiveCase]:
             "naive timestamp that must not gain a zone, an interval, json and jsonb "
             "text in the server's own key order, arrays, bytea with a NUL and 0xFF, "
             "a uuid, an enum label, a point, a NULL, an empty string and the four "
-            "characters NULL. The `columns` type is the type OID psycopg reports.",
+            "characters NULL. The `columns` type is the type OID psycopg reports; the "
+            "identifier of the seeded `mood` enum is masked to `<OID>` because it climbs "
+            "every time the seed is replayed.",
             sql="SELECT * FROM type_zoo",
         ),
         LiveCase(
@@ -235,7 +240,8 @@ def cases() -> list[LiveCase]:
             "postgres",
             PG,
             "The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the "
-            "real owner, and a NULL relacl rendered as an empty string.",
+            "real owner, and a NULL relacl rendered as an empty string. The OID cell is "
+            "masked to `<OID>` for the reason above; the column list that names it is not.",
         ),
         LiveCase(
             "postgres_count_live",
@@ -261,7 +267,8 @@ def cases() -> list[LiveCase]:
             "postgres",
             PG,
             "The CSV writer fed by psycopg's real decoding rather than a fake cursor's "
-            "rows: the `start` columns carry the server's own type OIDs, the header is "
+            "rows: the `start` columns carry the server's own type OIDs (the seeded "
+            "`mood` enum's masked to `<OID>` for the reason above), the header is "
             "the table's, and `done` reports the real row count and the file's real "
             "byte size. The path is masked to <TMP>; the size is not -- it is a fact "
             "about the bytes the writer produced from the values psycopg handed over.",

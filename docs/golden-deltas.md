@@ -239,5 +239,6 @@ dulu diduga berbeda; yang sudah punya kasus live, jawabannya ada di berkas itu, 
 | DECIMAL presisi penuh tidak lagi menjadi `float` di jalur JSON-native | **Perbaikan disengaja** | `exporter/writers.py:62` memakai `float(value)`, yang membuang presisi. Jalur `preview` tidak boleh mewarisinya |
 | Geometri dirender sebagai teks | **Perbaikan disengaja** | Hari ini bergantung pada `str()`; Rust memakai `Value::Unknown` secara eksplisit |
 | `elapsed_ms` dan `query_id` berbeda | **Bukan regresi** | Runtime berbeda; sudah dinormalisasi oleh `tools/golden/record.py` |
+| OID objek Postgres berbeda | **Bukan regresi** | Penomoran per-cluster: server membagi 1..16383 untuk katalognya sendiri dan mulai dari 16384 untuk objek klien, lalu naik satu tiap objek. `deploy/dev/up.sh` membuang dan membuat ulang container-nya tiap start sehingga seed dijalankan berulang, jadi snapshot yang membekukan angkanya memerah tanpa perubahan engine. Dinormalisasi jadi `<OID>` di kedua normaliser, hanya pada type code dan pada sel yang memang dinamai kolom `OID` |
 | Kata-kata pada pesan error berbeda | **Bukan regresi** | Yang dikontrak adalah *informasi* (pesan, kode, posisi), bukan string identik |
 | MySQL `TIMESTAMP` dikonversi ke zona sesi | **Perbaikan disengaja** (dipertahankan) | Server yang memutuskan; perbedaan dari `DATETIME` harus terlihat, bukan disamarkan |

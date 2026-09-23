@@ -15,7 +15,8 @@ returns for a `time`, or what Trino really puts on the wire for a
 cases freeze them.
 
 Every case here ran, and every `.ndjson` is that run's stdout after the same
-masking `record.py` applies (timings, query ids, temp paths). Nothing was
+masking `record.py` applies (timings, query ids, temp paths, and the OIDs the
+server itself assigned -- see below). Nothing was
 hand-written. A second `tools/golden/live_cases.py` run reproduced all fourteen
 Postgres and MySQL cases and `trino_nation_live` byte for byte; the other five
 Trino cases were recorded once, in the one window the container stayed up, and
@@ -28,6 +29,25 @@ default and the two `export` cases: all twenty-two cases below re-ran against
 the same three servers and matched byte for byte (22/22). The two new ones are
 the first live case for `export`; "What could not be recorded" says why
 `to_table` still has none.
+
+Re-checked again later the same day, with all three containers up: 22/22 again,
+and this time it took a change to get there. Three Postgres cases had been
+failing on nothing but an OID -- `a_mood`'s type code in `type_zoo_live` and
+`export_live`, and the table OIDs in `objects_live` -- because
+`deploy/dev/up.sh` drops and recreates its containers on every start and replays
+the seed (`up.sh:56`), and a server hands out the next identifier each time.
+PostgreSQL reserves 1..16383 for its own catalogues and starts client objects at
+16384 (`pg_class`'s `FirstNormalObjectId`), so the number is the cluster's
+bookkeeping rather than the engine's answer. Both normalisers now replace an
+identifier at or above that floor with `<OID>`, in the two places a server puts
+one -- a reported type code, and the cell the object browser's own `OID` column
+names -- and the four snapshots that held one were rewritten once (the three
+live cases plus the in-process `postgres_objects`). What that does *not* touch
+is the point of the narrow rule: `MySQL`'s object browser reports a real row
+count (`476354` for the seeded table) one column to the right of where Postgres
+reports its OID, and a mask keyed on "five digits or more" would have erased it.
+`the_server_oid_mask_reaches_the_two_places_an_oid_lives_and_nothing_else` in
+`crates/qh-ffi/tests/golden.rs` pins both halves.
 
 ## Servers recorded against
 
@@ -126,14 +146,14 @@ be frozen as if it were an answer.
 
 | case | command | engine | event lines | what it freezes |
 | --- | --- | --- | --- | --- |
-| `postgres_type_zoo_live` | `preview` | postgres | 4 | The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports. |
+| `postgres_type_zoo_live` | `preview` | postgres | 4 | The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports; the seeded `mood` enum's identifier is masked to `<OID>` because it climbs every time the seed is replayed. |
 | `postgres_batching_live` | `preview` | postgres | 5 | 250 real rows through PREVIEW_BATCH=200: the batch boundary, the second batch, and `truncated: true` from the one extra row the cap costs. |
 | `postgres_catalogs_live` | `catalogs` | postgres | 1 | `catalogs` on the driver whose object tree has no catalog level: the pg_database listing, filtered to connectable non-template databases, in the query's own ORDER BY. |
 | `postgres_tables_live` | `tables` | postgres | 1 | The information_schema statement Postgres builds for `tables`, against a schema that really holds the seeded tables -- BASE TABLE only, ordered. |
-| `postgres_objects_live` | `objects` | postgres | 1 | The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string. |
+| `postgres_objects_live` | `objects` | postgres | 1 | The only driver whose Name/OID/Owner/ACL shape is real: a real OID, the real owner, and a NULL relacl rendered as an empty string. The OID cell is masked to `<OID>`; the column list that names it is not. |
 | `postgres_count_live` | `count` | postgres | 3 | `count`'s wrapper run by Postgres itself on 500,000 real rows, so the number is the server's rather than a fake cursor's. |
 | `postgres_explain_live` | `explain` | postgres | 4 | Postgres answers EXPLAIN with one `QUERY PLAN` text column; this freezes the real column name, the real plan text and the absence of `truncated`. |
-| `postgres_export_live` | `export` | postgres | 5 | The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs, the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to `<TMP>`; the size is not -- it is the bytes the writer produced from the values psycopg handed over. |
+| `postgres_export_live` | `export` | postgres | 5 | The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs (the seeded `mood` enum's masked to `<OID>`), the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to `<TMP>`; the size is not -- it is the bytes the writer produced from the values psycopg handed over. |
 | `mysql_type_zoo_live` | `preview` | mysql | 4 | The same hard types again, as MySQL decodes them: decimal(38,10), datetime and timestamp kept distinct, a time PyMySQL hands back as an object, json re-ordered by the server, a blob with a NUL and 0xFF, an enum label, a char(36) and a binary(16) uuid, a NULL, an empty string and the four characters NULL. The `columns` type is MySQL's column type code. |
 | `mysql_batching_live` | `preview` | mysql | 5 | 250 real rows through the 200-row preview batch: the boundary, the second batch and `truncated: true`. |
 | `mysql_tables_live` | `tables` | mysql | 1 | MySQL's SHOW TABLES FROM `qh`, quoted with backticks, in the server's own order. |

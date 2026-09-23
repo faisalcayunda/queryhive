@@ -11,7 +11,8 @@ docs/golden-deltas.md, which is also where the Rust engine's accepted
 differences are listed.
 
 The comparison is exact on every key except the ones record.py normalises
-(elapsed_ms, query_id, tmp paths). Anything else that moves is a failure: the
+(elapsed_ms, query_id, tmp paths, and the OIDs the server itself assigned). Anything
+else that moves is a failure: the
 whole point of freezing the snapshots is that an unclassified difference has to
 stop the build rather than be smoothed over.
 """

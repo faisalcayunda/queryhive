@@ -9,7 +9,9 @@
 //! # Why the comparison is exact, and where it is not
 //!
 //! [`EXACT`] cases must match the snapshot byte for byte after the same normalisation
-//! `record.py` applies — `elapsed_ms` and `query_id` masked, temp paths replaced. Those
+//! `record.py` applies — `elapsed_ms` and `query_id` masked, temp paths replaced, and the
+//! object identifiers the *server* assigned masked too, because those move on their own
+//! (see [`mask_identity_oids`]). Those
 //! are the cases where the two engines promise the same thing: the event names, the
 //! fields, the order, and every rendered value including the type zoo.
 //!
@@ -780,7 +782,7 @@ fn roots_with(extra: Option<&Path>) -> Vec<String> {
 
 /// One event, normalised exactly as `record.py` normalises it.
 fn normalise(value: &Json, tmp: &[String]) -> Json {
-    match value {
+    let mut normalised = match value {
         Json::Object(fields) => Json::Object(
             fields
                 .iter()
@@ -788,6 +790,93 @@ fn normalise(value: &Json, tmp: &[String]) -> Json {
                 .collect(),
         ),
         other => other.clone(),
+    };
+    mask_identity_oids(&mut normalised);
+    normalised
+}
+
+/// The first object identifier a PostgreSQL server hands to an object *it* did not create.
+///
+/// System catalogues get 1..16383; anything a client makes starts at 16384 and climbs one
+/// per object *per cluster*. `deploy/dev/up.sh` drops and recreates its containers on every
+/// start and replays the seed, so the counter keeps rising and a snapshot that froze the
+/// number starts failing the moment anyone re-seeds -- not because the engine changed, but
+/// because the server had made more objects in the meantime. The identifier is the server's
+/// bookkeeping, not the engine's answer. Measured on the live fixture cluster (23 Sep 2026):
+/// the highest system OID was 13665 and the lowest user OID 32820, so the floor separates
+/// the two. These are the same numbers `record.py` uses; the two masks have to agree.
+const USER_OID_FLOOR: u64 = 16384;
+
+/// True for a bare decimal string at or above the first user-assigned OID.
+///
+/// Digits and nothing else, so a value that merely looks numeric (`0x4000`, `16384.0`, a
+/// large row count) is not mistaken for one -- and at most ten digits, because an OID is
+/// PostgreSQL's 4-byte unsigned integer (`pg_class.oid`, `description.type_code`), so a
+/// longer run of digits is data that happens to be numeric. Both halves keep the mask
+/// narrow, and both have to match `record.py`'s `_is_user_oid`, or the two sides disagree
+/// about which snapshots are equal.
+fn is_user_oid(value: &Json) -> bool {
+    let Json::String(text) = value else {
+        return false;
+    };
+    if text.is_empty() || text.len() > 10 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    text.parse::<u64>().is_ok_and(|oid| oid >= USER_OID_FLOOR)
+}
+
+/// Replace the OIDs a server assigned with a token, in the two places they appear.
+///
+/// Deliberately narrow, because everywhere else a five-digit number is data:
+///
+/// * `columns[*].type` -- the type OID the driver reports as a string. This is the one that
+///   moves for the type zoo: the seeded `mood` enum and the `type_zoo` table's row type are
+///   recreated by every seed.
+/// * `data[*][i]`, but only where `object_columns[i]` is `"OID"` -- the object browser's own
+///   column list says which cell holds an identifier, so no other driver's rows (`MySQL`'s
+///   "Engine"/"Rows", Trino's "Type"/"Name") are touched. The column *list* is left alone:
+///   it is part of the protocol, and freezing it is the point.
+///
+/// Runs after the per-key pass, because both decisions need a sibling key (`columns`,
+/// `object_columns`) rather than the value on its own.
+fn mask_identity_oids(event: &mut Json) {
+    let Json::Object(fields) = event else {
+        return;
+    };
+    if let Some(Json::Array(columns)) = fields.get_mut("columns") {
+        for column in columns.iter_mut() {
+            if let Json::Object(column) = column {
+                let user_oid = column.get("type").map(is_user_oid).unwrap_or(false);
+                if user_oid {
+                    column.insert("type".to_owned(), Json::String("<OID>".to_owned()));
+                }
+            }
+        }
+    }
+    // Which cell of a row holds an identifier, according to the event's own column list.
+    let oid_columns: Vec<usize> = match fields.get("object_columns") {
+        Some(Json::Array(names)) => names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.as_str() == Some("OID"))
+            .map(|(index, _)| index)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if oid_columns.is_empty() {
+        return;
+    }
+    if let Some(Json::Array(rows)) = fields.get_mut("data") {
+        for row in rows.iter_mut() {
+            if let Json::Array(cells) = row {
+                for index in oid_columns.iter() {
+                    let user_oid = cells.get(*index).map(is_user_oid).unwrap_or(false);
+                    if user_oid {
+                        cells[*index] = Json::String("<OID>".to_owned());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1165,6 +1254,68 @@ fn a_declared_case_id_is_matched_exactly_and_not_as_a_substring() {
 #[test]
 fn a_declaration_table_that_cannot_be_read_yields_nothing_rather_than_guessing() {
     assert!(declared_case_ids("LiveCase = namedtuple('LiveCase', 'id')\n").is_empty());
+}
+
+/// The mask that keeps a server's own object identifiers out of the snapshots.
+///
+/// Two halves matter here, and the second is the one that would quietly hide a real
+/// difference if it were loose. An identifier *is* replaced, in the two places a server puts
+/// one: the type OID a driver reports for a column, and the object browser's own `OID`
+/// column. And a number that merely looks like one is left exactly as the server sent it --
+/// which is not hypothetical, because `MySQL`'s object browser reports a real row count
+/// (`476354` for the seeded table) in the same event shape, one column to the right of where
+/// PostgreSQL reports its OID. A mask keyed on "five digits or more" would have erased it.
+#[test]
+fn the_server_oid_mask_reaches_the_two_places_an_oid_lives_and_nothing_else() {
+    /// One event through the normaliser: the mask is about which values survive, so the
+    /// assertion belongs on the whole event rather than on one cell.
+    fn event(text: &str) -> Json {
+        let parsed: Json = serde_json::from_str(text).expect("a JSON event");
+        normalise(&parsed, &[])
+    }
+    /// The same text, left alone, to compare a masked event against.
+    fn server_event(text: &str) -> Json {
+        serde_json::from_str(text).expect("a JSON event")
+    }
+
+    // A type OID at or above the first user object is masked; `23` (int4) is not, and an
+    // unmasked event is the proof rather than a string comparison of one field.
+    assert_eq!(
+        event(r#"{"columns":[{"name":"a_mood","type":"32827"},{"name":"id","type":"23"}]}"#),
+        event(r#"{"columns":[{"name":"a_mood","type":"<OID>"},{"name":"id","type":"23"}]}"#),
+    );
+
+    // The object browser's identifier, chosen by the event's own column list.
+    assert_eq!(
+        event(
+            r#"{"object_columns":["Name","OID","Owner","ACL"],
+                "data":[["type_zoo","32833","qh",""],["wide_500k","32819","qh",""]]}"#
+        ),
+        event(
+            r#"{"object_columns":["Name","OID","Owner","ACL"],
+                "data":[["type_zoo","<OID>","qh",""],["wide_500k","<OID>","qh",""]]}"#
+        ),
+    );
+
+    // ...and the column list that names that cell is part of the protocol, so it stays.
+    let named = event(r#"{"object_columns":["Name","OID","Owner","ACL"],"data":[]}"#);
+    assert_eq!(
+        named["object_columns"],
+        server_event(r#"["Name","OID","Owner","ACL"]"#)
+    );
+
+    // The counter-examples. Each comes back byte for byte as the server sent it: a MySQL row
+    // count in the `Rows` position, a row count in a `done` event, and three strings that
+    // only look numeric -- too precise, not decimal, and too long for the 4-byte type an OID
+    // really is.
+    for untouched in [
+        r#"{"object_columns":["Name","Engine","Rows","Comment"],
+            "data":[["wide_500k","InnoDB","476354",""]]}"#,
+        r#"{"rows":476354,"event":"done"}"#,
+        r#"{"columns":[{"type":"16384.0"},{"type":"0x4000"},{"type":"99999999999999"}]}"#,
+    ] {
+        assert_eq!(event(untouched), server_event(untouched), "{untouched}");
+    }
 }
 
 fn lines(events: &[Json]) -> String {

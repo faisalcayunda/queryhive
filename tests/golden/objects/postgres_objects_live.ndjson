@@ -1,1 +1,1 @@
-{"data": [["type_zoo", "24613", "qh", ""], ["wide_500k", "24598", "qh", ""]], "event": "objects", "object_columns": ["Name", "OID", "Owner", "ACL"]}
+{"data": [["type_zoo", "<OID>", "qh", ""], ["wide_500k", "<OID>", "qh", ""]], "event": "objects", "object_columns": ["Name", "OID", "Owner", "ACL"]}

@@ -43,7 +43,9 @@
 
 - [x] `tools/golden/record.py` — menjalankan engine Python **in-process** memakai harness
   `tests/test_engine_events.py` (diimpor, bukan diduplikasi), menormalkan `elapsed_ms`,
-  `query_id`, dan path tmp, lalu menulis stdout verbatim satu baris JSON per event
+  `query_id`, path tmp, dan OID milik server (penomoran per-cluster, bergerak tiap seed
+  dijalankan ulang — lihat `docs/golden-deltas.md`), lalu menulis stdout verbatim satu
+  baris JSON per event
 - [x] `tools/golden/compare.py` — menjalankan ulang kasus yang sama dan membandingkan;
   **21/21 cocok**, dan dua kali dijalankan hasilnya identik (idempoten)
 - [x] `tests/golden/` — 21 kasus: 11 perintah, tiga jalur error, dan zoo tipe §1.8
@@ -682,6 +684,8 @@ membuktikannya. Semua dijalankan di branch `feat/rust-engine`, di atas basis `59
 | Kosakata TLS belum punya rumah di `docs/` | **Ada rumah.** `docs/tls-modes.md` | `4b03d18` |
 | Daftar berkas `app/Sources/` di `README.md` | **Lengkap.** Empat belas berkas yang hilang ditambahkan, plus target uji, `Generated/`, dan empat skrip build | `README.md` § Layout |
 | Sapu bersih folder | **Selesai.** `check.js` (944 baris) dan `assets/trino-mascot.png` dihapus; `deploy/qh-sshd-run.sh` → `deploy/dev/` dengan `REPO` diperbaiki | `QH_TEST_SSH=1 cargo test -p qh-tunnel` → 29 lulus, 8 uji sshd benar-benar jalan (`62d9882`) |
+| Komparasi golden live setelah tunnel disambungkan | **Lulus, 22/22.** Ketiga container dev dinyalakan; seluruh 22 kasus `_live` cocok byte demi byte. Tiga kasus Postgres sempat merah karena OID per-cluster (bukan regresi) dan ditutup dengan normalisasi `<OID>`, bukan re-record | `tools/golden/live_cases.py` → `22/22 live cases match`, 0 gagal jalan; `tools/golden/compare.py` → `21/21`; `cargo test -p qh-ffi --test golden` → 8 lulus |
+| Validasi tunnel end-to-end | **Lulus.** `qh-sshd-dev` hidup, 8 uji sshd nyata jalan | `QH_TEST_SSH=1 cargo test -p qh-tunnel` → 29 lulus (21 unit + 8 sshd), 0 gagal |
 
 Ketahuan juga hari itu, di luar daftar: `app/build-ffi.sh` menulis binding ke root repo karena
 `GENERATED="Generated"` relatif sementara generator dijalankan di subshell yang sudah `cd` ke
@@ -693,22 +697,21 @@ handle result-set.
 
 Yang **masih** terbuka:
 
-- **Validasi tunnel end-to-end belum dijalankan.** Saat sesi itu container `qh-sshd-dev` mati,
-  jadi `QH_TEST_SSH=1 cargo test -p qh-tunnel` gagal 8 dengan `Connection refused (os error 61)`.
-  Bukan regresi: 21 uji unit lulus, dan `cargo test --workspace` tetap hijau karena uji sshd
-  skip tanpa env itu. Perlu container hidup, dan container tidak dinyalakan sendiri.
-- **Komparasi golden live belum dijalankan ulang setelah tunnel disambungkan.** Ketiga container
-  dev juga mati saat itu. Perbandingan terakhir yang lulus 22/22 terjadi sebelum tunnel masuk,
-  jadi angka itu belum mencerminkan commit hari ini.
 - **Bacaan balik password lewat `qh-credentials` masih perlu uji manual** (butuh GUI + dialog
   Keychain).
+- **Fase 2 belum bisa dimulai** sampai tiga celah FFI ditutup: event belum di-stream,
+  `CancelFlag` belum diekspor (tidak ada entry point cancel), dan belum ada tipe event atau
+  handle result-set untuk data plane.
 - **Hook `orchestrator_guard` punya dua salinan** (`~/.claude/hooks/` dan
   `~/.minimax/plugins/claude-adapt/hooks/claude-scripts/`); yang dimuat harness ini yang kedua,
-  jadi mengedit yang pertama tidak berpengaruh. Kewajiban argumen `model` dihapus dari keduanya
-  beserta aturan 5, karena harness yang tidak mewarisi model orchestrator menolak setiap nilai
-  dengan "must use provider/model syntax", sehingga syarat itu jalan buntu. Ujinya
-  (`test_orchestrator_guard.py`) diselaraskan dan lulus 21/21. Catatan: `~/.claude` adalah repo
-  git tersendiri, jadi perubahan di sana perlu commit sendiri atau akan tersapu.
+  jadi mengedit yang pertama tidak berpengaruh. Penyuntingan sesi 23 Sep dilakukan di salinan
+  mcode: kewajiban argumen `model` dihapus beserta aturan 5, karena harness yang tidak mewarisi
+  model orchestrator menolak setiap nilai dengan "must use provider/model syntax", sehingga syarat
+  itu jalan buntu. Ujinya (`test_orchestrator_guard.py`) diselaraskan dan lulus 21/21. Salinan
+  `~/.claude` **sengaja tidak disentuh** — pemiliknya menegaskan hook itu milik mcode. Catatan:
+  `~/.claude` adalah repo git tersendiri, jadi perubahan di sana perlu commit sendiri atau akan
+  tersapu. Cache hook mcode di `~/.minimax/v2/plugin-hook-cache/` masih memuat versi lama dan
+  disegarkan harness saat dimuat ulang.
 
 ### Sapu bersih dan struktur folder
 
@@ -728,7 +731,9 @@ dan penghapusannya menyatu dengan perubahan `Engine.current = RustEngine()`.
 
 > **Catatan handoff (akhir sesi 23 Sep 2026, diperbarui):** lima hal yang dulu dicatat di sini
 > sebagai sisa -- keputusan lisensi CDLA, menyambungkan `qh-tunnel`, ADR-0007, rumah dokumen untuk
-> kosakata TLS, dan sapu bersih + struktur folder -- **semuanya sudah tertutup**. Bukti per item ada
+> kosakata TLS, dan sapu bersih + struktur folder -- **semuanya sudah tertutup**, dan validasi yang
+> bergantung container (komparasi golden live 22/22 dan 8 uji sshd nyata) sudah dijalankan setelah
+> tunnel masuk. Bukti per item ada
 > di §Status validasi. Daftar bernomor di bawah **belum diaudit ulang** pada sesi itu, jadi jangan
 > memperlakukannya sebagai "yang benar-benar belum" tanpa memeriksa pohonnya: sebagian sudah
 > dikerjakan (mis. `ENCODING`/`DBF_ENCODING` lewat `b570a9a`, kasus live ekspor lewat `923880f`).
