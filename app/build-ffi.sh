@@ -52,4 +52,17 @@ mv "$GENERATED/qh_ffi.swift" "$GENERATED/QueryHiveFFI/qh_ffi.swift"
 mv "$GENERATED/qh_ffiFFI.h" "$GENERATED/qh_ffiFFI/qh_ffiFFI.h"
 mv "$GENERATED/qh_ffiFFI.modulemap" "$GENERATED/qh_ffiFFI/module.modulemap"
 
+# A header-only clang target emits no object file, but SwiftPM still lists
+# `qh_ffiFFI.o` as a link input for anything that depends on it, so the link fails
+# from a clean build. Give the target one translation unit; written here rather than
+# committed by hand so regeneration cannot silently drop it.
+cat > "$GENERATED/qh_ffiFFI/qh_ffiFFI.c" <<'EOF'
+// This file exists because a SwiftPM clang target with only a header and a modulemap
+// produces no object file, yet the linker still expects `<target>.o` whenever another
+// target (the executable, or the test bundle that embeds it) links against it. One
+// translation unit that includes the generated header gives clang something to emit.
+// app/build-ffi.sh rewrites it on every regeneration, so it survives `./build-ffi.sh`.
+#include "qh_ffiFFI.h"
+EOF
+
 log "regenerated $(ls "$GENERATED"/QueryHiveFFI "$GENERATED"/qh_ffiFFI | tr '\n' ' ')"

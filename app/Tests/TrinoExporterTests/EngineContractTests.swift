@@ -23,7 +23,7 @@ final class EngineContractTests: XCTestCase {
         let engine = MockEngine()
         engine.answer("connections", with: .events([Event(event: "connections")]))
 
-        let record = await EngineContract.assertKept(engine, "connections",
+        let record = await EngineContract.assertKept(engine, command: "connections",
                                                     env: ["DB_PATH": "/tmp/queryhive.sqlite3"])
 
         XCTAssertEqual(record.events.map(\.event), ["connections"])
@@ -42,7 +42,7 @@ final class EngineContractTests: XCTestCase {
         let database = try temporaryDatabase()
         let engine = RustEngine()
 
-        let record = await EngineContract.assertKept(engine, "connections",
+        let record = await EngineContract.assertKept(engine, command: "connections",
                                                     env: ["DB_PATH": database.path])
 
         XCTAssertEqual(record.events.map(\.event), ["connections"],
@@ -58,12 +58,12 @@ final class EngineContractTests: XCTestCase {
         // the fourteen. Both are "this engine cannot start this", which the protocol answers with
         // no handle and an already-delivered reason.
         let mock = MockEngine()
-        let mockRecord = await EngineContract.assertRefusedToStart(mock, "objects")
+        let mockRecord = await EngineContract.assertRefusedToStart(mock, command: "objects")
         XCTAssertTrue(mockRecord.stderr?.contains("nothing scripted") == true,
                       "the reason says what was wrong: \(mockRecord.stderr ?? "nil")")
 
         let rust = RustEngine()
-        let rustRecord = await EngineContract.assertRefusedToStart(rust, "definitely_not_a_command")
+        let rustRecord = await EngineContract.assertRefusedToStart(rust, command: "definitely_not_a_command")
         XCTAssertTrue(rustRecord.stderr?.contains("definitely_not_a_command") == true,
                       "the reason names the command that could not be answered: \(rustRecord.stderr ?? "nil")")
     }
@@ -92,11 +92,11 @@ final class EngineContractTests: XCTestCase {
         // is taken back out of it rather than accumulating.
         let database = try temporaryDatabase()
         let engine = RustEngine()
-        await EngineContract.assertKept(engine, "connections", env: ["DB_PATH": database.path])
+        await EngineContract.assertKept(engine, command: "connections", env: ["DB_PATH": database.path])
 
         engine.terminateAll()
 
-        let second = await EngineContract.assertKept(engine, "connections", env: ["DB_PATH": database.path])
+        let second = await EngineContract.assertKept(engine, command: "connections", env: ["DB_PATH": database.path])
         XCTAssertEqual(second.events.map(\.event), ["connections"])
     }
 }

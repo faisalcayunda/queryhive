@@ -101,18 +101,25 @@ final class EventDecodingTests: XCTestCase {
 
         let objects = events("objects", in: decoded)
         XCTAssertFalse(objects.isEmpty)
-        let typed = try XCTUnwrap(objects.first { $0.objectColumns == ["Name", "Type"] },
-                                  "the Trino case declares its own object columns")
-        XCTAssertEqual(typed.data?.count, 3)
+        // The frozen Trino case, not a live one: both declare the same columns since the live
+        // fixtures were added, so the three-row shape is what names this one.
+        let typed = try XCTUnwrap(objects.first {
+            $0.objectColumns == ["Name", "Type"] && $0.data?.count == 3
+        }, "the Trino case declares its own object columns")
         XCTAssertEqual(typed.data?[2], ["legacy", ""], "an empty string stays empty, not nil")
 
+        // An `explain` done carries no files, so this is the export half of the record. The
+        // `elapsed_ms` check lives below on the explain case, which is the one that sends it.
         let exports = events("done", in: decoded).filter { !($0.files ?? []).isEmpty }
         XCTAssertFalse(exports.isEmpty)
         let csv = try XCTUnwrap(exports.first { event in
             (event.files ?? []).contains { $0.name == "people.csv" }
         }, "the CSV case reports the file it wrote")
         XCTAssertEqual(csv.queryId, "20260131_120412_00042_abcde")
-        XCTAssertEqual(csv.elapsedMs, 0, "`elapsed_ms` is a number on the wire, not a string")
+        let explainDone = try XCTUnwrap(events("done", in: decoded).first { $0.elapsedMs != nil },
+                                        "the explain cases report how long they took")
+        XCTAssertGreaterThanOrEqual(explainDone.elapsedMs ?? -1, 0,
+                                    "`elapsed_ms` is a number on the wire, not a string")
         XCTAssertEqual(csv.cancelled, false)
         XCTAssertEqual(csv.warnings, [])
 
@@ -146,9 +153,12 @@ final class EventDecodingTests: XCTestCase {
         // nothing at all. `[[String?]]` is the type that keeps them apart.
         let (decoded, _) = try recorded()
         let rows = events("rows", in: decoded)
-        let withNulls = try XCTUnwrap(rows.first { ($0.data ?? []).contains { $0.contains(nil) } },
-                                      "the record has a row with a NULL cell in it")
-        let row = try XCTUnwrap(withNulls.data?.first { $0.contains(nil) })
+        // Exactly one NULL: a live explain row carries several, and the point here is that one
+        // nil survives decoding as nil — counting is only meaningful against the case with one.
+        let withNulls = try XCTUnwrap(rows.first {
+            ($0.data ?? []).contains { $0.filter { $0 == nil }.count == 1 }
+        }, "the record has a row with exactly one NULL cell in it")
+        let row = try XCTUnwrap(withNulls.data?.first { $0.filter { $0 == nil }.count == 1 })
 
         XCTAssertEqual(row.filter { $0 == nil }.count, 1)
         XCTAssertTrue(row.contains(where: { $0 == nil }), "the NULL cell is nil, not \"\"")

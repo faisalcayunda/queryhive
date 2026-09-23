@@ -34,7 +34,7 @@ final class RustEngineTests: XCTestCase {
         // in `AppModel` read *either* the `error` event's message *or* the last line of the stderr
         // argument. This asserts they get the same text in both, which is what makes the swap in
         // §1.6 not a change of behaviour at those call sites.
-        let record = await EngineContract.run(RustEngine(), "credential")
+        let (_, record) = await EngineContract.run(RustEngine(), "credential")
 
         XCTAssertEqual(record.exitStatus, 1, "a failed run is not a clean exit")
         XCTAssertEqual(record.events.map(\.event), ["error"])
@@ -52,7 +52,7 @@ final class RustEngineTests: XCTestCase {
         // which prints `EngineError.Usage(message: "…")` at the user. If that ever reaches the
         // error bar this test fails, because it is exactly the kind of thing nobody notices until
         // a user sends a screenshot.
-        let record = await EngineContract.run(RustEngine(), "credential")
+        let (_, record) = await EngineContract.run(RustEngine(), "credential")
         let message = record.events.first?.message ?? ""
 
         XCTAssertFalse(message.contains("EngineError"), "the enum's own name is not user-facing")
