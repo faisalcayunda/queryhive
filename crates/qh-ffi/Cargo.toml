@@ -41,6 +41,9 @@ qh-rt.workspace = true
 qh-sql.workspace = true
 qh-storage.workspace = true
 qh-sync.workspace = true
+# The SSH bastion a connection can be reached through: opened in `connect`, never a
+# command of its own (blueprint §3.2 — the tunnel is part of connecting).
+qh-tunnel.workspace = true
 
 # A secret is carried in a `SecretString`, never in a `String` that outlives the call
 # that produced it.
@@ -56,7 +59,7 @@ serde_json = "1"
 # string is the problem this migration exists to remove.
 uniffi = { version = "0.32", features = ["cli"] }
 thiserror.workspace = true
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "sync", "time"] }
 async-trait = "0.1"
 
 [dev-dependencies]
@@ -65,6 +68,8 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal"
 # `connections.json` through `DB_PATH` / `LEGACY_PATH`, so a test never reads or writes
 # the files the app owns.
 tempfile = "3"
+# One test vector: the base64 body of a real `.pub` key, for the host-key messages.
+base64 = "0.22"
 
 [lints.rust]
 unsafe_code = "forbid"
