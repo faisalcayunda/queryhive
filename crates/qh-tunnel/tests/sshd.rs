@@ -27,10 +27,10 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 const SKIP_HINT: &str =
-    "skipped: set QH_TEST_SSH=1 with deploy/qh-sshd-run.sh running (container qh-sshd-dev)";
+    "skipped: set QH_TEST_SSH=1 with deploy/dev/qh-sshd-run.sh running (container qh-sshd-dev)";
 
 /// How this machine's container is reached. Everything is overridable so the same tests
-/// can point at a different sshd, but the defaults are deploy/qh-sshd-run.sh's.
+/// can point at a different sshd, but the defaults are deploy/dev/qh-sshd-run.sh's.
 struct Settings {
     host: String,
     port: u16,

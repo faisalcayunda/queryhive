@@ -24,7 +24,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
 STATE="$REPO/target/qh-sshd"
 CONTAINER=qh-sshd-dev
 HOST_PORT=52222
