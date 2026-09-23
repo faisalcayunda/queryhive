@@ -28,6 +28,9 @@ backup.zip
 # in a commit. `git check-ignore -v .env` is the test that it stayed covered.
 .env
 .env.*
+# ...but the example is not a secret and the file itself says so: without this line a fresh
+# clone has no example to copy, and the comment inside `.env.example` is false.
+!.env.example
 
 # Internal development tooling, deliberately kept out of the repository.
 # `tools/kenari_search.py` is a local helper for researching while the app is
