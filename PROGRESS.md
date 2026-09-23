@@ -18,7 +18,7 @@
 | B — Riset web | **Berjalan sebagian** | `tools/kenari_search.py` — alat lokal yang **tidak masuk repo** (lihat §Perkakas lokal) — membuka `web_search` dan `web_fetch` lewat akun kenari pengguna, yang **terbukti bersaldo**: pencarian nyata mengembalikan hasil. Ini akun yang berbeda dari yang menghasilkan 402 di atas. `x_search` belum: jawabannya `plan_limit_reached` karena ditagih dari saldo terpisah, bukan kuota paket. §8.1 kini **terisi sebagian**: empat issue DBeaver dibuka langsung dan dikutip; Navicat dan DataGrip masih terbuka karena sumber yang ditemukan ditolak (bukan sumber primer). Satu klaim lama **dikoreksi**: TablePlus ternyata sekali beli, bukan langganan. `sqlx` terverifikasi langsung dari crates.io API (0.9.0, `MIT OR Apache-2.0`, 2026-05-21). Versi dependency lain diverifikasi lewat resolusi Cargo → `docs/dependencies.md`. |
 | C — Blueprint + ADR | **Selesai** | `docs/architecture/rust-engine-blueprint.md` §1–§8 + Architecture Decision Summary; ADR 0001–0010 di `docs/decisions/`. |
 | D — Fase 0 | **Selesai kecuali protocol Swift** | Golden snapshot ✅, baseline benchmark ✅, tag `python-engine-final` ✅, protocol `DatabaseEngine` + `MockEngine` ❌ (lihat catatan di bawah) |
-| D — Fase 1 | **Hampir selesai** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, ketiga driver, `qh-export` (sembilan format + `plan`), `qh-rt`, dan `qh-ffi` (11 perintah + CLI) selesai dan hijau; yang belum: `qh-credentials`, `qh-storage`, `qh-tunnel`, dan permukaan UniFFI di atas `qh-ffi` |
+| D — Fase 1 | **Hampir selesai** | `qh-core`, `qh-sql`, `qh-result-store`, `qh-driver`, ketiga driver, `qh-export` (sembilan format + `plan`), `qh-rt`, dan `qh-ffi` (14 perintah + CLI) selesai dan hijau, termasuk permukaan UniFFI, `qh-credentials`, `qh-storage` dan `qh-sync` yang kini tersambung ke `qh-ffi`; yang belum: `qh-tunnel` **ada dengan ujinya, tetapi tidak ada satu pun crate yang bergantung padanya** — grep `qh-tunnel` di seluruh `Cargo.toml` hanya menemukan baris anggota workspace, jadi perintah tunnel belum bisa dijangkau pengguna |
 | D — Fase 2, 3, 4 | Belum | |
 
 ---
@@ -623,7 +623,91 @@ ditambah `__MACOSX/`, berkas `.DS_Store`, dan `.qh-patch.py` (skrip sekali-pakai
 membuang `app/dist`: di dalamnya ada aplikasi yang sudah terbangun, jadi ia harus dibangun ulang
 sebelum dipakai lagi.
 
+## Status handoff (23 Sep 2026)
+
+Ditulis supaya pekerjaan ini bisa dilanjutkan dari harness mana pun tanpa membaca riwayat
+percakapan. Sumber kebenaran tetap pohon kode itu sendiri; yang di bawah adalah keadaan pada saat
+handoff dan apa yang **belum** tervalidasi.
+
+### Sudah mendarat hari ini
+
+Empat belas commit, yang terpenting: `17ecf46` URL tanpa path tidak lagi menelan query-nya;
+`6f4893c` suite TLS memilih skip, bukan merah, saat fixture-nya tidak ada; `3cce7e0` decoder interval
+Trino (kedua jenis) memakai perender bersama; `d094cb6` aplikasi bisa menyatakan `Prefer` untuk
+Trino; `b570a9a` `ENCODING`/`DBF_ENCODING` berlaku di `qh-export`; `581cc10` penjaga snapshot
+golden mem-parse id deklarasi, bukan mencocokkan potongan teks; `923880f` perekaman golden jadi
+opt-in dan ekspor punya kasus live; `e88225d` sebelas klaim dokumen yang bisa diperiksa dan salah;
+`36e30aa` `.env.example` benar-benar terlacak seperti bunyi baris pertamanya.
+
+### Hasil benchmark (angka pertama yang dimiliki engine Rust)
+
+Diukur hari itu juga, kedua sisi dijalankan bergantian (interleaved), median dari 3, beban mesin
+~3,2 dari 10 CPU. `SELECT * FROM wide_500k` (30 kolom × 500.000 baris):
+
+| Sumbu | PostgreSQL | MySQL |
+|---|---|---|
+| `elapsed_ms` engine | Rust 2.626 vs Python 4.236 (**1,61×**) | Rust 2.830 vs Python 6.901 (**2,44×**) |
+| Time-to-first-row | 11 ms vs 624 ms (**57×**) | 20 ms vs 3.299 ms (**167×**) |
+| Peak RSS | 9,1 MB vs 544,7 MB (**60× lebih kecil**) | 38,1 MB vs 1.093,4 MB (**29× lebih kecil**) |
+| Throughput | 191.251 vs 138.405 baris/s (1,38×) | 177.849 vs 137.177 baris/s (1,30×) |
+
+**Target §6 (5× throughput) tidak tercapai, dan tidak akan tercapai lewat protokol ini di socket
+lokal:** kedua engine didominasi encoding JSON per sel untuk 15 juta sel, dan 137 ribu baris/s dari
+Python sudah mendekati batas satu koneksi lokal. Yang membenarkan migrasi ini adalah latensi dan
+memori, bukan throughput — itu perlu ADR, bukan tabel.
+
+**Satu koreksi atas klaim lama:** 1.080 MB pada MySQL **bukan** biaya ukuran hasil. Python sudah
+memakai 537 MB (PG) / 1.093 MB (MySQL) pada `LIMIT=1`, karena `psycopg` memakai *client-side
+cursor* yang mematerialisasi seluruh hasil di `execute()` sebelum cap engine sempat berlaku. Jadi
+`LIMIT` tidak pernah menjadi tuas memori di engine lama, dan temuan itu justru argumen yang lebih
+kuat: pengguna yang membuka grid MySQL membayar 1 GB meski hanya mengambil sepuluh baris.
+
+Angka baseline yang terekam 22 Sep sekitar 6–8% lebih optimistis pada throughput (149.687 vs
+138.405 untuk PG), jadi memakai berkas rekaman sebagai penyebut akan melebih-lebihkan kemenangan
+Rust. Karena itu kedua sisi dijalankan ulang hari ini, bukan dibandingkan dengan rekaman.
+
+### Belum tervalidasi / belum selesai
+
+- **`swift test` belum pernah dijalankan di mesin ini:** toolchain-nya tidak menemukan modul
+  `XCTest` (`error: no such module 'XCTest'`), jadi target uji baru di `app/Tests/` **belum
+  dieksekusi sama sekali** walaupun `swift build` hijau. Jangan memperlakukannya sebagai lulus.
+- **`cargo deny check licenses` GAGAL, dan itu disengaja.** `deny.toml` + ADR-0011 mencatat
+  pengecualian MPL-2.0 untuk delapan crate `uniffi` sebagai `exceptions` per crate. Yang masih
+  ditolak: `CDLA-Permissive-2.0` pada `webpki-roots` 0.26.11, `webpki-roots` 1.0.9 dan
+  `webpki-root-certs` 1.0.9 — data sertifikat root Mozilla lewat rustls. Dibiarkan gagal supaya
+  tuntutannya keputusan pemilik (ADR pengecualian, atau melepas root store bawaan rustls), bukan
+  perubahan diam-diam di berkas konfigurasi.
+- **`qh-tunnel` tidak bisa dijangkau:** tidak ada crate yang bergantung padanya, jadi perintah
+  tunnel belum sampai ke pengguna.
+- ADR-0007: aplikasi memberi `allow-unsigned-executable-memory` dan `disable-library-validation`,
+  dan ADR-0007 sendiri mensyaratkan pengecualian itu dicatat di ADR baru — belum ada.
+- Kosakata TLS empat mode belum punya rumah di `docs/`; satu-satunya penjelasan ada di doc modul
+  `crates/qh-ffi/src/config.rs` dan `crates/qh-driver/src/lib.rs`.
+- Daftar berkas `app/Sources/TrinoExporter/` di `README.md` belum lengkap sejak beberapa berkas
+  baru muncul.
+- Bacaan balik password lewat `qh-credentials` masih perlu diuji manual (butuh GUI + dialog
+  Keychain).
+
+### Sapu bersih dan struktur folder
+
+Rencananya ada di `docs/architecture/folder-proposal.md` (dipindahkan dari `/tmp`, karena `/tmp`
+tidak selamat antar sesi). Ringkasnya: sebagian besar kekacauan yang terlihat sudah terjadwal
+dihapus bersama mesin Python, jadi merapikannya sekarang adalah pekerjaan untuk berkas yang mati
+beberapa hari lagi. Yang layak: hapus `check.js` (944 baris, mati), pindahkan
+`deploy/qh-sshd-run.sh` ke `deploy/dev/`, hapus `assets/trino-mascot.png` (yatim), dan
+`.env.example` — yang terakhir sudah dikerjakan. **Langkah paling berisiko** adalah perpindahan
+berkas skrip itu: jalur `target/qh-sshd` dihitung berbeda oleh skrip dan oleh ujinya, dan salah
+satu membuat uji tunnel **skip** alih-alih gagal, sehingga `cargo test` tetap hijau.
+
+Pemilik memutuskan (23 Sep): mesin Python lama **tetap utuh** sampai `RustEngine` menggantikannya,
+dan penghapusannya menyatu dengan perubahan `Engine.current = RustEngine()`.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
+
+> **Catatan handoff (akhir sesi 23 Sep 2026):** item 1–5 di bawah ini sudah selesai atau
+> digantikan; daftar yang masih berlaku ada di §Status handoff. Sisanya: keputusan lisensi CDLA,
+> menyambungkan `qh-tunnel`, ADR-0007, rumah dokumen untuk kosakata TLS, dan sapu bersih +
+> struktur folder -- ditambah dua hal yang butuh tangan manusia (item 6).
 
 Daftar ini diperbarui 23 Sep 2026. Sembilan item sebelumnya sudah selesai -- termasuk K11 dan K12
 yang justru bukan soal cancel sama sekali, melainkan `execute` yang menunggu deskripsi kolom

@@ -4,12 +4,15 @@
 > satu kategori di bawah. Perbedaan yang belum diklasifikasi berarti regresi, dan membuat
 > pembanding gagal.
 >
-> Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan 11 perintah engine Rust
+> Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan **14 perintah** engine Rust
 > dengan sesi palsu — persis seperti `record.py` men-drive engine Python in-process — lalu
-> membandingkan keluarannya dengan snapshot baris per baris. Hasilnya: **16 kasus identik**, dan 5
-> kasus terklasifikasi di bawah ini. Kasus yang identik tidak disebut lagi di sini; daftarnya ada
-> di `EXACT` pada berkas uji itu, dan sebuah penjaga menolak snapshot baru yang belum masuk salah
-> satu daftar.
+> membandingkan keluarannya dengan snapshot baris per baris. Dari 43 kasus
+> terekam: **17 identik**, 4 terklasifikasi di bawah ini, dan 22 diklasifikasi
+> `LIVE` — direkam dari server nyata, yang hasilnya ada di `tests/golden/RECORDED.md` karena yang
+> dapat dibandingkan di sini hanyalah kasus yang bisa dijalankan tanpa jaringan. Kasus yang identik
+> tidak disebut lagi di sini; daftarnya ada di `EXACT` pada berkas uji itu, dan penjaganya menolak
+> snapshot baru yang belum masuk salah satu daftar, dengan id yang **di-parse** dari tabel kasus
+> live, bukan dicocokkan sebagai potongan teks.
 
 ## Aturan
 
@@ -98,16 +101,21 @@ statement yang tidak mengubah baris apa pun, sementara Trino tidak menjawab sama
 Karena itu `Some(0)` dan `None` tidak boleh diperlakukan sama oleh pemanggil — lihat doc
 `Cursor::affected_rows`.
 
-### D-7 — Setting yang dibaca lalu diabaikan · **Keterbatasan yang diketahui**
+### D-7 — Setting yang dibaca lalu diabaikan · **DITUTUP 23 Sep 2026**
 
-| Setting | Mengapa diabaikan |
+Ketiganya sekarang berlaku, jadi D-7 berhenti menjadi perbedaan perilaku. Yang tersisa darinya satu
+perbedaan bentuk yang disengaja: nilai yang **tidak dikenal ditolak dengan menyebut namanya**,
+mengikuti bentuk yang sudah dipakai `sslmode` dan `DELIMITER` — dulu nilainya diterima diam-diam.
+
+| Setting | Perilaku sekarang |
 |---|---|
-| `RETRIES` | Retry adalah milik lapisan session (blueprint §1.7) yang belum dibangun. Pada koneksi yang putus di tengah ekspor, ini perbedaan perilaku nyata — bukan detail |
-| `ENCODING` | Semua writer engine Rust adalah UTF-8; CSV/teks `cp1252` tidak didukung |
-| `DBF_ENCODING` | Code page `dbf` tetap cp1252 |
+| `RETRIES` | Retry sesi sungguhan (blueprint §1.7). `RETRIES` = jumlah percobaan ulang, jadi `RETRIES=0` berarti tepat satu percobaan dan default-nya 5, sama dengan engine Python. Hanya kegagalan `Transient` yang diulang; statement yang ditolak server, cancel, dan fetch di tengah stream pada driver ber-cursor (PostgreSQL, MySQL) tidak diulang |
+| `ENCODING` | Code page untuk `txt` dan `csv` lewat `Codec` (`crates/qh-export/src/encoding.rs`), dengan `errors="replace"` dan gerbang BOM yang mengikuti `writers.py:126` |
+| `DBF_ENCODING` | Code page medan karakter `dbf`, plus byte language-driver di header yang kini **mengikuti** code page — engine Python selalu menulis `0x03` apa pun codec-nya, yang memberi tahu pembaca untuk men-decode UTF-8 sebagai cp1252 |
 
-Ketiganya tetap **diterima tanpa error**, supaya koneksi tersimpan yang membawanya tidak mendadak
-gagal. Tidak satupun muncul di snapshot, jadi tidak ada kasus uji yang terpengaruh.
+Nilai yang sah tetap **diterima tanpa error**, supaya koneksi tersimpan yang membawanya tidak
+mendadak gagal; yang tidak sah ditolak. Tidak satupun muncul di snapshot, jadi tidak ada kasus uji
+yang terpengaruh.
 
 Diverifikasi terhadap server sungguhan: PostgreSQL melaporkan interval `14 months, 3 days, 4:05:06`
 (`SELECT * FROM type_zoo`), dan itulah teks yang dipancarkan engine — dengan bagian bulan, yang
@@ -213,11 +221,18 @@ Aturan float yang setia dari `value.rs` — termasuk pergantian ke notasi ekspon
 (1e16 ke atas, di bawah 1e-4) — diangkat ke `render.rs`, jadi catatan lama di modul itu yang
 menyebut eksponen sebagai "divergensi yang dicatat" tidak berlaku lagi.
 
-## Yang belum dapat diverifikasi
+## Server nyata
 
-Perbedaan berikut hanya muncul pada server nyata dan tidak dapat direkam pada sesi ini (podman
-tersedia, tetapi compose dan dataset uji belum dibuat). Semuanya masih **[perlu diverifikasi]**:
+Bagian ini dulu berisi kandidat yang **belum dapat diverifikasi**: podman sudah ada tetapi compose
+dan dataset uji belum dibuat, jadi perbedaan yang hanya muncul pada server nyata tidak bisa direkam.
+Itu sudah tidak berlaku. 22 kasus sudah direkam dari server nyata dan hasilnya — beserta setiap
+sel yang berbeda dan sebabnya — ada di `tests/golden/RECORDED.md`, yang diperbarui dengan angka yang
+sama setiap kali kasus live dijalankan ulang (`tools/golden/live_cases.py`, dan tanpa argumen ia
+**membandingkan**, tidak merekam). Kandidat di bawah ini dipertahankan hanya sebagai daftar hal yang
+dulu diduga berbeda; yang sudah punya kasus live, jawabannya ada di berkas itu, bukan di sini:
 
+| Kandidat (historis) | Kategori dugaan | Cara menutup |
+|---|---|---|
 | Kandidat | Kategori dugaan | Cara menutup |
 |---|---|---|
 | Urutan kunci `jsonb` Postgres | **Bukan regresi** | `jsonb` tidak menjamin urutan; perbandingan harus kanonik. Diuji dengan perbandingan kanonik, bukan teks |
