@@ -337,6 +337,7 @@ fn pick(settings: &Settings, key: &str) -> (String, String) {
 /// trino://user:secret@trino.internal:8443/hive/analytics   catalog, schema
 /// postgresql://user:secret@pg.internal/appdb?sslmode=require
 /// mysql://user:secret@mysql.internal:3306/shop
+/// trino://coordinator:8080?sslmode=require                 no path, query kept
 /// ```
 ///
 /// A URL with no `//` is read as host-first, which is how a caller who pasted
@@ -453,10 +454,24 @@ impl Parsed {
             None => ("http".to_owned(), url.trim_start_matches("//").to_owned()),
         };
 
-        // Authority, then path, then query.
-        let (authority, tail) = match rest.find('/') {
+        // Authority, then path, then query — `urlparse`'s own order, and the
+        // authority ends at the first `/`, `?` or `#` rather than at the first `/`
+        // alone. Splitting it only on `/` swallowed the query of a URL that has no
+        // path: `trino://host:8080?sslmode=require` came out as the host
+        // `host:8080?sslmode=require` with no port and no query, so the mode it
+        // names was silently dropped and the connection pointed at a name no DNS
+        // has ever resolved. `host:8080?sslmode=require` now splits exactly like
+        // the shape the docs give, `host:8080/catalog?sslmode=require`.
+        let (authority, tail) = match rest.find(['/', '?', '#']) {
             Some(index) => (rest[..index].to_owned(), rest[index..].to_owned()),
             None => (rest.clone(), String::new()),
+        };
+        // The fragment goes before either is read, for the same reason: `urlparse`
+        // keeps it out of the path, so `host/catalog#frag` is a catalog named
+        // `catalog` and not one named `catalog#frag`.
+        let tail = match tail.split_once('#') {
+            Some((before, _)) => before.to_owned(),
+            None => tail,
         };
         let (path, query) = match tail.split_once('?') {
             Some((path, query)) => (path.to_owned(), query.to_owned()),
@@ -735,11 +750,17 @@ mod tests {
 
     #[test]
     fn a_trino_url_may_carry_its_own_sslmode() {
-        // The catalog segment is what the documented URL shape has, and `Parsed`
-        // only splits the query off after a path: `host:8080?sslmode=…` with no path
-        // leaves the query inside the authority, which is older than this rule.
+        // The catalog segment is what the documented URL shape has.
         assert_eq!(
             config(&[("DB_URL", "trino://coordinator:8080/hive?sslmode=require")]).tls,
+            TlsMode::RequireNoVerify
+        );
+        // The same URL with no path at all. It read as a host of
+        // `coordinator:8080?sslmode=require` before the authority was split on the
+        // query as well, so the mode the URL named was dropped and the connection
+        // went to a host that does not exist.
+        assert_eq!(
+            config(&[("DB_URL", "trino://coordinator:8080?sslmode=require")]).tls,
             TlsMode::RequireNoVerify
         );
         // `DB_SSLMODE` outranks the URL's own, like every other `DB_*` part does.
@@ -749,6 +770,14 @@ mod tests {
                     "DB_URL",
                     "trino://coordinator:8080/hive?sslmode=verify-full"
                 ),
+                ("DB_SSLMODE", "disable"),
+            ])
+            .tls,
+            TlsMode::Disable
+        );
+        assert_eq!(
+            config(&[
+                ("DB_URL", "trino://coordinator:8080?sslmode=verify-full"),
                 ("DB_SSLMODE", "disable"),
             ])
             .tls,
@@ -796,6 +825,306 @@ mod tests {
         assert_eq!(
             config(&[("DB_KIND", "postgres"), ("DB_HOST", "db")]).tls,
             TlsMode::Prefer
+        );
+    }
+
+    /// The connection a bare URL describes, with no `DB_*` part beside it.
+    fn from(url: &str) -> ConnectionConfig {
+        config(&[("DB_URL", url)])
+    }
+
+    #[test]
+    fn a_url_with_no_path_parses_like_one_with_a_path() {
+        // The defect this file carried: the authority was split on `/` alone, so a
+        // URL with no path swallowed its query into the host —
+        // `trino://host:8080?sslmode=require` came out as the host
+        // `host:8080?sslmode=require`, `port=None`, `query=[]`. The query named a
+        // TLS mode and the connection ignored it: a URL that asked for encryption
+        // was opened in clear to a host no DNS resolves.
+        let bare = from("trino://host:8080?sslmode=require");
+        assert_eq!(bare.host, "host");
+        assert_eq!(bare.port, 8080);
+        assert_eq!(bare.tls, TlsMode::RequireNoVerify);
+
+        // The path is the only thing the two shapes can differ in; every part they
+        // share has to come out equal, which is what makes one parser safe here.
+        let with_path = from("trino://host:8080/catalog?sslmode=require");
+        assert_eq!(bare.host, with_path.host);
+        assert_eq!(bare.port, with_path.port);
+        assert_eq!(bare.tls, with_path.tls);
+        assert_eq!(bare.database, None);
+        assert_eq!(with_path.database.as_deref(), Some("catalog"));
+    }
+
+    #[test]
+    fn a_no_path_url_with_credentials_splits_its_userinfo_too() {
+        // Measured before the fix: host `host:8080?sslmode=require`, port `None`,
+        // and the password rule promoted the mode to `Require` (verify) because the
+        // URL's own `sslmode=require` had been lost — libpq's `require` is the
+        // opposite: encrypt without verifying.
+        let bare = from("trino://user:pass@host:8080?sslmode=require");
+        assert_eq!(bare.host, "host");
+        assert_eq!(bare.port, 8080);
+        assert_eq!(bare.user, "user");
+        assert_eq!(bare.password.as_deref(), Some("pass"));
+        assert_eq!(bare.tls, TlsMode::RequireNoVerify);
+
+        let with_path = from("trino://user:pass@host:8080/catalog?sslmode=require");
+        assert_eq!(bare.host, with_path.host);
+        assert_eq!(bare.port, with_path.port);
+        assert_eq!(bare.user, with_path.user);
+        assert_eq!(bare.tls, with_path.tls);
+    }
+
+    #[test]
+    fn a_url_with_neither_a_path_nor_a_query_is_unchanged() {
+        // The shape every stored URL that has no query already used, and the one the
+        // fix must leave alone: the authority still ends where it did.
+        let bare = from("trino://host:8080");
+        assert_eq!(bare.host, "host");
+        assert_eq!(bare.port, 8080);
+        assert_eq!(bare.tls, TlsMode::Disable);
+        assert_eq!(bare.database, None);
+        assert_eq!(bare.schema, None);
+    }
+
+    #[test]
+    fn a_fragment_is_not_part_of_the_host_nor_of_the_last_segment() {
+        // `urlparse` never puts a fragment in the host or the path. Read off the code
+        // before the fix, the old splitter kept it in both: `host/catalog#frag` named
+        // its catalog `catalog#frag`, and `host:8080#frag` put the whole tail in the
+        // host.
+        let with_path = from("trino://host:8080/catalog/schema#frag");
+        assert_eq!(with_path.host, "host");
+        assert_eq!(with_path.port, 8080);
+        assert_eq!(with_path.database.as_deref(), Some("catalog"));
+        assert_eq!(with_path.schema.as_deref(), Some("schema"));
+
+        let bare = from("trino://host:8080#frag");
+        assert_eq!(bare.host, "host");
+        assert_eq!(bare.port, 8080);
+        assert_eq!(bare.database, None);
+    }
+
+    #[test]
+    fn a_trailing_slash_parses_like_no_path_at_all() {
+        assert_eq!(from("trino://host:8080/").host, "host");
+        assert_eq!(from("trino://host:8080/").port, 8080);
+        assert_eq!(from("trino://host:8080/").database, None);
+        // And with a query behind it: an empty path still ends the authority.
+        let trailing = from("trino://host:8080/?sslmode=require");
+        assert_eq!(trailing.host, "host");
+        assert_eq!(trailing.port, 8080);
+        assert_eq!(trailing.tls, TlsMode::RequireNoVerify);
+        assert_eq!(trailing.database, None);
+    }
+
+    #[test]
+    fn an_ipv6_literal_keeps_its_brackets_and_still_finds_its_port() {
+        // The parser does support a bracketed literal: the brackets are carried into
+        // the host as written, where Python's `urlparse` would strip them — a
+        // difference older than this fix and left alone here, because changing it
+        // would move the host of every IPv6 connection.
+        let with_path = from("trino://[::1]:8080/catalog?sslmode=require");
+        assert_eq!(with_path.host, "[::1]");
+        assert_eq!(with_path.port, 8080);
+        assert_eq!(with_path.tls, TlsMode::RequireNoVerify);
+
+        // The shape that used to lose both the port and the query: the colon after
+        // the brackets was inside the swallowed query, so the port did not parse.
+        let bare = from("trino://[::1]:8080?sslmode=require");
+        assert_eq!(bare.host, "[::1]");
+        assert_eq!(bare.port, 8080);
+        assert_eq!(bare.tls, TlsMode::RequireNoVerify);
+
+        // No port at all, which the brackets have to keep working for.
+        let no_port = from("trino://[::1]?sslmode=require");
+        assert_eq!(no_port.host, "[::1]");
+        assert_eq!(no_port.port, 8080);
+        assert_eq!(no_port.tls, TlsMode::RequireNoVerify);
+    }
+
+    #[test]
+    fn an_absent_port_takes_each_engines_own_default() {
+        // Trino's follows the scheme; postgres and mysql pass 0 through, which is
+        // `ConnectionConfig`'s "the driver's default" and never port zero.
+        assert_eq!(from("trino://host?sslmode=require").port, 8080);
+        assert_eq!(from("https://host?sslmode=require").port, 443);
+        assert_eq!(
+            config(&[
+                ("DB_KIND", "postgres"),
+                ("DB_URL", "postgres://host?sslmode=require")
+            ])
+            .port,
+            0
+        );
+        assert_eq!(
+            config(&[
+                ("DB_KIND", "mysql"),
+                ("DB_URL", "mysql://host?sslmode=require")
+            ])
+            .port,
+            0
+        );
+        // `DB_PORT` outranks the URL's own absence and its own port alike.
+        assert_eq!(
+            config(&[
+                ("DB_URL", "trino://host?sslmode=require"),
+                ("DB_PORT", "8443")
+            ])
+            .port,
+            8443
+        );
+    }
+
+    #[test]
+    fn percent_encoded_credentials_are_decoded_in_every_shape() {
+        let bare = from("trino://us%40er:p%3Ass@host:8080?sslmode=require");
+        assert_eq!(bare.host, "host");
+        assert_eq!(bare.user, "us@er");
+        assert_eq!(bare.password.as_deref(), Some("p:ss"));
+        // A percent-encoded catalog segment in the shape that has one.
+        let with_path = from("trino://user@host:8080/h%69ve?sslmode=require");
+        assert_eq!(with_path.database.as_deref(), Some("hive"));
+    }
+
+    #[test]
+    fn an_empty_query_matches_no_query_and_a_valueless_one_matches_a_blank() {
+        // The two shapes a hand-written splitter gets wrong: `?` with nothing behind
+        // it, and one pair with no `=`. Both have to leave the connection exactly as
+        // the URL with no query at all would.
+        let none = from("trino://host:8080");
+        for url in ["trino://host:8080?", "trino://host:8080?sslmode"] {
+            let parsed = from(url);
+            assert_eq!(parsed.host, none.host, "{url}");
+            assert_eq!(parsed.port, none.port, "{url}");
+            assert_eq!(parsed.tls, none.tls, "{url}");
+        }
+        // And the pair after a valueless one is still found.
+        assert_eq!(
+            from("trino://host:8080?x&sslmode=require").tls,
+            TlsMode::RequireNoVerify
+        );
+    }
+
+    #[test]
+    fn the_other_two_engines_read_the_same_no_path_shape() {
+        // One parser, three engines: the postgres and mysql branches read the query
+        // from the same place, and their host is what the query used to be swallowed
+        // into.
+        let postgres = config(&[
+            ("DB_KIND", "postgres"),
+            (
+                "DB_URL",
+                "postgresql://user:pass@pg:5432/appdb?sslmode=require",
+            ),
+        ]);
+        assert_eq!(postgres.host, "pg");
+        assert_eq!(postgres.port, 5432);
+        assert_eq!(postgres.user, "user");
+        assert_eq!(postgres.database.as_deref(), Some("appdb"));
+        assert_eq!(postgres.tls, TlsMode::RequireNoVerify);
+
+        let postgres_bare = config(&[
+            ("DB_KIND", "postgres"),
+            ("DB_URL", "postgres://pg:5432?sslmode=require"),
+        ]);
+        assert_eq!(postgres_bare.host, "pg");
+        assert_eq!(postgres_bare.port, 5432);
+        assert_eq!(postgres_bare.tls, TlsMode::RequireNoVerify);
+
+        let mysql = config(&[
+            ("DB_KIND", "mysql"),
+            ("DB_URL", "mysql://user:pass@db:3306/shop?sslmode=require"),
+        ]);
+        assert_eq!(mysql.host, "db");
+        assert_eq!(mysql.port, 3306);
+        assert_eq!(mysql.database.as_deref(), Some("shop"));
+        assert_eq!(mysql.tls, TlsMode::RequireNoVerify);
+
+        let mysql_bare = config(&[
+            ("DB_KIND", "mysql"),
+            ("DB_URL", "mysql://db:3306?sslmode=require"),
+        ]);
+        assert_eq!(mysql_bare.host, "db");
+        assert_eq!(mysql_bare.port, 3306);
+        assert_eq!(mysql_bare.tls, TlsMode::RequireNoVerify);
+    }
+
+    #[test]
+    fn db_parts_still_outrank_every_shape_of_url() {
+        // The ordering the module docs promise, checked against the shape that was
+        // just repaired as well as the one that always worked.
+        for url in [
+            "trino://user:pass@host:8080/hive/analytics?sslmode=require",
+            "trino://user:pass@host:8080?sslmode=require",
+        ] {
+            let overridden = config(&[
+                ("DB_URL", url),
+                ("DB_HOST", "other"),
+                ("DB_PORT", "9000"),
+                ("DB_USER", "someone"),
+                ("DB_PASSWORD", "else"),
+                ("DB_DATABASE", "othercatalog"),
+                ("DB_SCHEMA", "otherschema"),
+                // `verify-full` is the URL's `require` raised, and the only pair of
+                // spellings the two branches cannot land on the same mode by accident.
+                ("DB_SSLMODE", "verify-full"),
+            ]);
+            assert_eq!(overridden.host, "other", "{url}");
+            assert_eq!(overridden.port, 9000, "{url}");
+            assert_eq!(overridden.user, "someone", "{url}");
+            assert_eq!(overridden.password.as_deref(), Some("else"), "{url}");
+            assert_eq!(
+                overridden.database.as_deref(),
+                Some("othercatalog"),
+                "{url}"
+            );
+            assert_eq!(overridden.schema.as_deref(), Some("otherschema"), "{url}");
+            assert_eq!(overridden.tls, TlsMode::Require, "{url}");
+        }
+
+        // And the same parts reach a bare URL with no path and no query at all.
+        let bare = config(&[
+            ("DB_URL", "trino://host:8080"),
+            ("DB_HOST", "other"),
+            ("DB_PORT", "9000"),
+            ("DB_DATABASE", "othercatalog"),
+        ]);
+        assert_eq!(bare.host, "other");
+        assert_eq!(bare.port, 9000);
+        assert_eq!(bare.database.as_deref(), Some("othercatalog"));
+    }
+
+    #[test]
+    fn an_unrecognised_sslmode_in_a_urls_query_is_refused_too() {
+        // The rule that a spelling nobody recognises is refused rather than treated
+        // as a default, reached through a URL instead of a setting. It has to hold
+        // for the shape with no path, which is where the query used to be invisible.
+        for url in [
+            "trino://host:8080/hive?sslmode=tls",
+            "trino://host:8080?sslmode=tls",
+        ] {
+            assert_eq!(
+                build(&settings(&[("DB_URL", url)])).unwrap_err(),
+                ConfigError::BadSSLMode("tls".to_owned()),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_with_no_host_is_refused_rather_than_read_as_a_host() {
+        // A blank authority is a `ConfigError::NoUrlHost`, never a host made out of
+        // what followed it: `trino://?sslmode=require` used to read as a host of
+        // `?sslmode=require`, because the query was never split off.
+        assert_eq!(
+            build(&settings(&[("DB_URL", "trino://?sslmode=require")])).unwrap_err(),
+            ConfigError::NoUrlHost("trino://?sslmode=require".to_owned())
+        );
+        assert_eq!(
+            build(&settings(&[("DB_URL", "trino:///hive")])).unwrap_err(),
+            ConfigError::NoUrlHost("trino:///hive".to_owned())
         );
     }
 }
