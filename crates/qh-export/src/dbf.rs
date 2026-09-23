@@ -22,6 +22,20 @@
 //! reported rather than logged, because the caller is the only one who can decide
 //! whether it mattered — and a silent truncation in an export is how someone
 //! discovers weeks later that their data was never all there.
+//!
+//! # The code page is the setting's, and the header says which
+//!
+//! `DBF_ENCODING` picks the code page a character field is written in, defaulting to
+//! the previous engine's `cp1252` ([`crate::encoding::Codec`]). The header's
+//! language-driver byte is written from the same choice rather than pinned, so the
+//! file no longer claims cp1252 while holding UTF-8 — which is what the previous
+//! engine did, because it hardcoded `0x03` whatever codec it had been given.
+//!
+//! A value is encoded **before** it is cut to the field's width, because a dBase field
+//! is a byte count and not a character count: that is the Python engine's order too
+//! (`raw.encode(…, "replace")` and then `out[:width]`). One consequence is worth
+//! knowing: a UTF-8 field can be cut in the middle of a character, since the width is
+//! bytes. It is the same file either engine writes.
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -30,6 +44,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use qh_core::{to_text, ColumnMeta, Value};
 
+use crate::encoding::Codec;
 use crate::{ExportError, ExportOptions, Writer};
 
 /// dBase III+ hard limit on one record, header included.
@@ -59,6 +74,9 @@ pub struct DbfWriter {
     out: BufWriter<File>,
     fields: Vec<Field>,
     record_len: usize,
+    /// The code page for character fields, resolved from `DBF_ENCODING` when the file
+    /// is opened so that an unknown name fails before the header is written.
+    codec: Codec,
     count: u32,
     truncated: usize,
 }
@@ -82,6 +100,10 @@ impl DbfWriter {
         let fields = plan_fields(columns, names, options.dbf_char_width)?;
         let record_len = 1 + fields.iter().map(|field| field.width).sum::<usize>();
 
+        // Resolved first, before any file exists: an unknown `DBF_ENCODING` must not
+        // leave a header behind that claims a code page nothing was written in.
+        let codec = Codec::resolve("DBF_ENCODING", &options.dbf_encoding)?;
+
         // Checked after planning, and this is a deliberate departure from the Python
         // engine rather than a copied behaviour: Python validates only when text
         // columns forced the budget calculation, so a query of 255 numeric columns
@@ -101,7 +123,7 @@ impl DbfWriter {
 
         let mut out = BufWriter::new(File::create(path)?);
         let header_len = 32 + 32 * fields.len() + 1;
-        out.write_all(&header(header_len, record_len))?;
+        out.write_all(&header(header_len, record_len, codec.language_driver()))?;
         for field in &fields {
             out.write_all(&field_descriptor(field))?;
         }
@@ -111,6 +133,7 @@ impl DbfWriter {
             out,
             fields,
             record_len,
+            codec,
             count: 0,
             truncated: 0,
         })
@@ -132,7 +155,7 @@ impl DbfWriter {
     /// but too wide", which is why it is this and not a truncated number. A truncated
     /// number would be a wrong number, and silently wrong is the one outcome an
     /// export must not produce.
-    fn encode(value: &Value, field: &Field) -> (Vec<u8>, bool) {
+    fn encode(value: &Value, field: &Field, codec: Codec) -> (Vec<u8>, bool) {
         let width = field.width;
         match field.kind {
             b'L' => {
@@ -189,7 +212,9 @@ impl DbfWriter {
                 let text = to_text(value)
                     .unwrap_or_default()
                     .replace(['\r', '\n'], " ");
-                let mut out = cp1252(&text);
+                // A character the chosen code page cannot hold becomes `?`, which is
+                // what Python's `errors="replace"` produced. See `crate::encoding`.
+                let mut out = codec.encode(&text);
                 let mut cut = false;
                 if out.len() > width {
                     cut = true;
@@ -208,7 +233,7 @@ impl Writer for DbfWriter {
         record.push(b' '); // not deleted
         let mut cut = 0usize;
         for (value, field) in row.iter().zip(self.fields.iter()) {
-            let (encoded, truncated) = Self::encode(value, field);
+            let (encoded, truncated) = Self::encode(value, field, self.codec);
             debug_assert_eq!(
                 encoded.len(),
                 field.width,
@@ -245,7 +270,10 @@ impl Writer for DbfWriter {
 }
 
 /// The 32-byte file header.
-fn header(header_len: usize, record_len: usize) -> Vec<u8> {
+///
+/// `language_driver` is byte 29: the code page the character fields were written in,
+/// as the format's own table spells it. See [`Codec::language_driver`].
+fn header(header_len: usize, record_len: usize, language_driver: u8) -> Vec<u8> {
     let (year, month, day) = today();
     let mut out = Vec::with_capacity(32);
     out.push(0x03); // dBase III+ without memo
@@ -258,7 +286,7 @@ fn header(header_len: usize, record_len: usize) -> Vec<u8> {
     out.extend_from_slice(&[0, 0]); // reserved
     out.extend_from_slice(&[0, 0]); // incomplete transaction, encryption
     out.extend_from_slice(&[0u8; 12]); // reserved
-    out.extend_from_slice(&[0, 0x03]); // mdx flag, language driver = cp1252
+    out.extend_from_slice(&[0, language_driver]); // mdx flag, language driver
     out.extend_from_slice(&[0, 0]); // reserved
     debug_assert_eq!(out.len(), 32);
     out
@@ -491,56 +519,10 @@ fn today() -> (i64, u8, u8) {
     (year, month as u8, day as u8)
 }
 
-/// cp1252, which is the DBF language driver's own default.
-///
-/// Two rules, and the second is the one that would be got wrong by assumption:
-/// `U+0000..=U+007F` and `U+00A0..=U+00FF` map to themselves, the twenty-seven
-/// punctuation characters below map to `0x80..=0x9F` — and **`U+0080..=U+009F` are
-/// not encodable at all**, because those byte positions are taken by the punctuation.
-/// Python's encoder answers `?` for them, which is what `errors="replace"` produces.
-fn cp1252(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len());
-    for character in text.chars() {
-        let code = character as u32;
-        if code <= 0x7F || (0xA0..=0xFF).contains(&code) {
-            out.push(code as u8);
-            continue;
-        }
-        match character {
-            '\u{20ac}' => out.push(0x80),
-            '\u{201a}' => out.push(0x82),
-            '\u{0192}' => out.push(0x83),
-            '\u{201e}' => out.push(0x84),
-            '\u{2026}' => out.push(0x85),
-            '\u{2020}' => out.push(0x86),
-            '\u{2021}' => out.push(0x87),
-            '\u{02c6}' => out.push(0x88),
-            '\u{2030}' => out.push(0x89),
-            '\u{0160}' => out.push(0x8a),
-            '\u{2039}' => out.push(0x8b),
-            '\u{0152}' => out.push(0x8c),
-            '\u{017d}' => out.push(0x8e),
-            '\u{2018}' => out.push(0x91),
-            '\u{2019}' => out.push(0x92),
-            '\u{201c}' => out.push(0x93),
-            '\u{201d}' => out.push(0x94),
-            '\u{2022}' => out.push(0x95),
-            '\u{2013}' => out.push(0x96),
-            '\u{2014}' => out.push(0x97),
-            '\u{02dc}' => out.push(0x98),
-            '\u{2122}' => out.push(0x99),
-            '\u{0161}' => out.push(0x9a),
-            '\u{203a}' => out.push(0x9b),
-            '\u{0153}' => out.push(0x9c),
-            '\u{017e}' => out.push(0x9e),
-            '\u{0178}' => out.push(0x9f),
-            // Unencodable, `U+0080..=U+009F` included. `errors="replace"` answers `?`.
-            _ => out.push(b'?'),
-        }
-    }
-    out
-}
-
+/// cp1252 used to be written out here as its own table. It is one of the pages
+/// [`crate::encoding::Codec`] holds now, because `DBF_ENCODING` can name others —
+/// see that module for the table, for where it came from, and for why a character a
+/// page cannot hold becomes `?` rather than an error.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,22 +660,141 @@ mod tests {
         );
     }
 
+    /// One text column of one row, in the code page `DBF_ENCODING` names.
+    ///
+    /// The field's bytes are read out of the file rather than composed, so that what is
+    /// asserted is what a reader would find: the header, the descriptor and the record
+    /// are all on the way.
+    fn one_text_row(value: &str, dbf_encoding: &str) -> (Vec<u8>, usize) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qh-dbf-encoding-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("row-{unique}.dbf"));
+        let options = ExportOptions {
+            dbf_encoding: dbf_encoding.to_owned(),
+            ..ExportOptions::default()
+        };
+        let columns = [ColumnMeta::new("name", "varchar")];
+        let mut writer = DbfWriter::new(&path, &columns, &options).expect("open");
+        writer
+            .write_row(&[Value::Text(value.into())])
+            .expect("write_row");
+        writer.finish().expect("finish");
+        let bytes = std::fs::read(&path).expect("read back");
+        (bytes, writer.truncated())
+    }
+
+    /// The first (and only) character field's bytes, as the file itself lays them out.
+    fn first_text_field(bytes: &[u8]) -> Vec<u8> {
+        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        // The first field descriptor starts at byte 32, and its width is its byte 16.
+        let width = bytes[32 + 16] as usize;
+        bytes[header_len + 1..header_len + 1 + width].to_vec()
+    }
+
+    /// The value without the field's space padding.
+    fn trimmed(field: &[u8]) -> Vec<u8> {
+        let end = field
+            .iter()
+            .rposition(|byte| *byte != b' ')
+            .map(|last| last + 1)
+            .unwrap_or(0);
+        field[..end].to_vec()
+    }
+
     #[test]
-    fn cp1252_maps_the_characters_it_can_and_answers_question_marks_for_the_rest() {
+    fn dbf_encoding_chooses_the_code_page_a_character_field_is_written_in() {
+        // The accented value in four code pages. They are not interchangeable: cp1252
+        // and latin-1 agree on é, the DOS pages put it at 0x82, and UTF-8 is two bytes.
+        let (bytes, _) = one_text_row("café", "cp1252");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"caf\xe9");
+        let (bytes, _) = one_text_row("café", "latin-1");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"caf\xe9");
+        let (bytes, _) = one_text_row("café", "cp437");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"caf\x82");
+        let (bytes, _) = one_text_row("café", "cp850");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"caf\x82");
+        let (bytes, _) = one_text_row("café", "utf-8");
+        assert_eq!(trimmed(&first_text_field(&bytes)), "café".as_bytes());
+        // And the default is still cp1252, which is what the golden comparison rests on.
+        let (bytes, _) = one_text_row("café", "cp1252");
+        assert_eq!(bytes[29], 0x03, "the language driver");
+    }
+
+    #[test]
+    fn the_language_driver_byte_follows_the_code_page() {
+        // Byte 29 is what a reader that trusts the header uses. Claiming cp1252 for a
+        // UTF-8 record is the lie this replaces: the previous engine always wrote 0x03.
+        let drivers = [
+            ("cp1252", 0x03),
+            ("cp437", 0x01),
+            ("cp850", 0x02),
+            // No dBase code page exists for these three, so the header says "unknown"
+            // rather than naming one that is wrong.
+            ("utf-8", 0x00),
+            ("latin-1", 0x00),
+            ("ascii", 0x00),
+        ];
+        for (name, expected) in drivers {
+            let (bytes, _) = one_text_row("x", name);
+            assert_eq!(bytes[29], expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_character_the_code_page_cannot_hold_becomes_one_question_mark() {
+        // Python's `errors="replace"`, which is what the previous engine wrote. One
+        // `?` per character, not per byte, and it is not a truncation: the value fits
+        // the field, it just cannot be spelled in this page.
+        let (bytes, truncated) = one_text_row("名前", "cp1252");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"??");
+        assert_eq!(truncated, 0, "a substitution is not a width cut");
+        // latin-1 has no room for them either, and cp437 does have a kroner sign where
+        // cp850 has an ø — the difference between the two DOS pages, on one value.
+        let (bytes, _) = one_text_row("名前", "latin-1");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"??");
+        let (bytes, _) = one_text_row("ø", "cp850");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"\x9b");
+        let (bytes, _) = one_text_row("ø", "cp437");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"?");
+        // UTF-8 takes them as they are, which is the reason to ask for it.
+        let (bytes, _) = one_text_row("名前", "utf-8");
+        assert_eq!(trimmed(&first_text_field(&bytes)), "名前".as_bytes());
+    }
+
+    #[test]
+    fn the_undefined_cp1252_bytes_are_still_question_marks() {
         // The part that would be got wrong by assumption: these bytes are *undefined*
-        // in cp1252's decoding table, so Python's encoder cannot produce them and
-        // answers `?`.
-        assert_eq!(cp1252("\u{81}"), b"?");
-        assert_eq!(cp1252("\u{8d}"), b"?");
-        assert_eq!(cp1252("\u{9d}"), b"?");
-        // The punctuation that occupies those byte positions instead.
-        assert_eq!(cp1252("€"), b"\x80");
-        assert_eq!(cp1252("—"), b"\x97");
-        assert_eq!(cp1252("ŒœŸ"), b"\x8c\x9c\x9f");
-        // Latin-1's own range passes through, which is what makes `café` work.
-        assert_eq!(cp1252("café"), b"caf\xe9");
-        // A character cp1252 has no room for at all.
-        assert_eq!(cp1252("名前"), b"??");
+        // in cp1252's decoding table, so Python's encoder cannot produce them. The
+        // table is in `crate::encoding` now; this pins it from the writer's side too,
+        // because the default is what an unconfigured export gets.
+        let (bytes, _) = one_text_row("\u{81}\u{8d}\u{8f}\u{90}\u{9d}", "cp1252");
+        assert_eq!(trimmed(&first_text_field(&bytes)), b"?????");
+    }
+
+    #[test]
+    fn an_unknown_dbf_encoding_is_refused_before_the_file_exists() {
+        let dir = std::env::temp_dir().join(format!("qh-dbf-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("never-written.dbf");
+        let options = ExportOptions {
+            dbf_encoding: "shift_jis".to_owned(),
+            ..ExportOptions::default()
+        };
+        let error = match DbfWriter::new(&path, &columns(), &options) {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown code page must be refused, not ignored"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.starts_with("unknown DBF_ENCODING 'shift_jis';"),
+            "{message}"
+        );
+        // The name has to be in the message, or the user is left guessing which of the
+        // two encoding settings was wrong.
+        assert!(message.contains("shift_jis"), "{message}");
+        assert!(!path.exists(), "a refused export must not leave a file");
     }
 
     /// The second record, one record length further on.

@@ -11,7 +11,7 @@ use std::path::Path;
 use qh_core::{to_text, ColumnMeta, Value};
 use serde_json::Value as Json;
 
-use crate::{escape, ExportError, ExportOptions, Format, Writer};
+use crate::{escape, Codec, ExportError, ExportOptions, Format, Writer};
 
 // --------------------------------------------------------------------------- //
 // text and csv
@@ -24,8 +24,15 @@ use crate::{escape, ExportError, ExportOptions, Format, Writer};
 /// inside a quoted field is doubled. Getting this wrong produces a file that opens
 /// fine and has the wrong number of columns, so it is spelled out rather than
 /// delegated to a guess.
+///
+/// The file is written in the code page [`ExportOptions::encoding`] names, which is
+/// what Python's `open(path, "w", encoding=…, errors="replace")` did. The text is
+/// built as a `String` and encoded on the way out, so quoting and the line terminator
+/// happen in characters — a delimiter that a code page can hold cannot be introduced
+/// by the encoding step, and a `\r\n` stays two bytes.
 pub struct DelimitedWriter {
     out: BufWriter<File>,
+    codec: Codec,
     delimiter: char,
     quotechar: char,
     lineterminator: String,
@@ -39,16 +46,21 @@ impl DelimitedWriter {
         options: &ExportOptions,
         csv: bool,
     ) -> Result<Self, ExportError> {
+        // Resolved before the file exists: an unknown name must not leave an empty file
+        // behind for the caller to wonder about.
+        let codec = Codec::resolve("ENCODING", &options.encoding)?;
         let mut out = BufWriter::new(File::create(path)?);
 
-        // Written before anything else so that Excel reads the file as UTF-8, which
-        // is what the Python engine's `bom` option did.
-        if options.bom {
+        // Written before anything else so that Excel reads the file as UTF-8, which is
+        // what the Python engine's `bom` option did — and only when the file really is
+        // UTF-8, the way Python gated it on the encoding name.
+        if options.bom && codec.is_utf8() {
             out.write_all("\u{feff}".as_bytes())?;
         }
 
         let mut writer = Self {
             out,
+            codec,
             // The format's own default, which is not the same as an empty delimiter.
             delimiter: options.delimiter.unwrap_or(if csv { ',' } else { '\t' }),
             quotechar: options.quotechar,
@@ -70,7 +82,7 @@ impl DelimitedWriter {
 
     fn write_fields(&mut self, fields: &[String]) -> Result<(), ExportError> {
         let text = self.render_fields(fields);
-        self.out.write_all(text.as_bytes())?;
+        self.out.write_all(&self.codec.encode(&text))?;
         Ok(())
     }
 
@@ -119,6 +131,12 @@ impl Writer for DelimitedWriter {
 }
 
 /// Format a chunk of rows for the parallel path.
+///
+/// The text is returned unencoded, because a `String` cannot hold a code page that is
+/// not UTF-8: whoever writes these chunks has to encode them with the same
+/// [`Codec`] the writer would have used, or `ENCODING` is lost on that path. Nothing
+/// drives it today — [`crate::render_rows`] is public for the day the render workers
+/// exist — so this is where the encoding step belongs when that caller arrives.
 pub(crate) fn render_delimited(
     format: Format,
     options: &ExportOptions,
@@ -684,6 +702,118 @@ mod tests {
         }
         writer.finish().expect("finish");
         std::fs::read_to_string(&path).expect("read back")
+    }
+
+    /// The same export, read back as bytes — for the tests whose point is that the file
+    /// is *not* UTF-8, which a `String` cannot hold.
+    fn write_bytes(
+        format: Format,
+        columns: &[ColumnMeta],
+        options: &ExportOptions,
+        rows: &[Vec<Value>],
+    ) -> Vec<u8> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qh-export-bytes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!(
+            "bytes-{}-{unique}.{}",
+            format.name(),
+            format.extension()
+        ));
+        let mut writer = crate::open(format, &path, columns, options).expect("open");
+        for row in rows {
+            writer.write_row(row).expect("write_row");
+        }
+        writer.finish().expect("finish");
+        std::fs::read(&path).expect("read back")
+    }
+
+    #[test]
+    fn encoding_names_the_code_page_a_delimited_file_is_written_in() {
+        let rows = [vec![Value::Text("café — 名前".into())]];
+        let write = |encoding: &str| {
+            let options = ExportOptions {
+                encoding: encoding.to_owned(),
+                ..ExportOptions::default()
+            };
+            write_bytes(Format::Csv, &columns(&["a"]), &options, &rows)
+        };
+
+        // UTF-8 is the default and holds everything.
+        assert_eq!(write("utf-8"), "a\r\ncafé — 名前\r\n".as_bytes());
+        // cp1252 keeps the accented text and the em dash, and answers `?` for the two
+        // characters it has no byte for — Python's `errors="replace"`.
+        assert_eq!(write("cp1252"), b"a\r\ncaf\xe9 \x97 ??\r\n");
+        // latin-1 keeps é and refuses the em dash: U+2014 is not in it, while cp1252 has
+        // it at 0x97. This is the pair that must not be folded into one code page.
+        assert_eq!(write("latin-1"), b"a\r\ncaf\xe9 ? ??\r\n");
+        // The DOS pages put é at 0x82, and agree on the rest of this value.
+        assert_eq!(write("cp437"), b"a\r\ncaf\x82 ? ??\r\n");
+        // And the same writer with a tab: `txt` takes `ENCODING` too, since both
+        // formats are one `DelimitedWriter`.
+        let options = ExportOptions {
+            encoding: "latin-1".to_owned(),
+            ..ExportOptions::default()
+        };
+        assert_eq!(
+            write_bytes(
+                Format::Text,
+                &columns(&["a", "b"]),
+                &options,
+                &[vec![Value::Text("café".into()), Value::Text("—".into())]],
+            ),
+            b"a\tb\r\ncaf\xe9\t?\r\n"
+        );
+    }
+
+    #[test]
+    fn a_bom_is_only_written_for_utf_8() {
+        // The Python engine gated its BOM on the encoding name, and it has to: three
+        // UTF-8 bytes at the head of a cp1252 file are not a byte-order mark, they are
+        // corruption.
+        let rows = [vec![Value::Text("café".into())]];
+        let options = ExportOptions {
+            bom: true,
+            encoding: "cp1252".to_owned(),
+            ..ExportOptions::default()
+        };
+        let got = write_bytes(Format::Csv, &columns(&["a"]), &options, &rows);
+        assert_eq!(
+            got, b"a\r\ncaf\xe9\r\n",
+            "no BOM for a file that is not UTF-8"
+        );
+        // And the UTF-8 case still gets one.
+        let options = ExportOptions {
+            bom: true,
+            ..ExportOptions::default()
+        };
+        let got = write_bytes(Format::Csv, &columns(&["a"]), &options, &rows);
+        assert!(got.starts_with("\u{feff}".as_bytes()), "the BOM leads");
+    }
+
+    #[test]
+    fn an_unknown_encoding_is_refused_and_no_file_is_left_behind() {
+        let dir = std::env::temp_dir().join(format!("qh-export-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("never-written.csv");
+        let options = ExportOptions {
+            encoding: "utf-7".to_owned(),
+            ..ExportOptions::default()
+        };
+        let error = match crate::open(Format::Csv, &path, &columns(&["a"]), &options) {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown code page must be refused, not ignored"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.starts_with("unknown ENCODING 'utf-7';"),
+            "{message}"
+        );
+        assert!(!path.exists(), "a refused export must not leave a file");
+        // A format that does not take an encoding at all is unaffected: this is Python's
+        // behaviour too, because its JSON writer never read the option.
+        assert!(crate::open(Format::Json, &path, &columns(&["a"]), &options).is_ok());
     }
 
     #[test]

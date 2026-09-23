@@ -39,16 +39,37 @@
 //! [`plan`] is the layer above: it decides how many files an export becomes and what
 //! they are called.
 //!
+//! # Which writers are text, and what `ENCODING` does to them
+//!
+//! `ENCODING` and `DBF_ENCODING` reach the writers that produce text: `txt` and `csv`
+//! take [`ExportOptions::encoding`], `dbf` takes [`ExportOptions::dbf_encoding`], and
+//! three of the other writers take neither because the format does not have a text
+//! encoding in that sense:
+//!
+//! - `json` must be UTF-8 by its own specification, and Python's writer said so by
+//!   hardcoding `encoding="utf-8"` next to the `ensure_ascii=False` that keeps the
+//!   characters.
+//! - `xml` declares its encoding in the prolog this crate writes, so a different
+//!   `ENCODING` would produce a file that announces UTF-8 and is not.
+//! - `html` declares `<meta charset="utf-8">` in the head, for the same reason.
+//! - `sql` was hardcoded UTF-8 in Python too. A script's encoding is the client's
+//!   business, and every database client reads UTF-8 or is told otherwise by a flag
+//!   this export cannot set.
+//! - `xlsx` and `xls` are containers: the text inside them is encoded by the format
+//!   (`UTF-8` XML parts, or BIFF8's own string table), so a code page choice would
+//!   have nowhere to go.
+//!
+//! See [`encoding`] for the code pages that are accepted, what an unknown name does,
+//! and what happens to a character the chosen code page cannot hold.
+//!
 //! # What is deliberately not here yet
 //!
-//! - `encoding`: the Python engine could write any codec with `errors="replace"`.
-//!   This crate writes UTF-8. A writer that silently re-encoded would be worse than
-//!   one that cannot, so there is no option pretending otherwise.
 //! - `bundle`, which zipped a multi-part export into one download. It needs a
 //!   deflate implementation, and a stored-only zip of a 2 GB export is not an
 //!   improvement on four files.
 
 mod dbf;
+pub mod encoding;
 pub mod plan;
 mod writers;
 mod xls;
@@ -62,6 +83,7 @@ use qh_core::{ColumnMeta, Value};
 use thiserror::Error;
 
 pub use dbf::DbfWriter;
+pub use encoding::Codec;
 pub use plan::{export_rows, ExportOutcome, ExportSpec, Exporter};
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
 pub use xls::XlsWriter;
@@ -217,7 +239,18 @@ pub struct ExportOptions {
     /// `\r\n`, which is what the Python engine writes and what Excel expects.
     pub lineterminator: String,
     /// A UTF-8 byte-order mark, so Excel opens a UTF-8 CSV correctly.
+    ///
+    /// Written only when the file really is UTF-8: the Python engine gated it the same
+    /// way (`if opts.get("bom") and encoding.lower().replace("-", "") == "utf8"`), and a
+    /// UTF-8 BOM at the head of a cp1252 file is three bytes of nonsense.
     pub bom: bool,
+    /// The code page for `txt` and `csv`, by name — Python's own `ENCODING`, which
+    /// reaches only the two delimited formats (see the module docs for why the others
+    /// do not take one). `utf-8` unless the caller says otherwise.
+    ///
+    /// Resolved when the writer opens, so an unknown name fails before a file exists
+    /// rather than halfway through writing one.
+    pub encoding: String,
     /// One JSON object per line instead of an array.
     pub jsonl: bool,
     /// Indent for the JSON array form.
@@ -232,6 +265,10 @@ pub struct ExportOptions {
     pub sql_table: Option<String>,
     /// Width for a `dbf` text column, before the 4000-byte record budget trims it.
     pub dbf_char_width: usize,
+    /// The code page a `dbf` character field is written in, by name — Python's own
+    /// `DBF_ENCODING`, whose default is `cp1252` and whose byte is also what the
+    /// header's language-driver field claims (see [`Codec::language_driver`]).
+    pub dbf_encoding: String,
     /// Worksheet name for `xlsx` and `xls`. `None` is `Sheet1`, and the format's
     /// 31-character limit is applied rather than refused.
     pub sheet: Option<String>,
@@ -246,6 +283,9 @@ impl Default for ExportOptions {
             null_text: String::new(),
             lineterminator: "\r\n".to_owned(),
             bom: false,
+            // Both defaults are the Python engine's `format_opts`, which are also what
+            // the settings layer falls back to when the env carries neither name.
+            encoding: "utf-8".to_owned(),
             jsonl: false,
             indent: 2,
             xml_root: "RECORDS".to_owned(),
@@ -257,6 +297,7 @@ impl Default for ExportOptions {
             sql_rows_per_insert: 200,
             sql_table: None,
             dbf_char_width: 254,
+            dbf_encoding: "cp1252".to_owned(),
             sheet: None,
         }
     }
