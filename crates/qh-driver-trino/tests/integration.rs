@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use qh_core::{FailureKind, Value};
+use qh_core::{FailureKind, IntervalValue, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Driver, DriverKind, ExecuteOptions, ObjectPath, Session, TlsMode,
 };
@@ -166,6 +166,64 @@ async fn a_decimal_keeps_every_digit_through_the_real_protocol() {
             unscaled: 12_345_678_901_234_567_890_123_456_781_234_567_890,
             scale: 10,
         }
+    );
+}
+
+#[tokio::test]
+async fn both_interval_kinds_survive_the_real_protocol() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The only type this driver once left unmodelled, so the unit tests for it check
+    // the decoder against text this file has to keep honest. Measured on 483, the
+    // three expressions and what the coordinator said for each:
+    //
+    //   INTERVAL '3' DAY + INTERVAL '4' HOUR + INTERVAL '5' MINUTE + INTERVAL '6' SECOND
+    //     type: INTERVAL DAY TO SECOND     value: "3 04:05:06.000"
+    //   INTERVAL '2-3' YEAR TO MONTH
+    //     type: INTERVAL YEAR TO MONTH     value: "2-3"
+    //   INTERVAL '-3' DAY + INTERVAL '-4' HOUR
+    //     type: INTERVAL DAY TO SECOND     value: "-3 04:00:00.000"
+    //
+    // The type name is upper case here and lower case for every other type Trino
+    // reports, which is asserted rather than assumed. The negative value is the one
+    // whose sign covers both fields: read as -3 days *plus* 4 hours it would be an
+    // interval 8 hours from the server's own reading of it.
+    let rows = rows(
+        &mut session,
+        "SELECT INTERVAL '3' DAY + INTERVAL '4' HOUR + INTERVAL '5' MINUTE + INTERVAL '6' SECOND, \
+         INTERVAL '2-3' YEAR TO MONTH, \
+         INTERVAL '-3' DAY + INTERVAL '-4' HOUR",
+    )
+    .await;
+    assert_eq!(
+        rows[0],
+        vec![
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 3,
+                micros: 14_706_000_000,
+            }),
+            Value::Interval(IntervalValue {
+                months: 27,
+                days: 0,
+                micros: 0,
+            }),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: -3,
+                micros: -14_400_000_000,
+            }),
+        ]
+    );
+
+    // And the cell's text is the shared renderer's, not the wire's: `3 04:05:06.000`
+    // would mean this driver formatted it itself.
+    assert_eq!(rows[0][0].render_text().as_deref(), Some("3 days, 4:05:06"));
+    assert_eq!(
+        rows[0][1].render_text().as_deref(),
+        Some("27 months, 0:00:00")
     );
 }
 

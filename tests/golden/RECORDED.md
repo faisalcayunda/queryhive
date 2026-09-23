@@ -333,10 +333,12 @@ symptom as if it were the contract, and if it survives, this case has to be
 `ACCEPTED` for a reason that is not true. It needs to be settled before the id
 is listed either way.
 
-The interval text in the same case (`"3 days, 4:05:06"` against
-`3 04:05:06.000`) is a separate difference and the same shape as the delta
-`docs/golden-deltas.md` already describes for the in-process case, except that
-the body differs too, not only the quotes.
+The interval text in the same case (`"3 days, 4:05:06"` against `3 04:05:06.000`)
+was a separate difference, and for a while a bigger one than the delta
+`docs/golden-deltas.md` describes for the in-process case: the body differed too,
+not only the quotes, because Trino's interval had no decoder and the wire text was
+passed through. That is closed -- see the section at the end of this file. The body
+now agrees and only the quotes remain, which is exactly D-2.
 
 ### Trino: `explain` does not strip the caller's semicolon
 
@@ -487,10 +489,11 @@ kasus yang disebut; sisanya belum berubah.
 Dua sel yang masih berbeda di `trino_type_zoo_live`, keduanya sudah punya sebab:
 
 - `tiny_negative`: `-1E-10` melawan `-0.0000000001` — D-1, perbaikan disengaja.
-- `an_interval`: `"3 days, 4:05:06"` melawan `3 04:05:06.000`. D-2 hanya mencakup bagian kutipnya;
-  **badan teksnya masih berbeda**, karena Trino `INTERVAL DAY TO SECOND` belum punya decoder di
-  model nilai ini sehingga engine Rust meneruskan teks wire apa adanya. Itu celah decoder, bukan
-  soal kapabilitas, dan menutupnya mengubah setiap grid dan ekspor yang memuat interval.
+- `an_interval`: `"3 days, 4:05:06"` melawan `3 days, 4:05:06` -- **hanya kutipnya**, yaitu D-2.
+  Sebelum ini badannya juga berbeda (`3 04:05:06.000`), karena Trino `INTERVAL DAY TO SECOND` belum
+  punya decoder sehingga teks wire diteruskan apa adanya. Decoder itu sekarang ada: kedua jenis
+  interval Trino (`DAY TO SECOND` dan `YEAR TO MONTH`) masuk ke model nilai dan memakai perender
+  yang sama dengan PostgreSQL, jadi selisihnya tinggal kutip -- sama seperti kasus Postgres.
 
 Penolakan `catalogs` itu ternyata **bukan** di driver. Driver PostgreSQL sudah menjawabnya, dan
 yang menolak lebih dulu adalah gate di `crates/qh-ffi/src/commands.rs`, yang membaca

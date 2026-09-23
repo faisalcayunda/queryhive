@@ -44,12 +44,14 @@
 //! | `date` | `"2026-01-31"` |
 //! | `timestamp(6) with time zone` | `"2026-01-31 12:00:00.123456 +07:00"` |
 //! | `time(6)` | `"23:59:59.999999"` |
+//! | `interval day to second` | **string**, `"3 04:05:06.000"` |
+//! | `interval year to month` | **string**, `"2-3"` |
 //!
 //! The two precision-bearing rows are what the capability buys; without it the same
 //! value arrives typed `timestamp with time zone` / `time` and rounded, and both
 //! spellings decode through the same branches below.
 
-use qh_core::Value;
+use qh_core::{IntervalValue, Value};
 use serde_json::Value as Json;
 
 /// Decode one cell, given the type text Trino reported for its column.
@@ -162,9 +164,26 @@ pub fn decode(type_text: &str, value: &Json) -> Value {
             _ => unmodelled(type_text, value),
         },
 
-        // Geometry, `inet`, `interval`, and anything a future Trino adds. A
-        // normal outcome, not a defect: the text form is kept so the grid shows
-        // something and an export can still write it.
+        // Trino's two interval types, and the only branches here whose type name
+        // arrives in upper case: measured against 483, the column says
+        // `INTERVAL DAY TO SECOND` where every other type is lower case, so these
+        // two comparisons cannot be plain `match` patterns.
+        _ if base.eq_ignore_ascii_case("interval day to second") => {
+            match value.as_str().and_then(parse_interval_day_to_second) {
+                Some(interval) => Value::Interval(interval),
+                None => unmodelled(type_text, value),
+            }
+        }
+        _ if base.eq_ignore_ascii_case("interval year to month") => {
+            match value.as_str().and_then(parse_interval_year_to_month) {
+                Some(interval) => Value::Interval(interval),
+                None => unmodelled(type_text, value),
+            }
+        }
+
+        // Geometry, `inet`, and anything a future Trino adds. A normal outcome, not
+        // a defect: the text form is kept so the grid shows something and an export
+        // can still write it.
         _ => unmodelled(type_text, value),
     }
 }
@@ -331,6 +350,83 @@ fn parse_time_micros(text: &str) -> Option<i64> {
             + seconds * 1_000_000
             + fraction_to_micros(fraction)?,
     )
+}
+
+/// `"3 04:05:06.000"` as an [`IntervalValue`], with months left at zero.
+///
+/// The sign is a property of the **whole interval**, not of the day field, and that
+/// is the fact this function exists to get right. Measured against 483, three
+/// expressions and nothing else between them:
+///
+/// ```text
+/// INTERVAL '-3' DAY + INTERVAL '-4' HOUR   -3 04:00:00.000   -(3d 4h)
+/// INTERVAL '-3' DAY + INTERVAL  '4' HOUR   -2 20:00:00.000   -(2d 20h)
+/// INTERVAL  '1' DAY - INTERVAL  '4' HOUR    0 20:00:00.000
+/// INTERVAL '-4' HOUR                       -0 04:00:00.000   -4h, and the days are "-0"
+/// ```
+///
+/// So `-3 04:00:00.000` is not three negative days with four positive hours: the
+/// server normalises to a magnitude plus one sign, and the second row is that
+/// normalisation visible (`-68h` printed as `-(2d 20h)`). Reading the two fields with
+/// independent signs would put a value on screen that is 8 hours away from the one
+/// the server sent.
+///
+/// `"-0"` is why the sign is read from the text rather than left to `parse`, which
+/// answers zero for `-0` and would turn the third measurement — the ordinary case of a
+/// negative sub-day interval — into a positive one.
+///
+/// **The wire carries milliseconds and no more.** `INTERVAL '6.000007' SECOND` comes
+/// back as `0 00:00:06.000`, because `INTERVAL DAY TO SECOND` is stored in millis on
+/// the server, so the `micros` this produces is always a multiple of 1000 and the
+/// truncation happened before the driver saw it. Nothing is thrown away here.
+fn parse_interval_day_to_second(text: &str) -> Option<IntervalValue> {
+    let (days_text, clock_text) = text.trim().split_once(' ')?;
+    let negative = days_text.starts_with('-');
+    let days: i64 = days_text.trim_start_matches(['+', '-']).parse().ok()?;
+    let clock = parse_time_micros(clock_text)?;
+
+    let sign = if negative { -1 } else { 1 };
+    Some(IntervalValue {
+        months: 0,
+        days: i32::try_from(sign * days).ok()?,
+        micros: sign * clock,
+    })
+}
+
+/// `"2-3"` as an [`IntervalValue`]: two years, three months, so 27 months.
+///
+/// Years are folded into **months** and never into days. A year is exactly twelve
+/// months, so that fold is lossless and reversible; a month is not a fixed number of
+/// days, so the other fold is not, and it is what the previous engine's `timedelta`
+/// did when it turned a calendar interval into `428 days`. [`IntervalValue`] has no
+/// year field, so months is the only place a year can go — the same constraint, and
+/// the same choice, as PostgreSQL's decoder
+/// (`crates/qh-driver-postgres/src/normalize.rs`, `parse_interval`).
+///
+/// The sign leads the whole value, as in `-1-9` for
+/// `INTERVAL '-2' YEAR + INTERVAL '3' MONTH` — 21 months, normalised by the server so
+/// the month field is always under twelve, once more with the magnitude and the sign
+/// kept apart.
+fn parse_interval_year_to_month(text: &str) -> Option<IntervalValue> {
+    let text = text.trim();
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (years, months) = rest.split_once('-')?;
+    let total = years
+        .trim()
+        .parse::<i64>()
+        .ok()?
+        .checked_mul(12)?
+        .checked_add(months.trim().parse().ok()?)?;
+
+    let sign = if negative { -1 } else { 1 };
+    Some(IntervalValue {
+        months: i32::try_from(sign * total).ok()?,
+        days: 0,
+        micros: 0,
+    })
 }
 
 /// `"2026-01-31 12:00:00.123"`, optionally with `" UTC"` or `"+07:00"`.
@@ -757,6 +853,172 @@ mod tests {
         assert_eq!(
             decode("time", &json("\"00:00:00.1\"")),
             Value::Time { micros: 100_000 }
+        );
+    }
+
+    #[test]
+    fn both_interval_spellings_become_an_interval_value() {
+        // The column type is upper case on the wire, unlike every other type name,
+        // so both arms are matched without case — these two type texts are the ones
+        // a real 483 coordinator reported for the two expressions below.
+        let day_to_second = decode("INTERVAL DAY TO SECOND", &json("\"3 04:05:06.000\""));
+        assert_eq!(
+            day_to_second,
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 3,
+                micros: 14_706_000_000
+            })
+        );
+        // The point of the change: the cell reaches the shared renderer, which is the
+        // same one PostgreSQL's interval goes through, rather than the wire text
+        // `3 04:05:06.000` being passed straight to the grid.
+        assert_eq!(
+            day_to_second.render_text().as_deref(),
+            Some("3 days, 4:05:06")
+        );
+
+        let year_to_month = decode("INTERVAL YEAR TO MONTH", &json("\"2-3\""));
+        assert_eq!(
+            year_to_month,
+            Value::Interval(IntervalValue {
+                months: 27,
+                days: 0,
+                micros: 0
+            })
+        );
+        // Months, not days: a year is exactly twelve months, a month is not 30 days.
+        // `IntervalValue` has no year field, so 2y3m can only be 27 months.
+        assert_eq!(
+            year_to_month.render_text().as_deref(),
+            Some("27 months, 0:00:00")
+        );
+    }
+
+    #[test]
+    fn the_intervals_sign_covers_both_fields() {
+        // `-3 04:00:00.000` is -(3d 4h), not -3d +4h: the server normalises to a
+        // magnitude and one leading sign. Reading the fields independently would put
+        // a value on screen 8 hours from the one sent.
+        assert_eq!(
+            decode("interval day to second", &json("\"-3 04:00:00.000\"")),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: -3,
+                micros: -14_400_000_000
+            })
+        );
+        assert_eq!(
+            decode("interval day to second", &json("\"-2 20:00:00.000\"")),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: -2,
+                micros: -72_000_000_000
+            })
+        );
+
+        // `-0 04:00:00.000` is the negative sub-day case, and `"-0".parse()` is 0:
+        // the sign has to be read off the text, or this decodes as +4 hours.
+        let negative_hours = decode("interval day to second", &json("\"-0 04:00:00.000\""));
+        assert_eq!(
+            negative_hours,
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                micros: -14_400_000_000
+            })
+        );
+        assert_eq!(negative_hours.render_text().as_deref(), Some("-4:00:00"));
+
+        // A negative year-to-month leads with its sign, and the server has already
+        // normalised -2y+3m into -1y9m.
+        assert_eq!(
+            decode("interval year to month", &json("\"-1-9\"")),
+            Value::Interval(IntervalValue {
+                months: -21,
+                days: 0,
+                micros: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_zero_interval_and_a_millisecond_one_keep_their_reading() {
+        // `INTERVAL '0' SECOND` is measured as `0 00:00:00.000`, and it renders the
+        // way Python's `str(timedelta(0))` did.
+        let zero = decode("interval day to second", &json("\"0 00:00:00.000\""));
+        assert_eq!(
+            zero,
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                micros: 0
+            })
+        );
+        assert_eq!(zero.render_text().as_deref(), Some("0:00:00"));
+
+        // The sub-second part survives as far as the wire carries it:
+        // `INTERVAL '1.5' SECOND` is `0 00:00:01.500`.
+        assert_eq!(
+            decode("interval day to second", &json("\"0 00:00:01.500\"")),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                micros: 1_500_000
+            })
+        );
+        // Three fraction digits always, so `.000` is not `None`: `INTERVAL '9' SECOND`
+        // is `0 00:00:09.000`.
+        assert_eq!(
+            decode("interval day to second", &json("\"0 00:00:09.000\"")),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 0,
+                micros: 9_000_000
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_interval_is_unmodelled_rather_than_a_panic() {
+        // Same rule as every other branch: a server that changes its encoding
+        // degrades, it does not take the process down.
+        for (type_text, payload) in [
+            ("interval day to second", "\"not an interval\""),
+            ("interval day to second", "\"3 4:05\""),
+            ("interval day to second", "5"),
+            // A year-to-month has to have the `-`, or there is no second field.
+            ("interval year to month", "\"27\""),
+            ("interval year to month", "\"2-3-4\""),
+        ] {
+            match decode(type_text, &json(payload)) {
+                Value::Unknown { .. } => {}
+                other => panic!("{type_text} with {payload} should be unmodelled, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_interval_keeps_its_case_insensitive_type_name() {
+        // `array(INTERVAL DAY TO SECOND)` — the element type text travels inside the
+        // parentheses and is upper case there too.
+        assert_eq!(
+            decode(
+                "array(INTERVAL DAY TO SECOND)",
+                &json("[\"1 00:00:00.000\", \"-0 00:00:30.000\"]")
+            ),
+            Value::Array(vec![
+                Value::Interval(IntervalValue {
+                    months: 0,
+                    days: 1,
+                    micros: 0
+                }),
+                Value::Interval(IntervalValue {
+                    months: 0,
+                    days: 0,
+                    micros: -30_000_000
+                }),
+            ])
         );
     }
 
