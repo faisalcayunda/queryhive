@@ -601,6 +601,28 @@ URL Trino tanpa path menelan `?sslmode=` ke dalam host (cacat lama, mengubah par
 semua URL). Aplikasi belum bisa menyatakan `Prefer` untuk Trino, dan `verify` adalah medan mati
 selama `scheme=http`.
 
+### Keputusan sapu bersih (23 Sep 2026)
+
+Diputuskan Faisal, dan berlaku sampai ia diubah.
+
+**Mesin Python lama disimpan sampai `RustEngine` mendarat, lalu dibuang dalam satu perubahan yang
+sama.** Yang dimaksud: paket `exporter/` (8 berkas plus `static/`), `app.py`,
+`app/engine/queryhive_engine.py`, `app/engine-requirements.txt`, dan enam berkas uji mesin lama di
+`tests/`. Alasannya bukan kesopanan pada kode lama, melainkan dua hal yang bisa diperiksa:
+`DatabaseEngine.swift:45` menetapkan `Engine.current = PythonEngine()` dan `Engine.swift:25`
+menjalankan `queryhive_engine.py`, jadi aplikasi hari ini berjalan **di atas** mesin itu -- membuangnya
+lebih dulu meninggalkan aplikasi tanpa mesin sampai Fase 2 selesai. Dan `tests/golden/**` adalah
+**rekaman jawaban mesin itu**: dasar pembanding setiap keputusan paritas ikut hilang bersamanya.
+Penggantinya: penghapusan dilakukan dalam perubahan yang sama dengan `Engine.current = RustEngine()`,
+supaya tidak pernah ada jendela waktu aplikasi tanpa mesin.
+
+**Artefak build dan cruft boleh dibuang; `backup.zip` tidak.** `app/dist` (156 MB), `app/.engine`
+(80 MB) dan `build/` (32 MB) semuanya dapat dibangun ulang oleh `build_dmg.sh`/`build-engine.sh`,
+ditambah `__MACOSX/`, berkas `.DS_Store`, dan `.qh-patch.py` (skrip sekali-pakai milik agen).
+`backup.zip` (80 MB) adalah arsip isi repo 14 Agustus dan sengaja dipertahankan. Perlu diingat saat
+membuang `app/dist`: di dalamnya ada aplikasi yang sudah terbangun, jadi ia harus dibangun ulang
+sebelum dipakai lagi.
+
 ## Tugas berikutnya (urutan yang dikerjakan)
 
 Daftar ini diperbarui 23 Sep 2026. Sembilan item sebelumnya sudah selesai -- termasuk K11 dan K12
