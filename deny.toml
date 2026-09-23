@@ -52,13 +52,20 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "uniffi_meta" },
     { allow = ["MPL-2.0"], crate = "uniffi_pipeline" },
     { allow = ["MPL-2.0"], crate = "uniffi_udl" },
-]
 
-# NOT covered, on purpose: `CDLA-Permissive-2.0` on `webpki-roots` 0.26.11 and
-# 1.0.9 and `webpki-root-certs` 1.0.9 (the Mozilla CA root data, reached through
-# `reqwest`/`hyper-rustls`, `mysql_async` and `rustls-platform-verifier`).
-# ADR-0002's allow-list does not include it and no ADR has granted it, so
-# `cargo deny check licenses` fails on those three packages today. Whether to
-# grant a second exception is a separate licence decision with its own ADR —
-# writing it into this file without one is exactly the silent broadening the
-# `exceptions` block above is shaped to prevent.
+    # The second exception, for bundled Mozilla CA root certificate data.
+    #
+    # ADR-0012 records why CDLA-Permissive-2.0 is acceptable here: it is data-level
+    # copyleft, the workspace does not modify the root certificate data itself, and
+    # distributing the data unmodified is explicitly allowed (§2.1). The source is
+    # publicly available at crates.io, and using the data to verify TLS connections
+    # (i.e., producing Results as defined in §1.7) carries no licensing obligation.
+    #
+    # The three crates are the webpki-roots family, reached through reqwest,
+    # mysql_async, and rustls-platform-verifier. They are exceptions rather than
+    # allow entries for the same reason as MPL-2.0 above: a future unrelated crate
+    # that arrives CDLA-Permissive-licensed must still argue for itself in an ADR.
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "=0.26.11" },
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "=1.0.9" },
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs", version = "=1.0.9" },
+]
