@@ -8,14 +8,18 @@
 
 ```bash
 deploy/dev/up.sh all
-python3 deploy/dev/bench_fetch.py --kind postgres --label baseline-python
-python3 deploy/dev/bench_fetch.py --kind mysql    --label baseline-python
+python3 deploy/dev/bench_fetch.py --engine python --kind postgres --label <sesi> --repeat 3
+python3 deploy/dev/bench_fetch.py --engine python --kind mysql    --label <sesi> --repeat 3
+cargo build --release --bin queryhive-engine
+python3 deploy/dev/bench_fetch.py --engine rust   --kind postgres --label <sesi> --repeat 3
+python3 deploy/dev/bench_fetch.py --engine rust   --kind mysql    --label <sesi> --repeat 3
 python3 deploy/dev/bench_fetch.py --report-only
 ```
 
-Engine dijalankan sebagai proses anak persis seperti aplikasi menjalankannya, setiap baris
-stdout-nya diberi cap waktu saat tiba. Dua angka time-to-first-row dilaporkan karena
-keduanya berguna dan hanya salah satunya cocok untuk target §6:
+Kedua engine dijalankan lewat harness yang sama, membaca nama setelan yang sama dari
+environment, dengan perintah `preview` yang setara. Setiap baris stdout-nya diberi cap waktu
+saat tiba. Dua angka time-to-first-row dilaporkan karena keduanya berguna dan hanya salah
+satunya cocok untuk target §6:
 
 - **dari connect** — jarak dari event `step connect` ke event `rows` pertama. Engine
   mengirim `step connect` sebelum menyentuh jaringan, jadi ini connect + submit + halaman
@@ -27,41 +31,65 @@ keduanya berguna dan hanya salah satunya cocok untuk target §6:
 Menganchor pada event `columns` akan salah: event itu baru muncul setelah halaman pertama
 sudah ada, sehingga selisihnya hampir nol dan menyembunyikan seluruh waktu tunggu.
 
-**Throughput** dihitung antara baris pertama dan baris terakhir, sehingga waktu start dan
-connect tidak ikut dihitung sebagai kecepatan fetch. **Peak RSS** dibaca dari
-`/usr/bin/time -l`, yang melaporkan puncak satu proses anak, bukan angka kumulatif.
+**elapsed_ms** adalah angka engine sendiri, diambil dari event `done`. Kedua engine
+menstempelnya tepat sebelum mengirim `step connect`, jadi cakupannya sama di kedua sisi
+(connect + fetch + emit) dan tidak memuat waktu start proses — inilah satu-satunya angka
+yang mengukur rentang identik tanpa penjadwalan harness di tengahnya. **Throughput**
+dihitung antara baris pertama dan baris terakhir, sehingga waktu start dan connect tidak
+ikut dihitung sebagai kecepatan fetch. **Peak RSS** dibaca dari `/usr/bin/time -l`, yang
+melaporkan puncak satu proses anak, bukan angka kumulatif.
+
+**Rata-rata beban mesin** dicatat pada setiap run (`load_avg_1m_before`/`_after`): angka
+yang diambil saat mesin sibuk menggambarkan mesinnya, bukan engine-nya.
 
 Kondisi uji: `SELECT * FROM wide_500k` (30 kolom), tanpa retry, database lokal di container.
+Trino tidak diukur: katalog `memory` di container dev tidak punya `wide_500k`.
 
 ## Baseline engine Python
 
-| Kind | Baris | Baris pertama (dari connect) | Baris pertama (dari start) | Total | Fetch | Throughput | Peak RSS | Python |
-|---|---|---|---|---|---|---|---|---|
-| postgres | 500,000 | 722 ms | 871 ms | 4,234 ms | 3,340 ms | 149,687 baris/s | 546 MB | 3.12.12 |
-| mysql | 500,000 | 3,193 ms | 3,261 ms | 6,687 ms | 3,415 ms | 146,423 baris/s | 1,080 MB | 3.12.12 |
+| Kind | Label | Build | n | Baris | Baris pertama (dari connect) | Baris pertama (dari start) | Total (proses) | elapsed_ms (engine) | Fetch | Throughput | Peak RSS | load 1m |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| postgres | baseline-python | — | 1 | 500,000 | 722 ms | 871 ms | 4,234 ms | — | 3,340 ms | 149,687 baris/s | 546 MB | — |
+| mysql | baseline-python | — | 1 | 500,000 | 3,193 ms | 3,261 ms | 6,687 ms | — | 3,415 ms | 146,423 baris/s | 1,080 MB | — |
+| postgres | py-20260923 | — | 3 | 500,000 | 624 ms [602 ms–632 ms] | 695 ms [666 ms–701 ms] | 4,327 ms [4,304 ms–4,359 ms] | 4,236 ms [4,217 ms–4,276 ms] | 3,613 ms [3,586 ms–3,674 ms] | 138,405 [136,087–139,445] baris/s | 545 MB [545 MB–545 MB] | 3.16 [3.13–3.24] |
+| mysql | py-20260923 | — | 3 | 500,000 | 3,299 ms [3,257 ms–3,407 ms] | 3,365 ms [3,325 ms–3,473 ms] | 6,981 ms [6,809 ms–7,229 ms] | 6,901 ms [6,732 ms–7,148 ms] | 3,645 ms [3,434 ms–3,742 ms] | 137,177 [133,617–145,604] baris/s | 1,093 MB [1,093 MB–1,094 MB] | 3.14 [3.04–3.46] |
+
+Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti semua repeat sepakat. Statistik yang dipakai median, bukan yang tercepat: pada mesin yang dipakai bersama, satu run yang kebetulan sepi bukan kecepatan engine.
 
 ## Engine Rust
 
-**[belum diukur]** — engine Rust belum punya CLI yang setara `preview`, jadi belum ada yang bisa diukur.
+| Kind | Label | Build | n | Baris | Baris pertama (dari connect) | Baris pertama (dari start) | Total (proses) | elapsed_ms (engine) | Fetch | Throughput | Peak RSS | load 1m |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| postgres | rust-release-20260923 | release | 3 | 500,000 | 11 ms [9 ms–13 ms] | 16 ms [15 ms–22 ms] | 2,637 ms [2,618 ms–2,644 ms] | 2,626 ms [2,610 ms–2,637 ms] | 2,614 ms [2,602 ms–2,627 ms] | 191,251 [190,341–192,173] baris/s | 9 MB [9 MB–9 MB] | 3.26 [3.05–3.42] |
+| mysql | rust-release-20260923 | release | 3 | 500,000 | 20 ms [12 ms–26 ms] | 26 ms [18 ms–32 ms] | 2,838 ms [2,790 ms–2,847 ms] | 2,830 ms [2,782 ms–2,840 ms] | 2,811 ms [2,771 ms–2,815 ms] | 177,849 [177,639–180,430] baris/s | 38 MB [35 MB–39 MB] | 3.26 [3.13–3.39] |
+
+Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti semua repeat sepakat. Statistik yang dipakai median, bukan yang tercepat: pada mesin yang dipakai bersama, satu run yang kebetulan sepi bukan kecepatan engine.
 
 ## Perbandingan dengan target §6
 
 | Metrik | Target | Baseline Python | Rust | Status |
 |---|---|---|---|---|
-| Throughput fetch | ≥ 5× baseline Python | 149,687 baris/s | [belum diukur] | Menunggu engine Rust |
-| Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | 722 ms | [belum diukur] | Menunggu engine Rust |
-| Memori proses (500k × 30) | < 800 MB | 546 MB | [belum diukur] | Menunggu engine Rust |
+| Throughput fetch | ≥ 5× baseline Python | 138,405 [136,087–139,445] baris/s | 191,251 baris/s (median) | Belum memenuhi — 1.38× baseline Python |
+| Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | 624 ms [602 ms–632 ms] | 11 ms | Memenuhi — 11 ms |
+| Memori proses (500k × 30) | < 800 MB | 545 MB [545 MB–545 MB] | 9 MB | Memenuhi — 9 MB |
 | Scroll grid 60 fps | — | — | — | [belum diukur] |
 | Cold start < 1 dtk | — | — | — | [belum diukur] |
 | Introspeksi 5.000 tabel < 1 dtk | — | — | — | [belum diukur] |
 | Pembatalan < 500 ms | — | — | — | [belum diukur] |
 | Nol leak lintas FFI | — | — | — | [belum diukur] |
 
-## Temuan dari baseline
+## Temuan
 
-- **postgres: baris pertama datang 722 ms setelah connect**, sementara targetnya < 200 ms. Engine menunggu halaman pertama utuh sebelum mengirim apa pun, jadi target ini tidak bisa dicapai tanpa streaming per halaman.
-- postgres: 149,687 baris/s adalah **angka dasar yang harus dilampaui 5×** menurut §6, jadi target absolutnya sekitar 748,435 baris/s.
-- **mysql: memori sudah melewati target §6 sekarang.** 1,080 MB untuk 500k × 30, sedangkan targetnya < 800 MB. Ini bukan regresi yang diperkenalkan Rust; ini batas engine Python, dan salah satu alasan store Rust memakai encoding kolumnar dengan spill.
-- **mysql: baris pertama datang 3,193 ms setelah connect**, sementara targetnya < 200 ms. Engine menunggu halaman pertama utuh sebelum mengirim apa pun, jadi target ini tidak bisa dicapai tanpa streaming per halaman.
-- mysql: 146,423 baris/s adalah **angka dasar yang harus dilampaui 5×** menurut §6, jadi target absolutnya sekitar 732,115 baris/s.
+- **python/postgres (baseline-python, n=1): baris pertama 722 ms setelah connect**, sementara targetnya < 200 ms.
+- python/postgres (baseline-python, n=1): 149,687 baris/s (median); target §6 berarti ≥ 748,435 baris/s.
+- **python/mysql (baseline-python, n=1): memori melewati target §6.** 1,080 MB untuk 500k × 30, sedangkan targetnya < 800 MB.
+- **python/mysql (baseline-python, n=1): baris pertama 3,193 ms setelah connect**, sementara targetnya < 200 ms.
+- python/mysql (baseline-python, n=1): 146,423 baris/s (median); target §6 berarti ≥ 732,115 baris/s.
+- **python/postgres (py-20260923, n=3): baris pertama 624 ms setelah connect**, sementara targetnya < 200 ms.
+- python/postgres (py-20260923, n=3): 138,405 baris/s (median); target §6 berarti ≥ 692,025 baris/s.
+- **python/mysql (py-20260923, n=3): memori melewati target §6.** 1,093 MB untuk 500k × 30, sedangkan targetnya < 800 MB.
+- **python/mysql (py-20260923, n=3): baris pertama 3,299 ms setelah connect**, sementara targetnya < 200 ms.
+- python/mysql (py-20260923, n=3): 137,177 baris/s (median); target §6 berarti ≥ 685,885 baris/s.
+- rust/postgres (rust-release-20260923, release, n=3): 191,251 baris/s (median); target §6 berarti ≥ 956,255 baris/s.
+- rust/mysql (rust-release-20260923, release, n=3): 177,849 baris/s (median); target §6 berarti ≥ 889,245 baris/s.
 

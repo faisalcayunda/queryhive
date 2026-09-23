@@ -3,7 +3,45 @@
 baseline to be compared against.
 
     python3 deploy/dev/bench_fetch.py --kind postgres --label baseline-python
+    python3 deploy/dev/bench_fetch.py --engine rust --kind postgres --label rust-release
     python3 deploy/dev/bench_fetch.py --report-only
+
+How to reproduce this
+---------------------
+Both engines run through this one harness, against the same fixture, with the
+same statement, on the same machine. A number exists only if a run produced it.
+
+.. code-block:: bash
+
+    # 1. the fixture databases (postgres 55432, mysql 53306)
+    deploy/dev/up.sh all
+
+    # 2. the Python engine, three repeats per database
+    python3 deploy/dev/bench_fetch.py --engine python --kind postgres \\
+        --label python-<date> --repeat 3
+    python3 deploy/dev/bench_fetch.py --engine python --kind mysql \\
+        --label python-<date> --repeat 3
+
+    # 3. the Rust engine, the same repeats and the same statement
+    cargo build --release --bin queryhive-engine
+    python3 deploy/dev/bench_fetch.py --engine rust --kind postgres \\
+        --label rust-release-<date> --repeat 3
+    python3 deploy/dev/bench_fetch.py --engine rust --kind mysql \\
+        --label rust-release-<date> --repeat 3
+
+    # 4. regenerate docs/benchmarks.md from the appended records
+    python3 deploy/dev/bench_fetch.py --report-only
+
+Use a fresh ``--label`` per measurement session: the report groups by
+engine + kind + label + build, so reusing a label merges today's runs with an
+older day's and the spread then describes two machines instead of one.
+
+``--no-report`` appends the run without rewriting ``docs/benchmarks.md``. Use it
+while another writer owns that file, then regenerate it once for the session.
+
+Trino is not measured: the memory catalog in the dev container has no
+``wide_500k``, so a Trino number would be a different workload. The recorded
+Python baseline has no Trino run either.
 
 Why a separate harness
 ---------------------
@@ -31,9 +69,24 @@ it.
 
 The comparison is honest by construction: both engines are asked for the same
 statement, against the same server, on the same machine. The Python engine is
-measured through its own `preview` command; the Rust engine will be measured
-through the equivalent `qh-ffi` CLI, which exists for exactly this reason
-(blueprint section 4.5).
+measured through its own `preview` command; the Rust one through the equivalent
+`qh-ffi` CLI, which exists for exactly this reason (blueprint section 4.5). Both
+read the same settings from the environment, so one `CONNECTIONS` table drives
+both.
+
+Two timing numbers per run, and they are not the same thing:
+
+* the harness's own wall clock, timestamped per stdout line — `total_ms`,
+  `fetch_ms`, `time_to_first_row_ms`;
+* `elapsed_ms`, which the engine reports in its `done` event. Both engines stamp
+  it immediately before emitting `step connect`, so it spans connect + fetch +
+  emit and excludes process start. It is the only number that measures the same
+  span on both sides without the harness's own scheduling in the middle, which is
+  why it is reported beside the wall clock rather than instead of it.
+
+Peak RSS is per child process, read from `/usr/bin/time -l`. A run also records
+the machine's load average, because a number taken while four other builds are
+running describes the machine, not the engine.
 """
 
 from __future__ import annotations
@@ -42,6 +95,7 @@ import argparse
 import json
 import os
 import pathlib
+import statistics
 import subprocess
 import sys
 import time
@@ -53,6 +107,16 @@ ENGINE = ROOT / "app" / "engine" / "queryhive_engine.py"
 ENGINE_PYTHON = ROOT / "app" / ".engine" / "python" / "bin" / "python3"
 ENGINE_SITE = ROOT / "app" / ".engine" / "site-packages"
 TIME_BIN = "/usr/bin/time"
+
+# The Rust engine's CLI, by build profile. Release first: it is the profile the
+# app ships and the only fair comparison against a CPython that is itself an
+# optimised build. A debug binary is still measurable — the golden harness runs
+# one — but it is recorded with its profile so a debug number is never read as
+# the engine's speed.
+RUST_BINARIES = (
+    ("release", ROOT / "target" / "release" / "queryhive-engine"),
+    ("debug", ROOT / "target" / "debug" / "queryhive-engine"),
+)
 
 # Connection settings matching deploy/dev/up.sh. Throwaway local fixtures.
 CONNECTIONS = {
@@ -119,37 +183,70 @@ def parse_peak_rss(text: str) -> int | None:
     return None
 
 
-def measure(kind: str, sql: str, limit: int, label: str) -> dict:
-    if not ENGINE_PYTHON.exists():
-        raise SystemExit(
-            f"the bundled engine is missing ({ENGINE_PYTHON}).\n"
-            "Run ./app/build.sh once, or point ENGINE_PYTHON at an interpreter "
-            "that has the engine's requirements installed."
-        )
+def resolve_rust_binary(override: str | None) -> tuple[str, pathlib.Path]:
+    """The Rust CLI to run, and the build profile it came from.
+
+    An explicit `--binary` is reported by whatever its path says it is, so a
+    hand-pointed build is never silently labelled release.
+    """
+    if override:
+        path = pathlib.Path(override).resolve()
+        if not path.is_file():
+            raise SystemExit(f"--binary {override} is not a file")
+        profile = "release" if "/release/" in str(path) else "debug"
+        return profile, path
+    for profile, path in RUST_BINARIES:
+        if path.is_file():
+            return profile, path
+    raise SystemExit(
+        "no Rust engine binary found. Run:\n"
+        "  cargo build --release --bin queryhive-engine"
+    )
+
+
+def measure(kind: str, sql: str, limit: int, label: str, engine: str = "python",
+            binary: str | None = None) -> dict:
     if kind not in CONNECTIONS:
         raise SystemExit(f"unknown kind {kind!r}; expected one of {sorted(CONNECTIONS)}")
 
+    # Both engines read the same names out of the environment, so the settings
+    # table above is the single source of truth for either side.
     env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
     env.update(CONNECTIONS[kind])
-    env["PYTHONPATH"] = str(ENGINE_SITE)
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["SQL"] = sql
     env["LIMIT"] = str(limit)
     # No retries: a baseline that silently retried would report a number no user
     # would ever see, and a real failure should fail the measurement.
     env["RETRIES"] = "0"
 
-    command = [
-        TIME_BIN, "-l",
-        str(ENGINE_PYTHON), "-s", "-u", str(ENGINE),
-        "preview",
-    ]
+    profile = ""
+    if engine == "python":
+        if not ENGINE_PYTHON.exists():
+            raise SystemExit(
+                f"the bundled engine is missing ({ENGINE_PYTHON}).\n"
+                "Run ./app/build.sh once, or point ENGINE_PYTHON at an interpreter "
+                "that has the engine's requirements installed."
+            )
+        env["PYTHONPATH"] = str(ENGINE_SITE)
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        command = [TIME_BIN, "-l", str(ENGINE_PYTHON), "-s", "-u", str(ENGINE), "preview"]
+        cwd = ROOT / "app"
+    elif engine == "rust":
+        profile, path = resolve_rust_binary(binary)
+        command = [TIME_BIN, "-l", str(path), "preview"]
+        # The Rust binary resolves its own paths; the cwd only has to be inside the
+        # workspace so a stray relative write cannot land somewhere unrelated.
+        cwd = ROOT
+    else:
+        raise SystemExit(f"unknown engine {engine!r}; expected 'python' or 'rust'")
+
+    load_before = os.getloadavg()
 
     started = time.monotonic()
     process = subprocess.Popen(
         command,
-        cwd=str(ROOT / "app"),
+        cwd=str(cwd),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -161,6 +258,7 @@ def measure(kind: str, sql: str, limit: int, label: str) -> dict:
     connect_emitted_at: float | None = None
     rows_seen = 0
     done_at: float | None = None
+    engine_elapsed_ms: int | None = None
     error_message: str | None = None
 
     assert process.stdout is not None
@@ -187,6 +285,12 @@ def measure(kind: str, sql: str, limit: int, label: str) -> dict:
             rows_seen += len(event.get("data") or [])
         elif name == "done":
             done_at = now
+            # The engine's own number: both engines stamp it right before they
+            # emit `step connect`, so it covers connect + fetch + emit on either
+            # side. `int()` because the engines report whole milliseconds.
+            reported = event.get("elapsed_ms")
+            if isinstance(reported, (int, float)):
+                engine_elapsed_ms = int(reported)
         elif name == "error":
             error_message = event.get("message")
 
@@ -205,9 +309,10 @@ def measure(kind: str, sql: str, limit: int, label: str) -> dict:
     # Throughput is measured between the first and the last row, so process and
     # connect time are not credited as fetch speed.
     fetch_seconds = (done_at - first_row_at) if (first_row_at and done_at) else 0.0
-    return {
+    load_after = os.getloadavg()
+    record = {
         "label": label,
-        "engine": "python",
+        "engine": engine,
         "kind": kind,
         "sql": sql,
         "limit": limit,
@@ -221,15 +326,29 @@ def measure(kind: str, sql: str, limit: int, label: str) -> dict:
         ),
         "total_ms": round((finished - started) * 1000, 1),
         "fetch_ms": round(fetch_seconds * 1000, 1),
+        "elapsed_ms": engine_elapsed_ms,
         "rows_per_second": round(rows_seen / fetch_seconds) if fetch_seconds > 0 else None,
         "peak_rss_bytes": peak_rss,
         "peak_rss_mb": round(peak_rss / (1024 * 1024), 1) if peak_rss else None,
-        "python": subprocess.run(
-            [str(ENGINE_PYTHON), "-c", "import sys; print(sys.version.split()[0])"],
-            capture_output=True, text=True,
-        ).stdout.strip(),
+        # The load average at the time, because a contended machine reports its
+        # own busyness as the engine's latency otherwise. Recorded before and
+        # after so a run that started quiet and ended busy is visible as such.
+        "load_avg_1m_before": round(load_before[0], 2),
+        "load_avg_5m_before": round(load_before[1], 2),
+        "load_avg_1m_after": round(load_after[0], 2),
+        "load_avg_5m_after": round(load_after[1], 2),
+        "ncpu": os.cpu_count(),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
+    if engine == "rust":
+        record["build"] = profile
+        record["binary"] = str(path.relative_to(ROOT))
+    else:
+        record["python"] = subprocess.run(
+            [str(ENGINE_PYTHON), "-c", "import sys; print(sys.version.split()[0])"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+    return record
 
 
 def append(result: dict) -> None:
@@ -258,9 +377,53 @@ def human_rate(value: int | None) -> str:
     return "—" if value is None else f"{value:,}"
 
 
+def group_runs(results: list[dict]) -> dict[tuple, list[dict]]:
+    """Group records by engine + kind + label + build, in the order appended.
+
+    Grouping by label is what keeps two measurement sessions apart: the same
+    engine measured on a quiet machine and on a busy one are different
+    populations, and pooling them would make the spread describe the machine.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for row in results:
+        key = (
+            row.get("engine", "python"),
+            row["kind"],
+            row.get("label", ""),
+            row.get("build", ""),
+        )
+        groups.setdefault(key, []).append(row)
+    return groups
+
+
+def spread(values) -> tuple[float | None, float | None, float | None]:
+    """Median, minimum and maximum of the numbers actually present."""
+    numbers = sorted(value for value in values if isinstance(value, (int, float)))
+    if not numbers:
+        return None, None, None
+    return statistics.median(numbers), numbers[0], numbers[-1]
+
+
+def cell(values, fmt) -> str:
+    """`median [min–max]`, or the bare median when every repeat agrees."""
+    median, low, high = spread(values)
+    if median is None:
+        return "—"
+    if low == high:
+        return fmt(median)
+    return f"{fmt(median)} [{fmt(low)}–{fmt(high)}]"
+
+
+def newest_group(groups: dict[tuple, list[dict]], engine: str, kind: str):
+    """The most recently appended group for one engine and one database."""
+    matches = [
+        (key, rows) for key, rows in groups.items() if key[0] == engine and key[1] == kind
+    ]
+    return matches[-1] if matches else None
+
+
 def write_report(results: list[dict]) -> None:
-    python_runs = [row for row in results if row.get("engine") == "python"]
-    rust_runs = [row for row in results if row.get("engine") == "rust"]
+    groups = group_runs(results)
 
     lines = [
         "# Benchmarks",
@@ -273,14 +436,18 @@ def write_report(results: list[dict]) -> None:
         "",
         "```bash",
         "deploy/dev/up.sh all",
-        "python3 deploy/dev/bench_fetch.py --kind postgres --label baseline-python",
-        "python3 deploy/dev/bench_fetch.py --kind mysql    --label baseline-python",
+        "python3 deploy/dev/bench_fetch.py --engine python --kind postgres --label <sesi> --repeat 3",
+        "python3 deploy/dev/bench_fetch.py --engine python --kind mysql    --label <sesi> --repeat 3",
+        "cargo build --release --bin queryhive-engine",
+        "python3 deploy/dev/bench_fetch.py --engine rust   --kind postgres --label <sesi> --repeat 3",
+        "python3 deploy/dev/bench_fetch.py --engine rust   --kind mysql    --label <sesi> --repeat 3",
         "python3 deploy/dev/bench_fetch.py --report-only",
         "```",
         "",
-        "Engine dijalankan sebagai proses anak persis seperti aplikasi menjalankannya, setiap baris",
-        "stdout-nya diberi cap waktu saat tiba. Dua angka time-to-first-row dilaporkan karena",
-        "keduanya berguna dan hanya salah satunya cocok untuk target §6:",
+        "Kedua engine dijalankan lewat harness yang sama, membaca nama setelan yang sama dari",
+        "environment, dengan perintah `preview` yang setara. Setiap baris stdout-nya diberi cap waktu",
+        "saat tiba. Dua angka time-to-first-row dilaporkan karena keduanya berguna dan hanya salah",
+        "satunya cocok untuk target §6:",
         "",
         "- **dari connect** — jarak dari event `step connect` ke event `rows` pertama. Engine",
         "  mengirim `step connect` sebelum menyentuh jaringan, jadi ini connect + submit + halaman",
@@ -292,56 +459,67 @@ def write_report(results: list[dict]) -> None:
         "Menganchor pada event `columns` akan salah: event itu baru muncul setelah halaman pertama",
         "sudah ada, sehingga selisihnya hampir nol dan menyembunyikan seluruh waktu tunggu.",
         "",
-        "**Throughput** dihitung antara baris pertama dan baris terakhir, sehingga waktu start dan",
-        "connect tidak ikut dihitung sebagai kecepatan fetch. **Peak RSS** dibaca dari",
-        "`/usr/bin/time -l`, yang melaporkan puncak satu proses anak, bukan angka kumulatif.",
+        "**elapsed_ms** adalah angka engine sendiri, diambil dari event `done`. Kedua engine",
+        "menstempelnya tepat sebelum mengirim `step connect`, jadi cakupannya sama di kedua sisi",
+        "(connect + fetch + emit) dan tidak memuat waktu start proses — inilah satu-satunya angka",
+        "yang mengukur rentang identik tanpa penjadwalan harness di tengahnya. **Throughput**",
+        "dihitung antara baris pertama dan baris terakhir, sehingga waktu start dan connect tidak",
+        "ikut dihitung sebagai kecepatan fetch. **Peak RSS** dibaca dari `/usr/bin/time -l`, yang",
+        "melaporkan puncak satu proses anak, bukan angka kumulatif.",
+        "",
+        "**Rata-rata beban mesin** dicatat pada setiap run (`load_avg_1m_before`/`_after`): angka",
+        "yang diambil saat mesin sibuk menggambarkan mesinnya, bukan engine-nya.",
         "",
         "Kondisi uji: `SELECT * FROM wide_500k` (30 kolom), tanpa retry, database lokal di container.",
-        "",
-        "## Baseline engine Python",
+        "Trino tidak diukur: katalog `memory` di container dev tidak punya `wide_500k`.",
         "",
     ]
 
-    if python_runs:
-        lines += [
-            "| Kind | Baris | Baris pertama (dari connect) | Baris pertama (dari start) | Total | Fetch | Throughput | Peak RSS | Python |",
-            "|---|---|---|---|---|---|---|---|---|",
-        ]
-        for row in python_runs:
+    headers = (
+        "| Kind | Label | Build | n | Baris | Baris pertama (dari connect) | Baris pertama (dari start) "
+        "| Total (proses) | elapsed_ms (engine) | Fetch | Throughput | Peak RSS | load 1m |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    )
+
+    for engine, title, missing in (
+        (
+            "python",
+            "## Baseline engine Python",
+            "**[belum diukur]** — belum ada hasil. Jalankan harness di atas dengan container yang "
+            "sudah menyala.",
+        ),
+        (
+            "rust",
+            "## Engine Rust",
+            "**[belum diukur]** — belum ada jalannya yang terekam. Bangun `--release` lalu jalankan "
+            "harness di atas dengan `--engine rust`.",
+        ),
+    ):
+        lines += [title, ""]
+        members = [(key, rows) for key, rows in groups.items() if key[0] == engine]
+        if not members:
+            lines += [missing, ""]
+            continue
+        lines += list(headers)
+        for (_, kind, label, profile), rows in members:
             lines.append(
-                f"| {row['kind']} | {row['rows']:,} "
-                f"| {human_ms(row.get('time_to_first_row_after_connect_ms'))} "
-                f"| {human_ms(row['time_to_first_row_ms'])} "
-                f"| {human_ms(row['total_ms'])} | {human_ms(row['fetch_ms'])} "
-                f"| {human_rate(row['rows_per_second'])} baris/s | {human_bytes(row['peak_rss_bytes'])} "
-                f"| {row.get('python', '—')} |"
+                f"| {kind} | {label} | {profile or '—'} | {len(rows)} | {rows[0]['rows']:,} "
+                f"| {cell((r.get('time_to_first_row_after_connect_ms') for r in rows), human_ms)} "
+                f"| {cell((r.get('time_to_first_row_ms') for r in rows), human_ms)} "
+                f"| {cell((r.get('total_ms') for r in rows), human_ms)} "
+                f"| {cell((r.get('elapsed_ms') for r in rows), human_ms)} "
+                f"| {cell((r.get('fetch_ms') for r in rows), human_ms)} "
+                f"| {cell((r.get('rows_per_second') for r in rows), human_rate)} baris/s "
+                f"| {cell((r.get('peak_rss_bytes') for r in rows), human_bytes)} "
+                f"| {cell((r.get('load_avg_1m_before') for r in rows), lambda v: f'{v:.2f}')} |"
             )
         lines.append("")
-    else:
-        lines += [
-            "**[belum diukur]** — belum ada hasil. Jalankan harness di atas dengan container yang",
-            "sudah menyala.",
-            "",
-        ]
-
-    lines += ["## Engine Rust", ""]
-    if rust_runs:
-        lines += [
-            "| Kind | Baris | Time-to-first-row | Total | Fetch | Throughput | Peak RSS |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for row in rust_runs:
-            lines.append(
-                f"| {row['kind']} | {row['rows']:,} | {human_ms(row['time_to_first_row_ms'])} "
-                f"| {human_ms(row['total_ms'])} | {human_ms(row['fetch_ms'])} "
-                f"| {human_rate(row['rows_per_second'])} baris/s | {human_bytes(row['peak_rss_bytes'])} |"
-            )
-    else:
         lines.append(
-            "**[belum diukur]** — engine Rust belum punya CLI yang setara `preview`, jadi belum ada "
-            "yang bisa diukur."
+            "Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti semua "
+            "repeat sepakat. Statistik yang dipakai median, bukan yang tercepat: pada mesin yang "
+            "dipakai bersama, satu run yang kebetulan sepi bukan kecepatan engine."
         )
-    lines.append("")
+        lines.append("")
 
     lines += [
         "## Perbandingan dengan target §6",
@@ -349,52 +527,101 @@ def write_report(results: list[dict]) -> None:
         "| Metrik | Target | Baseline Python | Rust | Status |",
         "|---|---|---|---|---|",
     ]
-    pg = next((row for row in python_runs if row["kind"] == "postgres"), None)
+    def stat(entry, key, fmt) -> tuple[str, float | None]:
+        """The grouped cell for one metric, and the median behind it."""
+        if entry is None:
+            return "—", None
+        median, _, _ = spread(row.get(key) for row in entry[1])
+        return (cell((row.get(key) for row in entry[1]), fmt), median)
+
+    # The comparison is against the newest recorded group per engine, so a
+    # freshly measured pair is compared rather than an older day's baseline.
+    py_pg = newest_group(groups, "python", "postgres")
+    rs_pg = newest_group(groups, "rust", "postgres")
+
+    rate_cell, py_rate = stat(py_pg, "rows_per_second", human_rate)
+    _, rs_rate = stat(rs_pg, "rows_per_second", human_rate)
+    ttfr_cell, _ = stat(py_pg, "time_to_first_row_after_connect_ms", human_ms)
+    _, rs_ttfr = stat(rs_pg, "time_to_first_row_after_connect_ms", human_ms)
+    rss_cell, _ = stat(py_pg, "peak_rss_bytes", human_bytes)
+    _, rs_rss = stat(rs_pg, "peak_rss_bytes", human_bytes)
+
+    def verdict(target_met: bool | None, detail: str) -> str:
+        if target_met is None:
+            return "[belum diukur] — menunggu kedua sisi terukur"
+        return f"{'Memenuhi' if target_met else 'Belum memenuhi'} — {detail}"
+
+    rate_verdict = None
+    if py_rate and rs_rate:
+        rate_verdict = rs_rate >= py_rate * 5
+    else:
+        rs_rate = None
+    ttfr_verdict = None if rs_ttfr is None else rs_ttfr < 200
+    rss_verdict = None if rs_rss is None else rs_rss < 800 * 1024 * 1024
+
     lines.append(
         "| Throughput fetch | ≥ 5× baseline Python | "
-        + (f"{human_rate(pg['rows_per_second'])} baris/s" if pg else "—")
-        + " | [belum diukur] | Menunggu engine Rust |"
+        + (f"{rate_cell} baris/s" if py_rate else "—")
+        + " | "
+        + (f"{rs_rate:,.0f} baris/s (median)" if rs_rate else "[belum diukur]")
+        + " | "
+        + verdict(
+            rate_verdict,
+            f"{rs_rate / py_rate:.2f}× baseline Python"
+            if (rate_verdict is not None and py_rate)
+            else "tanpa basis pembanding",
+        )
+        + " |"
     )
     lines.append(
         "| Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | "
-        + (human_ms(pg.get("time_to_first_row_after_connect_ms")) if pg else "—")
-        + " | [belum diukur] | Menunggu engine Rust |"
+        + ttfr_cell
+        + " | "
+        + (human_ms(rs_ttfr) if rs_ttfr is not None else "[belum diukur]")
+        + " | "
+        + verdict(ttfr_verdict, f"{rs_ttfr:,.0f} ms" if rs_ttfr is not None else "—")
+        + " |"
     )
     lines.append(
         "| Memori proses (500k × 30) | < 800 MB | "
-        + (human_bytes(pg["peak_rss_bytes"]) if pg else "—")
-        + " | [belum diukur] | Menunggu engine Rust |"
+        + rss_cell
+        + " | "
+        + (human_bytes(rs_rss) if rs_rss is not None else "[belum diukur]")
+        + " | "
+        + verdict(rss_verdict, human_bytes(rs_rss) if rs_rss is not None else "—")
+        + " |"
     )
     for metric in ("Scroll grid 60 fps", "Cold start < 1 dtk", "Introspeksi 5.000 tabel < 1 dtk",
                    "Pembatalan < 500 ms", "Nol leak lintas FFI"):
         lines.append(f"| {metric} | — | — | — | [belum diukur] |")
     lines.append("")
 
-    lines += ["## Temuan dari baseline", ""]
+    lines += ["## Temuan", ""]
     findings: list[str] = []
-    for row in python_runs:
-        kind = row["kind"]
-        rate = row.get("rows_per_second")
-        first_row = row.get("time_to_first_row_after_connect_ms")
-        rss_mb = row.get("peak_rss_mb")
+    for (engine, kind, label, profile), rows in groups.items():
+        # One finding per group, off the median: per-repeat findings would say the
+        # same thing three times and invite reading a single run as the engine.
+        rate, _, _ = spread(row.get("rows_per_second") for row in rows)
+        first_row, _, _ = spread(
+            row.get("time_to_first_row_after_connect_ms") for row in rows
+        )
+        rss_mb, _, _ = spread(row.get("peak_rss_mb") for row in rows)
+        where = f"{engine}/{kind} ({label}{', ' + profile if profile else ''}, n={len(rows)})"
 
         if rss_mb is not None and rss_mb > 800:
             findings.append(
-                f"- **{kind}: memori sudah melewati target §6 sekarang.** {rss_mb:,.0f} MB untuk "
-                "500k × 30, sedangkan targetnya < 800 MB. Ini bukan regresi yang diperkenalkan "
-                "Rust; ini batas engine Python, dan salah satu alasan store Rust memakai encoding "
-                "kolumnar dengan spill."
+                f"- **{where}: memori melewati target §6.** {rss_mb:,.0f} MB untuk 500k × 30, "
+                "sedangkan targetnya < 800 MB."
             )
         if first_row is not None and first_row > 200:
             findings.append(
-                f"- **{kind}: baris pertama datang {first_row:,.0f} ms setelah connect**, "
-                "sementara targetnya < 200 ms. Engine menunggu halaman pertama utuh sebelum "
-                "mengirim apa pun, jadi target ini tidak bisa dicapai tanpa streaming per halaman."
+                f"- **{where}: baris pertama {first_row:,.0f} ms setelah connect**, sementara "
+                "targetnya < 200 ms."
             )
         if rate is not None:
             findings.append(
-                f"- {kind}: {rate:,} baris/s adalah **angka dasar yang harus dilampaui 5×** "
-                f"menurut §6, jadi target absolutnya sekitar {rate * 5:,} baris/s."
+                f"- {where}: {rate:,.0f} baris/s (median); target §6 berarti "
+                f"≥ {rate * 5:,.0f} baris/s."
             )
     if not findings:
         findings.append("- Belum ada hasil untuk dianalisis.")
@@ -407,22 +634,41 @@ def write_report(results: list[dict]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--engine", choices=("python", "rust"), default="python")
     parser.add_argument("--kind", choices=sorted(CONNECTIONS), default="postgres")
     parser.add_argument("--sql", default="SELECT * FROM wide_500k")
     parser.add_argument("--limit", type=int, default=WIDE_ROWS)
     parser.add_argument("--label", default="baseline-python")
+    parser.add_argument("--binary", default=None,
+                        help="the Rust CLI to run; defaults to target/release, then target/debug")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="how many times to repeat the measurement, one record per run")
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument("--no-report", action="store_true",
+                        help="append the record without rewriting docs/benchmarks.md")
     args = parser.parse_args(argv)
 
+    if args.report_only and args.no_report:
+        raise SystemExit("--report-only and --no-report are mutually exclusive")
+    if args.repeat < 1:
+        raise SystemExit("--repeat must be at least 1")
+
     if not args.report_only:
-        result = measure(args.kind, args.sql, args.limit, args.label)
-        append(result)
-        print(json.dumps(result, indent=2, sort_keys=True))
+        for index in range(args.repeat):
+            result = measure(
+                args.kind, args.sql, args.limit, args.label,
+                engine=args.engine, binary=args.binary,
+            )
+            append(result)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            if index + 1 < args.repeat:
+                print(f"--- repeat {index + 2} of {args.repeat} ---")
 
     results = load_results()
-    write_report(results)
-    print(f"\n{len(results)} run(s) recorded in {RESULTS.relative_to(ROOT)}")
-    print(f"report regenerated: {REPORT.relative_to(ROOT)}")
+    if not args.no_report:
+        write_report(results)
+        print(f"report regenerated: {REPORT.relative_to(ROOT)}")
+    print(f"{len(results)} run(s) recorded in {RESULTS.relative_to(ROOT)}")
     return 0
 
 
