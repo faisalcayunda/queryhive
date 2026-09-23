@@ -23,7 +23,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(dirname "$(pwd)")"
 PROFILE="${1:-release}"
-GENERATED="Generated"
+# Absolute, not a bare `Generated`: the generator runs inside a subshell that has cd'd to
+# $ROOT (it needs the workspace's Cargo.toml), and `--out-dir` is resolved against that
+# subshell's cwd. A relative value lands in a stray `Generated/` beside target/ at the repo
+# root instead, and the renames below then fail with "No such file or directory".
+GENERATED="$(pwd)/Generated"
 LIBRARY="$ROOT/target/$PROFILE/libqh_ffi.dylib"
 
 log() { echo "[build-ffi] $*"; }
@@ -65,4 +69,4 @@ cat > "$GENERATED/qh_ffiFFI/qh_ffiFFI.c" <<'EOF'
 #include "qh_ffiFFI.h"
 EOF
 
-log "regenerated $(ls "$GENERATED"/QueryHiveFFI "$GENERATED"/qh_ffiFFI | tr '\n' ' ')"
+log "regenerated $(cd "$GENERATED" && ls QueryHiveFFI qh_ffiFFI | tr '\n' ' ')"
