@@ -460,7 +460,37 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 
 
 // Public interface members begin here.
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -507,6 +537,414 @@ fileprivate struct FfiConverterString: FfiConverter {
         writeBytes(&buf, value.utf8)
     }
 }
+
+
+
+
+/**
+ * Where an engine's events go, implemented on the far side of the FFI.
+ *
+ * One method, called once per event, in the order the engine produced them, with the event as
+ * the JSON line the CLI writes. Called from inside the run, so the run cannot return before the
+ * last event has been handed over.
+ *
+ * A line this side could hold in a `Vec` and return instead; what the callback buys is *when*
+ * it arrives. `on_event` is the Rust engine's own spelling of it — `DatabaseEngine.run`'s
+ * argument is `onEvent`, and the app passes the same closure here.
+ */
+public protocol EventSink: AnyObject, Sendable {
+    
+    func onEvent(line: String) 
+    
+}
+/**
+ * Where an engine's events go, implemented on the far side of the FFI.
+ *
+ * One method, called once per event, in the order the engine produced them, with the event as
+ * the JSON line the CLI writes. Called from inside the run, so the run cannot return before the
+ * last event has been handed over.
+ *
+ * A line this side could hold in a `Vec` and return instead; what the callback buys is *when*
+ * it arrives. `on_event` is the Rust engine's own spelling of it — `DatabaseEngine.run`'s
+ * argument is `onEvent`, and the app passes the same closure here.
+ */
+open class EventSinkImpl: EventSink, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_qh_ffi_fn_clone_eventsink(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_qh_ffi_fn_free_eventsink(handle, $0) }
+    }
+
+    
+
+    
+open func onEvent(line: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_eventsink_on_event(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(line),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceEventSink {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceEventSink = UniffiVTableCallbackInterfaceEventSink(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeEventSink.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface EventSink: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeEventSink.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface EventSink: handle missing in uniffiClone")
+            }
+        },
+        onEvent: { (
+            uniffiHandle: UInt64,
+            line: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeEventSink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onEvent(
+                     line: try FfiConverterString.lift(line)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceEventSink> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceEventSink>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitEventSink() {
+    uniffi_qh_ffi_fn_init_callback_vtable_eventsink(UniffiCallbackInterfaceEventSink.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEventSink: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<EventSink>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = EventSink
+
+    public static func lift(_ handle: UInt64) throws -> EventSink {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return EventSinkImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: EventSink) -> UInt64 {
+         if let rustImpl = value as? EventSinkImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EventSink {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: EventSink, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEventSink_lift(_ handle: UInt64) throws -> EventSink {
+    return try FfiConverterTypeEventSink.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEventSink_lower(_ value: EventSink) -> UInt64 {
+    return FfiConverterTypeEventSink.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The handle that stops a run, built by the caller and handed to [`run`].
+ *
+ * A handle rather than a function that cancels "whatever is running", because this crate can
+ * have more than one command in flight in one process (the app runs each tab's command on its
+ * own queue), and a global cancel would stop the wrong one.
+ *
+ * Built by the caller rather than returned, because [`run`] does not return until the command is
+ * over: the caller has to be holding the handle while the run is still going. The app's own
+ * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
+ * queue while the FFI call blocks on another.
+ *
+ * Setting the flag is all it does. The engine reads it between rows and between statements, so
+ * a stopped `export` finishes the statement it is on, keeps the bytes already written and
+ * reports `done` with `cancelled: true` — a stop that loses what was written would be worse
+ * than no stop button.
+ */
+public protocol RunCancelProtocol: AnyObject, Sendable {
+    
+    /**
+     * Whether the stop has been asked for. Readable from the far side of the FFI so a caller can
+     * show its own "stopping" state without waiting for the engine's `done`.
+     */
+    func isCancelled()  -> Bool
+    
+    /**
+     * Ask the run to stop. Safe to call before the engine has opened anything, after it has
+     * finished, and more than once.
+     */
+    func requestCancel() 
+    
+}
+/**
+ * The handle that stops a run, built by the caller and handed to [`run`].
+ *
+ * A handle rather than a function that cancels "whatever is running", because this crate can
+ * have more than one command in flight in one process (the app runs each tab's command on its
+ * own queue), and a global cancel would stop the wrong one.
+ *
+ * Built by the caller rather than returned, because [`run`] does not return until the command is
+ * over: the caller has to be holding the handle while the run is still going. The app's own
+ * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
+ * queue while the FFI call blocks on another.
+ *
+ * Setting the flag is all it does. The engine reads it between rows and between statements, so
+ * a stopped `export` finishes the statement it is on, keeps the bytes already written and
+ * reports `done` with `cancelled: true` — a stop that loses what was written would be worse
+ * than no stop button.
+ */
+open class RunCancel: RunCancelProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_qh_ffi_fn_clone_runcancel(self.handle, $0) }
+    }
+    /**
+     * A fresh handle, for one run.
+     */
+public convenience init() {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_constructor_runcancel_new(uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_qh_ffi_fn_free_runcancel(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Whether the stop has been asked for. Readable from the far side of the FFI so a caller can
+     * show its own "stopping" state without waiting for the engine's `done`.
+     */
+open func isCancelled() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_runcancel_is_cancelled(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Ask the run to stop. Safe to call before the engine has opened anything, after it has
+     * finished, and more than once.
+     */
+open func requestCancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_runcancel_request_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRunCancel: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = RunCancel
+
+    public static func lift(_ handle: UInt64) throws -> RunCancel {
+        return RunCancel(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: RunCancel) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RunCancel {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: RunCancel, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunCancel_lift(_ handle: UInt64) throws -> RunCancel {
+    return try FfiConverterTypeRunCancel.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRunCancel_lower(_ value: RunCancel) -> UInt64 {
+    return FfiConverterTypeRunCancel.lower(value)
+}
+
+
 
 
 /**
@@ -727,147 +1165,6 @@ public func FfiConverterTypeEngineCommand_lower(_ value: EngineCommand) -> RustB
 }
 
 
-
-/**
- * What went wrong, in the shape the UI acts on.
- */
-public 
-enum EngineError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
-
-    
-    
-    /**
-     * The caller's own request was unusable. Decided before the network was touched, so
-     * there is nothing to retry and nothing to undo.
-     */
-    case Usage(message: String
-    )
-    /**
-     * The connection did not open.
-     */
-    case Connect(message: String
-    )
-    /**
-     * The server refused the statement, or the connection failed while it ran.
-     */
-    case Query(message: String
-    )
-    /**
-     * A failure that already changed something the user has to hear about: a `replace` write
-     * drops the old table before it creates the new one, so a failure after that has both the
-     * failure and the warnings to report.
-     */
-    case Partial(message: String, warnings: [String]
-    )
-    /**
-     * Everything else — a bad setting, a storage or export failure, an internal error — with
-     * the kind named so a caller can tell them apart without parsing the message.
-     */
-    case Failed(kind: String, message: String
-    )
-
-    
-
-    
-
-    
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
-    
-}
-
-#if compiler(>=6)
-extension EngineError: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeEngineError: FfiConverterRustBuffer {
-    typealias SwiftType = EngineError
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineError {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        
-
-        
-        case 1: return .Usage(
-            message: try FfiConverterString.read(from: &buf)
-            )
-        case 2: return .Connect(
-            message: try FfiConverterString.read(from: &buf)
-            )
-        case 3: return .Query(
-            message: try FfiConverterString.read(from: &buf)
-            )
-        case 4: return .Partial(
-            message: try FfiConverterString.read(from: &buf), 
-            warnings: try FfiConverterSequenceString.read(from: &buf)
-            )
-        case 5: return .Failed(
-            kind: try FfiConverterString.read(from: &buf), 
-            message: try FfiConverterString.read(from: &buf)
-            )
-
-         default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: EngineError, into buf: inout [UInt8]) {
-        switch value {
-
-        
-
-        
-        
-        case let .Usage(message):
-            writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
-            
-        
-        case let .Connect(message):
-            writeInt(&buf, Int32(2))
-            FfiConverterString.write(message, into: &buf)
-            
-        
-        case let .Query(message):
-            writeInt(&buf, Int32(3))
-            FfiConverterString.write(message, into: &buf)
-            
-        
-        case let .Partial(message,warnings):
-            writeInt(&buf, Int32(4))
-            FfiConverterString.write(message, into: &buf)
-            FfiConverterSequenceString.write(warnings, into: &buf)
-            
-        
-        case let .Failed(kind,message):
-            writeInt(&buf, Int32(5))
-            FfiConverterString.write(kind, into: &buf)
-            FfiConverterString.write(message, into: &buf)
-            
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeEngineError_lift(_ buf: RustBuffer) throws -> EngineError {
-    return try FfiConverterTypeEngineError.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeEngineError_lower(_ value: EngineError) -> RustBuffer {
-    return FfiConverterTypeEngineError.lower(value)
-}
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -941,20 +1238,29 @@ public func engineVersion() -> String  {
 })
 }
 /**
- * Run one command and return its events, one JSON line each.
+ * Run one command, sending each event to `sink` as it is produced.
  *
- * The events are the same ones the CLI writes, in the same order, with the same keys: this is
- * the same [`crate::run`] the binary calls, with a [`Capture`] instead of stdout, so the two
- * entry points cannot drift.
+ * `cancel` is the caller's own handle, the one it made before this call and keeps calling
+ * `request_cancel()` on while this one is blocked: nothing here can hand a handle back in time to
+ * stop the run it names (see the module note and [`RunCancel`]).
+ *
+ * Returns nothing, which is not an omission: a run that could not be *started* is reported
+ * through the sink, exactly as the CLI reports it with an `error` line, so the app keeps one
+ * failure path. A run that starts and then fails does the same.
+ *
+ * The call blocks until the command has ended, so it belongs off the main thread. The sink's
+ * callbacks run on the calling thread, inside the run, and the app hops to the main queue
+ * itself — the same split `DatabaseEngine`'s implementation already makes.
  */
-public func run(command: EngineCommand, settings: [Setting])throws  -> [String]  {
-    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+public func run(command: EngineCommand, settings: [Setting], sink: EventSink, cancel: RunCancel)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_qh_ffi_fn_func_run(
         FfiConverterTypeEngineCommand_lower(command),
-        FfiConverterSequenceTypeSetting.lower(settings),uniffiCallStatus
+        FfiConverterSequenceTypeSetting.lower(settings),
+        FfiConverterTypeEventSink_lower(sink),
+        FfiConverterTypeRunCancel_lower(cancel),uniffiCallStatus
     )
-})
+}
 }
 
 private enum InitializationResult {
@@ -978,10 +1284,23 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_func_engine_version() != 54811) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_qh_ffi_checksum_func_run() != 50077) {
+    if (uniffi_qh_ffi_checksum_func_run() != 54515) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_eventsink_on_event() != 4791) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_runcancel_is_cancelled() != 5744) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_runcancel_request_cancel() != 1756) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_constructor_runcancel_new() != 8044) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitEventSink()
     return InitializationResult.ok
 }()
 

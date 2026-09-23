@@ -29,54 +29,63 @@ final class RustEngineTests: XCTestCase {
     func testAFailureReachesTheUIInBothPlacesTheCallSitesLook() async {
         // `credential` without its action is a usage failure, and it is the one kind of failure
         // that needs no server: the engine decides it before it touches anything. It is here
-        // because the failure path is the one the FFI expresses differently from the process
-        // engine — a typed error rather than an exit status and a log — and the seven call sites
-        // in `AppModel` read *either* the `error` event's message *or* the last line of the stderr
-        // argument. This asserts they get the same text in both, which is what makes the swap in
-        // §1.6 not a change of behaviour at those call sites.
+        // because the failure path is shared by both engines — the CLI's `error` line and the
+        // last line of the stderr argument carry the same text — and the seven call sites in
+        // `AppModel` read *either* one. This asserts they get the same text in both, which is what
+        // makes the swap in §1.6 not a change of behaviour at those call sites.
         let (_, record) = await EngineContract.run(RustEngine(), "credential")
 
         XCTAssertEqual(record.exitStatus, 1, "a failed run is not a clean exit")
         XCTAssertEqual(record.events.map(\.event), ["error"])
         let message = record.events.first?.message
         XCTAssertEqual(message?.contains("CREDENTIAL_ACTION"), true,
-                       "the engine's own wording, not our enum's Debug rendering: \(message ?? "nil")")
+                       "the engine's own wording, not its Debug rendering: \(message ?? "nil")")
         XCTAssertEqual(record.stderr, message,
                        "the same text in the argument the process engine put its log in")
         XCTAssertEqual(record.deliveriesOffMainThread, 0)
     }
 
     @MainActor
-    func testTheTypedErrorIsNotShownToTheUserAsSwift() async {
-        // UniFFI generates `EngineError`'s `localizedDescription` as `String(reflecting: self)`,
-        // which prints `EngineError.Usage(message: "…")` at the user. If that ever reaches the
-        // error bar this test fails, because it is exactly the kind of thing nobody notices until
-        // a user sends a screenshot.
+    func testTheFailureMessageIsTheEngineWordingAndNotAThrownError() async {
+        // The message has to be the sentence the engine wrote, because the app's error bar shows
+        // it. It must not be a language-level rendering of a failure — the old surface threw a
+        // typed error whose `localizedDescription` printed the Swift case name at the user, and
+        // this is the check that the failure still arrives as data rather than as a thrown value.
         let (_, record) = await EngineContract.run(RustEngine(), "credential")
         let message = record.events.first?.message ?? ""
 
-        XCTAssertFalse(message.contains("EngineError"), "the enum's own name is not user-facing")
+        XCTAssertFalse(message.contains("EngineError"), "no type name is user-facing")
         XCTAssertFalse(message.contains("message:"), "nor are Swift's argument labels")
+        XCTAssertTrue(message.hasPrefix("CREDENTIAL_ACTION"), "the engine's own first word: \(message)")
     }
 
     @MainActor
-    func testStoppingARunBeforeItFinishesKeepsTheReasonOut() async {
-        // The honest shape of cancellation today: `terminate()` cannot stop the FFI call (there is
-        // no cancel entry point — see `RustEngine`'s note), so what it can do is stop the delivery.
-        // `terminateAll()` is the app's call at termination, and this is the closest a test without
-        // a server can get to it: the call runs, nothing is handed to a caller that has stopped
-        // waiting, and `onExit` still arrives exactly once because the contract says so.
+    func testStopReachesTheEngineRatherThanOnlyTheDelivery() async {
+        // The half that used to be untestable. `terminate()` must reach the engine's own cancel
+        // handle, because stopping only the delivery would leave the query running on the
+        // coordinator — an app that believed otherwise would be wrong about its own database load.
+        //
+        // Asserted through the run's handle, over the real FFI: `RustRun.cancelHandle` is the
+        // `RunCancel` the engine is holding, so a `terminate()` that reached it is visible as the
+        // engine's own `isCancelled()`. The full effect of a stop — `done.cancelled`, the partial
+        // file kept — is a Rust-side test (`golden.rs`, the cancelled-export case) because it
+        // needs a server that answers with rows, which a unit test here does not have.
         let engine = RustEngine()
         let record = RunRecord()
         let handle = engine.run("credential", env: [:],
                                 onEvent: { record.record(event: $0, onMainThread: Thread.isMainThread) },
                                 onExit: { record.record(exit: $0, stderr: $1, onMainThread: Thread.isMainThread) })
+        let rust = handle as? RustRun
+        XCTAssertNotNil(rust, "the handle this engine hands back is its own")
+
+        XCTAssertEqual(rust?.cancelHandle?.isCancelled(), false, "nothing has asked to stop yet")
         handle?.terminate()
+        XCTAssertEqual(rust?.cancelHandle?.isCancelled(), true,
+                       "the stop crossed into the engine, not just into this handle")
         // No request was made to the engine's own store, so this cannot leave anything behind.
         engine.terminateAll()
         await record.waitForExit()
 
         XCTAssertEqual(record.exits, 1, "a stopped run still has to end exactly once")
-        XCTAssertEqual(record.events.count, 0, "the failure the caller stopped waiting for is not delivered")
     }
 }

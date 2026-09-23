@@ -5,32 +5,69 @@
 //! type mapping*; the data plane does not, because marshalling every cell as a string is the
 //! very problem this migration exists to remove. This module is only the first of those.
 //!
-//! # Why it returns JSON lines
+//! # Why the events are JSON lines
 //!
-//! [`run`] returns the same NDJSON the CLI writes. That is not laziness: the app already
-//! parses exactly these events — the Python engine wrote them to stdout and `Engine.swift`
-//! decodes them — so this surface can replace the process boundary without touching a single
-//! call site. Typed events are the next step, and doing them before there is an app-side
+//! A `run` call hands back the same NDJSON the CLI writes. That is not laziness: the app already
+//! parses exactly these events — the previous engine wrote them to stdout and `Engine.swift`
+//! decodes them — so this surface replaces the process boundary without touching a single call
+//! site. Typed events are still the next step, and doing them before there is an app-side
 //! consumer would mean designing a type hierarchy against no caller.
 //!
-//! # The error is where the types are
+//! # Failure is one more line, not a thrown error
 //!
-//! The opposite is true of failures, which is why they are not a string. A `Result` becomes a
-//! thrown Swift error carrying what the UI reacts to: a `usage` failure means the user's own
-//! request was unusable and nothing was touched, a `connect` failure means the connection did
-//! not open, a `query` failure means the server refused the statement, and a `partial` failure
-//! carries the warnings a `replace` write earned before it failed — the one case where
-//! reporting the error cannot undo what already happened.
+//! A command that fails emits one `error` event and ends, exactly as the CLI does, and the sink
+//! receives it like any other event. This module used to declare a typed `EngineError` instead,
+//! and it went away with the change that made events stream: a `Result` can only be returned once,
+//! at the end, so an error channel that is not an event cannot describe a failure that happens
+//! while the caller is already painting. The app never used the type — its seven call sites read
+//! the `error` event's message or the last line of the stderr argument, and `RustEngine` mapped
+//! the typed error into exactly those two places — so one channel costs the app nothing and makes
+//! the FFI path and the CLI path observably identical, which is what the golden corpus tests.
 //!
-//! # Blocking, deliberately
+//! What is given up is the `kind` on the error: `usage` versus `connect` versus `query`, which a
+//! caller could branch on without reading the message. It has nowhere to go today — using it means
+//! changing every failure path in `AppModel` — and the place it would land is a `kind` field on
+//! this same `error` event, beside the message, once something reads it. The table that named the
+//! variants went with the type rather than staying behind unused: which `CliError` is which kind is
+//! a property of those variants, not of a mapping here.
 //!
-//! Every function here is synchronous. The commands are async, so each call runs one on a
-//! runtime of its own; what matters to the caller is that one FFI call must not run on the
-//! main thread, which the app decides. A cancel entry point is a separate, later piece of
-//! work rather than a parameter here, because the app's cancel has to reach a command that is
-//! already running.
+//! # Every call takes a sink and a cancel handle
+//!
+//! [`run`] is the shape an FFI caller can write: hand over a sink, hand over the handle that
+//! stops the run, and the events arrive as the engine produces them rather than in one lump at
+//! the end. Two reasons that pairing is the whole surface rather than a convenience:
+//!
+//! - **A sink, not a return value, because time matters.** The previous engine wrote one line per
+//!   event and flushed it, so an export's progress moved while the export ran. Returning a
+//!   `Vec<String>` kept every event and lost only *when* it was delivered, which is invisible in
+//!   a test and obvious to someone watching a long export.
+//! - **Cancel is the caller's own handle, made before the call**, because it has to reach a run
+//!   that is already in flight. [`run`] blocks until the command has ended, so a handle it
+//!   returned could only ever be used once there was nothing left to stop; the caller builds the
+//!   [`RunCancel`], hands it in, and calls `request_cancel()` from wherever its Stop button lives.
+//!   `request()` sets a flag the engine reads between rows and between statements, so a stopped
+//!   export finishes the statement it is on, keeps the bytes it already wrote, and reports `done`
+//!   with `cancelled: true` — the same outcome SIGTERM produces in the CLI, which is the other
+//!   thing the flag exists for.
+//!
+//! Both are synchronous, and that is deliberate: the commands are async, so each call runs one on
+//! a runtime of its own, and what matters to the caller is that one FFI call must not run on the
+//! main thread. The app decides that, and it is also why the handle is a separate object: the
+//! thread that is blocked in [`run`] cannot be the thread that presses Stop.
+//!
+//! # The events are the same events, and the order is the same order
+//!
+//! Nothing above changes the protocol. A `run` call emits exactly the lines the CLI writes, from
+//! the same [`crate::run`] the binary calls, with a sink in place of stdout, so the two entry
+//! points cannot drift — and the golden corpus, which is recorded against the CLI, still tests
+//! this path ([`SinkEmitter`] hands on the same [`serde_json::Value`] both of them serialise).
 
-use crate::events::Capture;
+use std::io;
+use std::sync::Arc;
+
+use serde_json::Value as Json;
+
+use crate::events::{event, Emitter};
 use crate::{run as run_command, CancelFlag, CliError, Command, RealEngine, Settings};
 
 /// One setting, as the environment would have carried it.
@@ -95,121 +132,159 @@ impl EngineCommand {
     }
 }
 
-/// What went wrong, in the shape the UI acts on.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum EngineError {
-    /// The caller's own request was unusable. Decided before the network was touched, so
-    /// there is nothing to retry and nothing to undo.
-    #[error("{message}")]
-    Usage { message: String },
-
-    /// The connection did not open.
-    #[error("{message}")]
-    Connect { message: String },
-
-    /// The server refused the statement, or the connection failed while it ran.
-    #[error("{message}")]
-    Query { message: String },
-
-    /// A failure that already changed something the user has to hear about: a `replace` write
-    /// drops the old table before it creates the new one, so a failure after that has both the
-    /// failure and the warnings to report.
-    #[error("{message}")]
-    Partial {
-        message: String,
-        warnings: Vec<String>,
-    },
-
-    /// Everything else — a bad setting, a storage or export failure, an internal error — with
-    /// the kind named so a caller can tell them apart without parsing the message.
-    #[error("{message}")]
-    Failed { kind: String, message: String },
-}
-
-impl From<CliError> for EngineError {
-    fn from(error: CliError) -> Self {
-        // `Warned` is checked first and by name: it is the only failure whose *other* field
-        // matters, and `message()` would silently drop it.
-        if let CliError::Warned { message, warnings } = &error {
-            return Self::Partial {
-                message: message.clone(),
-                warnings: warnings.clone(),
-            };
-        }
-        let message = error.message();
-        match error {
-            CliError::Usage(_) => Self::Usage { message },
-            CliError::Connect(_) => Self::Connect { message },
-            CliError::Query(_) => Self::Query { message },
-            CliError::Warned { .. } => unreachable!("handled above"),
-            other => Self::Failed {
-                // The variant's name, spelled the way the CLI spells it, so a caller can log
-                // or branch on it without depending on the message's wording.
-                kind: kind_of(&other).to_owned(),
-                message,
-            },
-        }
-    }
-}
-
-/// The variant's own name, which is stable where the message is not.
-fn kind_of(error: &CliError) -> &'static str {
-    match error {
-        CliError::Usage(_) => "usage",
-        CliError::Connect(_) => "connect",
-        CliError::Query(_) => "query",
-        CliError::Warned { .. } => "warned",
-        CliError::Config(_) => "config",
-        CliError::Setting(_) => "setting",
-        CliError::Sql(_) => "sql",
-        CliError::Export(_) => "export",
-        CliError::Storage(_) => "storage",
-        CliError::Import(_) => "import",
-        CliError::Credential(_) => "credential",
-        CliError::Io(_) => "io",
-        CliError::Internal(_) => "internal",
-    }
-}
-
-/// Run one command and return its events, one JSON line each.
+/// Where an engine's events go, implemented on the far side of the FFI.
 ///
-/// The events are the same ones the CLI writes, in the same order, with the same keys: this is
-/// the same [`crate::run`] the binary calls, with a [`Capture`] instead of stdout, so the two
-/// entry points cannot drift.
+/// One method, called once per event, in the order the engine produced them, with the event as
+/// the JSON line the CLI writes. Called from inside the run, so the run cannot return before the
+/// last event has been handed over.
+///
+/// A line this side could hold in a `Vec` and return instead; what the callback buys is *when*
+/// it arrives. `on_event` is the Rust engine's own spelling of it — `DatabaseEngine.run`'s
+/// argument is `onEvent`, and the app passes the same closure here.
+#[uniffi::export(foreign)]
+pub trait EventSink: Send + Sync {
+    fn on_event(&self, line: String);
+}
+
+/// Every event, to the caller's sink.
+struct SinkEmitter {
+    sink: Arc<dyn EventSink>,
+}
+
+impl Emitter for SinkEmitter {
+    fn emit(&mut self, event: Json) -> io::Result<()> {
+        // Serialised here rather than in the sink, because this is the layer that writes the
+        // protocol: the same compact form `JsonLines` puts on stdout, so the app decodes one
+        // shape whichever entry point produced it.
+        //
+        // A sink that refuses the event — a UI that has moved on — still leaves the run to
+        // finish. The line is a delivered message, not a result the run depends on, and
+        // aborting here would turn a lost event into a failed export.
+        self.sink
+            .on_event(serde_json::to_string(&event).expect("an event is serialisable"));
+        Ok(())
+    }
+}
+
+/// The handle that stops a run, built by the caller and handed to [`run`].
+///
+/// A handle rather than a function that cancels "whatever is running", because this crate can
+/// have more than one command in flight in one process (the app runs each tab's command on its
+/// own queue), and a global cancel would stop the wrong one.
+///
+/// Built by the caller rather than returned, because [`run`] does not return until the command is
+/// over: the caller has to be holding the handle while the run is still going. The app's own
+/// `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
+/// queue while the FFI call blocks on another.
+///
+/// Setting the flag is all it does. The engine reads it between rows and between statements, so
+/// a stopped `export` finishes the statement it is on, keeps the bytes already written and
+/// reports `done` with `cancelled: true` — a stop that loses what was written would be worse
+/// than no stop button.
+#[derive(Debug, Clone, Default, uniffi::Object)]
+pub struct RunCancel {
+    flag: CancelFlag,
+}
+
 #[uniffi::export]
-pub fn run(command: EngineCommand, settings: Vec<Setting>) -> Result<Vec<String>, EngineError> {
+impl RunCancel {
+    /// A fresh handle, for one run.
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Ask the run to stop. Safe to call before the engine has opened anything, after it has
+    /// finished, and more than once.
+    pub fn request_cancel(&self) {
+        self.flag.request();
+    }
+
+    /// Whether the stop has been asked for. Readable from the far side of the FFI so a caller can
+    /// show its own "stopping" state without waiting for the engine's `done`.
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.is_cancelled()
+    }
+}
+
+/// Run one command, sending each event to `sink` as it is produced.
+///
+/// `cancel` is the caller's own handle, the one it made before this call and keeps calling
+/// `request_cancel()` on while this one is blocked: nothing here can hand a handle back in time to
+/// stop the run it names (see the module note and [`RunCancel`]).
+///
+/// Returns nothing, which is not an omission: a run that could not be *started* is reported
+/// through the sink, exactly as the CLI reports it with an `error` line, so the app keeps one
+/// failure path. A run that starts and then fails does the same.
+///
+/// The call blocks until the command has ended, so it belongs off the main thread. The sink's
+/// callbacks run on the calling thread, inside the run, and the app hops to the main queue
+/// itself — the same split `DatabaseEngine`'s implementation already makes.
+#[uniffi::export]
+pub fn run(
+    command: EngineCommand,
+    settings: Vec<Setting>,
+    sink: Arc<dyn EventSink>,
+    cancel: Arc<RunCancel>,
+) {
     let settings = Settings::from_pairs(
         settings
             .into_iter()
             .map(|setting| (setting.key, setting.value)),
     );
 
+    let mut out = SinkEmitter { sink };
+
     // A runtime per call: the commands are async and the caller is not, and a shared runtime
     // would be a piece of global state whose shutdown the app cannot reason about. The call is
     // already off the main thread by the caller's own decision — see the module note.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|error| EngineError::Failed {
-            kind: "internal".to_owned(),
-            message: format!("could not start a runtime: {error}"),
-        })?;
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            // Nothing was started, so there is no `error` line to write: the sink is the only
+            // place this failure can be reported, and it is reported the way a command's failure
+            // is, so the app has one shape to decode.
+            fail(
+                &mut out,
+                &CliError::Internal(format!("could not start a runtime: {error}")),
+            );
+            return;
+        }
+    };
 
-    let mut capture = Capture::new();
     let engine = RealEngine::with_settings(settings.clone());
-    let cancel = CancelFlag::new();
+    match runtime.block_on(run_command(
+        command.as_command(),
+        &settings,
+        &mut out,
+        &engine,
+        &cancel.flag,
+    )) {
+        Ok(()) => {}
+        Err(error) => fail(&mut out, &error),
+    }
+}
 
-    runtime
-        .block_on(run_command(
-            command.as_command(),
-            &settings,
-            &mut capture,
-            &engine,
-            &cancel,
-        ))
-        .map_err(EngineError::from)?;
-
-    Ok(capture.lines())
+/// The one `error` event, carrying the warnings a failure already earned.
+///
+/// The same pairing `main.rs` writes for a failure, for the same reason: a `replace` write that
+/// dropped the old table has more to report than a message, and reporting the failure cannot undo
+/// the drop.
+fn fail(out: &mut dyn Emitter, error: &CliError) {
+    let warnings = error.warnings();
+    let _ = out.emit(
+        event("error")
+            .field("message", error.message())
+            .maybe(
+                "warnings",
+                (!warnings.is_empty())
+                    .then(|| Json::Array(warnings.iter().map(|w| Json::from(w.clone())).collect())),
+            )
+            .build(),
+    );
 }
 
 /// The version of this engine, for a caller that has to say what it is talking to.
@@ -232,14 +307,104 @@ pub fn command_names() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use serde_json::Value;
+    use crate::events::JsonLines;
 
     fn setting(key: &str, value: &str) -> Setting {
         Setting {
             key: key.to_owned(),
             value: value.to_owned(),
         }
+    }
+
+    /// A sink that keeps every line it is handed, so a test can read the protocol.
+    ///
+    /// Cloning hands out a second handle to the *same* lines, which is what lets `run` take an
+    /// owned sink while the test still reads what arrived. A `Mutex` rather than the `Cell` a
+    /// single-threaded test would use: this crate forbids unsafe code and the trait is `Sync`, so
+    /// the interior mutability has to be the kind that is.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        lines: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Recorder {
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().expect("recorded lines").clone()
+        }
+
+        /// The lines as JSON, for an assertion about a field rather than about a whole line.
+        fn events(&self) -> Vec<Json> {
+            self.lines()
+                .iter()
+                .map(|line| serde_json::from_str(line).expect("an event is JSON"))
+                .collect()
+        }
+    }
+
+    impl EventSink for Recorder {
+        fn on_event(&self, line: String) {
+            self.lines.lock().expect("recorded lines").push(line);
+        }
+    }
+
+    #[test]
+    fn the_sink_is_handed_each_event_in_the_shape_the_cli_writes() {
+        // The one thing this layer must not get wrong: an event handed to a sink has to be the
+        // same line `JsonLines` puts on stdout, because the app decodes one shape whichever entry
+        // point produced it -- compact, one line, no pretty-printing.
+        //
+        // Asserted by running both emitters over the same events rather than against a
+        // hand-written literal, because the shape *is* whatever `JsonLines` writes: a literal
+        // would be a second copy of that decision, and it goes stale silently the day the writer
+        // changes. Key order is the case in point -- `preserve_order` is on in this tree, so the
+        // keys come out in the order the event builder inserted them (`event` first, then the
+        // payload) and a sorted-literal assertion here was simply wrong about the protocol.
+        let sink = Recorder::default();
+        let mut to_sink = SinkEmitter {
+            sink: Arc::new(sink.clone()),
+        };
+        let mut to_stdout = JsonLines::new(Vec::new());
+
+        for event in [
+            event("rows")
+                .field("data", Json::Array(vec![Json::from(1), Json::from(2)]))
+                .build(),
+            event("done").field("rows", 2).build(),
+        ] {
+            to_stdout
+                .emit(event.clone())
+                .expect("a Vec cannot fail to be written to");
+            to_sink
+                .emit(event)
+                .expect("a sink that records cannot fail");
+        }
+
+        let stdout = String::from_utf8(to_stdout.into_inner()).expect("JSON is UTF-8");
+        assert_eq!(
+            sink.lines(),
+            stdout.lines().map(str::to_owned).collect::<Vec<_>>(),
+            "the sink is handed the very lines the CLI would have written"
+        );
+    }
+
+    #[test]
+    fn the_cancel_handle_belongs_to_the_caller() {
+        // The property the app depends on: the handle is built *before* the call, so the thread
+        // that is blocked in `run` is not the thread that presses Stop. Made here, read here, and
+        // handed to `run` by the same expression -- which is the only thing the compiler can check
+        // (the parameter type) and this can check by value.
+        let cancel = RunCancel::new();
+        assert!(!cancel.is_cancelled(), "a fresh handle has stopped nothing");
+
+        cancel.request_cancel();
+        assert!(cancel.is_cancelled(), "and it stays stopped once asked");
+
+        // Asking twice is not an error: a user presses Stop, then presses it again.
+        cancel.request_cancel();
+        assert!(cancel.is_cancelled());
     }
 
     #[test]
@@ -256,25 +421,27 @@ mod tests {
     }
 
     #[test]
-    fn a_command_runs_through_the_ffi_path_and_returns_the_events_the_cli_writes() {
+    fn a_command_runs_through_the_ffi_path_and_hands_the_sink_the_events_the_cli_writes() {
         // The whole path in one assertion: settings as data instead of environment, dispatch,
-        // events captured instead of written to stdout. `connections` is the command to test
-        // it with because it reaches the local store and nothing else -- no server, no
-        // network, and a database under a temporary directory the test owns.
+        // events handed to the caller's own sink instead of written to stdout. `connections` is
+        // the command to test it with because it reaches the local store and nothing else -- no
+        // server, no network, and a database under a temporary directory the test owns.
         let directory = tempfile::tempdir().expect("a temporary directory");
         let database = directory.path().join("queryhive.sqlite3");
+        let sink = Recorder::default();
 
-        let events = run(
+        run(
             EngineCommand::Connections,
             vec![setting("DB_PATH", &database.to_string_lossy())],
-        )
-        .expect("the command runs");
+            Arc::new(sink.clone()),
+            RunCancel::new(),
+        );
 
+        let events = sink.events();
         assert_eq!(events.len(), 1, "one event: {events:?}");
-        let event: Value = serde_json::from_str(&events[0]).expect("an event is JSON");
-        assert_eq!(event["event"], "connections");
+        assert_eq!(events[0]["event"], "connections");
         assert_eq!(
-            event["connections"].as_array().map(Vec::len),
+            events[0]["connections"].as_array().map(Vec::len),
             Some(0),
             "a database this test just created holds no connections"
         );
@@ -284,20 +451,46 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_the_caller_can_act_on_arrives_as_a_typed_error_not_a_string() {
-        // `credential` without its action: a usage failure, which is the one kind where the
-        // app must know nothing was touched.
-        match run(EngineCommand::Credential, Vec::new()) {
-            Err(EngineError::Usage { message }) => {
-                assert!(message.contains("CREDENTIAL_ACTION"), "{message}");
-            }
-            other => panic!("expected a usage failure, got {other:?}"),
-        }
+    fn a_failure_arrives_as_an_error_event_rather_than_a_thrown_error() {
+        // `credential` without its action is a usage failure, decided before anything is touched.
+        // It arrives on the same channel as every other event: the app reads the `error` event's
+        // message and the last line of the stderr argument, and never a typed error.
+        let sink = Recorder::default();
+        run(
+            EngineCommand::Credential,
+            Vec::new(),
+            Arc::new(sink.clone()),
+            RunCancel::new(),
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "one failure, one event: {events:?}");
+        assert_eq!(events[0]["event"], "error");
+        let message = events[0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("CREDENTIAL_ACTION"), "{message}");
     }
 
     #[test]
-    fn the_version_comes_from_the_build() {
-        assert_eq!(engine_version(), env!("CARGO_PKG_VERSION"));
-        assert!(!engine_version().is_empty());
+    fn a_failure_without_warnings_omits_the_field_rather_than_sending_an_empty_array() {
+        // The `warnings` pairing `main.rs` writes: present and non-empty after a `replace` that
+        // dropped the old table, absent otherwise. `to_table` with no target is a usage error
+        // reachable without a server, so it is the case this test can produce -- and what it
+        // asserts is the *shape*, because an empty array and an absent key are two different
+        // events to a decoder that has learned to read the field.
+        let sink = Recorder::default();
+        run(
+            EngineCommand::ToTable,
+            Vec::new(),
+            Arc::new(sink.clone()),
+            RunCancel::new(),
+        );
+
+        let events = sink.events();
+        assert_eq!(events[0]["event"], "error");
+        assert!(
+            events[0].get("warnings").is_none(),
+            "a failure with no warnings omits the field: {}",
+            events[0]
+        );
     }
 }

@@ -158,6 +158,16 @@ struct FakeSession {
     rows: Vec<Vec<Value>>,
     names: Vec<String>,
     object_rows: Vec<Vec<String>>,
+    /// Rows per batch the cursor hands out, when a test needs a run to last longer
+    /// than one page. `None` puts every row in a single batch, which is what the
+    /// snapshots were recorded with.
+    batches_of: Option<usize>,
+    /// The caller's stop handle, for a test that has to pull it mid-run.
+    ///
+    /// The fake is where the request comes from because nothing else can reach into
+    /// an engine that is already running: a real caller presses Stop on another
+    /// thread, and this test has no second thread to press from.
+    cancel: Option<CancelFlag>,
 }
 
 impl FakeSession {
@@ -173,7 +183,21 @@ impl FakeSession {
             rows: Vec::new(),
             names: Vec::new(),
             object_rows: Vec::new(),
+            batches_of: None,
+            cancel: None,
         }
+    }
+
+    /// Hand the rows out `size` at a time, so there is a page boundary in the run.
+    fn batches_of(mut self, size: usize) -> Self {
+        self.batches_of = Some(size);
+        self
+    }
+
+    /// Ask `cancel` to stop the run at the moment the last page has been handed out.
+    fn cancel_when_drained(mut self, cancel: CancelFlag) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     fn query_id(mut self, id: Option<&str>) -> Self {
@@ -253,11 +277,11 @@ impl Session for FakeSession {
         Ok(Box::new(FakeCursor {
             columns: self.columns.clone(),
             affected: self.affected,
-            batches: if self.rows.is_empty() {
-                VecDeque::new()
-            } else {
-                VecDeque::from([ColumnBatch::new(transpose(&self.rows)).expect("a batch")])
-            },
+            batches: batches_of(
+                &self.rows,
+                self.batches_of.unwrap_or(self.rows.len().max(1)),
+            ),
+            cancel: self.cancel.clone(),
         }))
     }
 
@@ -298,6 +322,7 @@ struct FakeCursor {
     columns: Vec<ColumnMeta>,
     affected: Option<u64>,
     batches: VecDeque<ColumnBatch>,
+    cancel: Option<CancelFlag>,
 }
 
 #[async_trait]
@@ -311,8 +336,27 @@ impl Cursor for FakeCursor {
     }
 
     async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
-        Ok(self.batches.pop_front())
+        let next = self.batches.pop_front();
+        // The stop lands once the server is done answering, so the page after this one
+        // never arrives: a stop that could not stop anything is the bug this test exists
+        // for, and a flag set before the first page would pass even if nothing read it.
+        if let Some(cancel) = &self.cancel {
+            if self.batches.is_empty() {
+                cancel.request();
+            }
+        }
+        Ok(next)
     }
+}
+
+/// The rows as `size`-row batches, in order.
+fn batches_of(rows: &[Vec<Value>], size: usize) -> VecDeque<ColumnBatch> {
+    if rows.is_empty() {
+        return VecDeque::new();
+    }
+    rows.chunks(size.max(1))
+        .map(|chunk| ColumnBatch::new(transpose(chunk)).expect("a batch"))
+        .collect()
 }
 
 /// Rows as a batch's column-major form.
@@ -1316,6 +1360,77 @@ fn the_server_oid_mask_reaches_the_two_places_an_oid_lives_and_nothing_else() {
     ] {
         assert_eq!(event(untouched), server_event(untouched), "{untouched}");
     }
+}
+
+/// The stop the app's button asks for, all the way down to the row loop.
+///
+/// A caller's own flag, its own run, and the file on disk afterwards. This is the half
+/// `RustEngine`'s note used to say could not be checked: the FFI exports the handle
+/// (`RunCancel`), and everything below it — `run` to `export` to `pump` — reads the same
+/// flag a SIGTERM sets, so a stop cannot mean one thing from the terminal and another
+/// from the app.
+///
+/// The fake cursor sets the flag once it has handed out the last page, which is where a
+/// user who has seen the progress move would press Stop. What the assertions are about is
+/// that the loop *read* it: an unread flag writes rows 4 through 6 as well, and the file
+/// says so.
+#[tokio::test]
+async fn a_cancelled_export_keeps_what_it_wrote_and_says_it_was_cancelled() {
+    let out_dir = tempfile::tempdir().expect("a temporary directory");
+    let rows: Vec<Vec<Value>> = (1..=6)
+        .map(|id| vec![Value::Int(id), Value::Text(format!("row{id}").into())])
+        .collect();
+
+    let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    pairs.push(("SQL".to_owned(), "SELECT * FROM people".to_owned()));
+    pairs.push(("FORMAT".to_owned(), "csv".to_owned()));
+    pairs.push(("NAME".to_owned(), "people".to_owned()));
+    pairs.push((
+        "OUT_DIR".to_owned(),
+        out_dir.path().to_string_lossy().into_owned(),
+    ));
+    // Two batches of three, so the stop lands between the two pages rather than inside
+    // the first one: the loop reads the flag before a page is fetched, which is the case
+    // a real Stop hits when a query is slow rather than when a writer is slow.
+    let session = FakeSession::new(DriverKind::Trino)
+        .columns(&[("id", "integer"), ("name", "varchar")])
+        .rows(rows)
+        .batches_of(3);
+    let cancel = CancelFlag::new();
+    let engine = FakeEngine {
+        session: session.clone().cancel_when_drained(cancel.clone()),
+        refuse: false,
+    };
+
+    let mut events = Capture::new();
+    run(
+        Command::Export,
+        &Settings::from_pairs(pairs),
+        &mut events,
+        &engine,
+        &cancel,
+    )
+    .await
+    .expect("a cancelled export is not a failed export");
+
+    assert!(cancel.is_cancelled(), "the stop really reached the flag");
+    let done = events.lines.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["cancelled"], true, "the app shows this to the user");
+    assert_eq!(
+        done["rows"], 3,
+        "the rows written before the stop, not all six: {done}"
+    );
+
+    // The file is closed with the rows it had, and no row 4. This is the promise the
+    // FFI's own note makes — "a stop that loses what was written would be worse than no
+    // stop button" — and it is a promise about bytes on disk, so it is checked there.
+    let written = std::fs::read_to_string(out_dir.path().join("people.csv"))
+        .expect("the export closed its file");
+    assert_eq!(written, "id,name\r\n1,row1\r\n2,row2\r\n3,row3\r\n");
 }
 
 fn lines(events: &[Json]) -> String {

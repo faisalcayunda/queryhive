@@ -243,6 +243,68 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_EVENT_SINK_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_EVENT_SINK_METHOD0
+typedef void (*UniffiCallbackInterfaceEventSinkMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_EVENT_SINK
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_EVENT_SINK
+typedef struct UniffiVTableCallbackInterfaceEventSink {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceEventSinkMethod0 _Nonnull onEvent;
+} UniffiVTableCallbackInterfaceEventSink;
+
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EVENTSINK
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EVENTSINK
+uint64_t uniffi_qh_ffi_fn_clone_eventsink(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_EVENTSINK
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_EVENTSINK
+void uniffi_qh_ffi_fn_free_eventsink(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_INIT_CALLBACK_VTABLE_EVENTSINK
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_INIT_CALLBACK_VTABLE_EVENTSINK
+void uniffi_qh_ffi_fn_init_callback_vtable_eventsink(const UniffiVTableCallbackInterfaceEventSink* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EVENTSINK_ON_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EVENTSINK_ON_EVENT
+void uniffi_qh_ffi_fn_method_eventsink_on_event(uint64_t ptr, RustBuffer line, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_RUNCANCEL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_RUNCANCEL
+uint64_t uniffi_qh_ffi_fn_clone_runcancel(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_RUNCANCEL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_RUNCANCEL
+void uniffi_qh_ffi_fn_free_runcancel(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_RUNCANCEL_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_RUNCANCEL_NEW
+uint64_t uniffi_qh_ffi_fn_constructor_runcancel_new(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_IS_CANCELLED
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_IS_CANCELLED
+int8_t uniffi_qh_ffi_fn_method_runcancel_is_cancelled(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_REQUEST_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_REQUEST_CANCEL
+void uniffi_qh_ffi_fn_method_runcancel_request_cancel(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_COMMAND_NAMES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_COMMAND_NAMES
 RustBuffer uniffi_qh_ffi_fn_func_command_names(RustCallStatus *_Nonnull out_status
@@ -257,7 +319,7 @@ RustBuffer uniffi_qh_ffi_fn_func_engine_version(RustCallStatus *_Nonnull out_sta
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_RUN
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_RUN
-RustBuffer uniffi_qh_ffi_fn_func_run(RustBuffer command, RustBuffer settings, RustCallStatus *_Nonnull out_status
+void uniffi_qh_ffi_fn_func_run(RustBuffer command, RustBuffer settings, uint64_t sink, uint64_t cancel, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_QH_FFI_RUSTBUFFER_ALLOC
@@ -535,6 +597,30 @@ uint16_t uniffi_qh_ffi_checksum_func_engine_version(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_RUN
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_RUN
 uint16_t uniffi_qh_ffi_checksum_func_run(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EVENTSINK_ON_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EVENTSINK_ON_EVENT
+uint16_t uniffi_qh_ffi_checksum_method_eventsink_on_event(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_IS_CANCELLED
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_IS_CANCELLED
+uint16_t uniffi_qh_ffi_checksum_method_runcancel_is_cancelled(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
+uint16_t uniffi_qh_ffi_checksum_method_runcancel_request_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_RUNCANCEL_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_RUNCANCEL_NEW
+uint16_t uniffi_qh_ffi_checksum_constructor_runcancel_new(void
     
 );
 #endif

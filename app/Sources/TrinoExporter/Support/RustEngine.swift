@@ -6,27 +6,41 @@ import QueryHiveFFI
 ///
 /// This is the only type in the app that imports the FFI module, and `Engine.current` does not
 /// name it yet: the legacy engine is removed in the same change that flips that line
-/// (`PROGRESS.md`, "Keputusan sapu bersih"), and that change is not this one. So what this file is
-/// allowed to be today is a conformer that compiles, honours the contract below, and does not
-/// pretend about the three places the FFI cannot answer yet:
+/// (`PROGRESS.md`, "Keputusan sapu bersih"), and that change is not this one.
 ///
-/// 1. **Events are not streamed.** `run` in `crates/qh-ffi/src/uniffi_api.rs` builds a runtime of
-///    its own, runs the whole command, and returns every line at once (`Result<Vec<String>,
-///    EngineError>`). The Python engine's events arrive as the child writes them, which is what
-///    makes an `export`'s progress move while the export runs; here the same events arrive in the
-///    same order, at the end. Nothing a caller sees is wrong, but a long export would look frozen.
-///    The FFI's own module note says why: typed events and a stream are the next step, and doing
-///    them before there is a consumer would design a hierarchy against no caller.
-/// 2. **Cancellation is not wired.** The same note says a cancel entry point is separate, later
-///    work because "the app's cancel has to reach a command that is already running". There is
-///    nothing in the surface to reach for: `CancelFlag` exists in the crate but is not exported
-///    over UniFFI. So `terminate()` here stops the *delivery*, not the query — see `RustRun`.
-/// 3. **There is no process, and no stderr.** The protocol's second callback argument is the
-///    child's stderr, and the seven call sites that read it parse its last line for a failure
-///    message. The FFI reports failures as a typed `EngineError` instead, so this engine writes
-///    the message into both places at once: an `error` event carrying it, and the same text in
-///    that argument. A call site that looks at either one keeps working unchanged. The exit
-///    status becomes 1, which is what the CLI exits with for the same failure.
+/// The two gaps this file used to document are closed, and what is left is the two places the FFI
+/// is *deliberately* not the process engine:
+///
+/// 1. **Events stream.** `run` takes an `EventSink` and the engine calls it as it produces each
+///    event, so an `export`'s progress moves while the export runs — the same thing the Python
+///    engine's `print(..., flush=True)` bought, and the reason a `Vec<String>` return value was
+///    not enough no matter how complete it was.
+/// 2. **Stop stops the query.** `run` also takes a `RunCancel`, made here before the call and kept
+///    on the handle, so `terminate()` reaches a run that is still in flight. The engine reads the
+///    same flag a SIGTERM sets — between rows and between statements — so a stopped `export`
+///    finishes the statement it is on, keeps the bytes it already wrote, and reports `done` with
+///    `cancelled: true`. One honest limit, unchanged from the Python engine: `preview` and
+///    `explain` do not poll the flag (`commands.rs`, "nothing polls for a cancel here"), so
+///    stopping a preview takes effect at the end of the statement rather than during it. In the
+///    old engine the same was true and it was invisible, because SIGTERM killed the child at the
+///    end anyway.
+///
+/// The one thing that is genuinely gone is the child process:
+///
+/// - **There is no stderr.** The protocol's second callback argument is the child's log, and the
+///   call sites that read it take its last line as a failure message. There is no log here, so
+///   this engine writes the message into both places at once: an `error` event carrying it, and
+///   the same text in that argument. A call site that looks at either one keeps working
+///   unchanged. The exit status is 1 for a failure and 0 otherwise, which is what the CLI exits
+///   with for the same run.
+/// - **A secret cannot leak the way it used to, and that is not the same as being redacted.**
+///   `PythonEngine` scrubbed its environment's secret-looking values out of every message before
+///   the UI saw one, because a Python traceback can echo a live password. These messages are
+///   built by the engine rather than by an interpreter: a connection renders through
+///   `ConnectionConfig::redacted()` / its own `Debug`, neither of which prints a password, and the
+///   tunnel's failures name a setting rather than its value (`tunnel.rs`'s `TunnelConfigError`).
+///   So the scrubber is not carried over — and no test asserts that absence, which is the honest
+///   state of it: it holds by construction, not by check.
 ///
 /// `env` is passed through as data, with no translation at all: the FFI's `Setting` pairs are the
 /// same keys the CLI reads, so the app's existing environment is already the FFI's input. That is
@@ -90,118 +104,132 @@ struct RustEngine: DatabaseEngine {
         // picture by never relying on it — settings are read by key on the other side.
         let settings = env.map { Setting(key: $0.key, value: $0.value) }
 
-        DispatchQueue.global().async {
-            // One FFI call, and it is a blocking one by design (`uniffi_api.rs`, "Blocking,
-            // deliberately"): it must not run on the main thread, and a concurrent queue is not
-            // the main thread. The call also builds its own tokio runtime and drops it, which is
-            // why a run costs a thread pool rather than reusing one.
-            let outcome: Result<[String], EngineError>
-            do {
-                outcome = .success(try QueryHiveFFI.run(command: named, settings: settings))
-            } catch let error as EngineError {
-                outcome = .failure(error)
-            } catch {
-                // UniFFI only throws the declared error type, but the surface is allowed to grow
-                // one, and a `catch` that is not exhaustive would be a crash rather than a message.
-                DispatchQueue.main.async {
-                    Self.finish(handle, onEvent: onEvent, onExit: onExit, lines: [], failure: nil,
-                                unexpected: error)
-                }
-                return
-            }
+        // Made *before* the call, and that ordering is the whole reason `RunCancel` is the
+        // caller's object rather than `run`'s return value: the FFI call does not return until the
+        // command is over, so a handle it handed back could only ever be used once there was
+        // nothing left to stop. Stop is pressed on the main queue while this call is blocked on
+        // another thread, which is why the handle has to exist first.
+        let cancel = RunCancel()
+        handle.attach(cancel: cancel)
+        let sink = Sink(handle: handle, onEvent: onEvent)
 
+        DispatchQueue.global().async {
+            // One FFI call, and it is a blocking one by design (`uniffi_api.rs`, "The call blocks
+            // until the command has ended, so it belongs off the main thread"): it must not run on
+            // the main thread, and a concurrent queue is not the main thread. The call also builds
+            // its own tokio runtime and drops it, which is why a run costs a thread pool rather
+            // than reusing one.
+            //
+            // No `do`/`catch`: the FFI has no failure to throw. A command that fails emits one
+            // `error` event through the sink, so there is exactly one failure path for the caller
+            // to read — the same one the CLI writes.
+            QueryHiveFFI.run(command: named, settings: settings, sink: sink, cancel: cancel)
+
+            // Every event has already been handed to the sink's queue by now, so this lands after
+            // the last one: the queue is serial and the sink hopped to it first.
             DispatchQueue.main.async {
-                switch outcome {
-                case .success(let lines):
-                    Self.finish(handle, onEvent: onEvent, onExit: onExit, lines: lines,
-                                failure: nil, unexpected: nil)
-                case .failure(let error):
-                    Self.finish(handle, onEvent: onEvent, onExit: onExit, lines: [],
-                                failure: error, unexpected: nil)
-                }
+                Self.finish(handle, onExit: onExit, sink: sink)
             }
         }
         return handle
     }
 
     func terminateAll() {
-        // Dropping the handles is the whole of it: the FFI call itself cannot be interrupted
-        // (see the type note), so all `terminate()` can do is promise no event reaches the UI
-        // after the window is gone — which is the reason the app delegate calls this at all.
+        // Every run is asked to stop, which is what the app delegate wants at termination: a
+        // query left running on the coordinator after the window is gone is the thing this call
+        // exists to prevent. The runs are dropped from the set here rather than by their own
+        // completion so that a run whose thread is wedged cannot accumulate across calls.
         let handles = Self.running
         Self.running.removeAll()
         handles.forEach { $0.terminate() }
     }
 
-    /// Everything the main queue does once the call has returned: the events, then the exit.
+    /// Everything the main queue does once the call has returned: the exit, after the events.
     ///
-    /// One helper for all three ways the call can end, because the ordering rule ("events, then
-    /// `onExit`, exactly once, on the main queue") is the part callers depend on and it should not
-    /// exist in three slightly different copies.
-    private static func finish(_ handle: RustRun, onEvent: @escaping (Event) -> Void,
+    /// The events are not passed through here, and that is the change streaming brought: the sink
+    /// delivered each one as the engine produced it, so all that is left is the ordering rule's
+    /// second half — `onExit`, exactly once, on the main queue, after the last event.
+    private static func finish(_ handle: RustRun,
                                onExit: @escaping (_ status: Int32, _ stderr: String) -> Void,
-                               lines: [String], failure: EngineError?, unexpected: (any Error)?) {
+                               sink: Sink) {
         running.remove(handle)
 
-        if let unexpected {
-            // A failure the FFI did not declare. Worded like the CLI's own catch-all so the user
-            // reads the same sentence whichever engine wrote it.
-            let message = "internal error: \(unexpected.localizedDescription)"
-            onEvent(Event(event: "error", message: message))
+        if let message = sink.failure {
+            // The message the engine wrote, in both places at once: the exit status the call
+            // sites branch on, and the argument `PythonEngine` put its log in. It was already
+            // delivered as the `error` event, by the sink, on the way here.
             onExit(1, message)
             return
         }
-
-        if let failure {
-            let (message, warnings) = describe(failure)
-            // The same pairing the CLI writes for a failure: the event the UI shows, and the text
-            // it keeps as detail. `warnings` is left out when empty — mirroring `main.rs`, where
-            // the field is omitted rather than sent as `[]`.
-            if !handle.isStopped {
-                onEvent(Event(event: "error", message: message,
-                              warnings: warnings.isEmpty ? nil : warnings))
-            }
-            onExit(1, message)
-            return
-        }
-
-        for line in lines where !handle.isStopped {
-            if let event = EngineWire.event(in: Data(line.utf8)) { onEvent(event) }
-        }
-        // Status 0 and no stderr, which is what a Python run that ended cleanly reports too.
+        // Status 0 and no stderr, which is what a Python run that ended cleanly reports too — and
+        // what a *cancelled* run reports: stopping is a decision the user made, not a failure.
         onExit(0, "")
     }
+}
 
-    /// What to tell the user about a typed failure.
+/// The sink the FFI is handed: decode one line, deliver it on the main queue.
+///
+/// A class, because `EventSink` is one (UniFFI keeps it in a handle map and calls back into the
+/// same object), and because the failure message it remembers has to outlive the calls.
+final class Sink: EventSink, @unchecked Sendable {
+    /// The run this sink belongs to, so a stopped run's late events are not painted into a view
+    /// that has moved on.
+    private let handle: RustRun
+    /// Named `deliver` rather than `onEvent`: the protocol's own method is `onEvent(line:)`, and a
+    /// stored property of that name is a redeclaration in the same type.
+    private let deliver: (Event) -> Void
+
+    /// Guarded because the FFI calls this from its own thread while the main queue reads it at
+    /// the end of the run. `RustRun`'s own lock has the same shape and the same reason.
+    private let lock = NSLock()
+    private var message: String?
+
+    init(handle: RustRun, onEvent: @escaping (Event) -> Void) {
+        self.handle = handle
+        self.deliver = onEvent
+    }
+
+    /// The `error` event's message, or `nil` if the run did not fail.
     ///
-    /// Not `localizedDescription`: UniFFI generates that as `String(reflecting: self)`, which
-    /// prints the Swift case name and its labels at the user
-    /// (`EngineError.Connect(message: "…")`). The app's error bar is already worded for users, so
-    /// this reads the message the engine wrote. `Failed`'s `kind` and `Partial`'s `warnings` are
-    /// not dropped silently: the warnings are reported beside the message, as the CLI reports
-    /// them, and the `kind` is the one piece of the typed error that has nowhere to go yet —
-    /// `PROGRESS.md` records that using it means changing every failure path in `AppModel`, which
-    /// this change is not allowed to touch.
-    private static func describe(_ error: EngineError) -> (message: String, warnings: [String]) {
-        switch error {
-        case .Usage(let message), .Connect(let message), .Query(let message):
-            return (message, [])
-        case .Partial(let message, let warnings):
-            return (message, warnings)
-        case .Failed(_, let message):
-            return (message, [])
+    /// Kept here rather than returned, because there is nowhere to return it to: the FFI call
+    /// reports a failure on the same channel as everything else, which is the point of it.
+    var failure: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return message
+    }
+
+    func onEvent(line: String) {
+        // The decode lives in `EngineWire` because `PythonEngine` reads the same lines out of the
+        // child's stdout, and the two must not disagree about what one means. A line that is not
+        // an event is dropped rather than failing the run, exactly as the old engine dropped it
+        // into stderr: the engine writes nothing else to this channel.
+        guard let event = EngineWire.event(in: Data(line.utf8)) else { return }
+
+        if event.event == "error" {
+            lock.lock()
+            message = event.message
+            lock.unlock()
+        }
+
+        // Hopped rather than delivered here: the FFI calls this from the thread that is running
+        // the command, and the protocol promises every delivery on the main queue. The hop is
+        // unconditional, so the events arrive in the order the engine produced them — a serial
+        // queue is what makes that ordering survive the hop, and what makes them all land before
+        // the exit that `finish` hops to after this call returns.
+        DispatchQueue.main.async { [handle, deliver] in
+            guard !handle.isStopped else { return }
+            deliver(event)
         }
     }
 }
 
 /// The handle a caller holds while a Rust run is in flight.
 ///
-/// `EngineRun` promises one thing — "the handle that stops it" — and this is the honest half of it.
-/// The FFI call cannot be interrupted (there is no cancel entry point to call), so `terminate()`
-/// stops the events from being delivered to a caller that has moved on, and the query keeps
-/// running to completion in the background where nobody is waiting for its result. That is worth
-/// writing down rather than hiding: an app that believed `terminate()` had stopped the query would
-/// be wrong about its own database load.
+/// `EngineRun` promises one thing — "the handle that stops it" — and this is all of it: `terminate()`
+/// asks the engine to stop, and the engine stops reading rows. It is a request rather than a kill,
+/// which is worth knowing when a statement is slow to notice: a stopped `export` keeps the rows it
+/// already wrote and reports them, and a stopped `preview` ends with the statement it is on.
 ///
 /// A run is its own identity — a second run of the same command is a different run — so equality
 /// is identity rather than the fields a subclass-style `Equatable` would compare.
@@ -209,15 +237,28 @@ final class RustRun: EngineRun, Hashable {
     let command: String
 
     private let lock = NSLock()
+    /// The engine's own handle, handed over by `run` before the call starts.
+    ///
+    /// Readable outside this file so a test can check that a stop crossed into the engine rather
+    /// than only setting a flag here — which is the difference the old version of this file could
+    /// not test, and said so.
+    private(set) var cancelHandle: RunCancel?
     private var stopped = false
 
     init(command: String) {
         self.command = command
     }
 
-    /// Whether the caller has stopped waiting for this run. Read on the main queue, written from
-    /// wherever `terminate()` is called — including the app delegate's `applicationWillTerminate`,
-    /// which is why this is locked rather than a plain `Bool`.
+    /// The caller's cancel handle, handed over by `run` before the FFI call starts. Locked
+    /// because `terminate()` is called from the main queue — including the app delegate's
+    /// `applicationWillTerminate` — while `run` sets it from wherever the call was made.
+    func attach(cancel: RunCancel) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.cancelHandle = cancel
+    }
+
+    /// Whether the caller has stopped waiting for this run.
     var isStopped: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -226,8 +267,15 @@ final class RustRun: EngineRun, Hashable {
 
     func terminate() {
         lock.lock()
-        defer { lock.unlock() }
+        let cancel = cancelHandle
         stopped = true
+        lock.unlock()
+        // Outside the lock: the FFI call crosses into Rust, and holding a Swift lock across it
+        // would make the stop wait on whatever the run happens to be doing.
+        //
+        // Idempotent, because a user presses Stop and then presses it again, and it is safe
+        // before the engine has opened anything and after it has finished — `RunCancel` says so.
+        cancel?.requestCancel()
     }
 
     static func == (lhs: RustRun, rhs: RustRun) -> Bool { lhs === rhs }

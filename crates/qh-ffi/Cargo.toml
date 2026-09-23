@@ -49,10 +49,14 @@ qh-tunnel.workspace = true
 # that produced it.
 secrecy.workspace = true
 
-# Key order in an event does not matter to a decoder, but a stable one makes the
-# engine's stdout diffable against the frozen snapshots byte for byte. This build
-# has no `preserve_order` on purpose: the map is a BTreeMap, so keys come out
-# sorted, which is exactly how `tools/golden/record.py` normalises them.
+# Key order is not this crate's decision, and nothing here depends on it. The
+# workspace turns `preserve_order` on (root `Cargo.toml`, for the server's own
+# column order -- `qh-core`'s `render.rs`), and features unify across a workspace,
+# so this crate gets that map too: an event's keys come out in the order the
+# builder inserted them rather than sorted. Every consumer decodes by key, and the
+# golden harness compares parsed values rather than bytes, so the frozen snapshots
+# under `tests/golden/` stay comparable even though `tools/golden/record.py` sorts
+# the keys it writes.
 serde_json = "1"
 # The control plane only (ADR-0004): errors and typed values, not the grid data plane,
 # which is a handle and an offset buffer precisely because marshalling every cell as a

@@ -11,9 +11,15 @@
 //!    it in the same object, so a decoder reads `{"event": "rows", "data": [...]}`
 //!    in one pass. Anything else would be a protocol change.
 //!
-//! Keys are emitted sorted (the map is a `BTreeMap`), which is what the snapshot
-//! recorder normalises to, so the engine's stdout can be compared with the frozen
-//! Python lines without a normaliser in between.
+//! Keys come out in the order the event builder inserted them, not sorted:
+//! `serde_json`'s `preserve_order` is on in this tree (the workspace turns it on
+//! for the server's own column order, `qh-core`'s `render.rs`), so the map is an
+//! insertion-ordered one and `event` lands before its payload.
+//!
+//! No consumer depends on that order. The app decodes by key, and the golden
+//! harness compares parsed values rather than bytes, so the frozen snapshots —
+//! which `tools/golden/record.py` writes with `sort_keys=True` — can still be
+//! compared with what this writer produces.
 
 use std::io::{self, Write};
 
@@ -98,8 +104,8 @@ impl Capture {
         Self::default()
     }
 
-    /// The captured events as the harness compares them: one JSON line each, keys
-    /// sorted, exactly the shape `JsonLines` writes.
+    /// The captured events as the harness compares them: one JSON line each, in
+    /// the shape `JsonLines` writes (keys in insertion order, compact).
     pub fn lines(&self) -> Vec<String> {
         self.lines
             .iter()
