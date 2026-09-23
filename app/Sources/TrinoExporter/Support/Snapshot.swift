@@ -548,6 +548,17 @@ enum Snapshot {
             model.presentConnectionEditor(nil)
         case "connection-uri":
             model.presentConnectionEditor(nil)
+        case "connection-trino":
+            // Trino's form is not the Postgres one with a field renamed: it is the only driver
+            // with a transport picker, and the only one whose third transport (`prefer`) is
+            // neither a scheme nor a verification answer. Seeded on `prefer` so a review draws
+            // the state a snapshot could not otherwise reach.
+            let trino = Connection(id: UUID(), name: "Trino prefer", color: .amber, kind: .trino,
+                                   host: "localhost", port: 8080, scheme: "prefer",
+                                   user: "dev", database: "tpch", schema: "", verify: true)
+            model.connections.append(trino)
+            model.rebuildTree()
+            model.presentConnectionEditor(trino.id)
         case "connection-postgres", "connection-mysql":
             // The editor is not the same form three times over: Postgres has no catalog and
             // swaps the TLS toggle for an SSL mode, MySQL has no schema at all.

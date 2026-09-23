@@ -354,10 +354,19 @@ struct ConnectionEditorSheet: View {
             }
             HStack(alignment: .top, spacing: 12) {
                 if kind == .trino {
-                    LabeledField("Scheme") {
-                        Segmented(selection: $scheme, options: ["https", "http"]) { $0.uppercased() }
+                    // Three options, not two, because Trino's encryption decision has four
+                    // outcomes and the two scheme words can only spell three of them. The
+                    // fourth — "https when the coordinator offers it, http otherwise" — is
+                    // `prefer`, and it is the shared vocabulary's own word rather than a new
+                    // one: the other two drivers' SSL mode pickers already show it for this
+                    // exact outcome. See `TrinoTransport` for how it reaches the engine.
+                    LabeledField("Transport") {
+                        Segmented(selection: trinoTransport, options: TrinoTransport.allCases) { $0.label }
                     }
-                    .frame(width: 150)
+                    .frame(width: 235)
+                    .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
+                          + "first and keeps plain HTTP only for a coordinator that has no TLS at all — "
+                          + "the certificate is not checked either way.")
                 }
                 LabeledField("Port · Required") {
                     TextField(String(kind.defaultPort), value: $port, format: .number.grouping(.never))
@@ -370,6 +379,10 @@ struct ConnectionEditorSheet: View {
                 // the other scheme's standard one.
                 if old == "http", new == "https", port == 8080 { port = 8443 }
                 if old == "https", new == "http", port == 8443 { port = 8080 }
+                // `prefer` moves nothing. It tries HTTPS and falls back to clear on whatever
+                // port it was given, which is the only port that can answer the question the
+                // transport exists to leave open; rewriting the port would answer it for the
+                // coordinator instead of asking it.
             }
             LabeledField("User · Required") {
                 TextField("faisal", text: $user).field(invalid: attemptedSave && missingRequired.contains("user"))
@@ -418,14 +431,54 @@ struct ConnectionEditorSheet: View {
                     Segmented(selection: $sslmode, options: kind.sslModes) { $0 }
                 }
             } else {
-                ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+                // HTTPS is the only Trino transport with a verification answer to give, so it is
+                // the only one that shows the box. `prefer` never checks the certificate — the
+                // mode means "encrypt if you can", both on the attempt and on the fallback —
+                // and in clear there is nothing to check, so neither is offered a control that
+                // could not change the connection.
+                //
+                // The absence is *said* rather than left blank: a control that simply vanishes
+                // reads as a mistake, and an unchecked box reads as an answer. The stored value
+                // stays stored either way, so going back to HTTPS offers the user's last choice
+                // again.
+                switch TrinoTransport(stored: scheme) {
+                case .https:
+                    ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+                case .prefer:
+                    tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
+                            + "The certificate is not checked.")
+                        .help("`prefer` never verifies: it encrypts when it can and falls back to clear "
+                              + "only when the coordinator answers the handshake with something that is not "
+                              + "TLS. HTTPS with this box off is the transport that says so outright.")
+                case .http:
+                    tlsNote("Plain HTTP: nothing to verify. A password still forces HTTPS — "
+                            + "pick HTTPS to choose how that is verified.")
+                        .help("In clear there is no certificate to check. The engine raises this connection "
+                              + "to HTTPS anyway when a password is stored, which is why the verification "
+                              + "answer lives on the HTTPS transport rather than here.")
+                }
             }
         }
     }
 
+    /// The picker's own binding over the string the connection stores, so the third option
+    /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
+    private var trinoTransport: Binding<TrinoTransport> {
+        Binding(get: { TrinoTransport(stored: scheme) },
+                set: { scheme = $0.rawValue })
+    }
+
+    /// One spoken line where a control would be, for a transport with no verification to answer.
+    private func tlsNote(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(Tone.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var passwordHint: String {
         switch kind {
-        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https."
+        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https. Prefer is the exception: it starts on HTTPS and falls back to clear only when the coordinator has no TLS."
         case .postgres: "Postgres accepts a password over any SSL mode, including \"prefer\"."
         case .mysql: "MySQL accepts a password over either SSL mode."
         }

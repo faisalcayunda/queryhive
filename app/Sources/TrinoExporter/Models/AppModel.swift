@@ -1324,7 +1324,8 @@ final class AppModel {
     static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
                                       password: String?, database: String, schema: String,
                                       scheme: String, sslmode: String, verify: Bool) -> [String: String] {
-        [
+        let transport = TrinoTransport(stored: scheme)
+        return [
             "DB_KIND": kind.rawValue,
             "DB_HOST": host,
             "DB_PORT": String(port),
@@ -1335,9 +1336,26 @@ final class AppModel {
             // Trino's transport is a scheme; the other two express encryption through sslmode.
             // Sending the wrong one is harmless — the engine ignores what a driver has no use
             // for — but sending both would be confusing to read in a bug report.
-            "DB_SCHEME": kind == .trino ? (scheme.isEmpty ? "http" : scheme) : "",
-            "DB_SSLMODE": kind.hasSSLModes ? (sslmode.isEmpty ? kind.defaultSSLMode : sslmode) : "",
-            "DB_INSECURE": verify ? "" : "1",
+            //
+            // `prefer` is the one mode that needs both, and needs `sslmode` to be the one that
+            // names it: a scheme can say "clear" or "encrypt", never "encrypt if you can". So
+            // `DB_SCHEME=https` still goes out — it is where the mode starts, and the engine
+            // reads it — and `DB_SSLMODE=prefer` decides, because a named sslmode outranks the
+            // scheme in `qh_ffi::config`. The scheme word is sent unchanged rather than
+            // normalised, so a value the engine would refuse is still refused out loud.
+            "DB_SCHEME": kind == .trino ? (transport == .prefer ? "https" : (scheme.isEmpty ? "http" : scheme)) : "",
+            // Only `prefer` is named for Trino. A stored Trino connection's `sslmode` is
+            // whatever an earlier editor left there (it wrote Postgres's default into it), and
+            // sending that for the other transports would outrank the scheme — turning a
+            // connection the user set to https into a clear one, silently.
+            "DB_SSLMODE": kind == .trino
+                ? (transport == .prefer ? TrinoTransport.prefer.rawValue : "")
+                : (sslmode.isEmpty ? kind.defaultSSLMode : sslmode),
+            // `prefer` decides its own verification, and it never checks: `DB_INSECURE` would
+            // otherwise demote it to a required, unverified connection, which is a different
+            // mode and not the fallback the user asked for. Every other transport keeps the
+            // stored flag, `http` included — the engine ignores it in clear.
+            "DB_INSECURE": kind == .trino && transport == .prefer ? "" : (verify ? "" : "1"),
         ]
     }
 

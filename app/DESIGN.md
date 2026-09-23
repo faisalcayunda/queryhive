@@ -152,7 +152,7 @@ things worth having were fitted to the rows that already exist:
 | object pickers on their own strip | at the right of the editor header, which was empty | they are a lookup, not an action, so they take the far side of a row whose actions sit left |
 | `Run ⌄` | Run with a chevron menu beside it | the primary action stays one click; the variants stay one more |
 | `□ Stop` beside Run | Stop beside Run, disabled when idle | it used to swap into Run's slot, which moved the button out from under the pointer exactly when it was being reached for |
-| icon toolbar: EXPLAIN, format, layout toggles | **not copied** | the engine has no EXPLAIN, no formatter, and one grid — a button with nothing behind it is worse than no button |
+| icon toolbar: EXPLAIN, format, layout toggles | **not copied as icons** | Explain is a button beside Stop, not an icon (§Explain); there is no formatter; and there is one grid, so the layout toggles have nothing to switch — a button with nothing behind it is worse than no button |
 | "Continue on Error" | **not copied** | one statement runs per run; there is no script to continue |
 
 The pickers follow the connection's driver levels exactly as the tree does — no schema picker for
@@ -600,10 +600,19 @@ The form shows only the fields the driver has:
 
 | | Trino | PostgreSQL | MySQL |
 |---|---|---|---|
-| transport | Scheme (http/https) + Verify TLS | SSL mode | SSL mode |
+| transport | Transport (https/http/prefer) + Verify TLS (https only) | SSL mode | SSL mode |
 | `database` field | "Catalog" | "Database · Required" | "Database" |
 | `schema` field | yes | yes (`search_path`) | **no** |
 | tree | catalog → schema → table | schema → table | database → table |
+
+Trino's encryption is a transport rather than a list of mode words, because the engine decides it
+from a scheme: **HTTPS** encrypts and checks the certificate, **HTTP** is clear, and **Prefer** — the
+one outcome the scheme words cannot spell — tries HTTPS first and falls back to plain HTTP only when
+the coordinator answers the handshake with something that is not TLS. `prefer` is the shared
+vocabulary's own word for that, already shown by the other two drivers; the app stores it in the
+connection's `scheme` slot and sends it as `DB_SSLMODE`, which outranks `DB_SCHEME` in the engine.
+The Verify checkbox is drawn for HTTPS alone: it is the only transport with a verification answer,
+and the other two say so in that row instead of showing a box that could not change the connection.
 
 `ConnectionKind.levels` and the engine's `db_drivers` command are the same contract stated twice,
 and they have to agree. A `connections.json` written before QueryHive spoke to more than Trino
@@ -774,7 +783,7 @@ parts and an older one that still sends `TRINO_*` both work.
 | `DB_DATABASE` / `TRINO_CATALOG` | all | trino: catalog; postgres: `dbname`; mysql: database. Also what the browse commands list from. |
 | `DB_SCHEMA` / `TRINO_SCHEMA` | all | trino: schema; postgres: `search_path`; mysql: unused. |
 | `DB_SCHEME` | trino | `http` or `https`. A password implies https, as does port 443/8443. |
-| `DB_SSLMODE` | postgres, mysql | postgres `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full`; mysql `disable`\|`require`. |
+| `DB_SSLMODE` | postgres, mysql; trino for `prefer` only | postgres `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full`; mysql `disable`\|`require`; trino `prefer` (the app's third transport), sent alone so it always outranks the scheme. |
 | `DB_INSECURE` / `TRINO_INSECURE` | all | `1` skips certificate verification. |
 | `SQL`, `SQL_PATH` | export, to_table | The statement, or a file holding it. One is required. |
 | `TARGET_CATALOG`, `TARGET_SCHEMA`, `TARGET_TABLE` | to_table | Where the rows are written. The driver decides which it uses; a blank one it *does* use is a usage error. Postgres ignores `TARGET_CATALOG`, MySQL ignores `TARGET_SCHEMA`. |

@@ -110,11 +110,56 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
         // internal server with a private CA they could only ever refuse, and an
         // option whose only outcome is a failure is worse than no option.
         case .mysql: ["disable", "prefer", "require"]
+        // Empty on purpose, and Trino is the one driver whose encryption is not a list of
+        // mode words: its UI is a transport picker, which spells the same four outcomes as
+        // `https`/`http` beside a verify flag, plus `prefer` as a third transport word.
+        // Listing modes here as well would be a second control for one decision.
         case .trino: []
         }
     }
 
     var defaultSSLMode: String { self == .postgres ? "prefer" : "disable" }
+}
+
+/// Trino's transport, as its picker spells it: the two scheme words, plus the one outcome
+/// neither of them can express.
+///
+/// `prefer` is not a new word. It is the shared vocabulary's own — the Postgres and MySQL
+/// pickers already offer it for exactly this outcome, "encrypt when the server offers it" —
+/// and the engine reads it for Trino too, as `DB_SSLMODE`. What it is not is a *scheme*:
+/// `prefer` starts on `https` and keeps plain `http` in reserve for the one coordinator that
+/// answers the TLS handshake with something that is not TLS at all. So the app stores the
+/// word in the connection's scheme slot (the JSON key stays `scheme`, and every value written
+/// before this existed is one of the two schemes and still means what it did) and translates
+/// it to `DB_SCHEME` + `DB_SSLMODE` + `DB_INSECURE` on the way out, in
+/// `AppModel.connectionEnvironment`.
+///
+/// The four outcomes, and where each one is reachable from — there is no fifth:
+///
+/// | Transport | `DB_SCHEME` | `DB_SSLMODE` | `DB_INSECURE` | Engine mode |
+/// |---|---|---|---|---|
+/// | `https` | `https` | — | — | `Require` |
+/// | `https` + verify off | `https` | — | `1` | `RequireNoVerify` |
+/// | `http` | `http` | — | — | `Disable` |
+/// | `prefer` | `https` | `prefer` | — | `Prefer` |
+enum TrinoTransport: String, CaseIterable, Identifiable {
+    case https, http, prefer
+
+    var id: Self { self }
+
+    /// What the segmented control shows, in the same upper case as the other two options.
+    var label: String { rawValue.uppercased() }
+
+    /// Reads the stored word. Anything unrecognised — a blank included, which the engine has
+    /// always read as plain `http` — lands on `http`: guessing `https` for a value nobody can
+    /// explain would silently encrypt a connection that used to be in clear.
+    init(stored word: String) {
+        switch word.lowercased() {
+        case "https": self = .https
+        case "prefer": self = .prefer
+        default: self = .http
+        }
+    }
 }
 
 /// Whether the app is talking to a server, as the status bar reports it.
@@ -150,8 +195,11 @@ struct Connection: Identifiable, Codable, Equatable {
     var kind: ConnectionKind
     var host: String
     var port: Int
-    /// Trino only: `http` or `https`. A port of 443/8443 or a stored password upgrades this to
-    /// https in the engine, matching `TrinoConfig.__post_init__`.
+    /// Trino only: the transport word the editor's picker offers — `https`, `http`, or `prefer`
+    /// (see `TrinoTransport`, which is how the third one reaches the engine). The key stays
+    /// `scheme` on disk, and the two scheme values mean exactly what they always have.
+    /// A port of 443/8443 or a stored password upgrades a clear connection to https in the
+    /// engine, matching `TrinoConfig.__post_init__`.
     var scheme: String
     /// Postgres and MySQL only: the wire encryption mode.
     var sslmode: String
@@ -238,7 +286,16 @@ struct Connection: Identifiable, Codable, Equatable {
     /// The driver-specific encryption setting, for the connection list and the editor.
     var securityLabel: String {
         switch kind {
-        case .trino: scheme.uppercased() + (verify ? "" : " · unverified")
+        case .trino:
+            switch TrinoTransport(stored: scheme) {
+            case .https: "HTTPS" + (verify ? "" : " · unverified")
+            // Nothing is encrypted, so there is no verification answer to add — and `verify`
+            // is not one either, whichever way it is stored.
+            case .http: "HTTP"
+            // `prefer` never checks the certificate, so the stored flag is not reported here:
+            // it cannot apply to this transport.
+            case .prefer: "prefer · unverified"
+            }
         case .postgres, .mysql: (sslmode.isEmpty ? kind.defaultSSLMode : sslmode)
         }
     }
