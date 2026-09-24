@@ -55,8 +55,8 @@ secrecy.workspace = true
 # so this crate gets that map too: an event's keys come out in the order the
 # builder inserted them rather than sorted. Every consumer decodes by key, and the
 # golden harness compares parsed values rather than bytes, so the frozen snapshots
-# under `tests/golden/` stay comparable even though `tools/golden/record.py` sorts
-# the keys it writes.
+# under `tests/golden/` stay comparable even though `tools/golden/normalise.py`
+# sorts the keys it writes.
 serde_json = "1"
 # The control plane only (ADR-0004): errors and typed values, not the grid data plane,
 # which is a handle and an offset buffer precisely because marshalling every cell as a

@@ -4,9 +4,9 @@ import QueryHiveFFI
 /// The Fase 2 engine: the same fourteen commands, reached by calling into the Rust engine instead
 /// of spawning the bundled Python process (blueprint §1.6, ADR-0004).
 ///
-/// This is the only type in the app that imports the FFI module, and `Engine.current` does not
-/// name it yet: the legacy engine is removed in the same change that flips that line
-/// (`PROGRESS.md`, "Keputusan sapu bersih"), and that change is not this one.
+/// This is the only type in the app that imports the FFI module, and `Engine.current` names it:
+/// the Python engine went in the same change that flipped that line (`PROGRESS.md`, "Keputusan
+/// sapu bersih").
 ///
 /// The two gaps this file used to document are closed, and what is left is the two places the FFI
 /// is *deliberately* not the process engine:
@@ -34,11 +34,12 @@ import QueryHiveFFI
 ///   unchanged. The exit status is 1 for a failure and 0 otherwise, which is what the CLI exits
 ///   with for the same run.
 /// - **A secret cannot leak the way it used to, and that is not the same as being redacted.**
-///   `PythonEngine` scrubbed its environment's secret-looking values out of every message before
-///   the UI saw one, because a Python traceback can echo a live password. These messages are
-///   built by the engine rather than by an interpreter: a connection renders through
-///   `ConnectionConfig::redacted()` / its own `Debug`, neither of which prints a password, and the
-///   tunnel's failures name a setting rather than its value (`tunnel.rs`'s `TunnelConfigError`).
+///   The engine that came before this one scrubbed its environment's secret-looking values out of
+///   every message before the UI saw one, because a Python traceback can echo a live password.
+///   These messages are built by the engine rather than by an interpreter: a connection renders
+///   through `ConnectionConfig::redacted()` / its own `Debug`, neither of which prints a password,
+///   and the tunnel's failures name a setting rather than its value (`tunnel.rs`'s
+///   `TunnelConfigError`).
 ///   So the scrubber is not carried over — and no test asserts that absence, which is the honest
 ///   state of it: it holds by construction, not by check.
 ///
@@ -47,15 +48,14 @@ import QueryHiveFFI
 /// the one part of this engine that needed no decision.
 struct RustEngine: DatabaseEngine {
     /// The runs this engine has started and not yet finished, so `terminateAll()` can stop them
-    /// all. Static, for `PythonEngine`'s reason: the app delegate holds no engine, it asks
+    /// all. Static, not per-instance: the app delegate holds no engine, it asks
     /// `Engine.current`, and one instance may not be the one that started a run. Mutated on the
     /// main queue (`run` is called from it, and the completion handler returns there), which is
-    /// the same assumption `PythonEngine.running` makes.
+    /// the same assumption the retired `Process`-based engine made.
     private static var running = Set<RustRun>()
 
-    /// The status this engine reports for a command it cannot start. `-1` is `PythonEngine`'s for
-    /// the same situation, and no process exit status is ever negative, so a caller cannot confuse
-    /// it with a failed run.
+    /// The status this engine reports for a command it cannot start. `-1`, and no process exit
+    /// status is ever negative, so a caller cannot confuse it with a failed run.
     private static let cannotStart: Int32 = -1
 
     /// The commands the FFI has a case for, spelled as the CLI spells them.
@@ -156,7 +156,7 @@ struct RustEngine: DatabaseEngine {
 
         if let message = sink.failure {
             // The message the engine wrote, in both places at once: the exit status the call
-            // sites branch on, and the argument `PythonEngine` put its log in. It was already
+            // sites branch on, and the argument the retired engine put its log in. It was already
             // delivered as the `error` event, by the sink, on the way here.
             onExit(1, message)
             return
@@ -200,9 +200,9 @@ final class Sink: EventSink, @unchecked Sendable {
     }
 
     func onEvent(line: String) {
-        // The decode lives in `EngineWire` because `PythonEngine` reads the same lines out of the
-        // child's stdout, and the two must not disagree about what one means. A line that is not
-        // an event is dropped rather than failing the run, exactly as the old engine dropped it
+        // The decode lives in `EngineWire` because the frozen golden snapshots are the same lines,
+        // and the app must not disagree with them about what one means. A line that is not an
+        // event is dropped rather than failing the run, exactly as the retired engine dropped it
         // into stderr: the engine writes nothing else to this channel.
         guard let event = EngineWire.event(in: Data(line.utf8)) else { return }
 

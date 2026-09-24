@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Check or record golden snapshots of the Python engine against the *real* dev servers.
+"""Check or record golden snapshots of the engine against the *real* dev servers.
 
-    <venv>/bin/python tools/golden/live_cases.py                        # check every case
-    <venv>/bin/python tools/golden/live_cases.py postgres_count_live    # check one case
-    <venv>/bin/python tools/golden/live_cases.py --record <case-id>     # record a new case
-    <venv>/bin/python tools/golden/live_cases.py --record --force       # re-record on purpose
-    <venv>/bin/python tools/golden/live_cases.py --list
+    python3 tools/golden/live_cases.py                        # check every case
+    python3 tools/golden/live_cases.py postgres_count_live    # check one case
+    python3 tools/golden/live_cases.py --record <case-id>     # record a new case
+    python3 tools/golden/live_cases.py --record --force       # re-record on purpose
+    python3 tools/golden/live_cases.py --list
 
 Why this exists
 ---------------
-`record.py` freezes the engine's *normalisation* by driving it in-process with a
-fake cursor: the rows a case sees are the ones the case wrote down, so what is
-pinned is what the engine does with a value it was handed. That leaves one
+The other half of the corpus records the engine's *normalisation* from a fake
+cursor: the rows a case sees are the ones the case wrote down, so what is pinned
+there is what the engine does with a value it was handed. That leaves one
 question entirely unasked -- does the value the engine is handed on a real
 server have the shape the fake cursor pretended it did? A `numeric(38,10)` is a
 `Decimal` only because psycopg decoded it that way; a type OID is a number only
@@ -21,30 +21,36 @@ freeze them is to point the engine at a server that is really running.
 So these cases run the engine exactly as the app runs it -- one command name,
 settings in the environment, one JSON object per stdout line -- as a child
 process against the containers `deploy/dev/up.sh` starts, and freeze its stdout
-the same way `record.py` does (and with the same normalisation: see
+with the same normalisation every reader of `tests/golden/` uses (see
 `normalise`). Nothing is hand-written: a case that cannot run is reported and
 recorded not at all.
+
+The child is `target/debug/queryhive-engine`, the CLI half of the Rust engine.
+These snapshots were recorded against its Python predecessor, which is why
+`docs/golden-deltas.md` exists; a case that the Rust engine answers differently
+is a difference to read and then accept in `crates/qh-ffi/tests/golden.rs`,
+never something to normalise away here.
 
 What it does by default
 -----------------------
 Nothing is written. Each selected case is run again against the server it was
 recorded from and its stdout is diffed, line for line, against the snapshot on
-disk (`record.diff_lines`, the same comparison `compare.py` uses for the
-in-process cases). Every key must match except the ones `normalise` masks --
-`elapsed_ms`, `query_id`, temp paths, and the object identifiers the server itself
-assigned (they climb every time `deploy/dev/up.sh` replays its seed, so freezing
-them freezes the cluster's history rather than the engine's answer). A case that
-cannot run at all (a
-container down, a client package not importable) is reported as such rather
-than as a difference: "could not ask" is not "the answer changed".
+disk (`normalise.diff_lines`). Every key must match except the ones `normalise`
+masks -- `elapsed_ms`, `query_id`, temp paths, and the object identifiers the
+server itself assigned (they climb every time `deploy/dev/up.sh` replays its
+seed, so freezing them freezes the cluster's history rather than the engine's
+answer). A case that cannot run at all (a container down, the binary not built)
+is reported as such rather than as a difference: "could not ask" is not "the
+answer changed".
 
 What `--record` writes
 ----------------------
 `tests/golden/<command>/<case>.ndjson` and `<case>.meta.json`, exactly like the
-in-process cases, so `crates/qh-ffi/tests/golden.rs` finds them the same way.
+other recorded cases, so `crates/qh-ffi/tests/golden.rs` finds them the same way.
 `index.json` is rebuilt from every `.meta.json` in the tree, so recording here
-never drops the in-process cases and re-recording those never drops these. Case
-ids end in `_live` so the two sets stay visible as what they are.
+never drops the recorded-from-a-fake-cursor cases and re-recording those never
+drops these. Case ids end in `_live` so the two sets stay visible as what they
+are.
 
 What it will overwrite
 ----------------------
@@ -59,12 +65,10 @@ them.
 
 Requirements
 ------------
-The engine's real client packages have to be importable by the interpreter that
-runs this script -- trino, psycopg and pymysql -- and the dev servers have to be
-up:
+The engine binary has to be built, and the dev servers have to be up:
 
+    cargo build -p qh-ffi --bin queryhive-engine
     deploy/dev/up.sh postgres mysql   # and `trino` if there is memory for it
-    uv venv /tmp/qh-golden-venv && uv pip install --python ... trino psycopg[binary] pymysql
 
 `check_tools()` says exactly what is missing rather than producing a snapshot of
 a traceback.
@@ -81,12 +85,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ENGINE = ROOT / "app" / "engine" / "queryhive_engine.py"
+# The engine as the app runs it: the CLI binary `crates/qh-ffi` installs, built
+# from the same crate the app links against. Debug rather than release because
+# this runs against a fixture cluster, not a release.
+ENGINE = ROOT / "target" / "debug" / "queryhive-engine"
 GOLDEN_DIR = ROOT / "tests" / "golden"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import record  # noqa: E402  (same directory; reuses its normalisation)
+import normalise  # noqa: E402  (same directory; the shared normalisation)
 
 # The dev containers, exactly as `deploy/dev/up.sh` publishes them. The ports are
 # off the defaults on purpose (see that script) so a database already listening
@@ -158,14 +165,15 @@ class LiveCase:
 
         The temp root is printed as `<TMP>`, the same token `normalise` stores,
         because an `export` case's OUT_DIR is a real directory under it and the
-        document this feeds has to be the same on every machine.
+        document this feeds has to be the same on every machine. The binary is
+        named repo-relative for the same reason: a document that carried this
+        machine's `target/debug` path would not be reproducible anywhere else.
         """
         parts = [
             f"{key}={_quote_shell(str(value).replace(tempfile.gettempdir(), '<TMP>'))}"
             for key, value in sorted(self.env_map().items())
         ]
-        return " ".join(parts + [sys.executable, "-s", "-u", "app/engine/queryhive_engine.py",
-                                 self.command])
+        return " ".join(parts + ["target/debug/queryhive-engine", self.command])
 
 
 def _quote_shell(value: str) -> str:
@@ -436,38 +444,34 @@ LIVE_IDS: tuple[str, ...] = tuple(case.case_id for case in cases())
 def check_tools() -> list[str]:
     """What is missing before a live run can mean anything, as plain sentences.
 
-    The interpreter that matters is the one running this script, so each import
-    is asked of `sys.executable` -- not of a `python3` found on PATH, which may
-    be a different interpreter entirely and whose absence (or whose stubs) would
-    otherwise skip the check without saying so.
+    One thing, and it is checked rather than assumed: the engine binary. It is
+    looked for where `cargo build -p qh-ffi --bin queryhive-engine` puts it, and
+    every sentence it can produce names the command that fixes it -- a live run
+    that quietly compared nothing would be worse than one that refuses.
     """
-    problems = []
-    for module in ("trino", "psycopg", "pymysql"):
-        if subprocess.run(
-            [sys.executable, "-c", f"import {module}"], capture_output=True
-        ).returncode:
-            problems.append(f"{module} is not importable by {sys.executable}")
     if not ENGINE.is_file():
-        problems.append(f"the engine is not at {ENGINE}")
-    return problems
+        return [f"the engine is not at {ENGINE}; build it with: "
+                f"cargo build -p qh-ffi --bin queryhive-engine"]
+    if not os.access(ENGINE, os.X_OK):
+        return [f"the engine at {ENGINE} is not executable"]
+    return []
 
 
 def run_case(case: LiveCase) -> tuple[int, str, str]:
     """Run one case as the app does; return (exit code, stdout, stderr).
 
-    A child process, not an import: the point is that the real client packages
-    open the real connection. `-s` keeps the user's site directory out of it and
-    `-u` keeps stdout unbuffered, which is what the app passes too.
+    A child process, not an in-process call: the point is that the real client
+    libraries open the real connection, exactly as they do when the app runs the
+    same command through the FFI.
     """
     env = {
         key: os.environ[key]
         for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
         if key in os.environ
     }
-    env["PYTHONIOENCODING"] = "utf-8"
     env.update(case.env_map())
     completed = subprocess.run(
-        [sys.executable, "-s", "-u", str(ENGINE), case.command],
+        [str(ENGINE), case.command],
         cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
     )
     return completed.returncode, completed.stdout, completed.stderr
@@ -481,7 +485,7 @@ def collect(only: list[str] | None = None) -> tuple[dict[str, dict], list[str]]:
     to normalise those paths exactly as the recording that produced the snapshot
     did, or every export case would diff on its own path.
     """
-    record.add_roots(tempfile.gettempdir())
+    normalise.add_roots(tempfile.gettempdir())
     results: dict[str, dict] = {}
     failures: list[str] = []
     for case in cases():
@@ -489,7 +493,7 @@ def collect(only: list[str] | None = None) -> tuple[dict[str, dict], list[str]]:
             continue
         code, stdout, stderr = run_case(case)
         try:
-            lines = record.normalise(stdout)
+            lines = normalise.normalise(stdout)
         except ValueError as exc:
             failures.append(f"{case.case_id}: a stdout line was not JSON ({exc})")
             continue
@@ -587,7 +591,7 @@ def record_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None,
             json.dumps(payload["meta"], indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-    record.rebuild_index(destination)
+    normalise.rebuild_index(destination)
     print(f"recorded {len(results)} case(s): {', '.join(sorted(results))}")
     return 0
 
@@ -620,7 +624,7 @@ def compare_live(destination: Path = GOLDEN_DIR, only: list[str] | None = None) 
                   f"record it with: live_cases.py --record {case.case_id}")
             continue
         expected = path.read_text(encoding="utf-8").splitlines()
-        problems = record.diff_lines(expected, results[case.case_id]["lines"], full=False)
+        problems = normalise.diff_lines(expected, results[case.case_id]["lines"], full=False)
         if problems:
             diffs += 1
             print(f"DIFF {case.case_id}")

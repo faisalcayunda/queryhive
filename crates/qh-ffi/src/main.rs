@@ -7,7 +7,7 @@
 //!
 //! # The last line of defence
 //!
-//! `queryhive_engine.py`'s `main` ends with a comment worth keeping: the `error`
+//! The removed `queryhive_engine.py`'s `main` ends with a comment worth keeping: the `error`
 //! event is emitted from the one path that may not throw, because a failure while
 //! reporting a failure leaves the app with no JSON to parse at all. The Rust
 //! equivalent is here — the command runs inside `catch_unwind`, so a panic in a

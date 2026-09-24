@@ -1,4 +1,4 @@
-//! The six writers. One struct each, mirroring `exporter/writers.py`.
+//! The six writers. One struct each, mirroring the removed `exporter/writers.py`.
 //!
 //! Each one opens its file on construction, writes a row at a time, and finishes
 //! with a trailer where its format needs one. Nothing accumulates rows: the point of

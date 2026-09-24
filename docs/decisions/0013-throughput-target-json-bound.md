@@ -116,6 +116,19 @@ deploy/dev/bench_fetch.py --engine rust mysql wide_500k
 deploy/dev/bench_fetch.py --engine python mysql wide_500k
 ```
 
+> **Kutipan ini historis dan perintahnya sudah tidak bisa dijalankan.** Flag `--engine` hilang
+> bersama lengan Python-nya (`deploy/dev/bench_fetch.py` kini hanya punya `--kind`, `--sql`,
+> `--limit`, `--label`, `--binary`, `--repeat`, `--report-only`, `--no-report`), dan sejak mesin
+> Python dihapus tidak ada lagi pembanding untuk dijalankan bergantian. Empat baris di
+> `bench-results.jsonl` yang ditulis perintah di atas adalah satu-satunya salinan baseline Python,
+> dan sengaja dibiarkan beku. Menjalankan ulang hari ini:
+>
+> ```
+> python3 deploy/dev/bench_fetch.py --kind postgres --label rust-release
+> python3 deploy/dev/bench_fetch.py --kind mysql --label rust-release
+> python3 deploy/dev/bench_fetch.py --report-only
+> ```
+
 Dijalankan bergantian (interleaved), median dari 3, beban mesin ~3,2 dari 10 CPU. Harness
 mencatat `elapsed_ms` dari event engine sendiri, TTFR dari event `connect` (sebelum
 sentuh jaringan), peak RSS dari `/usr/bin/time -l`, dan throughput dihitung dari

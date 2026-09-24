@@ -1,6 +1,7 @@
 //! Turning settings into a connection.
 //!
-//! This is `DatabaseConfig.from_env` (`exporter/drivers.py:780`) with its rules
+//! This is what was `DatabaseConfig.from_env` (`exporter/drivers.py:780`, since deleted)
+//! with its rules
 //! kept, because they are the ones the app already sends: **`DB_*` wins over its
 //! older `TRINO_*` alias**, a blank value means "unset", and a URL is optional —
 //! the app sends the parts only, so the parts alone have to build a working

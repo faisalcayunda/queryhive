@@ -5,8 +5,9 @@ __pycache__/
 *.pyc
 *.spec
 
-# Native app build artifacts. app/engine-requirements.txt is NOT ignored: it is the
-# committed, fully pinned lockfile build-engine.sh reuses instead of re-resolving.
+# Native app build artifacts. app/.engine/ is the leftover directory of the retired
+# CPython engine; nothing writes to it now, and it is ignored so that the tree that
+# used to hold it stays out of `git status` until someone deletes it by hand.
 app/.build/
 app/.engine/
 

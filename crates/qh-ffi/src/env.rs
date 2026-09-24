@@ -1,7 +1,7 @@
 //! Settings, and the readers that turn text into values.
 //!
 //! Every setting comes from the environment and nothing is read from disk: that is
-//! the whole configuration story of this engine, inherited unchanged from
+//! the whole configuration story of this engine, inherited unchanged from the removed
 //! `queryhive_engine.py`'s `settings()`. The readers below are its `_raw`, `_value`,
 //! `_int` and `_flag`, and each one exists for a reason worth keeping:
 //!

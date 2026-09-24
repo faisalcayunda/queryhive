@@ -4,9 +4,18 @@
 > satu kategori di bawah. Perbedaan yang belum diklasifikasi berarti regresi, dan membuat
 > pembanding gagal.
 >
-> Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan **14 perintah** engine Rust
-> dengan sesi palsu — persis seperti `record.py` men-drive engine Python in-process — lalu
-> membandingkan keluarannya dengan snapshot baris per baris. Dari 43 kasus
+> **Catatan pembacaan (24 Sep 2026):** seluruh kutipan path ke mesin lama di dokumen ini —
+> `queryhive_engine.py`, `exporter/writers.py`, `app/engine-requirements.txt` — menunjuk berkas
+> yang **sudah dihapus** bersama mesin Python. Kutipannya tetap benar sebagai catatan apa yang
+> dilakukan mesin itu saat selisih ini ditemukan, dan tidak ada baris nomornya yang bisa diperiksa
+> lagi di pohon hari ini. Yang masih hidup: `crates/qh-ffi/tests/golden.rs` (kasus in-process),
+> `tools/golden/live_cases.py` (kasus server nyata), `tools/golden/normalise.py` (masking), dan
+> snapshot beku di `tests/golden/`.
+>
+> Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan **17 kasus** engine Rust
+> dengan sesi palsu, lalu membandingkan keluarannya dengan snapshot baris per baris. Itu cara yang
+> sama dulu dipakai `record.py` untuk mesin Python; skrip itu sudah terhapus bersama mesinnya, dan
+> normalisasi kini tinggal di `tools/golden/normalise.py`. Dari 43 kasus
 > terekam: **17 identik**, 4 terklasifikasi di bawah ini, dan 22 diklasifikasi
 > `LIVE` — direkam dari server nyata, yang hasilnya ada di `tests/golden/RECORDED.md` karena yang
 > dapat dibandingkan di sini hanyalah kasus yang bisa dijalankan tanpa jaringan. Kasus yang identik
@@ -171,6 +180,36 @@ diklasifikasikan oleh entri ini, bukan ditimbang ulang satu per satu tiap kali. 
 satu perubahan penamaan di sisi driver menggerakkan beberapa kasus sekaligus, jadi perubahan
 seperti itu dilakukan dengan sadar, bukan sebagai efek samping.
 
+### D-9 — Nilai array Postgres tetap literal server, bukan daftar JSON · **Bukan regresi**
+
+Mesin Python mengirim daftar JSON — `[1, null, 3]` — karena psycopg sudah mendekode array itu
+sebelum nilainya sampai ke perender. Mesin Rust mengirim teks server apa adanya: `{1,NULL,3}`,
+dengan NULL dieja menurut PostgreSQL. Kasus yang memakunya adalah `postgres_type_zoo_live`
+(kolom `ints`, `texts`, `nested`).
+
+Bedanya adalah **pengejaan, bukan isi**: kedua sisi membawa informasi yang sama, dan tidak ada yang
+hilang di salah satunya. Yang memutuskan adalah siapa yang membaca sel itu, dan jawabannya tidak
+ada yang membaca: aplikasi mendekode payload `preview` sebagai `[[String?]]`
+(`app/Sources/TrinoExporter/App.swift:156`), jadi sel array adalah satu string di sisi aplikasi
+apa pun ejaannya; perender ekspor juga memperlakukan `Value::Json` dan `Value::Text` sama-sama
+sebagai satu string (`crates/qh-core/src/render.rs:83` dan lengan fallback `to_json_value` di
+`:146`). Menghasilkan bentuk JSON berarti menulis parser literal array PostgreSQL — kurung
+bersarang, elemen berkutip, escape, dimensi berapa pun — hanya untuk mengeja ulang string yang
+tidak diurai siapa pun. Karena itu teks server dipertahankan; aturannya ada di
+`crates/qh-driver-postgres/src/normalize.rs:47`.
+
+Bedanya dengan D-1 dan D-2 perlu ditegaskan, supaya tidak dibaca sebagai perbaikan yang setara:
+di sana mesin lama menghasilkan sesuatu yang **salah** (notasi ilmiah yang salah, kutip JSON yang
+tidak pernah jadi bagian nilainya). Di sini mesin lama menghasilkan sesuatu yang **benar dalam
+sintaks lain**. Jadi ejaan ini bisa dibalik ke JSON kapan saja tanpa memperbaiki bug apa pun —
+keputusan, bukan perbaikan — dan yang menahan bukan kebenaran, melainkan biaya parser itu.
+
+**Akibatnya pada berkas ekspor, dan itu terukur.** Ejaan ini menggerakkan byte: `SELECT * FROM
+type_zoo` yang sama ditulis mesin lama sebagai **508** byte CSV Postgres, sekarang **499**;
+MySQL **398** menjadi **399**. Karena itu `postgres_export_live` dan `mysql_export_live` merah
+pada `files.bytes` di peristiwa `done`, dan baris `files.bytes` itulah satu-satunya tempat di
+korpus ini di mana besar sebuah keputusan perender terlihat sebagai angka.
+
 ## Temuan yang sudah ditutup
 
 ### T-1 — Dua aturan berbeda untuk `timestamptz` · **Ditutup 22 Sep 2026**
@@ -233,12 +272,10 @@ dulu diduga berbeda; yang sudah punya kasus live, jawabannya ada di berkas itu, 
 
 | Kandidat (historis) | Kategori dugaan | Cara menutup |
 |---|---|---|
-| Kandidat | Kategori dugaan | Cara menutup |
-|---|---|---|
 | Urutan kunci `jsonb` Postgres | **Bukan regresi** | `jsonb` tidak menjamin urutan; perbandingan harus kanonik. Diuji dengan perbandingan kanonik, bukan teks |
-| DECIMAL presisi penuh tidak lagi menjadi `float` di jalur JSON-native | **Perbaikan disengaja** | `exporter/writers.py:62` memakai `float(value)`, yang membuang presisi. Jalur `preview` tidak boleh mewarisinya |
+| DECIMAL presisi penuh tidak lagi menjadi `float` di jalur JSON-native | **Perbaikan disengaja** | Mesin lama memakai `float(value)` di writer-nya, yang membuang presisi. Jalur `preview` tidak boleh mewarisinya |
 | Geometri dirender sebagai teks | **Perbaikan disengaja** | Hari ini bergantung pada `str()`; Rust memakai `Value::Unknown` secara eksplisit |
-| `elapsed_ms` dan `query_id` berbeda | **Bukan regresi** | Runtime berbeda; sudah dinormalisasi oleh `tools/golden/record.py` |
+| `elapsed_ms` dan `query_id` berbeda | **Bukan regresi** | Runtime berbeda; sudah dinormalisasi oleh `tools/golden/normalise.py` |
 | OID objek Postgres berbeda | **Bukan regresi** | Penomoran per-cluster: server membagi 1..16383 untuk katalognya sendiri dan mulai dari 16384 untuk objek klien, lalu naik satu tiap objek. `deploy/dev/up.sh` membuang dan membuat ulang container-nya tiap start sehingga seed dijalankan berulang, jadi snapshot yang membekukan angkanya memerah tanpa perubahan engine. Dinormalisasi jadi `<OID>` di kedua normaliser, hanya pada type code dan pada sel yang memang dinamai kolom `OID` |
 | Kata-kata pada pesan error berbeda | **Bukan regresi** | Yang dikontrak adalah *informasi* (pesan, kode, posisi), bukan string identik |
 | MySQL `TIMESTAMP` dikonversi ke zona sesi | **Perbaikan disengaja** (dipertahankan) | Server yang memutuskan; perbedaan dari `DATETIME` harus terlihat, bukan disamarkan |

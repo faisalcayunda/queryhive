@@ -52,8 +52,14 @@ menegakkan ini untuk mencegat library injection.
 Swift. Jalur build-nya:
 
 1. `cargo build --release -p qh-ffi` → `target/release/libqh_ffi.dylib`
-2. `app/build.sh` menyalin lib itu ke bundle app
+2. `swift build` menautkannya dari `target/release` — dylib itu **tidak** disalin ke dalam
+   bundle, jadi install name-nya tetap path absolut ke `target/release/deps/`
 3. App me-load lib saat launch lewat FFI binding yang di-generate UniFFI
+
+Langkah 2 itulah alasan entitlement ini masih diperlukan, dan sekaligus batas yang diketahui:
+bundle hasil `app/build.sh` hanya jalan di mesin yang punya `target/release`. Membuat bundle
+portabel berarti membangun crate ini sebagai `staticlib` dan mengemasnya sebagai XCFramework —
+perubahan pada crate FFI, dicatat sebagai pekerjaan terpisah.
 
 Tanpa entitlement ini, aplikasi akan crash saat launch dengan error signature validation
 atau library load failure.
@@ -74,7 +80,7 @@ atau library load failure.
 
 Ditolak karena friction development terlalu tinggi untuk protection gain yang kecil — library
 yang kita load **adalah milik kita sendiri**, bukan third-party arbitrary code. Validasi yang
-sesungguhnya adalah bahwa lib itu berada di bundle app kita, dan itu sudah terjaga.
+sesungguhnya adalah bahwa lib itu keluar dari workspace kita, dan itu sudah terjaga.
 
 ### Batasi FFI call surface menjadi read-only
 

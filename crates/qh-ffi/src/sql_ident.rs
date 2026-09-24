@@ -1,6 +1,6 @@
 //! How a write target is named, per driver.
 //!
-//! From `exporter/drivers.py`'s `slots`, `qualified` and `reference`. The three
+//! From the removed `exporter/drivers.py`'s `slots`, `qualified` and `reference`. The three
 //! `TARGET_*` settings are one per name slot, and **which of them a driver needs is
 //! the driver's own list**: Trino writes `catalog.schema.table`, PostgreSQL
 //! `schema.table` (the database is the connection), MySQL `` `database`.`table` ``

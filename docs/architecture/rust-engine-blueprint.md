@@ -6,6 +6,16 @@
 > **Branch:** `feat/rust-engine`.
 > **Dokumen ini adalah kontrak.** Setiap klaim tentang kode lama menyebut path file; setiap klaim
 > yang belum terverifikasi ditandai `[perlu verifikasi]`.
+>
+> **Migrasi ini sudah mendarat (24 Sep 2026).** Aplikasi sekarang berjalan sepenuhnya di atas
+> `RustEngine` (`Engine.current` di `app/Sources/TrinoExporter/Support/DatabaseEngine.swift`), dan
+> seluruh mesin Python — `exporter/`, `app/engine/queryhive_engine.py`, `app.py`, skrip build
+> Python, dan enam berkas uji mesin lama — sudah **dihapus**. Karena itu, seluruh §2 dan §3 di
+> bawah ini yang menggambarkan mesin Python harus dibaca sebagai **potret sumber yang dimigrasikan**,
+> bukan sebagai petunjuk menjalankan apa pun: path seperti `exporter/writers.py` dan
+> `app/engine/queryhive_engine.py` tidak ada lagi di pohon. Rencana penghapusan di §8 sudah
+> terlaksana, dan harness `tools/golden/record.py`/`compare.py` yang disebut di §5 sudah digantikan
+> `tools/golden/live_cases.py` + `tools/golden/normalise.py`.
 
 ## Ringkasan Eksekutif
 
@@ -292,6 +302,14 @@ Tujuannya: membekukan **keputusan rendering engine Python** sebelum ia dihapus, 
 bisa dibuktikan setara.
 
 #### Cara merekam — tanpa Docker
+
+> **Sudah terlaksana, dengan bentuk yang berbeda.** Paragraf dan langkah di bawah adalah rencana
+> asli; yang dibangun akhirnya bukan `tools/golden/record.py` melainkan
+> `crates/qh-ffi/tests/golden.rs` (17 kasus in-process, dijalankan `cargo test -p qh-ffi --test golden`)
+> dan `tools/golden/live_cases.py` untuk kasus server nyata, dengan masking di
+> `tools/golden/normalise.py`. `record.py` dan `compare.py` sudah dihapus, dan harness Python yang
+> dulu dipakai merekam (`tests/test_engine_events.py`) ikut terhapus bersama mesinnya. Snapshot di
+> `tests/golden/` tetap rekaman beku dan **tidak** direkam ulang untuk menutup selisih.
 
 `tests/test_engine_events.py:36` sudah menyediakan harness yang mengganti `dbapi.connect` dengan
 kursor palsu. Artinya snapshot dapat direkam **hari ini, tanpa database**, dan yang terekam adalah

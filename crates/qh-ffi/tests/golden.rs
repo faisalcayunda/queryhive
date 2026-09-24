@@ -1,17 +1,17 @@
 //! The Rust engine against the frozen Python snapshots.
 //!
-//! `tools/golden/record.py` froze what the Python engine emitted for a fixed set of
-//! cases, driving it **in-process with a fake cursor** rather than against a database.
-//! This test does the same thing to this engine: a fake session answers `execute`,
-//! `browse` and `objects` from a script, and the command's events are compared with
-//! the snapshot line by line.
+//! The snapshots in `tests/golden/` were frozen by a harness that drove the Python
+//! engine **in-process with a fake cursor** rather than against a database. That harness
+//! went when the engine did; the snapshots stayed. This test does the same thing to this
+//! engine: a fake session answers `execute`, `browse` and `objects` from a script, and
+//! the command's events are compared with the snapshot line by line.
 //!
 //! # Why the comparison is exact, and where it is not
 //!
 //! [`EXACT`] cases must match the snapshot byte for byte after the same normalisation
-//! `record.py` applies — `elapsed_ms` and `query_id` masked, temp paths replaced, and the
-//! object identifiers the *server* assigned masked too, because those move on their own
-//! (see [`mask_identity_oids`]). Those
+//! `tools/golden/normalise.py` applies — `elapsed_ms` and `query_id` masked, temp paths
+//! replaced, and the object identifiers the *server* assigned masked too, because those
+//! move on their own (see [`mask_identity_oids`]). Those
 //! are the cases where the two engines promise the same thing: the event names, the
 //! fields, the order, and every rendered value including the type zoo.
 //!
@@ -22,7 +22,8 @@
 //!
 //! `a_new_snapshot_cannot_be_ignored` walks the snapshot directory and fails on any
 //! case that is in neither list, so freezing a new snapshot cannot silently skip this
-//! test — the same protection `compare.py` gives the Python side with its "NEW" line.
+//! test — the same protection `tools/golden/compare.py` used to give the Python side
+//! with its "NEW" line.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -402,7 +403,7 @@ impl Engine for FakeEngine {
 // the cases
 // --------------------------------------------------------------------------- //
 
-/// The settings every case starts from, mirroring `record.py`'s own defaults.
+/// The settings every case starts from, mirroring the recorder's own defaults.
 ///
 /// `USER` is there because it is where the Python engine took the user name from when
 /// nothing else supplied one — the snapshot recorded the machine's login name, and the
@@ -413,7 +414,7 @@ fn base(host_key: &'static str, host: &'static str) -> Vec<(&'static str, &'stat
 
 /// The type zoo of blueprint section 1.8, as the values a driver hands the engine.
 ///
-/// The same rows `record.py` freezes, expressed in this engine's own value model: a
+/// The same rows the snapshot froze, expressed in this engine's own value model: a
 /// Python `Decimal("1234567890123456789012345678.1234567890")` is an unscaled integer
 /// and a scale, a tz-aware `datetime` is microseconds plus the offset the server
 /// reported, and a `timedelta` is months, days and microseconds kept apart.
@@ -811,7 +812,7 @@ fn temp_roots() -> Vec<String> {
 
 /// The temp roots plus this case's own output directory.
 ///
-/// `record.py` adds the directory it exported into to its mask list, so the file name
+/// The recorder added the directory it exported into to its mask list, so the file name
 /// is all that survives a path — `<TMP>/people.csv` rather than `<TMP>qh-golden-…`. The
 /// longest prefix wins, so the export directory has to be masked before the temp root
 /// that contains it.
@@ -824,7 +825,7 @@ fn roots_with(extra: Option<&Path>) -> Vec<String> {
     roots
 }
 
-/// One event, normalised exactly as `record.py` normalises it.
+/// One event, normalised exactly as `tools/golden/normalise.py` normalises it.
 fn normalise(value: &Json, tmp: &[String]) -> Json {
     let mut normalised = match value {
         Json::Object(fields) => Json::Object(
@@ -848,7 +849,7 @@ fn normalise(value: &Json, tmp: &[String]) -> Json {
 /// because the server had made more objects in the meantime. The identifier is the server's
 /// bookkeeping, not the engine's answer. Measured on the live fixture cluster (23 Sep 2026):
 /// the highest system OID was 13665 and the lowest user OID 32820, so the floor separates
-/// the two. These are the same numbers `record.py` uses; the two masks have to agree.
+/// the two. These are the same numbers the Python mask uses; the two have to agree.
 const USER_OID_FLOOR: u64 = 16384;
 
 /// True for a bare decimal string at or above the first user-assigned OID.
@@ -857,7 +858,7 @@ const USER_OID_FLOOR: u64 = 16384;
 /// large row count) is not mistaken for one -- and at most ten digits, because an OID is
 /// PostgreSQL's 4-byte unsigned integer (`pg_class.oid`, `description.type_code`), so a
 /// longer run of digits is data that happens to be numeric. Both halves keep the mask
-/// narrow, and both have to match `record.py`'s `_is_user_oid`, or the two sides disagree
+/// narrow, and both have to match `normalise.py`'s `_is_user_oid`, or the two sides disagree
 /// about which snapshots are equal.
 fn is_user_oid(value: &Json) -> bool {
     let Json::String(text) = value else {

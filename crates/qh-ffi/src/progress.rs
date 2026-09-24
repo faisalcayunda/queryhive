@@ -1,6 +1,6 @@
 //! The throttled progress reporter.
 //!
-//! From `queryhive_engine.py`'s `make_progress`. Two rules, and both matter:
+//! From the removed `queryhive_engine.py`'s `make_progress`. Two rules, and both matter:
 //!
 //! - **At most one event per `PROGRESS_MS`.** A query that returns rows faster than
 //!   the floor would otherwise put one JSON line on stdout per row, and the app

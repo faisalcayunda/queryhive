@@ -8,18 +8,20 @@
 
 ```bash
 deploy/dev/up.sh all
-python3 deploy/dev/bench_fetch.py --engine python --kind postgres --label <sesi> --repeat 3
-python3 deploy/dev/bench_fetch.py --engine python --kind mysql    --label <sesi> --repeat 3
 cargo build --release --bin queryhive-engine
-python3 deploy/dev/bench_fetch.py --engine rust   --kind postgres --label <sesi> --repeat 3
-python3 deploy/dev/bench_fetch.py --engine rust   --kind mysql    --label <sesi> --repeat 3
+python3 deploy/dev/bench_fetch.py --kind postgres --label <sesi> --repeat 3
+python3 deploy/dev/bench_fetch.py --kind mysql    --label <sesi> --repeat 3
 python3 deploy/dev/bench_fetch.py --report-only
 ```
 
-Kedua engine dijalankan lewat harness yang sama, membaca nama setelan yang sama dari
-environment, dengan perintah `preview` yang setara. Setiap baris stdout-nya diberi cap waktu
-saat tiba. Dua angka time-to-first-row dilaporkan karena keduanya berguna dan hanya salah
-satunya cocok untuk target §6:
+Baseline Python di bawah ini adalah **rekaman beku**: barisnya sudah ada di
+`deploy/dev/bench-results.jsonl` sebelum mesin Python dihapus dari pohon, dan tidak bisa
+direkam ulang. Harness hanya bisa menjalankan engine Rust.
+
+Harness menjalankan engine lewat satu jalur: perintah `preview` pada CLI `qh-ffi`, dengan
+nama setelan yang sama dibaca dari environment. Setiap baris stdout-nya diberi cap waktu saat
+tiba. Dua angka time-to-first-row dilaporkan karena keduanya berguna dan hanya salah satunya
+cocok untuk target §6:
 
 - **dari connect** — jarak dari event `step connect` ke event `rows` pertama. Engine
   mengirim `step connect` sebelum menyentuh jaringan, jadi ini connect + submit + halaman
@@ -31,8 +33,8 @@ satunya cocok untuk target §6:
 Menganchor pada event `columns` akan salah: event itu baru muncul setelah halaman pertama
 sudah ada, sehingga selisihnya hampir nol dan menyembunyikan seluruh waktu tunggu.
 
-**elapsed_ms** adalah angka engine sendiri, diambil dari event `done`. Kedua engine
-menstempelnya tepat sebelum mengirim `step connect`, jadi cakupannya sama di kedua sisi
+**elapsed_ms** adalah angka engine sendiri, diambil dari event `done`. Engine menstempelnya
+tepat sebelum mengirim `step connect`, jadi cakupannya sama di setiap baris rekaman
 (connect + fetch + emit) dan tidak memuat waktu start proses — inilah satu-satunya angka
 yang mengukur rentang identik tanpa penjadwalan harness di tengahnya. **Throughput**
 dihitung antara baris pertama dan baris terakhir, sehingga waktu start dan connect tidak
@@ -45,7 +47,7 @@ yang diambil saat mesin sibuk menggambarkan mesinnya, bukan engine-nya.
 Kondisi uji: `SELECT * FROM wide_500k` (30 kolom), tanpa retry, database lokal di container.
 Trino tidak diukur: katalog `memory` di container dev tidak punya `wide_500k`.
 
-## Baseline engine Python
+## Baseline engine Python (rekaman beku)
 
 | Kind | Label | Build | n | Baris | Baris pertama (dari connect) | Baris pertama (dari start) | Total (proses) | elapsed_ms (engine) | Fetch | Throughput | Peak RSS | load 1m |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|

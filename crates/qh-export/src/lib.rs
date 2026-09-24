@@ -1,6 +1,6 @@
 //! Streaming export writers, one per format.
 //!
-//! This is the Rust side of `exporter/writers.py`. Every writer takes rows one at a
+//! This is the Rust side of the removed `exporter/writers.py`. Every writer takes rows one at a
 //! time and writes as it goes, so peak memory stays flat however many rows a query
 //! returns — which is the whole reason this is a crate and not a function that
 //! builds a `String`.

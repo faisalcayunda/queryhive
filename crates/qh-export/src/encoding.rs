@@ -2,15 +2,15 @@
 //!
 //! # What this is following
 //!
-//! `export`'s writers in the Python engine take two encoding settings, and the
+//! `export`'s writers in the removed Python engine took two encoding settings, and the
 //! behaviour here is theirs:
 //!
-//! - `ENCODING` (`exporter/writers.py:126`) opens the **delimited** writer with
+//! - `ENCODING` (`exporter/writers.py:126`) opened the **delimited** writer with
 //!   `open(path, "w", encoding=encoding, errors="replace")`. Nothing else reads it:
 //!   the JSON, XML, HTML and SQL writers hardcode `encoding="utf-8"` a few lines
 //!   below, and the Excel writers hand their text to `openpyxl`/`xlwt`, which decide
 //!   the container's own encoding.
-//! - `DBF_ENCODING` (`exporter/writers.py:489`) picks the codec for a `dbf` character
+//! - `DBF_ENCODING` (`exporter/writers.py:489`) picked the codec for a `dbf` character
 //!   field, applied per value at `writers.py:559`: `raw.encode(self.encoding,
 //!   "replace")`. The default is `cp1252`, and each value is encoded **before** it is
 //!   cut to the field's width, so a field is a byte count and not a character count.

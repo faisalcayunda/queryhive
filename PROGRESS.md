@@ -1,14 +1,42 @@
 # PROGRESS — Migrasi Engine Python → Rust
 
+> ## ⚠️ Status 24 Sep 2026 — migrasi sudah mendarat
+>
+> **Aplikasi sekarang berjalan sepenuhnya di atas `RustEngine`**, dan seluruh mesin Python sudah
+> **dihapus** dari pohon: paket `exporter/`, `app.py`, `app/engine/queryhive_engine.py`,
+> `app/engine-requirements.txt`, `requirements*.txt`, `venv_setup.sh`, `run_local.sh`,
+> `build_dmg.sh` (root), `app/build-engine.sh`, `QueryHive.spec`, dan enam berkas uji mesin lama di
+> `tests/`. `tools/golden/record.py` dan `compare.py` juga sudah dihapus dari worktree. Bukti:
+> `Engine.current = RustEngine()` di
+> `app/Sources/TrinoExporter/Support/DatabaseEngine.swift`; `git diff --cached --name-status | grep '^D'`
+> menunjukkan 24 penghapusan, dan `git ls-files | grep -E '\.py$'` hanya menyisakan empat harness —
+> `tools/golden/live_cases.py`, `tools/golden/normalise.py`, `deploy/dev/bench_fetch.py`,
+> `deploy/dev/make_seed.py` (dua berkas `tools/golden/{record,compare}.py` masih tercatat di index
+> sampai perubahan ini di-commit; keduanya sudah tidak ada di worktree).
+>
+> **Konsekuensi saat membaca dokumen ini:** setiap path Python di bawah — `queryhive_engine.py`,
+> `exporter/*`, `record.py`, `compare.py`, `app/engine/` — adalah **catatan historis** dari
+> pekerjaan saat itu, bukan petunjuk yang bisa dijalankan hari ini. Semua berkas itu sudah tidak
+> ada. Perintah golden yang berlaku sekarang:
+> `cargo build -p qh-ffi --bin queryhive-engine` lalu `/usr/bin/python3 tools/golden/live_cases.py`
+> (normalisasi di `tools/golden/normalise.py`).
+>
+> **Dua angka di bawah sudah tidak menggambarkan keadaan hari ini** dan sudah dianotasi di
+> tempatnya: klaim golden live "22/22" (sekarang **12/22**, selisihnya terklasifikasi) dan
+> "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 9 lulus). Verifikasi
+> berat per 24 Sep 2026: `cargo fmt --all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`
+> ✅, `cargo test --workspace` → **547 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+> `swift build && swift test` → **16 tes / 0 gagal** ✅, `app/build.sh` → `Built dist/QueryHive.app` ✅.
+
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
 
 - **Branch aktif:** `feat/rust-engine` (dibuat dari `main` @ `602bfb7`)
-- **Fase aktif:** **Fase 1 hampir selesai** — `qh-tunnel` sudah tersambung; Fase 2 (aplikasi
-  berjalan di atas `RustEngine`) belum dimulai, dan itulah yang tersisa sebelum mesin Python
-  bisa dibuang
+- **Fase aktif:** **Fase 2 selesai** — aplikasi berjalan di atas `RustEngine`, mesin Python sudah
+  dibuang. Yang tersisa bukan Fase 2, melainkan pekerjaan yang berdiri sendiri: portabilitas bundle
+  (staticlib/XCFramework) dan uji baca-balik kredensial yang butuh tangan manusia
 - **Mesin:** macOS arm64, `rustc 1.98.1`, `cargo 1.98.1`, Swift 6.2.3, podman (VM
-  `podman-machine-default` sudah start, `podman ps` bersih tanpa container)
+  `podman-machine-default` sudah start)
 
 ---
 
@@ -684,7 +712,8 @@ membuktikannya. Semua dijalankan di branch `feat/rust-engine`, di atas basis `59
 | Kosakata TLS belum punya rumah di `docs/` | **Ada rumah.** `docs/tls-modes.md` | `4b03d18` |
 | Daftar berkas `app/Sources/` di `README.md` | **Lengkap.** Empat belas berkas yang hilang ditambahkan, plus target uji, `Generated/`, dan empat skrip build | `README.md` § Layout |
 | Sapu bersih folder | **Selesai.** `check.js` (944 baris) dan `assets/trino-mascot.png` dihapus; `deploy/qh-sshd-run.sh` → `deploy/dev/` dengan `REPO` diperbaiki | `QH_TEST_SSH=1 cargo test -p qh-tunnel` → 29 lulus, 8 uji sshd benar-benar jalan (`62d9882`) |
-| Komparasi golden live setelah tunnel disambungkan | **Lulus, 22/22.** Ketiga container dev dinyalakan; seluruh 22 kasus `_live` cocok byte demi byte. Tiga kasus Postgres sempat merah karena OID per-cluster (bukan regresi) dan ditutup dengan normalisasi `<OID>`, bukan re-record | `tools/golden/live_cases.py` → `22/22 live cases match`, 0 gagal jalan; `tools/golden/compare.py` → `21/21`; `cargo test -p qh-ffi --test golden` → 8 lulus |
+| Komparasi golden live setelah tunnel disambungkan | **Lulus, 22/22** (diukur 22–23 Sep, terhadap binary saat itu). Ketiga container dev dinyalakan; seluruh 22 kasus `_live` cocok byte demi byte. Tiga kasus Postgres sempat merah karena OID per-cluster (bukan regresi) dan ditutup dengan normalisasi `<OID>`, bukan re-record | `tools/golden/live_cases.py` → `22/22 live cases match`, 0 gagal jalan; `tools/golden/compare.py` → `21/21` (**skrip ini sudah dihapus**, normalisasi pindah ke `tools/golden/normalise.py`); `cargo test -p qh-ffi --test golden` → 8 lulus |
+| Komparasi golden live **diukur ulang** (24 Sep 2026, binary segar) | **12/22**, dan selisihnya sudah diklasifikasi, bukan regresi baru. Enam kasus yang dulu merah kini hanya berbeda di `columns.type` (D-8); tiga cacat "fix first" sudah tertutup (`postgres_catalogs_live`, `trino_explain_live`, capability header Trino); `mysql_schemas_live` masih merah karena kata-katanya berbeda dari snapshot; sisanya selisih nilai yang diklasifikasi (D-1, D-2, D-9) atau dua kasus `export` yang byte-nya bergeser karena keputusan perender (508→499, 398→399). Angka 22/22 di baris atas **tidak boleh dipakai lagi** sebagai status hari ini | `/usr/bin/python3 tools/golden/live_cases.py` → `12/22 live cases match` (dua kali, binary dibangun ulang); `cargo test -p qh-ffi --test golden` → 9 lulus, 0 gagal |
 | Validasi tunnel end-to-end | **Lulus.** `qh-sshd-dev` hidup, 8 uji sshd nyata jalan | `QH_TEST_SSH=1 cargo test -p qh-tunnel` → 29 lulus (21 unit + 8 sshd), 0 gagal |
 
 Ketahuan juga hari itu, di luar daftar: `app/build-ffi.sh` menulis binding ke root repo karena

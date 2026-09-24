@@ -1,5 +1,20 @@
 # QueryHive repository layout: a proposal with the bill attached
 
+> **Executed 24 Sep 2026, with one correction.** Steps 1–5 of §4's plan are done: `check.js` and
+> `assets/trino-mascot.png` are deleted, `.env.example` is un-ignored, `qh-sshd-run.sh` moved into
+> `deploy/dev/`, and the sweep ran — the legacy Python unit is gone and `Engine.current` is
+> `RustEngine()`. The one thing this document got wrong is step 5's third gate:
+> `python3 tools/golden/compare.py` no longer exists, because the sweep that deleted the Python
+> engine also retired that harness. Its replacement is
+> `/usr/bin/python3 tools/golden/live_cases.py` (normalisation in `tools/golden/normalise.py`),
+> alongside `cargo test -p qh-ffi --test golden`. Note also that the 22/22 that harness reported at
+> the time of writing is **12/22** against today's binary; the ten red cases are classified, not
+> newly broken (`docs/golden-deltas.md`, `tests/golden/RECORDED.md`).
+>
+> Everything else below is left as written, and every count in it is a count of the tree as it
+> stood on 23 Sep, before the sweep. Read it as the argument that was made, not as a description of
+> the tree today.
+
 Written 23 Sep 2026. Counted from `git ls-files` (279 files) at commit `d094cb6`, with six other
 agents writing into the tree at the time of writing. Nothing in the repository was moved, renamed
 or deleted to produce this document.

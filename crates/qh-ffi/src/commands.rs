@@ -1,6 +1,6 @@
 //! The eleven driver-facing commands.
 //!
-//! One function per command, each a transcription of the Python engine's own
+//! One function per command, each a transcription of the removed Python engine's own
 //! (`queryhive_engine.py:453-935`) rather than a reinterpretation of it: the event
 //! names, the fields, and **the order the events go out in** are the contract the
 //! app decodes and the snapshots freeze. Where a rule is subtle, the comment says

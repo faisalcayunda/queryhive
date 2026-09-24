@@ -1,6 +1,9 @@
 //! The engine entry point: the fourteen commands, and the CLI the golden harness runs.
 //!
-//! This is the Rust side of `app/engine/queryhive_engine.py`. The blueprint puts the
+//! This is the Rust side of the Python engine that came before it
+//! (`app/engine/queryhive_engine.py`). That engine and the `exporter/` package beside it
+//! have been deleted, so the citations of them across these crates are the design record
+//! rather than files still in the tree. The blueprint puts the
 //! CLI's destination at `qh-ffi` ("11 perintah CLI | `queryhive_engine.py:950` |
 //! `qh-ffi` (via `DatabaseEngine`)"), and it says the CLI itself stays on as a debug
 //! binary for the golden harness once the UI moves to the FFI surface. That is what

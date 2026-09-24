@@ -1,6 +1,6 @@
 //! One export, possibly several files.
 //!
-//! This is the Rust side of `export_rows` in `exporter/export.py:60-138`. A writer
+//! This is the Rust side of `export_rows` in the removed `exporter/export.py:60-138`. A writer
 //! knows how to put rows in a file; this module decides *how many* files and what
 //! they are called.
 //!

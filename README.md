@@ -6,8 +6,9 @@ result set never lands in memory whole.
 | | |
 |---|---|
 | **Formats** | `.txt` `.csv` `.json` `.xml` `.html` `.sql` `.xls` `.xlsx` `.dbf` |
-| **Interfaces** | native macOS app (SwiftUI), local web UI (browser), CLI, macOS `.app` in a DMG |
+| **Interfaces** | native macOS app (SwiftUI), `queryhive-engine` CLI, macOS `.app` in a DMG |
 | **Connection** | any coordinator: URL or host/port/user/password, nothing hardcoded |
+| **Engine** | Rust, no interpreter: the app links it across UniFFI, the CLI runs it directly |
 
 ## Why batching
 
@@ -15,11 +16,12 @@ The usual "error fetching results" in a Trino export tool comes from calling
 `fetchall()`: the client buffers every row, memory climbs, and the request that
 was supposed to drain the result set stalls until the coordinator gives up.
 
-This tool never buffers the result. It walks the cursor with
-`fetchmany(batch_size)` and hands each batch straight to a writer that appends
-to disk, so:
+This tool never buffers the result. It walks the cursor one batch at a time and
+hands each batch straight to a writer that appends to disk, so:
 
-* peak memory stays flat (300k rows × 9 columns ran in 62 MB RSS);
+* peak memory stays flat (300k rows × 9 columns ran in 62 MB RSS on the Python
+  engine this replaced; the Rust engine's numbers are measured, not assumed —
+  `docs/benchmarks.md`);
 * pages are pulled at the pace the writer consumes them, and a 30s heartbeat
   keeps the query alive while a slow format catches up;
 * transient fetch failures (502/503/504, dropped connections, read timeouts)
@@ -33,11 +35,19 @@ to disk, so:
 open app/dist/QueryHive.app
 ```
 
-A native SwiftUI app, no browser involved. `app/build.sh` builds a standalone arm64 CPython
-plus the pinned engine packages into `app/.engine/` (idempotent — it is a fast no-op until the
-pins change), then bundles the app, the engine and the `exporter` package and ad-hoc signs the
-result. The `.app` is unsigned, so Gatekeeper blocks the first launch: right-click → Open, or
-`xattr -dr com.apple.quarantine app/dist/QueryHive.app`.
+A native SwiftUI app, no browser involved. `app/build.sh` builds the Rust
+engine's shared library as a release `cdylib` (`app/build-ffi.sh`), regenerates
+the committed Swift bindings from it, then builds and ad-hoc signs the bundle.
+The `.app` is unsigned, so Gatekeeper blocks the first launch: right-click →
+Open, or `xattr -dr com.apple.quarantine app/dist/QueryHive.app`.
+
+Known limitation: the Swift binary links the engine by the absolute install name
+Cargo gives a `cdylib`, so `dist/QueryHive.app` runs on a machine that has
+`target/release/` and is not yet a bundle you can hand to someone else. Making it
+relocatable means building `qh-ffi` as a `staticlib` and packaging it as an
+XCFramework from an xtask; that is a change to the FFI crate, not to the app, and
+`app/Package.swift` names it at `ffiLibraryDirectory`.
+
 
 **Run shows you the rows; Export writes them.** Run fetches the first N (the `LIMIT` in the grid's
 footer, default 1000) and paints them in a result grid — row numbers, a pinned header with type
@@ -56,10 +66,9 @@ It is laid out like Navicat and finished like CleanMyMac: an object tree down th
 toolbar with Run/Stop, the SQL editor over a Log / Columns / Files panel you can drag, and a
 status bar. The visual layer — near-black canvas, two-colour module glow, frosted glass,
 rounded type, gradient accents — is the same one its sibling `scripts/iceberg_importer` uses.
-`app/DESIGN.md` is the design contract and the engine protocol;
-`app/engine/queryhive_engine.py` is the Python side, which reports progress as one JSON object
-per stdout line so the UI can show a live row counter, a real cancel, and the columns the
-coordinator returned.
+`app/DESIGN.md` is the design contract and the engine protocol; the engine itself is the
+`crates/qh-*` workspace, and it reports progress as events so the UI can show a live row
+counter, a real cancel, and the columns the coordinator returned.
 
 Connections come in three kinds — **Trino**, **PostgreSQL** and **MySQL** — and adding one works
 the way Navicat's does: pick the type from a grid of tiles, then fill in its fields. The driver is
@@ -118,7 +127,7 @@ without changing your Mac's setting.
 ### Ship it as a DMG
 
 ```bash
-./app/build-dmg.sh          # -> app/dist/QueryHive-0.0.1-arm64.dmg (40 MB)
+./app/build-dmg.sh          # -> app/dist/QueryHive-0.1.0-arm64.dmg
 ```
 
 The DMG holds the app, an `/Applications` symlink and a `READ ME.txt`. The build verifies its own
@@ -140,104 +149,86 @@ NOTARY_PROFILE=queryhive-notary ./app/build-dmg.sh --notarize
 That needs a **Developer ID Application** certificate. An "Apple Development" certificate does not
 substitute for one — measured on this project, `spctl` rejects it exactly as it rejects ad-hoc
 (`origin=Apple Development: ...`). `app/QueryHive.entitlements` carries the two hardened-runtime
-exceptions a bundled CPython needs, but it has not been exercised against a real Developer ID yet,
-so the first notarized build must be launched and its engine used before it is published.
+exceptions the FFI boundary needs (ADR-0014), but it has not been exercised against a real
+Developer ID yet, so the first notarized build must be launched and its engine used before it is
+published.
 
-**Requirements.** Apple Silicon (arm64) and macOS 14 or later. Every Apple Silicon Mac can run
-macOS 14, so architecture is not a limit; an Intel Mac cannot run it at all, and the app carries
-its own Python so nothing else needs installing.
+**Requirements.** Apple Silicon (arm64) and macOS 14 or later, plus a Rust toolchain to build from
+source. Every Apple Silicon Mac can run macOS 14, so architecture is not a limit; an Intel Mac
+cannot run it at all.
 
-The root `build_dmg.sh` is the older pywebview build of the same tool — the browser UI wrapped in
-a window. Both drive the identical `exporter` package.
+## Build the engine alone
 
-## Install
-
-```bash
-git clone <this repo> && cd trino_exporter
-uv venv --python 3.12 .venv
-VIRTUAL_ENV=.venv uv pip install -r requirements.txt
-```
-
-Plain pip works too: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
-
-## Run on localhost
+The engine is a Rust workspace; the app and the golden corpus are two consumers of the same
+`qh-ffi` surface.
 
 ```bash
-./run_local.sh                 # http://127.0.0.1:8765, opens your browser
-./run_local.sh --no-browser    # just serve
-TRINO_EXPORTER_PORT=9000 ./run_local.sh
+cargo build --release --bin queryhive-engine   # target/release/queryhive-engine
+cargo build -p qh-ffi                           # target/release/libqh_ffi.dylib, for the app
+./app/build-ffi.sh                              # ...then regenerate app/Generated/ from it
 ```
 
-The page has a **Trino URL** box plus individual host / port / scheme / user /
-password / catalog / schema fields; the two stay in sync, edit whichever you
-prefer. Connection settings (never the password) are remembered in
-`localStorage`. Exports run in the background with a live row counter, a cancel
-button, and a download link. Multi-part exports arrive as a zip.
-
-## Run from the CLI
+## Run the engine from the CLI
 
 ```bash
-.venv/bin/python -m exporter.cli \
-  --url https://faisal@trino.internal:8443/hive/analytics \
-  -q "SELECT * FROM penerima_manfaat WHERE tahun = 2026" \
-  -F xlsx -o ~/Downloads -n penerima_2026 \
-  --batch-size 20000 --rows-per-file 500000
+export DB_KIND=trino DB_HOST=trino.internal DB_PORT=8443 DB_USER=faisal \
+       DB_DATABASE=hive DB_SCHEMA=analytics DB_SCHEME=https
+export SQL="SELECT * FROM penerima_manfaat WHERE tahun = 2026" \
+       FORMAT=xlsx OUT_DIR=~/Downloads NAME=penerima_2026 \
+       BATCH_SIZE=20000 ROWS_PER_FILE=500000
+target/release/queryhive-engine export
 ```
 
-Connection flags, all optional if the URL carries them:
+The binary takes exactly one argument — the command — and reads everything else
+from the environment, because that is the same contract the app uses over FFI:
+there is no second set of option names to drift. One JSON object per stdout line
+comes back, which is what the app decodes.
 
-| flag | env | note |
-|---|---|---|
-| `--url` | `TRINO_URL` | `https://user:pass@host:port/catalog/schema` |
-| `--host` `--port` | `TRINO_HOST` `TRINO_PORT` | override any part of the URL |
-| `--user` `--password` | `TRINO_USER` `TRINO_PASSWORD` | a password implies https |
-| `--catalog` `--schema` | `TRINO_CATALOG` `TRINO_SCHEMA` | |
-| `--https` `--insecure` | | force TLS / skip certificate checks |
-| `--session K=V` | | repeatable session property |
+| command | what it does |
+|---|---|
+| `db_drivers` | the drivers this build has, as JSON |
+| `connections` `import_connections` `credential` | the app's saved connections and its password store (no driver opened) |
+| `objects` `catalogs` `schemas` `tables` | introspection for the object tree |
+| `test` | connect and report, without reading rows |
+| `export` | stream a query into any of the nine formats |
+| `to_table` | `CREATE TABLE AS` / `DROP + CREATE` / `INSERT INTO … SELECT` |
+| `preview` `count` `explain` | the first N rows, a row count, the plan |
+
+Connection settings, `DB_*` (the older `TRINO_*` spelling still works; `DB_*` wins):
+
+| env | note |
+|---|---|
+| `DB_KIND` | `trino`, `postgres` or `mysql`; otherwise the URL's scheme decides |
+| `DB_URL` | `postgresql://user:pass@host:5432/db`, or the split fields below |
+| `DB_HOST` `DB_PORT` `DB_USER` `DB_PASSWORD` `DB_DATABASE` `DB_SCHEMA` | override any part of the URL |
+| `DB_SCHEME` `DB_SSLMODE` `DB_INSECURE` | `http`/`https` plus the TLS mode; a password implies https |
+| `DB_ALL_SCHEMAS` | introspect every schema, not just `DB_SCHEMA` |
 
 Batching and output:
 
-| flag | default | note |
+| env | default | note |
 |---|---|---|
-| `--batch-size` | 10000 | rows per fetch from the coordinator |
-| `--rows-per-file` | none | split the output every N rows |
-| `--retries` | 5 | retries on a transient fetch error |
-| `-F/--format` | csv | one of the nine |
-| `-o/--out-dir` `-n/--name` | cwd, `export` | |
-| `--zip` | off | bundle the result files |
+| `SQL` / `SQL_PATH` | — | the statement, inline or a file; one of the two is required |
+| `BATCH_SIZE` | 10000 | rows per fetch from the server |
+| `ROWS_PER_FILE` | none | split the output every N rows |
+| `RETRIES` | 5 | retries on a transient fetch error |
+| `FORMAT` | `csv` | one of the nine |
+| `OUT_DIR` `NAME` | cwd, `export` | |
+| `ZIP` | off | bundle the result files |
+| `LIMIT` | 1000 | `preview`'s row cap |
+| `PROGRESS_MS` | engine default | how often a progress event is emitted |
+| `TARGET_CATALOG` `TARGET_SCHEMA` `TARGET_TABLE` `WRITE_MODE` | | `to_table`'s destination |
 
-Read SQL from a file or a pipe with `-f query.sql` / `-f -`.
-
-Per-format options: `--delimiter --encoding --no-header --bom --null-text`
-(txt/csv), `--jsonl`, `--sql-table`, `--sheet`, `--dbf-char-width --dbf-encoding`.
-
-## Build the DMG (Apple Silicon)
-
-```bash
-./build_dmg.sh      # -> dist/TrinoExporter-1.0.0-arm64.dmg
-```
-
-Runs the tests, builds an arm64 app bundle with PyInstaller, smoke-tests that
-the bundle actually serves, then packs the `.app` next to an `/Applications`
-symlink. PyInstaller cannot cross-compile, so build on an arm64 Mac.
-
-The bundle is **unsigned**. On first launch Gatekeeper will block it:
-right-click → Open, or
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/Trino Exporter.app"
-```
-
-Opening the app starts the same server on a free port and opens your browser.
-There is no menu bar, so the header has a **Quit** button that stops it.
+Per-format options: `DELIMITER ENCODING HEADER BOM NULL_TEXT` (txt/csv), `JSONL`,
+`SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH DBF_ENCODING`.
 
 ## Format notes
 
 | format | what to know |
 |---|---|
-| `txt` | tab-separated with a header row; `--delimiter` changes it |
-| `csv` | RFC 4180 quoting; `--bom` if Excel mangles UTF-8 |
-| `json` | array of objects, or `--jsonl` for one object per line |
+| `txt` | tab-separated with a header row; `DELIMITER` changes it |
+| `csv` | RFC 4180 quoting; `BOM` if Excel mangles UTF-8 |
+| `json` | array of objects, or `JSONL` for one object per line |
 | `xml` | `<RECORDS><RECORD>`; column names sanitised into valid tags |
 | `html` | standalone page with a sticky header, everything escaped |
 | `sql` | multi-row `INSERT`s, 200 rows per statement, quotes doubled |
@@ -253,26 +244,41 @@ columns are serialised as JSON text everywhere except `json` itself.
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_writers.py
+cargo test --workspace                          # the engine
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo deny check licenses                       # the licence policy, ADR-0002/0011
+cd app && swift build && swift test             # the app's decoders and the engine contract
+/usr/bin/python3 tools/golden/live_cases.py     # the frozen golden corpus
 ```
 
-11 checks covering every writer (parsed back with `csv`, `json`,
-`ElementTree`, `openpyxl`, and a byte-level DBF header check), part splitting,
-and cancellation. The DBF and XLS outputs were additionally verified against
-`dbfread` and `xlrd`, and all nine formats were exported end-to-end against a
-real Trino coordinator using the `tpch` catalog.
+The golden corpus under `tests/golden/` is a recording: 43 commands, their JSON
+exactly as the engine produced it, normalised so the volatile parts (timestamps,
+paths, server-assigned OIDs) do not make a correct engine look changed. `_live`
+cases are re-run against the dev containers; the rest are compared in-process.
+`tests/golden/RECORDED.md` says how it was recorded and what each case covers.
+
+The DBF and XLS writers were additionally verified against `dbfread` and `xlrd` back when this
+tree still had a Python engine, and all nine formats were exported end-to-end against a real Trino
+coordinator using the `tpch` catalog. Those checks are history, not something the current test
+suite re-runs.
 
 ## Layout
 
 ```
-exporter/
-  writers.py   9 streaming writers + value formatting (dbf is hand-rolled)
-  source.py    batched cursor, retries, connection config / URL parsing
-  export.py    orchestration: part splitting, progress, zip bundling
-  to_table.py  CREATE TABLE AS SELECT / INSERT INTO ... SELECT
-  cli.py       command line
-  web.py       FastAPI app, background jobs
-  static/      the UI, single self-contained file
+crates/
+  qh-core/          errors, values, rendering: the types everything else speaks
+  qh-driver/        the driver trait every backend implements
+  qh-driver-trino/  the hand-rolled Trino client (ADR-0006)
+  qh-driver-postgres/  qh-driver-mysql/    libpq / MySQL protocol clients
+  qh-export/        9 streaming writers, part splitting, plan
+  qh-sql/           identifier quoting and the SQL a connection's driver needs
+  qh-storage/       connections.json; qh-credentials/ the Keychain side
+  qh-tunnel/        the SSH bastion a connection can be reached through
+  qh-result-store/  the grid's row store; qh-sync/ its prefetch
+  qh-rt/            the tokio runtime the FFI owns
+  qh-ffi/           the engine entry point: the fourteen commands, the UniFFI surface,
+                    and `queryhive-engine`, the CLI the golden harness runs
 app/
   DESIGN.md                 the native app's design contract and engine protocol
   Package.swift             SwiftPM targets: the executable, the generated bindings, the C
@@ -280,9 +286,8 @@ app/
   Sources/TrinoExporter/
     App.swift               @main, the engine's Event type, notices
     Support/DatabaseEngine.swift  the DatabaseEngine/EngineRun contract and the Engine.current seam
-    Support/Engine.swift    PythonEngine: launches the bundled engine, decodes its JSON events
-    Support/EngineWire.swift  the NDJSON event wire format, decoded by both engines
-    Support/RustEngine.swift  RustEngine: the same contract over UniFFI, not wired in yet
+    Support/EngineWire.swift  the event wire format
+    Support/RustEngine.swift  RustEngine: the contract over UniFFI, and Engine.current
     Support/Theme.swift     the CleanMyMac design system: Tone, Hue, glass, HubButton, the comb
     Support/ThemeStore.swift  the appearance choice: AppTheme, AccentChoice, ThemeStore, presets
     Support/AppIcon.swift   the app icon, drawn in code
@@ -309,25 +314,25 @@ app/
     Views/SettingsView.swift  the Settings window: Appearance and Keyboard
   Tests/TrinoExporterTests/  EngineContractTests, EventDecodingTests, RustEngineTests, plus the
                             MockEngine and EngineContract they share
-  engine/queryhive_engine.py  JSON-event CLI the app drives (db_drivers, objects, test, catalogs, schemas, tables, export, to_table, preview, count, explain)
   Generated/                UniFFI output, committed: the Swift bindings, the C header, the
                             modulemap, and the one translation unit build-ffi.sh writes
-  build-engine.sh             builds the bundled standalone CPython + pinned packages
   build-ffi.sh                builds libqh_ffi --release and regenerates Generated/
-  build.sh                    builds app/dist/QueryHive.app, copying ../exporter into the bundle
-                              beside the engine
+  build.sh                    builds app/dist/QueryHive.app around that library
   build-dmg.sh                wraps that .app in a DMG, with optional Developer ID + notarization
   QueryHive.entitlements      the entitlements the hardened runtime needs (ADR-0014)
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code
   make-driver-logos.sh        regenerates Support/DriverLogos.swift from assets/drivers/*.svg
-app.py         launcher used by both run_local.sh and the pywebview .app bundle
+tests/golden/                 the frozen corpus, its recordings and RECORDED.md
+tools/golden/live_cases.py    runs the live cases against the debug binary
+deploy/dev/                   the fixture containers, and the benchmark harness
+docs/decisions/               ADRs; docs/architecture/ the blueprint and the folder proposal
 ```
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). Bundled dependencies carry their own licences (Trino client:
-Apache 2.0; psycopg: PostgreSQL License; PyMySQL, openpyxl and XlsxWriter: MIT), all of which are
-compatible with redistributing this under MIT.
+MIT — see [LICENSE](LICENSE). The workspace's Rust dependencies carry their own licences; the
+policy is the allow-list in `deny.toml`, enforced by `cargo deny check licenses` (ADR-0002,
+ADR-0011), so the list in that file — not this paragraph — is the authority.
 
 Two things the licence does **not** cover, both worth knowing before you rebrand or redistribute:
 

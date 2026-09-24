@@ -1,6 +1,6 @@
 //! The event stream the app decodes: one compact JSON object per line.
 //!
-//! This is the Rust side of `queryhive_engine.py`'s `emit()`. Two things about it
+//! This is the Rust side of the removed `queryhive_engine.py`'s `emit()`. Two things about it
 //! are contracts rather than style:
 //!
 //! 1. **Every line flushes as it is written.** The app paints a grid from the
@@ -18,8 +18,8 @@
 //!
 //! No consumer depends on that order. The app decodes by key, and the golden
 //! harness compares parsed values rather than bytes, so the frozen snapshots —
-//! which `tools/golden/record.py` writes with `sort_keys=True` — can still be
-//! compared with what this writer produces.
+//! which the recorder wrote with `sort_keys=True` — can still be compared with
+//! what this writer produces.
 
 use std::io::{self, Write};
 

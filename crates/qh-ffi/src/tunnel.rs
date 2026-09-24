@@ -12,7 +12,7 @@
 //!
 //! Checked first, per the engine's own rule that existing vocabulary wins
 //! (`config.rs`'s `DB_*`/`TRINO_*` aliases): neither the Python engine
-//! (`app/engine/queryhive_engine.py`) nor the app defines any SSH setting today —
+//! (`app/engine/queryhive_engine.py`) nor the app ever defined any SSH setting —
 //! the app says so itself where it imports connections that have one
 //! (`Sources/TrinoExporter/Support/NavicatImport.swift`: "QueryHive cannot open an
 //! SSH tunnel", reading Navicat's `SSH_Host` field). The names here are Navicat's

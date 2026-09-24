@@ -6,9 +6,12 @@
 
 ## Konteks
 
-Trino hari ini diakses lewat paket Python `trino==0.339.0` (`app/engine-requirements.txt`), dan
+Trino **dulu** diakses lewat paket Python `trino==0.339.0` (`app/engine-requirements.txt`), dan
 `exporter/source.py` bahkan memuat penanganan khusus untuk perilakunya: auto-upgrade HTTP→HTTPS
-(`source.py:242`) dan `describe_error` (`source.py:64`) ada karena keanehan klien itu.
+(`source.py:242`) dan `describe_error` (`source.py:64`) ada karena keanehan klien itu. Kedua berkas
+itu **sudah tidak ada** — keputusan di ADR ini sudah dilaksanakan, dan client-nya sekarang
+`crates/qh-driver-trino` (`CLIENT_CAPABILITIES` di `src/lib.rs`). Kutipan path di atas dibiarkan
+sebagai catatan konteks saat keputusan diambil.
 
 Protokol Trino bukan protokol SQL biner. Ia HTTP murni: `POST /v1/statement` → respons berisi
 `nextUri` → `GET nextUri` berulang sampai selesai; cancel = `DELETE nextUri`; hasil di-decode dari

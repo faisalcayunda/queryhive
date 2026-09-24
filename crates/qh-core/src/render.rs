@@ -1,7 +1,7 @@
 //! Rendering a [`Value`] as text, or as JSON.
 //!
-//! This is the Rust side of `exporter/writers.py`'s `to_text` and `to_json_value`
-//! (lines 38 and 58), and it is deliberately a *rendering* layer rather than a
+//! This is the Rust side of the removed `exporter/writers.py`'s `to_text` and
+//! `to_json_value` (lines 38 and 58), and it is deliberately a *rendering* layer rather than a
 //! conversion: the internal [`Value`] keeps its type, and text is produced only
 //! when something is being written out. That is the difference the blueprint asks
 //! for at §1.7 — the Python engine returned strings from the start, so a DECIMAL
