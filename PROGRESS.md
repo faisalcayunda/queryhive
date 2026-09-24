@@ -1211,6 +1211,51 @@ Bundle dan DMG dibangun ulang sesudahnya: `app/dist/QueryHive.app`, DMG
 `app/dist/QueryHive-0.1.0-arm64.dmg` sha256
 `28bc0b7f9fdcb898b1a581d65766c3e7aa34d72225596d48845542ba524518f1`.
 
+### Settings di-relayout jadi kartu bergrup, setelah riset HIG (24 Sep 2026)
+
+Keluhan lanjutan setelah hierarki jarak dipasang: "layout pun menurut saya acak acakan seperti tanpa
+design plan". Membenarkan keluhan itu: jarak yang benar tidak menciptakan struktur. Panel itu masih
+satu kolom tujuh section yang bobotnya setara, dipisah divider, dan **Preset duduk sejajar dengan
+Theme, Accent, dan Tone** padahal Preset adalah ketiganya sekaligus. Itu sebabnya tidak ada rencana
+yang terbaca.
+
+**Riset dijalankan lebih dulu, dari sumber primer.** Empat halaman Apple diambil langsung: HIG
+*Settings* (panduan pane macOS), HIG *Toolbars*, HIG *Sidebars*, dan SwiftUI *Settings* +
+*FormStyle.grouped*. Tiga butir yang menentukan arah: window settings macOS sebaiknya punya
+**pemilih pane yang tetap terlihat dan selalu menandai pane aktif**; isinya disusun sebagai
+**baris bergrup di dalam section berjudul** (grouped rows), bukan daftar rata; dan **kurangi jumlah
+setting yang tampil serentak** sebanyak mungkin. Catatan: `web_search` mati karena saldo paket habis
+(HTTP 402 dari endpoint), jadi riset dikerjakan lewat `web_fetch` ke `developer.apple.com` saja.
+
+**Yang berubah.**
+
+1. **Pemilih pane jadi bar penuh dengan simbol.** Dua pane, *Appearance* dan *Keyboard*, masing-masing
+   dengan SF Symbol (`paintpalette`, `keyboard`). Pane bar berada **di luar** `ScrollView`, jadi ia
+   tidak bisa ikut tergulir keluar layar — HIG meminta pemilih pane tetap terlihat. Pane aktif
+   ditandai track lebih gelap plus label semibold: terukur dari piksel render, tombol aktif rata-rata
+   `#D4D5D7` (212) dan non-aktif `#F8F9FC` (248) pada mode terang.
+2. **Tujuh section jadi tiga kartu + footer.** Preset jadi kartu tersendiri karena ia satu keputusan
+   utuh; Mode, Theme, Accent, dan Tone digabung ke satu kartu *Appearance* dengan divider antar baris,
+   karena keempatnya empat bagian dari satu pertanyaan; Glow jadi kartu *Backdrop*. Reset keluar dari
+   kartu dan duduk di bawah hairline sendiri — ia bukan setting, ia jalan kembali dari semua setting,
+   dan memberinya kartu keempat akan menyamakan bobotnya dengan pilihan yang ia batalkan.
+3. **Jendela dipatok 560x640 dan pane-nya yang menggulir.** Sebelumnya `SettingsView` tidak punya
+   tinggi sendiri sehingga jendela menyesuaikan isi; begitu section Mode menambah picker dan dua
+   paragraf, jendela tumbuh melebihi layar, macOS memakukannya ke tepi atas, dan **Glow serta Reset
+   jatuh di bawah tepi bawah tanpa jalan menjangkaunya**. Tinggi dipatok, isi menggulir, dan
+   `.scrollBounceBehavior(.basedOnSize)` mematikan pantulan saat pane memang muat.
+4. **Pane Keyboard dapat tabel binding sungguhan.** Sebelumnya scheme dijelaskan dengan kalimat saja.
+   Kini seluruh 13 `ShortcutAction` didaftar dengan tombol scheme aktif, dan aksi yang tidak terikat
+   ditulis "not bound" alih-alih disembunyikan — shortcut yang hilang justru hal yang perlu diketahui
+   pengguna, dan menyembunyikan barisnya membuat scheme tampak lengkap padahal bukan.
+
+**Terverifikasi.** `swift build` bersih tanpa peringatan, `swift test` **27 lulus / 0 gagal**. Dua
+pane dirender sebagai scene (`settings`, `settings-keyboard`; frame snapshot diperbaiki dari 520x560
+ke 560x640 karena sebelumnya meng-crop view yang tingginya 640). Dari piksel: kedua pane muat penuh
+(konten terakhir di y=1272 dan y=1296 dari 1336, tidak terpotong), kartu terbaca sebagai kartu di
+mode terang maupun gelap (latar kartu berbeda dari kanvas di keduanya), dan baris binding keyboard
+berjumlah 13 sesuai isi enum.
+
 ## Perkakas lokal (sengaja tidak masuk repo)
 
 `tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang

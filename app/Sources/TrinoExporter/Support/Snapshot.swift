@@ -86,8 +86,8 @@ enum Snapshot {
         // Settings is its own scene in the running app, so it needs its own root here or it stays
         // the one screen nobody can look at without launching.
         let hosting: NSHostingView<AnyView>
-        if scene == "settings" {
-            hosting = NSHostingView(rootView: AnyView(SettingsView()
+        if scene == "settings" || scene == "settings-keyboard" {
+            hosting = NSHostingView(rootView: AnyView(SettingsView(pane: scene == "settings-keyboard" ? .keyboard : .appearance)
                 .environment(model)
                 .preferredColorScheme(scheme)))
         } else {
@@ -96,8 +96,8 @@ enum Snapshot {
                 .frame(width: width, height: height)
                 .preferredColorScheme(scheme)))
         }
-        hosting.frame = scene == "settings"
-            ? NSRect(x: 0, y: 0, width: 520, height: 560)
+        hosting.frame = scene == "settings" || scene == "settings-keyboard"
+            ? NSRect(x: 0, y: 0, width: 560, height: 640)
             : NSRect(x: 0, y: 0, width: width, height: height)
 
         let window = NSWindow(contentRect: hosting.frame,
