@@ -25,7 +25,7 @@
 > tempatnya: klaim golden live "22/22" (sekarang **12/22**, selisihnya terklasifikasi) dan
 > "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 12 lulus). Verifikasi
 > berat per 24 Sep 2026: `cargo fmt --all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`
-> ✅, `cargo test --workspace` → **553 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+> ✅, `cargo test --workspace` → **557 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
 > `swift build && swift test` → **16 tes / 0 gagal** ✅, `app/build.sh` → `Built dist/QueryHive.app` ✅.
 > Bundle sekarang bersifat self-contained: mesinnya statis, jadi `otool -L` pada
 > `Contents/MacOS/QueryHive` tidak lagi menyebut library Rust mana pun. Perubahan itu mendarat di
@@ -860,6 +860,7 @@ kenapa itu tidak akan berubah lewat protokol ini.
 | K11 | ~~`KILL QUERY` tidak menghentikan join panjang~~ **Selesai, akar masalahnya bukan cancel** | `execute` menunggu deskripsi kolom, dan MySQL mengirimnya saat result set **mulai** — untuk query blocking, itu berarti saat query **selesai**. Jadi `execute` menunggu seluruh query, pemanggil belum memegang cursor apa pun, dan cancel tidak punya sasaran. Cancel-nya sendiri selalu sehat | Diperbaiki dengan mendeskripsikan lebih dulu lewat `prep` (COM_STMT_PREPARE, tanpa eksekusi). Terukur: `execute(SLEEP(2))` 2,002 dtk → `prep` untuk join yang sama **915 µs** |
 | K12 | ~~Suite uji MySQL memakan 30 detik~~ **Selesai** | 30,28 dtk itu adalah `SELECT SLEEP(30)` yang berjalan **tuntas di dalam `execute`** sebelum cancel sempat dipanggil. Penjelasan yang sama dengan K11, dan bukti bahwa uji cancel-nya tidak membuktikan apa pun | Suite kini **0,33 dtk** |
 | K13 | ~~`preview` kehilangan verdict `truncated` bila cap jatuh persis di batas halaman~~ **Selesai (cacat warisan)** | Cap hanya dijawab bila tercapai dengan baris masih tersisa di tangan. Cap yang memakan halaman tepat habis tidak pernah sampai ke situ, jadi `done.truncated` selalu `false`. Contohnya jalur default aplikasi: `rowLimit` 1000 dibagi `PREVIEW_BATCH` 200 = lima halaman utuh, dan grid berkata "1000 rows returned" tanpa "(limit reached)" untuk tabel 500.000 baris. Cacat yang sama ada di `_stream_rows` mesin Python (`253362a^`), jadi ini bukan regresi port | Verdict kini ditanyakan lewat `cursor.next_batch(VERDICT_FETCH)`, satu baris, bukan satu halaman. Uji: `a_preview_whose_cap_lands_on_a_page_boundary_still_says_whether_more_exists` (`crates/qh-ffi/tests/golden.rs`) |
+| K14 | ~~Trino menolak 401 meski kredensial benar~~ **Selesai (cacat port)** | Driver mengirim `X-Trino-User` saja. Header itu menamai pengguna, bukan mengautentikasi: koordinator dengan `password-file` atau LDAP menjawab 401 pada **setiap** request, dan dari editor koneksi itu tidak bisa dibedakan dari password salah. Password tetap dibaca (`DB_PASSWORD`, `crates/qh-ffi/src/config.rs:163`) lalu hanya dipakai menaikkan `TlsMode`, tidak pernah dikirim. Mesin Python sebelumnya mengirimnya (`trino.auth.BasicAuthentication(user, password)`, `exporter/drivers.py:433` di `253362a^`), jadi ini regresi port, bukan perilaku lama | `Credentials` di `crates/qh-driver-trino/src/lib.rs` membawa user dan password sebagai satu nilai, dan `with_shared_headers` menambah `Authorization: Basic` bila password ada. Empat uji di `crates/qh-driver-trino/tests/capabilities.rs` mem-pin headernya di kawat |
 
 ### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 
@@ -976,6 +977,239 @@ dengan cap 200 harus `false`), dan tiga uji di `crates/qh-ffi/tests/real_server.
 diperiksa dengan mematikan kodenya sebentar: tanpa verdict, tes pertama gagal persis pada
 `truncated: false`; tanpa cek cancel di `emit_batches`, tes server nyata melaporkan 210 baris dan
 `truncated: true` untuk run yang sudah di-stop.
+
+### Trino 401 padahal kredensial benar: password yang tidak pernah dikirim (24 Sep 2026)
+
+Pertanyaannya datang dari luar kode: koneksi Trino ditolak unauthorized dengan kredensial
+yang benar. Jawabannya ada di `with_shared_headers`, dan bentuknya satu header yang tidak
+ada.
+
+**Yang dikirim driver sebelum perbaikan** hanya `X-Trino-User` dan
+`X-Trino-Client-Capabilities`, di tiga request yang protokolnya punya (`POST /v1/statement`,
+poll halaman, `DELETE` cancel). `X-Trino-User` menamai pengguna; ia tidak mengautentikasi
+siapa pun. Password dibaca dari `DB_PASSWORD`/`TRINO_PASSWORD`
+(`crates/qh-ffi/src/config.rs:163`), punya aturan sendiri yang teruji (`a_password_still_implies_tls`,
+`:690-698`), tetapi seluruh efeknya adalah menaikkan `TlsMode` ke `Require`. Nilainya tidak
+pernah sampai ke HTTP.
+
+Mesin Python yang baru dihapus memang mengirimnya, jadi ini regresi port dan bukan perilaku
+lama: `auth = trino.auth.BasicAuthentication(user, password) if password else None`
+(`exporter/drivers.py:433` di `253362a^`). Di sisi aplikasi password tetap dikirim ke engine
+(`"DB_PASSWORD": password ?? ""`, `app/Sources/TrinoExporter/Models/AppModel.swift:1333`),
+jadi yang putus hanya separuh terakhir: engine ke koordinator.
+
+**Reproduksi.** Karena container dev (`qh-trino` 58080, `deploy/dev/up.sh:86-95`) berjalan
+tanpa auth, 401 tidak bisa muncul di sana, dan lima kasus Trino live tetap lolos. Yang dipakai
+adalah koordinator tiruan sementara di `/tmp/qh401/mock_trino.py` (tidak masuk repo): listener
+HTTPS yang menjawab 401 tanpa `Authorization: Basic` yang cocok, dan 200 dengan halaman
+berbentuk Trino bila ada. Lognya mencatat header tiap request, jadi log itu sendiri buktinya.
+
+```
+$ /usr/bin/curl -sk -u queryhive:secret -X POST https://127.0.0.1:18443/v1/statement -d 'SELECT 1'
+HTTP 200
+$ DB_KIND=trino DB_HOST=127.0.0.1 DB_PORT=18443 DB_USER=queryhive DB_PASSWORD=secret \
+  DB_DATABASE=tpch DB_SCHEMA=tiny DB_SCHEME=https DB_INSECURE=1 SQL='SELECT 1' RETRIES=0 \
+  ./target/debug/queryhive-engine preview
+{"event":"error","message":"401 Unauthorized: {\"message\": \"Unauthorized\"}"}
+
+# apa yang koordinator tiruan lihat, dari lognya
+POST /v1/statement
+    X-Trino-User: 'queryhive'
+    Authorization: None            <- di sini masalahnya
+    X-Trino-Client-Capabilities: 'PARAMETRIC_DATETIME'
+```
+
+Sesudah perbaikan, request yang sama:
+
+```
+{"event":"step","step":"connect"}
+{"event":"columns","columns":[{"name":"x","type":"integer"}]}
+{"event":"rows","data":[["1"]]}
+{"event":"done","rows":1,"truncated":false,"query_id":"mock-20260924","elapsed_ms":12}
+# log: Authorization: 'Basic cXVlcnloaXZlOnNlY3JldA=='
+```
+
+Sambungan tanpa password diperiksa terpisah dan tidak berubah: `Authorization` tetap tidak
+dikirim (satu-satunya kecocokan di log adalah `Authorization: None`), `X-Trino-User` tetap
+`queryhive`, dan koordinator tiruan tetap menjawab 401 karena ia memang menuntut auth. Jadi
+perbaikannya tidak memasang kredensial kosong pada koneksi yang tidak pernah diberi password.
+
+**Perbaikannya.** Tipe `Credentials { user, password }` di `crates/qh-driver-trino/src/lib.rs`,
+dibuat sekali di `connect` dari `ConnectionConfig` dan disimpan di session serta cursor, supaya
+user dan password tidak bisa terpisah di satu call site. `with_shared_headers` menambah
+`basic_auth(user, Some(password))` hanya bila password ada. `reqwest` sudah menyediakan
+`basic_auth` sejak 0.12, jadi tidak ada dependensi baru dan tidak ada encoder base64 yang
+ditulis sendiri. `Debug` untuk `Credentials` ditulis tangan dan hanya mencetak
+`password: present`/`none`, mengikuti aturan yang sudah dipakai `ConnectionConfig`.
+
+**Uji.** Empat tes baru di `crates/qh-driver-trino/tests/capabilities.rs`, yang memang tempat
+mem-pin header di kawat (listener membaca seluruh request head, tanpa Trino):
+`a_password_reaches_the_coordinator_as_basic_auth_on_the_statement_and_its_page`,
+`the_cancel_request_is_authenticated_too`,
+`a_connection_with_no_password_sends_no_authorization_header`, dan
+`a_credential_never_prints_its_password`. Nilai Basic-nya ditulis literal
+(`Basic YW5hbHl0aWNfdXNlcjpodW50ZXIy` untuk `analytic_user:hunter2`), bukan dihitung dengan
+cara yang sama seperti driver, supaya tes tidak bisa setuju dengan driver yang sama-sama salah.
+Keduanya diperiksa dengan mematikan kodenya sebentar: tanpa cabang `basic_auth`, kedua tes
+pertama gagal pada `left: None, right: Some("Basic ...")`; dengan `basic_auth` dipanggil tanpa
+syarat, tes tanpa password gagal karena header terkirim.
+
+Verifikasi setelah perbaikan: `cargo test --workspace` **557 lulus / 0 gagal** (553 sebelum,
+empat tes ini yang menambah), `cargo test -p qh-ffi --test golden` 12/12,
+`/usr/bin/python3 tools/golden/live_cases.py` tetap **12/22**, `cargo fmt --all --check` bersih,
+`cargo clippy --workspace --all-targets -- -D warnings` bersih, `cargo deny check licenses` →
+`licenses ok`, `swift test` 16 tes / 0 gagal.
+
+**Yang belum terbukti.** Perbaikannya diuji terhadap koordinator yang menuntut Basic auth,
+bukan terhadap koordinator yang benar-benar memberi 401 itu. Bentuk auth di sana belum
+dikirim ke saya. Kalau koordinatornya memakai JWT atau OAuth2, password tidak akan
+menolong, dan yang perlu dibaca adalah nama header yang diminta di pesan 401-nya. Langkah
+pertama untuk memastikan: kirim satu request ke URL yang sama dan perhatikan daftar
+`www-authenticate` pada respons.
+
+### Object screen: baris yang bisa diklik, dan inspector di sebelahnya (24 Sep 2026)
+
+Revisi UI. Sebelumnya memilih sebuah schema membuka daftar objeknya sebagai grid, tetapi
+barisnya hanya teks: tidak ada yang bisa diklik, tidak ada yang bisa dipilih, dan tidak ada
+informasi tentang tabel mana pun. Navicat di sisi lain membiarkan satu baris dipilih dan
+menampilkan detailnya.
+
+**Yang berubah.** Tiap baris kini satu view sendiri (`ObjectRow`) dengan hover, klik untuk
+memilih, klik-ganda untuk membuka tabelnya sebagai tab query, dan menu konteks yang sama dengan
+simpul tabel di pohon (Open, Insert into Query, Copy Qualified Name, Copy Name). Begitu satu baris
+dipilih, sebuah inspector muncul di kanan dengan dua bagian: **Listing**, yaitu seluruh sel baris
+itu di bawah header driver sendiri (Postgres menyumbang OID, Owner, ACL; Trino Type; MySQL Engine
+dan Rows), dan **Columns**, yaitu kolom tabel itu yang sebenarnya.
+
+**Kenapa satu view per baris.** Hover adalah `@State`, dan `@State` di dalam badan `ForEach`
+dibagi oleh semua iterasi: meng-hover satu baris akan menyalakan semuanya. Baris sebagai view
+sendiri adalah satu-satunya cara state itu jadi per baris.
+
+**Kenapa kolomnya lewat `preview`, bukan `count` atau query metadata per driver.** Ketiga server
+mendeskripsikan result set sebelum mengirim barisnya, jadi event `columns` datang tanpa menunggu
+data. `SELECT *` dengan `LIMIT=1` karena itu menjawab bentuk tabel tanpa membacanya. Alternatifnya
+adalah satu query `information_schema` per driver, yaitu tiga tempat lagi yang jawabannya bisa
+berbeda dari apa yang benar-benar dikembalikan sebuah `SELECT`. Diukur terhadap koordinator tiruan
+yang mengembalikan kolom dan nol baris:
+
+```
+$ DB_KIND=trino DB_HOST=127.0.0.1 DB_PORT=18444 DB_USER=queryhive DB_DATABASE=hive \
+  DB_SCHEMA=analytics DB_SCHEME=http \
+  SQL='SELECT * FROM "hive"."analytics"."penerima_manfaat"' LIMIT=1 RETRIES=0 \
+  ./target/debug/queryhive-engine preview
+{"event":"columns","columns":[{"name":"id","type":"bigint"},{"name":"nik","type":"varchar(16)"},
+ {"name":"nama","type":"varchar"},{"name":"terdaftar_pada","type":"timestamp(6) with time zone"}]}
+{"event":"done","rows":0,"truncated":false,"query_id":"mock-cols-20260924","elapsed_ms":6}
+```
+
+Nol baris, dan kolomnya lengkap. Koordinator tiruan itu mencatat statement yang diterimanya,
+sehingga kualifikasi namanya ikut terbukti:
+`body: 'SELECT * FROM "hive"."analytics"."penerima_manfaat"'`.
+
+**Nama tabel dibaca dari header, bukan dari posisi.** Ketiga driver hari ini menaruh `Name` di
+kolom pertama, tetapi hanya headernya yang kontrak: Postgres menjawab Name/OID/Owner/ACL, Trino
+Name/Type, MySQL Name/Engine/Rows/Comment, dan driver yang menaruh kolomnya sendiri lebih dulu akan
+dibaca salah oleh indeks tetap. `objectName(at:)` mencarinya dengan perbandingan tanpa peduli
+besar-kecil huruf.
+
+**Seleksi dibuang saat daftar dimuat ulang.** Seleksinya sebuah indeks, jadi daftar baru memberi
+arti lain pada angka yang sama: nomor itu akan menunjuk tabel yang kebetulan kini duduk di baris
+tersebut. `clearObjectSelection` membuangnya bersama field detailnya, dan token detail-nya
+di-nol-kan supaya fetch yang masih terbang tidak mendarat di pane yang sudah dikosongkan.
+
+**Aksi baris menerima indeks baris, bukan membaca seleksi.** Klik-ganda dan klik-kanan bisa
+mendarat di baris yang belum pernah diklik sekali, dan aksi yang hanya bekerja pada baris yang
+sudah terpilih akan tampak rusak justru saat pengguna paling cepat. `openObject(tab, row:)` dan
+`insertObject(tab, row:)` memilih dulu, lalu bertindak, sehingga inspector dan tab yang baru
+terbuka selalu setuju.
+
+**Jalur gagal menulis alasan, bukan diam.** Koneksi yang hilang (dihapus selagi tab objeknya
+terbuka) dan lingkungan yang gagal dibangun sama-sama mengisi `objectDetailError` dengan kalimat
+yang menyebut sebabnya. Diam akan meninggalkan inspector berkata "No columns reported", yaitu
+klaim tentang tabel padahal kenyataannya aplikasi ini tidak pernah bertanya.
+
+**Uji.** `app/Tests/TrinoExporterTests/ObjectScreenTests.swift` baru, 10 tes: nama dibaca dari
+header yang benar dan tanpa peduli besar-kecil huruf, nama kosong bukan tabel, baris tanpa kolom
+`Name` dan indeks di luar jangkauan mengembalikan `nil` alih-alih crash, statement inspector
+dikualifikasi sesuai driver, scope tanpa katalog jatuh ke nama polos, muat-ulang membuang seleksi,
+dan dua jalur gagal di atas. Dua mutasi membuktikan tesnya bergigi: membaca nama dengan posisi
+tetap (`let column = 0`) menggagalkan 2 tes, dan membiarkan `objectSelection` hidup saat muat-ulang
+menggagalkan 1 tes. Keduanya dikembalikan setelah diuji. `swift test` **26 lulus / 0 gagal** (16
+sebelumnya), `cargo test --workspace` tetap **557 lulus / 0 gagal** (perubahan ini tidak menyentuh
+Rust), `swift build` bersih.
+
+**Verifikasi visual.** `--snapshot --scene objects` merender pane-nya dengan satu baris terpilih,
+dan fixture scene itu kini memuat seleksi plus kolom tabelnya supaya pane yang tidak punya
+pembanding lain ikut terlihat. Diperiksa pada lebar penuh, lebar minimum 1120 (grid menggeser
+horizontal, inspector utuh), mode terang, dan aksen lain. Lima scene lain (done, table, grid,
+tree-large, empty) tetap merender, jadi tidak ada regresi tata letak.
+
+Bundle dan DMG dibangun ulang sesudahnya: `app/dist/QueryHive.app` binary 16:30:26, DMG
+`app/dist/QueryHive-0.1.0-arm64.dmg` 8.211.048 byte 16:30:31 (sumber terakhir 16:18:04), sha256
+`d88c64fa6de731cbe8f810e811fdc58a9a98c45eb64af92b968259e9914f7b22`, `otool -L` tetap 0 entri
+`qh_ffi`/`target/release`.
+
+### Settings diberi struktur section, dan klik pohon berhenti me-redraw semua baris (24 Sep 2026)
+
+Dua keluhan dari memakai build terbaru: modal Settings terasa "acak-acakan seperti tanpa design
+plan", dan memilih schema/tabel di pohon kembali berat.
+
+**Settings: jarak yang seragam diganti hierarki.** Sebelumnya `AppearanceSettings` adalah satu
+`VStack(spacing: 16)` berisi label-section, teks penjelas, kontrol, dan divider yang semuanya
+berjarak sama — jadi mata tidak mendapat petunjuk mana yang milik satu section dan mana pemisah
+antar section. Kini polanya dua tingkat: di dalam satu section label→kontrol berjarak 10
+(`sectionHeader` mengikat judul dan paragraf penjelasnya), antar section berjarak 24 dengan
+divider duduk di celah itu. Diverifikasi dari piksel render `--scene settings`: band konten kini
+berpola header (15–17px) + kontrol (46–80px) dengan celah ~20px, dipisah divider dengan celah
+~50px, dan seluruh tujuh section muat di tinggi jendela tanpa terpotong.
+
+**Pohon: seleksi tidak lagi dibaca dari model oleh setiap baris.** `TreeRow` punya parameter
+`selected` yang di-pass dari parent persis supaya badan baris tidak membaca observable — tetapi
+di dalam `children` (rekursinya) baris anak tetap menghitung `model.selectedNodeID == child.id`,
+dan root `ForEach` juga membacanya per baris. Akibatnya satu klik men-subscribe ulang **seluruh
+baris yang terlihat**: dengan ratusan baris, body semuanya jalan lagi hanya untuk memindahkan satu
+highlight. Itulah klik yang terasa berat. Perbaikannya: `TreeRow` kini menerima `selectedID:
+String?` dan menghitung `selected` secara lokal (`node.id == selectedID`), sehingga perbandingan
+SwiftUI per baris bernilai sama untuk semua baris kecuali dua, dan hanya dua body itu yang jalan.
+`swift test` **27 lulus / 0 gagal**, `swift build` bersih, snapshot `cascade-postgres` tetap
+merender.
+
+**Tiga cacat yang ditemukan setelah revisi pertama dijalankan.** Ketiganya dari memakai build-nya,
+bukan dari membaca kodenya, dan ketiganya diperbaiki dengan angka pembanding.
+
+1. **Seleksi terhapus oleh pembersihan yang balapan dengan klik.** Baris di-paint oleh event
+   `objects`, yang datang **sebelum** prosesnya keluar, sementara `clearObjectSelection` dipanggil
+   di `onExit`. Klik yang mendarat di antara keduanya dihapus sesaat kemudian: barisnya tetap
+   ter-highlight, inspector tidak pernah muncul. Persis gejala yang dilaporkan. Pembersihan pindah
+   ke **awal** `loadObjects`, sebelum guard apa pun, karena ia milik "daftar ini akan diganti" yang
+   sudah diputuskan pemanggilnya, bukan milik berhasil-tidaknya lookup koneksi.
+2. **Highlight baris hanya selebar kolomnya.** `background` mengambil lebar HStack-nya sendiri,
+   yaitu jumlah lebar kolom tetap. Daftar Trino dua kolom menyala sekitar 340 pt dari pane 1600 pt,
+   jadi terlihat seperti persegi nyasar, bukan seleksi. Ditambah `.frame(maxWidth: .infinity)`.
+   Terukur: sebelum, sampel di x=900..1750 semuanya `#171515` (latar pane); sesudah, x=1750
+   `#FAEED6` (highlight).
+3. **Urutan gesture terbalik.** `onTapGesture` tunggal dipasang sebelum yang ganda, dan recognizer
+   tunggal mengklaim klik pertama lebih dulu sehingga yang ganda tidak pernah melihat klik
+   keduanya. Pohon objek di aplikasi ini sudah memakai urutan sebaliknya
+   (`SidebarTree.swift:220-221`), jadi ini penyimpangan dari pola yang sudah terbukti di sini.
+
+**Cacat lama yang ikut terlihat: celah di atas tab strip saat panel mengisi jendela.**
+Dilaporkan sebagai "atasnya jadi hilang". Dibuktikan bukan berasal dari revisi ini: scene
+`table-opened` dirender dengan perubahan di-`git stash` dan tanpa, lalu hash-nya dibandingkan, dan
+keduanya `1d61273b...4207`. Sebabnya `openTable` menyetel `panelExpanded = true` supaya baris
+mengambil seluruh jendela, tetapi `BottomPanel` tetap dipatok `min(panelHeight, ceiling)` = 480 pt
+dan `VStack` menaruh blok 516 pt itu di tengah ruang setinggi jendela. Diperbaiki dengan parameter
+`fills` yang membuang tinggi tetapnya. Terukur: baris pertama header tabel pindah dari y=295 ke
+y=220 pada jendela 2480x1656.
+
+**Uji.** `ObjectScreenTests` kini 11 tes. Dua mutasi membuktikan yang baru bergigi: membaca nama
+dengan posisi tetap menggagalkan 2 tes, dan mengembalikan pembersihan ke `onExit` menggagalkan 2
+tes. `swift test` **27 lulus / 0 gagal**. Snapshot: tujuh scene dirender ulang, dan dua angka di
+atas diukur dari pikselnya, bukan dari kesan.
+
+Bundle dan DMG dibangun ulang sesudahnya: `app/dist/QueryHive.app`, DMG
+`app/dist/QueryHive-0.1.0-arm64.dmg` sha256
+`28bc0b7f9fdcb898b1a581d65766c3e7aa34d72225596d48845542ba524518f1`.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 
