@@ -23,13 +23,13 @@
 >
 > **Dua angka di bawah sudah tidak menggambarkan keadaan hari ini** dan sudah dianotasi di
 > tempatnya: klaim golden live "22/22" (sekarang **12/22**, selisihnya terklasifikasi) dan
-> "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 11 lulus). Verifikasi
+> "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 12 lulus). Verifikasi
 > berat per 24 Sep 2026: `cargo fmt --all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`
-> ✅, `cargo test --workspace` → **549 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+> ✅, `cargo test --workspace` → **553 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
 > `swift build && swift test` → **16 tes / 0 gagal** ✅, `app/build.sh` → `Built dist/QueryHive.app` ✅.
 > Bundle sekarang bersifat self-contained: mesinnya statis, jadi `otool -L` pada
-> `Contents/MacOS/QueryHive` tidak lagi menyebut library Rust mana pun. Perubahan itu ada di
-> working tree, **belum di-commit** per penulisan catatan ini.
+> `Contents/MacOS/QueryHive` tidak lagi menyebut library Rust mana pun. Perubahan itu mendarat di
+> `367dec7`.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -859,6 +859,7 @@ kenapa itu tidak akan berubah lewat protokol ini.
 | K10 | ~~Driver MySQL belum ada~~ **Selesai** | — | Rancangannya ternyata bukan extended protocol melainkan task produsen + channel; alasannya di bawah |
 | K11 | ~~`KILL QUERY` tidak menghentikan join panjang~~ **Selesai, akar masalahnya bukan cancel** | `execute` menunggu deskripsi kolom, dan MySQL mengirimnya saat result set **mulai** — untuk query blocking, itu berarti saat query **selesai**. Jadi `execute` menunggu seluruh query, pemanggil belum memegang cursor apa pun, dan cancel tidak punya sasaran. Cancel-nya sendiri selalu sehat | Diperbaiki dengan mendeskripsikan lebih dulu lewat `prep` (COM_STMT_PREPARE, tanpa eksekusi). Terukur: `execute(SLEEP(2))` 2,002 dtk → `prep` untuk join yang sama **915 µs** |
 | K12 | ~~Suite uji MySQL memakan 30 detik~~ **Selesai** | 30,28 dtk itu adalah `SELECT SLEEP(30)` yang berjalan **tuntas di dalam `execute`** sebelum cancel sempat dipanggil. Penjelasan yang sama dengan K11, dan bukti bahwa uji cancel-nya tidak membuktikan apa pun | Suite kini **0,33 dtk** |
+| K13 | ~~`preview` kehilangan verdict `truncated` bila cap jatuh persis di batas halaman~~ **Selesai (cacat warisan)** | Cap hanya dijawab bila tercapai dengan baris masih tersisa di tangan. Cap yang memakan halaman tepat habis tidak pernah sampai ke situ, jadi `done.truncated` selalu `false`. Contohnya jalur default aplikasi: `rowLimit` 1000 dibagi `PREVIEW_BATCH` 200 = lima halaman utuh, dan grid berkata "1000 rows returned" tanpa "(limit reached)" untuk tabel 500.000 baris. Cacat yang sama ada di `_stream_rows` mesin Python (`253362a^`), jadi ini bukan regresi port | Verdict kini ditanyakan lewat `cursor.next_batch(VERDICT_FETCH)`, satu baris, bukan satu halaman. Uji: `a_preview_whose_cap_lands_on_a_page_boundary_still_says_whether_more_exists` (`crates/qh-ffi/tests/golden.rs`) |
 
 ### K7 — temuan API yang menentukan bentuk driver PostgreSQL (kini terjawab)
 
@@ -923,6 +924,58 @@ Crate kerangka MySQL pernah **dihapus dari workspace** alih-alih dibiarkan beris
 (commit `dafd071`). Itu alasan sesi ini menelusuri API sampai ke sumbernya sebelum menulis satu
 baris pun: kerangka kosong yang terlihat seperti pekerjaan belum selesai lebih membingungkan
 daripada tidak ada apa-apa.
+
+### Verdict `truncated` yang hilang, dan dua batas Stop pada `preview` (24 Sep 2026)
+
+Sesi ini mulai sebagai pekerjaan menutup utang: tes cancel `preview` terhadap server nyata. Yang
+ditemukan lebih besar dari yang dicari, dan tiap temuan datang dari mengukur bukan dari membaca.
+
+**1. Stop pada `preview` tidak bisa memotong halaman yang sedang dibaca.** `stream_rows` menarik
+batch pertama sebelum emitter mana pun dipanggil, dan `emit_batches` hanya membaca flag sebelum
+fetch berikutnya. Diukur: `SELECT g, pg_sleep(0.4) IS NULL FROM generate_series(1, 400)` dengan
+stop 400 ms setelah start kembali setelah **160,6 dtk**, yaitu seluruh statement (enam halaman,
+400 baris kali 0,4 dtk) tuntas dibaca. Granularitas Stop karena itu **satu halaman**: ia
+menghentikan fetch berikutnya, bukan yang sedang berjalan. Berbeda dengan `export`, yang memang
+memanggil `session.cancel()` lewat `RunCancel` di `qh-rt`, `preview` dan `explain` tidak pernah
+memanggilnya. Batas ini sekarang diuji dari luar dengan `StopAfterPageOne` di
+`crates/qh-ffi/tests/real_server.rs`, bukan lagi lewat `tokio::time::sleep` yang balapan dengan
+mesin.
+
+**2. Verdict `truncated` hilang saat cap jatuh di batas halaman** (K13). Ini cacat warisan: loop
+yang sama ada di `_stream_rows` mesin Python (`253362a^`), jadi bukan regresi port, tapi dampaknya
+kini lebih besar daripada saat direkam. `rowLimit` aplikasi default **1000** dan `PREVIEW_BATCH`
+**200**, jadi setiap Run biasa berakhir tepat di batas halaman. Diukur sebelum perbaikan:
+
+```
+$ ./target/debug/queryhive-engine preview     # LIMIT default 1000, wide_500k 500.000 baris
+{"event":"done","rows":1000,"truncated":false,...}
+```
+
+Grid menerjemahkan `truncated: false` menjadi "1000 rows returned", tanpa "(limit reached)".
+Sesudah perbaikan, tiga kasus yang membuktikan verdict-nya benar sekarang:
+
+```
+LIMIT=1000   (batas halaman, ada sisa)  -> rows 1000, truncated: true
+LIMIT=250    (tengah halaman)           -> rows 250,  truncated: true
+LIMIT=500000 (persis jumlah baris)      -> rows 500000, truncated: false
+```
+
+Verdict itu memakai `cursor.next_batch(VERDICT_FETCH)`, satu baris, bukan satu halaman. Ketiga
+driver menghormati jumlah yang diminta: PostgreSQL menghentikan pembacaan stream-nya, MySQL
+memotong batch lewat `slice_rows`, Trino membatasi budget halamannya (`budget()`). Jadi cap yang
+kelipatan halaman tidak lagi menarik 200 baris untuk membuang 199 di antaranya.
+
+Korpus beku tidak tersentuh: `LIMIT` di `tests/golden/preview/postgres_batching_live.meta.json`
+adalah 250 dan `limit_truncation` memakai 3, keduanya bukan kelipatan 200, jadi kedua snapshot
+tetap cocok. Korpus live juga tetap **12/22** sesudah perbaikan, jadi ini bukan penyebab selisih
+yang tersisa.
+
+Uji yang menutup keduanya: `a_preview_whose_cap_lands_on_a_page_boundary_still_says_whether_more_exists`
+di `crates/qh-ffi/tests/golden.rs` (dua run: 400 baris dengan cap 200 harus `true`, 200 baris
+dengan cap 200 harus `false`), dan tiga uji di `crates/qh-ffi/tests/real_server.rs`. Keduanya
+diperiksa dengan mematikan kodenya sebentar: tanpa verdict, tes pertama gagal persis pada
+`truncated: false`; tanpa cek cancel di `emit_batches`, tes server nyata melaporkan 210 baris dan
+`truncated: true` untuk run yang sudah di-stop.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 

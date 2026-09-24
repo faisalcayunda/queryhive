@@ -50,6 +50,16 @@ pub const PREVIEW_BATCH: usize = 200;
 /// `LIMIT=0` asks for one row rather than none.
 pub const PREVIEW_LIMIT: i64 = 1_000;
 
+/// Rows asked for when the row cap needs to know whether more exists.
+///
+/// One, because the question is "does the server have another row" and the answer is in
+/// the first one. Asking for a page instead would cost `PREVIEW_BATCH` rows of work for
+/// every preview whose `LIMIT` is a multiple of the page size, which is the default
+/// `LIMIT=1000` against `PREVIEW_BATCH=200` — five pages of which the last was fetched
+/// only to be discarded. All three drivers honour the number they are asked for
+/// (PostgreSQL and MySQL stop their read, Trino caps its page budget).
+pub const VERDICT_FETCH: usize = 1;
+
 /// Recorded when a cancel reached the server mid-write.
 pub const CANCEL_WARNING: &str = "stopped before the statement finished";
 
@@ -1002,7 +1012,9 @@ async fn stream_rows(
 /// The cap costs one row past it, pulled for the verdict and then dropped: a page
 /// that ends exactly on the cap with more behind it is not the same result as one
 /// that ends there because the query was done, and the grid's footer says "limit
-/// reached" for one and "N rows" for the other.
+/// reached" for one and "N rows" for the other. Asking for that row is
+/// [`VERDICT_FETCH`] rows wide, never a page, so the verdict costs the same whether the
+/// cap lands mid-page or exactly on the page boundary.
 ///
 /// A stop is asked **before each fetch**, which is the same place `pump` asks it and
 /// the only place it can cost the server anything: pages already received are handed
@@ -1033,6 +1045,16 @@ async fn emit_batches(
         // gates the next fetch, and a partial batch is not `emitted` yet.
         if let Some(limit) = limit {
             if emitted >= limit {
+                // The cap was reached without a row to spare, so whether more exists has
+                // to be asked: the grid's footer claims the whole result when nothing is
+                // truncated, and a result that is exactly the cap is not the same as one
+                // the cap cut short. One row, not a page: a cap that is a multiple of the
+                // page size — the default `LIMIT=1000` against `PREVIEW_BATCH=200` — would
+                // otherwise fetch a whole page to discard all but this row.
+                truncated = match cursor.next_batch(VERDICT_FETCH).await? {
+                    Some(batch) => batch.rows() > 0,
+                    None => false,
+                };
                 break;
             }
         }

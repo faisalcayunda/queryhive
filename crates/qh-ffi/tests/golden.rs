@@ -35,6 +35,7 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Session,
 };
+use qh_ffi::commands::PREVIEW_BATCH;
 use qh_ffi::events::Capture;
 use qh_ffi::{run, CancelFlag, CliError, Command, Engine, Settings};
 use serde_json::Value as Json;
@@ -1520,6 +1521,69 @@ async fn a_preview_stops_between_pages_and_keeps_the_rows_it_pulled() {
         "the two rows of page one are emitted: {}",
         lines(&events.lines)
     );
+}
+
+/// The `preview` cap landing exactly on a page boundary, which is the app's ordinary run
+/// rather than a corner case: `LIMIT` defaults to 1000 and `PREVIEW_BATCH` is 200, so the
+/// cap is a whole number of pages on every Run the grid makes.
+///
+/// The verdict used to be answered only when the cap was reached with a row still in
+/// hand, and a cap on a page boundary is never that: the page was consumed exactly, so
+/// the last fetch was a full page and the run ended with `truncated: false` no matter what
+/// the server still held. The footer then read "1000 rows returned" for a result the cap
+/// had cut short. `limit_truncation` covers the mid-page case; this is the boundary.
+#[tokio::test]
+async fn a_preview_whose_cap_lands_on_a_page_boundary_still_says_whether_more_exists() {
+    // Two runs of the same shape differing only in what the page past the cap holds, so
+    // the two `truncated` values have to differ: one row behind the cap and none.
+    for (total, expected) in [(PREVIEW_BATCH * 2, true), (PREVIEW_BATCH, false)] {
+        let rows: Vec<Vec<Value>> = (1..=total).map(|id| vec![Value::Int(id as i64)]).collect();
+        let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
+        pairs.push(("SQL".to_owned(), "SELECT * FROM people".to_owned()));
+        pairs.push(("LIMIT".to_owned(), PREVIEW_BATCH.to_string()));
+
+        let engine = FakeEngine {
+            session: FakeSession::new(DriverKind::Trino)
+                .columns(&[("id", "integer")])
+                .rows(rows)
+                .batches_of(PREVIEW_BATCH),
+            refuse: false,
+        };
+
+        let mut events = Capture::new();
+        run(
+            Command::Preview,
+            &Settings::from_pairs(pairs),
+            &mut events,
+            &engine,
+            &CancelFlag::new(),
+        )
+        .await
+        .expect("a preview at its cap is not a failure");
+
+        let done = events.lines.last().expect("the run always reports its end");
+        assert_eq!(done["event"], "done");
+        assert_eq!(
+            done["rows"], PREVIEW_BATCH as u64,
+            "the cap stopped this either way: {done}"
+        );
+        assert_eq!(
+            done["truncated"], expected,
+            "a cap of {PREVIEW_BATCH} over {total} rows: {done}"
+        );
+        // The verdict row is pulled for the answer and never shown, so the grid sees the
+        // cap and nothing past it however the run ended.
+        let shown: usize = events
+            .lines
+            .iter()
+            .filter(|line| line["event"] == "rows")
+            .map(|line| line["data"].as_array().expect("`data` is an array").len())
+            .sum();
+        assert_eq!(shown, PREVIEW_BATCH, "{}", lines(&events.lines));
+    }
 }
 
 #[tokio::test]

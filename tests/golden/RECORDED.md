@@ -653,9 +653,11 @@ Dua keputusan yang diambil dari sini, beserta tempatnya:
   hanya berbeda di medan ini diklasifikasikan oleh entri itu, bukan ditimbang ulang satu per satu.
 - Kasus live tetap di daftar `LIVE` di `crates/qh-ffi/tests/golden.rs`, dengan gigi bahwa setiap id
   wajib dideklarasikan di `tools/golden/live_cases.py`. Kedua puluh dua sudah di sana, termasuk dua
-  kasus `export`, dan `cargo test -p qh-ffi --test golden` hijau (11 lulus) pada 24 Sep 2026 --
-  sembilan uji lama ditambah dua uji yang menagih bahwa `preview` dan `explain` berhenti di antara
-  halaman saat flag cancel menyala.
+  kasus `export`, dan `cargo test -p qh-ffi --test golden` hijau (12 lulus) pada 24 Sep 2026 --
+  sembilan uji lama, dua uji yang menagih bahwa `preview` dan `explain` berhenti di antara halaman
+  saat flag cancel menyala, dan satu uji yang menagih verdict `truncated` saat cap jatuh persis di
+  batas halaman (`a_preview_whose_cap_lands_on_a_page_boundary_still_says_whether_more_exists`;
+  cacatnya dan angkanya di `PROGRESS.md` K13).
 
 ### Diukur ulang 24 Sep 2026
 
