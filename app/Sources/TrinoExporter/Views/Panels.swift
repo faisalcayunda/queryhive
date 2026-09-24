@@ -8,6 +8,13 @@ struct BottomPanel: View {
     @Bindable var tab: QueryTab
     /// The most this panel may take, so a window dragged small cannot squeeze the editor away.
     var ceiling: CGFloat?
+    /// Take every point the workspace has left, rather than a fixed share of it.
+    ///
+    /// Set when the rows are meant to *be* the window (`panelExpanded`, which `openTable` turns on).
+    /// Without it the panel was capped at `panelHeight` and the enclosing `VStack` centred that
+    /// shorter block in the workspace, which left a band of nothing above the tab strip. Measured:
+    /// a 516 pt stack in a 1560 pt workspace put the tab strip at y=295.
+    var fills = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,9 +36,17 @@ struct BottomPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(height: model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity))
+        .frame(height: stackedHeight)
+        .frame(maxHeight: fills ? .infinity : nil)
         .background(Tone.recess.opacity(0.20))
         .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+    }
+
+    /// `nil` when the panel is taking the whole workspace: a fixed height would win over the
+    /// flexible frame beside it, because the fixed one is applied first.
+    private var stackedHeight: CGFloat? {
+        if fills { return nil }
+        return model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity)
     }
 
     private var header: some View {

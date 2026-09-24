@@ -173,7 +173,13 @@ struct ConnectionEditorSheet: View {
         }
         .frame(width: 620, height: 660)
         .background(Tone.canvas)
-        .preferredColorScheme(.dark)
+        // No `.preferredColorScheme(.dark)` here. It used to pin the sheet dark, and that is what
+        // made the editor unreadable in light mode: `Tone.canvas` follows the *stored mode* (light
+        // mode picks the light theme) while `Tone.ink` is a dynamic `NSColor` that follows the
+        // *effective appearance*. Pinning dark made the sheet's ink resolve white over a canvas the
+        // theme had already drawn light, so every label came out white on white. The sheet now
+        // inherits the appearance of the window that presents it, which is what every other surface
+        // in the app does.
         .confirmationDialog("Delete \(name.isEmpty ? "this connection" : name)?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { delete() }
         } message: {

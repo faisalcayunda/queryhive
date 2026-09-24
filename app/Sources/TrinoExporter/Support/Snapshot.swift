@@ -312,6 +312,22 @@ enum Snapshot {
                 ["referensi_jenis_kelamin", "24607", "postgres", ""],
                 ["kasus_kesehatan_2025", "24608", "app_datahub", ""],
             ]
+            // One row chosen, so the fixture draws the inspector and its columns. Without a
+            // selection the scene would only prove the grid renders, and the pane that reads the
+            // table's own columns is the half that has nothing else to check it.
+            objectsTab.objectSelection = 1
+            objectsTab.objectDetailTable = "penerima_manfaat"
+            objectsTab.objectDetailColumns = [
+                Event.Column(name: "id", type: "bigint"),
+                Event.Column(name: "nik", type: "character varying(16)"),
+                Event.Column(name: "nama", type: "text"),
+                Event.Column(name: "wilayah_kode", type: "character varying(10)"),
+                Event.Column(name: "tanggal_lahir", type: "date"),
+                Event.Column(name: "jenis_kelamin", type: "mood"),
+                Event.Column(name: "penghasilan_bulanan", type: "numeric(38,10)"),
+                Event.Column(name: "terdaftar_pada", type: "timestamp with time zone"),
+                Event.Column(name: "dibuat_pada", type: "timestamp without time zone"),
+            ]
             model.tabs.append(objectsTab)
             model.selectedTabID = objectsTab.id
         case "connection-tested":

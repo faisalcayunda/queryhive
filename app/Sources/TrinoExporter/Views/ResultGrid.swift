@@ -140,7 +140,13 @@ struct ResultGrid: View {
                 .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
-        .background(Color(hex: 0x141726))
+        // `Tone.recess` rather than a literal dark navy. This was `Color(hex: 0x141726)`, the one
+        // hard-coded colour left in the views, and it is why the grid's header stayed near-black in
+        // light mode while every other surface followed the appearance: a literal has no appearance
+        // to resolve against. The tint is applied to `recess` so the band still reads as a header
+        // rather than as another row -- `recess` is black on dark and white on light, so the same
+        // expression deepens the dark appearance and lightens the light one.
+        .background(Tone.recess.opacity(0.85))
         .overlay(Rectangle().fill(Tone.ink.opacity(0.12)).frame(height: 1), alignment: .bottom)
     }
 

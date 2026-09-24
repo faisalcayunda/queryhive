@@ -227,6 +227,16 @@ final class AppModel {
     /// The environment is built the same way every other browse command builds it, so a connection
     /// that browses in the tree lists objects here without any second set of rules.
     func loadObjects(_ tab: QueryTab) {
+        // Cleared first, before anything can return early, because the clear belongs to "this
+        // listing is about to be replaced" -- which the caller's request already decided -- and not
+        // to whether the connection lookup below succeeds.
+        //
+        // Clearing at the *end* of the run was a race the user could lose: the rows are painted by
+        // the `objects` event, which arrives before the run exits, so a click landing in that window
+        // was wiped by the exit handler a moment later. The row stayed highlighted and the inspector
+        // never appeared. Clearing here cannot be raced, because no new row is on screen yet.
+        clearObjectSelection(tab)
+
         guard let scope = tab.objectScope,
               let connection = connections.first(where: { $0.id == scope.connectionID }) else { return }
         guard var env = try? connectionEnvironment(connection) else { return }
@@ -265,6 +275,125 @@ final class AppModel {
                     ?? "Listing the objects failed."
             }
         })
+    }
+
+    /// Drops the object screen's selection and whatever detail it had fetched.
+    func clearObjectSelection(_ tab: QueryTab) {
+        tab.objectSelection = nil
+        tab.objectDetailColumns = []
+        tab.objectDetailError = nil
+        tab.objectDetailTable = nil
+        tab.objectDetailLoading = false
+        // The token, so a detail fetch still in flight cannot land on the cleared pane.
+        tab.objectDetailToken = nil
+        tab.objectDetailProcess?.terminate()
+        tab.objectDetailProcess = nil
+    }
+
+    /// Selects one row of the object screen and fetches that table's columns.
+    ///
+    /// The click is what asks for the detail, not a timer or a prefetch: this is one round trip
+    /// per table on a server that may be far away, and the user asked for exactly one row.
+    func selectObject(_ tab: QueryTab, row: Int) {
+        guard let scope = tab.objectScope, let name = tab.objectName(at: row) else { return }
+        tab.objectSelection = row
+        tab.objectDetailColumns = []
+        tab.objectDetailError = nil
+        tab.objectDetailLoading = false
+        tab.objectDetailTable = name
+
+        // Every failure below writes a reason rather than returning quietly. A silent return would
+        // leave the inspector saying "No columns reported", which is a claim about the table when
+        // the truth is that this app never asked about it.
+        guard let connection = connections.first(where: { $0.id == scope.connectionID }) else {
+            tab.objectDetailError = "The connection for this schema is gone."
+            return
+        }
+        let env: [String: String]
+        do {
+            var built = try connectionEnvironment(connection)
+            built["RETRIES"] = "2"
+            if !scope.catalog.isEmpty { built["DB_DATABASE"] = scope.catalog }
+            if !scope.schema.isEmpty { built["DB_SCHEMA"] = scope.schema }
+            // A `preview` of `SELECT *` under a one-row cap is how the column list is asked for: the
+            // engine describes the result set before it sends rows, so the `columns` event arrives
+            // without waiting for data, and `LIMIT=1` keeps a wide table from being read to answer a
+            // question about its shape. `count` is deliberately not used: it answers a number, not a
+            // shape, and it would run the statement over every row.
+            built["SQL"] = objectColumnsSQL(database: scope.catalog.isEmpty ? nil : scope.catalog,
+                                            schema: scope.schema.isEmpty ? nil : scope.schema,
+                                            table: name, for: connection.kind)
+            built["LIMIT"] = "1"
+            env = built
+        } catch {
+            tab.objectDetailError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+
+        let token = UUID()
+        tab.objectDetailToken = token
+        tab.objectDetailLoading = true
+        tab.objectDetailProcess = Engine.current.run("preview", env: env, onEvent: { event in
+            guard tab.objectDetailToken == token else { return }
+            switch event.event {
+            case "columns":
+                tab.objectDetailColumns = event.columns ?? []
+                tab.objectDetailLoading = false
+            case "error":
+                tab.objectDetailError = event.message ?? "Reading the table's columns failed."
+                tab.objectDetailLoading = false
+            default:
+                break
+            }
+        }, onExit: { status, log in
+            guard tab.objectDetailToken == token else { return }
+            tab.objectDetailProcess = nil
+            tab.objectDetailLoading = false
+            if status != 0, tab.objectDetailError == nil {
+                tab.objectDetailError = log.split(separator: "\n").last.map(String.init)
+                    ?? "Reading the table's columns failed."
+            }
+        })
+    }
+
+    /// Opens one object-screen row as a query tab, the same way double-clicking the table in the
+    /// tree does. Both go through `openTable`, so the two entry points cannot drift into producing
+    /// different SQL for the same table.
+    ///
+    /// Takes the row rather than reading the selection, because a double-click or a right-click can
+    /// land on a row the user has not single-clicked first, and a gesture that only worked on an
+    /// already-selected row would look broken exactly when the user is moving fastest. Selecting
+    /// first is also what makes the inspector agree with the tab that just opened.
+    func openObject(_ tab: QueryTab, row: Int) {
+        selectObject(tab, row: row)
+        guard let node = objectNode(tab, row: row) else { return }
+        openTable(node)
+    }
+
+    /// Inserts one row's table into the active query, the tree's own context-menu action.
+    func insertObject(_ tab: QueryTab, row: Int) {
+        selectObject(tab, row: row)
+        guard let node = objectNode(tab, row: row) else { return }
+        insert(node)
+    }
+
+    /// A tree-shaped node for one object-screen row, so the row can reuse the tree's own actions
+    /// rather than growing a second copy of "how this driver spells a qualified name".
+    private func objectNode(_ tab: QueryTab, row: Int) -> TreeNode? {
+        guard let scope = tab.objectScope, let name = tab.objectName(at: row),
+              let connection = connections.first(where: { $0.id == scope.connectionID }) else { return nil }
+        let connectionNode = TreeNode.connection(connection)
+        let parent: TreeNode
+        switch connection.kind {
+        case .trino:
+            let catalog = TreeNode.catalog(scope.catalog, parent: connectionNode)
+            parent = TreeNode.schema(scope.schema, parent: catalog)
+        case .postgres:
+            parent = TreeNode.schema(scope.schema, parent: connectionNode)
+        case .mysql:
+            parent = TreeNode.database(scope.catalog, parent: connectionNode)
+        }
+        return TreeNode.table(name, parent: parent)
     }
 
     func newTab(connectionID: UUID? = nil) {

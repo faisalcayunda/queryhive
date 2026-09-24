@@ -177,3 +177,21 @@ func qualifiedName(database: String?, schema: String?, table: String,
         return "`\(database)`.`\(table)`"
     }
 }
+
+/// The statement the object screen's inspector runs to learn one table's columns.
+///
+/// A `SELECT *` under a one-row cap, rather than a metadata query per driver: all three servers
+/// describe a result set before they send any row of it, so the engine's `columns` event answers
+/// the question, and the cap keeps a wide table from being read to answer a question about its
+/// shape. Each driver would otherwise need its own information_schema query, and those three
+/// queries are three more places for the answer to disagree with what a `SELECT` actually returns.
+///
+/// The fallback to the bare name is for a caller whose scope has no name to qualify with. It is
+/// deliberately not an error: `qualifiedName` returning nil means this connection cannot qualify
+/// the table, and the server will resolve the bare name against the connection's own default
+/// rather than refusing to answer at all.
+func objectColumnsSQL(database: String?, schema: String?, table: String,
+                      for kind: ConnectionKind) -> String {
+    let name = qualifiedName(database: database, schema: schema, table: table, for: kind) ?? table
+    return "SELECT * FROM \(name)"
+}
