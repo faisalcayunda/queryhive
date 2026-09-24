@@ -70,78 +70,62 @@ struct AppearanceSettings: View {
     @Bindable private var store = ThemeStore.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Mode")
-                Text("System follows macOS and keeps following it — switch the system appearance with "
-                     + "this window open and everything below repaints. Light and Dark pin one instead, "
-                     + "whatever the system is set to.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        // The pane is laid out as sections, not as one long list: a small gap ties a section's
+        // label to its control (10), a large one separates sections (24) with the divider sitting
+        // in that gap. When both distances were 16 the eye got no grouping and the pane read as a
+        // single cramped column.
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeader("Mode", text:
+                    "System follows macOS and keeps following it — switch the system appearance with "
+                    + "this window open and everything below repaints. Light and Dark pin one instead, "
+                    + "whatever the system is set to.")
+                Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
             }
-
-            Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
 
             Divider().overlay(Tone.ink.opacity(0.08))
 
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Preset")
-                Text("Three combinations worth a single click. Each one names a canvas for the dark "
-                     + "and another for the light, so switching mode stays inside the preset. "
-                     + "Everything below still works on its own.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeader("Preset", text:
+                    "Three combinations worth a single click. Each one names a canvas for the dark "
+                    + "and another for the light, so switching mode stays inside the preset. "
+                    + "Everything below still works on its own.")
+                presetButtons
             }
-
-            presetButtons
 
             Divider().overlay(Tone.ink.opacity(0.08))
 
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Theme")
-                Text("The canvas, for the appearance you are in. Each is listed on its own side — "
-                     + "the dark ones in the dark, the light ones in the light — because a canvas "
-                     + "belongs to one appearance and there is no such thing as a light Midnight.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeader("Theme", text:
+                    "The canvas, for the appearance you are in. Each is listed on its own side — "
+                    + "the dark ones in the dark, the light ones in the light — because a canvas "
+                    + "belongs to one appearance and there is no such thing as a light Midnight.")
+                themeTiles
             }
-
-            themeTiles
 
             Divider().overlay(Tone.ink.opacity(0.08))
 
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Accent")
-                Text("Paints the interactive chrome: the Run capsule, focus rings, the selected tab "
-                     + "and tile. The object tree's own colours do not move — they are how the tree "
-                     + "tells a table from a column, and the app's mark keeps its own pair.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeader("Accent", text:
+                    "Paints the interactive chrome: the Run capsule, focus rings, the selected tab "
+                    + "and tile. The object tree's own colours do not move — they are how the tree "
+                    + "tells a table from a column, and the app's mark keeps its own pair.")
+                accentSwatches
             }
-
-            accentSwatches
 
             Divider().overlay(Tone.ink.opacity(0.08))
 
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Tone")
-                Text("How the coloured surfaces are painted, independent of the colours themselves. "
-                     + "Plain and Soft draw no gradient at all — no ramp on the Run capsule, no "
-                     + "sheen, no coloured shadow, and a flat backdrop.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                sectionHeader("Tone", text:
+                    "How the coloured surfaces are painted, independent of the colours themselves. "
+                    + "Plain and Soft draw no gradient at all — no ramp on the Run capsule, no "
+                    + "sheen, no coloured shadow, and a flat backdrop.")
+                tonePicker
             }
-
-            tonePicker
 
             Divider().overlay(Tone.ink.opacity(0.08))
 
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     SectionLabel(text: "Backdrop glow")
                     Spacer()
@@ -179,6 +163,18 @@ struct AppearanceSettings: View {
 
     private var glowLabel: String {
         "\(Int((store.glow * 100).rounded()))%"
+    }
+
+    /// A section's label and its one-paragraph explanation, kept together so the gap below the
+    /// text is the section gap (10), never the between-sections gap (24).
+    private func sectionHeader(_ title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            SectionLabel(text: title)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// How an accent looks under a given tone, for a swatch or a tile preview.

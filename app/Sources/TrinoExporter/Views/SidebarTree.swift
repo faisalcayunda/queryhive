@@ -28,7 +28,7 @@ struct SidebarTree: View {
                     } else {
                         ForEach(model.tree) { node in
                             TreeRow(node: node, depth: 0, visible: visibleIDs,
-                                    selected: model.selectedNodeID == node.id)
+                                    selectedID: model.selectedNodeID)
                         }
                     }
                 }
@@ -139,11 +139,20 @@ struct TreeRow: View {
     @Bindable var node: TreeNode
     let depth: Int
     let visible: Set<String>?
-    /// Passed in rather than read from the model. A body that reads no observable property is one
-    /// SwiftUI can skip re-running when something unrelated changes — and with a few hundred rows
-    /// on screen, "something unrelated" happens on every keystroke in the editor.
-    var selected = false
+    /// The selected row's id, passed down from the root rather than read from the model here.
+    ///
+    /// Reading `model.selectedNodeID` inside this body subscribed **every visible row** to the
+    /// selection, so one click re-ran every row's body instead of the two whose highlight moved
+    /// — with a few hundred rows on screen that is the click that felt heavy. As a plain `let`,
+    /// SwiftUI compares it per row and skips every body whose value did not change. The same
+    /// reason `visible` above is a value, and the reason the comment on the old `selected` flag
+    /// gave for passing it in.
+    let selectedID: String?
     @State private var hovering = false
+
+    /// Whether this row is the selected one. Computed from the passed-in id, so the body still
+    /// reads nothing from the model.
+    private var selected: Bool { node.id == selectedID }
 
     private var isVisible: Bool { visible?.contains(node.id) ?? true }
     /// A filter auto-opens every level it can see, so a deep match is not hidden behind a node
@@ -176,7 +185,7 @@ struct TreeRow: View {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     ForEach(children) { child in
                         TreeRow(node: child, depth: depth + 1, visible: visible,
-                                selected: model.selectedNodeID == child.id)
+                                selectedID: selectedID)
                     }
                 }
             }
