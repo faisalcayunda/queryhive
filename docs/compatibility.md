@@ -120,8 +120,11 @@ kelas masalah yang sama dengan yang baru saja ditemukan di driver MySQL — di s
 bisa dijangkau. Di sini bentuknya berbeda tetapi jebakannya sejenis, dan sudah diketahui
 sebelum satu baris pun ditulis.
 
-Keempat header yang dipakai proyek ini: `X-Trino-User`, `X-Trino-Catalog`,
-`X-Trino-Schema`, dan `Content-Type: text/plain` pada `POST`.
+Empat header yang selalu dipakai proyek ini: `X-Trino-User`, `X-Trino-Catalog`,
+`X-Trino-Schema`, dan `Content-Type: text/plain` pada `POST`. Header kelima menyusul pada
+24 Sep 2026: `Authorization: Basic`, dikirim hanya bila koneksinya punya password. Sebelumnya
+password menaikkan `TlsMode` lalu tidak pernah dikirim, sehingga koordinator ber-`password-file`
+menjawab 401 untuk kredensial yang benar (K14 di `PROGRESS.md`).
 
 ## Versi minimum per mesin
 

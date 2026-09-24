@@ -425,7 +425,7 @@ impl Driver for TrinoDriver {
                 config.host,
                 config.port
             ),
-            user: non_empty(&config.user).unwrap_or_else(|| "queryhive".to_owned()),
+            credentials: Credentials::new(&config.user, config.password.clone()),
             catalog: config.database.clone().unwrap_or_default(),
             schema: config.schema.clone().unwrap_or_default(),
             running: Arc::new(Mutex::new(None)),
@@ -462,24 +462,92 @@ fn non_empty(text: &str) -> Option<String> {
     }
 }
 
+/// What every request to the coordinator has to carry: who is asking, and with
+/// what secret.
+///
+/// Trino's statement protocol keeps no session, so there is nothing that can be
+/// authenticated once and reused. The identity travels on the request itself, and
+/// `password` is `Some` exactly when the connection has one. Both halves go out
+/// together, which is why they are passed as one value rather than as two
+/// arguments a call site could get half right.
+#[derive(Clone)]
+pub struct Credentials {
+    pub user: String,
+    pub password: Option<String>,
+}
+
+impl Credentials {
+    /// The user a bare connection runs as, and no secret.
+    ///
+    /// An empty `user` is not sent as an empty header: Trino answers that with a
+    /// 401 in the same shape it answers a missing user, and the Python engine
+    /// defaulted to this name too, so a connection with no username keeps working.
+    pub fn new(user: &str, password: Option<String>) -> Self {
+        Self {
+            user: non_empty(user).unwrap_or_else(|| DEFAULT_USER.to_owned()),
+            password,
+        }
+    }
+}
+
+/// Never prints the password.
+///
+/// A `{:?}` on anything holding credentials is the shortest path from a support
+/// request to a secret in a log, so the derived form is replaced with one that
+/// reports only whether one is present — the same rule `ConnectionConfig` follows.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Credentials(user: {:?}, password: {})",
+            self.user,
+            if self.password.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+        )
+    }
+}
+
+/// The name a connection runs as when it names no user.
+pub const DEFAULT_USER: &str = "queryhive";
+
 /// The headers every request to the coordinator carries.
 ///
-/// One function because [`CLIENT_CAPABILITIES`] is invisible when it is missing: a
-/// request without it is answered with the same types and values downgraded to
-/// milliseconds, and nothing reports an error. So the capability is attached where
-/// the request is built, not left to each call site to remember — the statement's
-/// `POST`, every page poll, and the `DELETE` that cancels all pass through here.
+/// One function because two different omissions are invisible from the outside,
+/// and one of them costs the request outright.
 ///
-/// The poll does not *have* to carry it on 483: measured, a POST with the header
-/// followed by a poll without it still returned `timestamp(6)` and
+/// [`CLIENT_CAPABILITIES`] is the quiet one: a request without it is answered with
+/// the same types and values downgraded to milliseconds, and nothing reports an
+/// error. So the capability is attached where the request is built, not left to
+/// each call site to remember — the statement's `POST`, every page poll, and the
+/// `DELETE` that cancels all pass through here.
+///
+/// The credentials are the loud one. `X-Trino-User` alone names the user but
+/// authenticates nobody, so a coordinator configured with password-file or LDAP
+/// auth answers 401 to every request while the connection is, as far as the user
+/// can tell, correctly configured. Sending `Authorization: Basic` as well is what
+/// makes a password in the connection mean something; without it, a password only
+/// raised [`TlsMode`] and then went nowhere.
+///
+/// The poll does not *have* to carry the capability on 483: measured, a POST with
+/// the header followed by a poll without it still returned `timestamp(6)` and
 /// `12:00:00.123456`, because the coordinator settles the encoding when the
 /// statement is created. It is sent anyway — the header is part of what this client
 /// is, the reference client sends it on every request, and a coordinator that read
 /// it per response would otherwise downgrade the middle of a result set.
-fn with_shared_headers(request: reqwest::RequestBuilder, user: &str) -> reqwest::RequestBuilder {
-    request
-        .header("X-Trino-User", user)
-        .header(CLIENT_CAPABILITIES_HEADER, CLIENT_CAPABILITIES)
+fn with_shared_headers(
+    request: reqwest::RequestBuilder,
+    credentials: &Credentials,
+) -> reqwest::RequestBuilder {
+    let request = request
+        .header("X-Trino-User", &credentials.user)
+        .header(CLIENT_CAPABILITIES_HEADER, CLIENT_CAPABILITIES);
+    match &credentials.password {
+        Some(password) => request.basic_auth(&credentials.user, Some(password)),
+        None => request,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +565,7 @@ struct TrinoSession {
     /// `http://host:port` or `https://host:port`, with no trailing slash. Settled
     /// once, on the first `POST`.
     base: String,
-    user: String,
+    credentials: Credentials,
     /// Trino's catalog, which is this driver's `database` slot.
     catalog: String,
     schema: String,
@@ -540,7 +608,7 @@ impl TrinoSession {
     async fn send_post(&self, sql: &str) -> Result<reqwest::Response, reqwest::Error> {
         let mut request = with_shared_headers(
             self.client.post(format!("{}/v1/statement", self.base)),
-            &self.user,
+            &self.credentials,
         )
         .header("Content-Type", "text/plain");
         if !self.catalog.is_empty() {
@@ -752,7 +820,7 @@ impl Session for TrinoSession {
 
         Ok(Box::new(TrinoCursor {
             client: self.client.clone(),
-            user: self.user.clone(),
+            credentials: self.credentials.clone(),
             catalog: self.catalog.clone(),
             schema: self.schema.clone(),
             running: Arc::clone(&self.running),
@@ -835,7 +903,7 @@ impl Session for TrinoSession {
         } else {
             running.next_uri
         };
-        let response = with_shared_headers(self.client.delete(&target), &self.user)
+        let response = with_shared_headers(self.client.delete(&target), &self.credentials)
             .send()
             .await
             .map_err(|error| EngineError::Query {
@@ -873,7 +941,7 @@ impl Session for TrinoSession {
 
 struct TrinoCursor {
     client: reqwest::Client,
-    user: String,
+    credentials: Credentials,
     catalog: String,
     schema: String,
     running: Shared,
@@ -902,7 +970,7 @@ impl TrinoCursor {
                 .get(&uri)
                 .header("X-Trino-Catalog", &self.catalog)
                 .header("X-Trino-Schema", &self.schema),
-            &self.user,
+            &self.credentials,
         )
         .send()
         .await
