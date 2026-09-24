@@ -556,8 +556,8 @@ pub async fn run(
         Command::Tables => commands::tables(settings, out, engine).await,
         Command::Export => commands::export(settings, out, engine, cancel).await,
         Command::ToTable => commands::to_table(settings, out, engine, cancel).await,
-        Command::Preview => commands::preview(settings, out, engine).await,
+        Command::Preview => commands::preview(settings, out, engine, cancel).await,
         Command::Count => commands::count(settings, out, engine).await,
-        Command::Explain => commands::explain(settings, out, engine).await,
+        Command::Explain => commands::explain(settings, out, engine, cancel).await,
     }
 }

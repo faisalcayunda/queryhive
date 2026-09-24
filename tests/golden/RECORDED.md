@@ -653,7 +653,9 @@ Dua keputusan yang diambil dari sini, beserta tempatnya:
   hanya berbeda di medan ini diklasifikasikan oleh entri itu, bukan ditimbang ulang satu per satu.
 - Kasus live tetap di daftar `LIVE` di `crates/qh-ffi/tests/golden.rs`, dengan gigi bahwa setiap id
   wajib dideklarasikan di `tools/golden/live_cases.py`. Kedua puluh dua sudah di sana, termasuk dua
-  kasus `export`, dan `cargo test -p qh-ffi --test golden` hijau (9 lulus) pada 24 Sep 2026.
+  kasus `export`, dan `cargo test -p qh-ffi --test golden` hijau (11 lulus) pada 24 Sep 2026 --
+  sembilan uji lama ditambah dua uji yang menagih bahwa `preview` dan `explain` berhenti di antara
+  halaman saat flag cancel menyala.
 
 ### Diukur ulang 24 Sep 2026
 
@@ -667,10 +669,11 @@ nilai yang sudah diklasifikasi (D-1, D-2, D-9) atau hanya medan `columns.type`.
 
 Dua kasus `export` live menyusul 23 Sep 2026 -- `postgres_export_live` dan `mysql_export_live`, satu
 per server untuk `SELECT * FROM type_zoo` yang sama -- sehingga celah `export` di matriks di atas
-tertutup; keduanya sudah diverifikasi ulang (22/22 kasus cocok). Keduanya **belum** ada di daftar
-`LIVE`, jadi `a_new_snapshot_cannot_be_ignored` gagal dan menyebut `mysql_export_live` lebih dulu
-sampai dua id itu ditambahkan. `to_table` untuk Postgres dan MySQL **tidak** direkam; dua sebabnya
-terukur dan ada di "What could not be recorded" (MySQL meninggalkan tabel yang langsung mengubah dua
-snapshot lain; Postgres tidak pernah commit, jadi snapshot-nya akan memakukan keberhasilan yang
-dibantah server).
+tertutup. Keduanya sudah terdaftar di daftar `LIVE` sejak 23 Sep 2026 (commit `581cc10`, uji yang
+membaca deklarasi itu), jadi `a_new_snapshot_cannot_be_ignored` lewat, bukan gagal. Parentetis
+"22/22 kasus cocok" di kalimat sebelumnya adalah angka build 22–23 Sep; terhadap
+`target/debug/queryhive-engine` yang dibangun 24 Sep angkanya 12/22, seperti catatan di atas.
+`to_table` untuk Postgres dan MySQL **tidak** direkam; dua sebabnya terukur dan ada di "What could
+not be recorded" (MySQL meninggalkan tabel yang langsung mengubah dua snapshot lain; Postgres tidak
+pernah commit, jadi snapshot-nya akan memakukan keberhasilan yang dibantah server).
 

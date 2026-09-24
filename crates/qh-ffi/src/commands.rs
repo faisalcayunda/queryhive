@@ -872,10 +872,16 @@ pub async fn to_table(
 /// The cap is enforced while pulling and never by rewriting the SQL: the statement
 /// the cursor runs is the one the caller handed over, byte for byte, because a
 /// rewritten statement can behave differently.
+///
+/// A Stop lands between rows rather than only at the end of the statement, and the
+/// rows already pulled stay on the wire. `cancelled` is added to `done` only when a
+/// stop actually arrived, so a run nobody stopped keeps the event shape the frozen
+/// corpus recorded.
 pub async fn preview(
     settings: &Settings,
     out: &mut dyn Emitter,
     engine: &dyn Engine,
+    cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
     // Floored at one: a preview that returned no rows at all would tell the caller
@@ -884,16 +890,18 @@ pub async fn preview(
     let config = connection(settings, engine)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
-    let (rows, truncated, query_id) =
-        stream_rows(settings, out, engine, &config, &sql, Some(limit)).await?;
-    out.emit(
-        event("done")
-            .field("rows", rows)
-            .field("truncated", truncated)
-            .field("query_id", query_id)
-            .field("elapsed_ms", started.elapsed().as_millis() as u64)
-            .build(),
-    )?;
+    let (rows, truncated, query_id, cancelled) =
+        stream_rows(settings, out, engine, &config, &sql, Some(limit), cancel).await?;
+    let done = event("done")
+        .field("rows", rows)
+        .field("truncated", truncated)
+        .field("query_id", query_id)
+        .field("elapsed_ms", started.elapsed().as_millis() as u64);
+    out.emit(if cancelled {
+        done.field("cancelled", true).build()
+    } else {
+        done.build()
+    })?;
     Ok(())
 }
 
@@ -906,6 +914,7 @@ pub async fn explain(
     settings: &Settings,
     out: &mut dyn Emitter,
     engine: &dyn Engine,
+    cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
     let config = connection(settings, engine)?;
@@ -928,14 +937,16 @@ pub async fn explain(
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
     // branch on it.
-    let (rows, _) = emit_batches(out, cursor, primed, None).await?;
-    out.emit(
-        event("done")
-            .field("rows", rows)
-            .field("query_id", session.query_id())
-            .field("elapsed_ms", started.elapsed().as_millis() as u64)
-            .build(),
-    )?;
+    let (rows, _, cancelled) = emit_batches(out, cursor, primed, None, Some(cancel)).await?;
+    let done = event("done")
+        .field("rows", rows)
+        .field("query_id", session.query_id())
+        .field("elapsed_ms", started.elapsed().as_millis() as u64);
+    out.emit(if cancelled {
+        done.field("cancelled", true).build()
+    } else {
+        done.build()
+    })?;
     let _ = session.close().await;
     Ok(())
 }
@@ -952,7 +963,8 @@ async fn stream_rows(
     config: &ConnectionConfig,
     sql: &str,
     limit: Option<u64>,
-) -> Result<(u64, bool, Option<String>), CliError> {
+    cancel: &CancelFlag,
+) -> Result<(u64, bool, Option<String>, bool), CliError> {
     let (mut session, policy) = open(settings, engine, config).await?;
     let mut cursor = retry::execute(
         &mut session,
@@ -972,10 +984,11 @@ async fn stream_rows(
     // it emitted the same event, and it is why the primed batch is handed on rather
     // than dropped: those rows are already fetched.
     let primed = cursor.next_batch(PREVIEW_BATCH).await?;
-    let (rows, truncated) = emit_batches(out, cursor, primed, limit).await?;
+    let (rows, truncated, cancelled) =
+        emit_batches(out, cursor, primed, limit, Some(cancel)).await?;
     let query_id = session.query_id();
     let _ = session.close().await;
-    Ok((rows, truncated, query_id))
+    Ok((rows, truncated, query_id, cancelled))
 }
 
 /// Send `columns`, then `rows` in `PREVIEW_BATCH` batches, honouring an optional cap.
@@ -990,12 +1003,20 @@ async fn stream_rows(
 /// that ends exactly on the cap with more behind it is not the same result as one
 /// that ends there because the query was done, and the grid's footer says "limit
 /// reached" for one and "N rows" for the other.
+///
+/// A stop is asked **before each fetch**, which is the same place `pump` asks it and
+/// the only place it can cost the server anything: pages already received are handed
+/// on, exactly as an export keeps the rows it already wrote. Asking per row instead
+/// would drop a page that had already arrived, which is what a Stop pressed while the
+/// first page was in flight would look like, and it buys nothing — formatting a row
+/// this process already holds is not the expensive part of the wait.
 async fn emit_batches(
     out: &mut dyn Emitter,
     mut cursor: Box<dyn Cursor>,
     primed: Option<ColumnBatch>,
     limit: Option<u64>,
-) -> Result<(u64, bool), CliError> {
+    cancel: Option<&CancelFlag>,
+) -> Result<(u64, bool, bool), CliError> {
     out.emit(
         event("columns")
             .field("columns", columns_json(cursor.columns()))
@@ -1004,6 +1025,7 @@ async fn emit_batches(
 
     let mut emitted: u64 = 0;
     let mut truncated = false;
+    let mut cancelled = false;
     let mut pending: Vec<Json> = Vec::new();
     let mut next = primed;
     'outer: loop {
@@ -1015,11 +1037,25 @@ async fn emit_batches(
             }
         }
         let batch = match next.take() {
+            // The primed batch is handed on rather than dropped: it was fetched before
+            // this loop existed, so a stop that arrived while it was in flight has
+            // already been paid for.
             Some(batch) => batch,
-            None => match cursor.next_batch(PREVIEW_BATCH).await? {
-                Some(batch) => batch,
-                None => break,
-            },
+            None => {
+                // Asked before the fetch rather than before each row: this is the point
+                // where waiting has a cost, and the batch already in hand is not dropped
+                // for a stop that arrived while it was being fetched.
+                if let Some(cancel) = cancel {
+                    if cancel.is_cancelled() {
+                        cancelled = true;
+                        break 'outer;
+                    }
+                }
+                match cursor.next_batch(PREVIEW_BATCH).await? {
+                    Some(batch) => batch,
+                    None => break,
+                }
+            }
         };
         if batch.rows() == 0 {
             // An empty batch is not the end: a driver may legally return one while
@@ -1059,7 +1095,7 @@ async fn emit_batches(
         emitted += pending.len() as u64;
         out.emit(event("rows").field("data", Json::Array(pending)).build())?;
     }
-    Ok((emitted, truncated))
+    Ok((emitted, truncated, cancelled))
 }
 
 /// `count`: how many rows the caller's statement really returns.

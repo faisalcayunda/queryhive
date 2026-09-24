@@ -19,11 +19,15 @@ import QueryHiveFFI
 ///    on the handle, so `terminate()` reaches a run that is still in flight. The engine reads the
 ///    same flag a SIGTERM sets — between rows and between statements — so a stopped `export`
 ///    finishes the statement it is on, keeps the bytes it already wrote, and reports `done` with
-///    `cancelled: true`. One honest limit, unchanged from the Python engine: `preview` and
-///    `explain` do not poll the flag (`commands.rs`, "nothing polls for a cancel here"), so
-///    stopping a preview takes effect at the end of the statement rather than during it. In the
-///    old engine the same was true and it was invisible, because SIGTERM killed the child at the
-///    end anyway.
+///    `cancelled: true`. Every streaming command polls it now: `export` before each row and before
+///    each page, `to_table` before each statement, and `preview` and `explain` before each page.
+///    What a stopped stream does with what it already has is the same rule in all of them — send
+///    it. A stopped `preview` keeps the rows it pulled and a stopped `export` keeps the rows it
+///    wrote, because a Stop that blanked the grid or truncated the file would be worse than no
+///    Stop button. `preview` and `explain` carry `cancelled: true` in `done` only when a stop
+///    actually arrived, so a run nobody stopped keeps the event shape the frozen corpus recorded.
+///    `count` is the one command that does not poll: it reads a single row and is finished before a
+///    stop could land anywhere useful.
 ///
 /// The one thing that is genuinely gone is the child process:
 ///

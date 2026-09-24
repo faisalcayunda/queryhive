@@ -169,6 +169,9 @@ struct FakeSession {
     /// an engine that is already running: a real caller presses Stop on another
     /// thread, and this test has no second thread to press from.
     cancel: Option<CancelFlag>,
+    /// How many pages to hand out before pulling that handle. `None` means the last
+    /// page, which is what a drained `cancel_when_drained` asks for.
+    cancel_after: Option<usize>,
 }
 
 impl FakeSession {
@@ -186,6 +189,7 @@ impl FakeSession {
             object_rows: Vec::new(),
             batches_of: None,
             cancel: None,
+            cancel_after: None,
         }
     }
 
@@ -198,6 +202,14 @@ impl FakeSession {
     /// Ask `cancel` to stop the run at the moment the last page has been handed out.
     fn cancel_when_drained(mut self, cancel: CancelFlag) -> Self {
         self.cancel = Some(cancel);
+        self
+    }
+
+    /// Ask `cancel` to stop the run as soon as page `pages` has been handed out, for
+    /// runs whose last page is not the one a Stop would land on.
+    fn cancel_after_pages(mut self, pages: usize, cancel: CancelFlag) -> Self {
+        self.cancel = Some(cancel);
+        self.cancel_after = Some(pages);
         self
     }
 
@@ -283,6 +295,8 @@ impl Session for FakeSession {
                 self.batches_of.unwrap_or(self.rows.len().max(1)),
             ),
             cancel: self.cancel.clone(),
+            cancel_after: self.cancel_after,
+            served: 0,
         }))
     }
 
@@ -324,6 +338,9 @@ struct FakeCursor {
     affected: Option<u64>,
     batches: VecDeque<ColumnBatch>,
     cancel: Option<CancelFlag>,
+    cancel_after: Option<usize>,
+    /// Pages handed out so far, counted for `cancel_after`.
+    served: usize,
 }
 
 #[async_trait]
@@ -338,11 +355,16 @@ impl Cursor for FakeCursor {
 
     async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
         let next = self.batches.pop_front();
+        self.served += 1;
         // The stop lands once the server is done answering, so the page after this one
         // never arrives: a stop that could not stop anything is the bug this test exists
         // for, and a flag set before the first page would pass even if nothing read it.
         if let Some(cancel) = &self.cancel {
-            if self.batches.is_empty() {
+            let reached = match self.cancel_after {
+                Some(pages) => self.served >= pages,
+                None => self.batches.is_empty(),
+            };
+            if reached {
                 cancel.request();
             }
         }
@@ -1432,6 +1454,119 @@ async fn a_cancelled_export_keeps_what_it_wrote_and_says_it_was_cancelled() {
     let written = std::fs::read_to_string(out_dir.path().join("people.csv"))
         .expect("the export closed its file");
     assert_eq!(written, "id,name\r\n1,row1\r\n2,row2\r\n3,row3\r\n");
+}
+
+#[tokio::test]
+async fn a_preview_stops_between_pages_and_keeps_the_rows_it_pulled() {
+    // The stop this test exists for is the one a user presses while a slow query is
+    // still answering: the flag is pulled after page one of three, so pages two and
+    // three never arrive. Before this, `preview` never read the flag and the run
+    // walked the whole result set no matter how early Stop was pressed.
+    let rows: Vec<Vec<Value>> = (1..=6)
+        .map(|id| vec![Value::Int(id), Value::Text(format!("row{id}").into())])
+        .collect();
+    let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    pairs.push(("SQL".to_owned(), "SELECT * FROM people".to_owned()));
+
+    let session = FakeSession::new(DriverKind::Trino)
+        .columns(&[("id", "integer"), ("name", "varchar")])
+        .rows(rows)
+        .batches_of(2);
+    let cancel = CancelFlag::new();
+    let engine = FakeEngine {
+        // Page one is handed out during the priming fetch, so a request from after
+        // that page is already waiting for the loop by the time it asks.
+        session: session.clone().cancel_after_pages(1, cancel.clone()),
+        refuse: false,
+    };
+
+    let mut events = Capture::new();
+    run(
+        Command::Preview,
+        &Settings::from_pairs(pairs),
+        &mut events,
+        &engine,
+        &cancel,
+    )
+    .await
+    .expect("a stopped preview is not a failed preview");
+
+    assert!(cancel.is_cancelled(), "the stop really reached the flag");
+    let done = events.lines.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["cancelled"], true, "the app shows this to the user");
+    assert_eq!(
+        done["rows"], 2,
+        "the rows pulled before the stop, not all six: {done}"
+    );
+
+    // The rows that did arrive are on the wire rather than swallowed: a Stop that
+    // blanked the grid would be worse than no Stop button.
+    let data: Vec<Json> = events
+        .lines
+        .iter()
+        .filter(|line| line["event"] == "rows")
+        .flat_map(|line| match &line["data"] {
+            Json::Array(rows) => rows.clone(),
+            other => panic!("`data` is an array of rows, got {other}"),
+        })
+        .collect();
+    assert_eq!(
+        data.len(),
+        2,
+        "the two rows of page one are emitted: {}",
+        lines(&events.lines)
+    );
+}
+
+#[tokio::test]
+async fn an_explain_stops_between_pages_too() {
+    // `explain` shares `emit_batches` with `preview`, and this is the test that keeps
+    // it sharing the cancel path as well: a plan can be slow to produce, and a Stop
+    // pressed while the coordinator is planning must not wait for the last page.
+    let rows: Vec<Vec<Value>> = (1..=5)
+        .map(|id| vec![Value::Text(format!("plan line {id}").into())])
+        .collect();
+    let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    pairs.push(("SQL".to_owned(), "SELECT * FROM people".to_owned()));
+
+    let session = FakeSession::new(DriverKind::Trino)
+        .columns(&[("plan", "varchar")])
+        .rows(rows)
+        .batches_of(2);
+    let cancel = CancelFlag::new();
+    let engine = FakeEngine {
+        session: session.clone().cancel_after_pages(1, cancel.clone()),
+        refuse: false,
+    };
+
+    let mut events = Capture::new();
+    run(
+        Command::Explain,
+        &Settings::from_pairs(pairs),
+        &mut events,
+        &engine,
+        &cancel,
+    )
+    .await
+    .expect("a stopped explain is not a failed explain");
+
+    // The statement the driver builds is what ran, and the note in `RustEngine` says
+    // explain does not poll the flag. If that ever becomes false again, this fails.
+    assert_eq!(session.executed(), vec!["EXPLAIN SELECT * FROM people"]);
+    let done = events.lines.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["cancelled"], true, "the app shows this to the user");
+    assert_eq!(
+        done["rows"], 2,
+        "the plan lines pulled before the stop: {done}"
+    );
 }
 
 fn lines(events: &[Json]) -> String {
