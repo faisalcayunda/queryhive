@@ -73,10 +73,14 @@ memverifikasi koneksi TLS — yaitu membuat Results — kamu bebas.
    transitif yang hanya dibaca oleh `rustls` untuk memverifikasi server certificate. Tidak ada
    Additions yang kami buat, jadi tidak ada kewajiban publikasi (§2.2 tidak terpicu).
 
-2. **Kita mendistribusikan Data dalam Executable Form.** Root certificate data ter-embed dalam
-   `libqh_ffi.dylib` sebagai konstanta, dan aplikasi mengirimkan lib itu. Tapi itu adalah
-   **distribusi data yang tidak berubah**, bukan Additions — CDLA-Permissive mengizinkannya
-   (§2.1).
+2. **Kita mendistribusikan Data dalam Executable Form.** Root certificate data ter-embed di
+   dalam binary aplikasi sebagai konstanta: kode `webpki-roots` ikut ter-link ke
+   `app/dist/QueryHive.app/Contents/MacOS/QueryHive` karena mesinnya kini statis (`otool -L` pada
+   binary itu tidak menyebut satu pun library Rust, jadi seluruh kode Rust ada di dalamnya).
+   Tapi itu adalah **distribusi data yang tidak berubah**, bukan Additions — CDLA-Permissive
+   mengizinkannya (§2.1). Perubahan 24 Sep 2026 dari dylib ke arsip statis tidak mengubah
+   kesimpulan ini: yang berubah hanya file mana yang membawa data itu, dan "Executable Form"
+   memang mencakup keduanya.
 
 3. **Source Code Form Data tetap tersedia, tanpa tindakan dari kita.** Sumber asli adalah
    `crates.io` (registry publik), yang menyimpan arsip `.crate` setiap versi. Pengguna dapat

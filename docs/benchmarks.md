@@ -80,6 +80,29 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 | Pembatalan < 500 ms | — | — | — | [belum diukur] |
 | Nol leak lintas FFI | — | — | — | [belum diukur] |
 
+## Ongkos `panic = "unwind"` pada ukuran artefak
+
+ADR-0009 memilih `panic = "unwind"` supaya panic dari data server tidak menjatuhkan aplikasi, dan
+konsekuensinya dijanjikan dicatat sebagai angka. Ini angkanya, diukur 24 Sep 2026 dengan
+membangun `qh-ffi` dua kali dan mengganti satu baris di `Cargo.toml` (`[profile.release]`).
+Profil lain identik: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`.
+
+| Artefak | `panic = "unwind"` | `panic = "abort"` | Selisih |
+|---|---|---|---|
+| `libqh_ffi.a` (arsip yang ditautkan app) | 131,52 MiB | 121,59 MiB | **9,93 MiB** |
+| `libqh_ffi.dylib` (dibaca generator) | 9,54 MiB | 8,15 MiB | **1,39 MiB** |
+| `QueryHive` (binary app yang dikirim) | 16,32 MiB | 14,63 MiB | **1,69 MiB** |
+
+Yang menentukan bagi pengguna adalah baris terakhir: **unwinding table berbiaya 1,69 MiB**, sekitar
+10% dari binary app. Baris arsipnya jauh lebih besar dan sama sekali tidak relevan untuk distribusi,
+sebab app tidak pernah mengirim arsip itu — kode yang dipakai disalin ke binary app, dan sisanya
+dibuang. Angka 9,93 MiB itu adalah selisih blob mentah, bukan ukuran yang sampai ke siapa pun.
+
+Catatan cara mengukurnya: tiga angka di atas diambil dari build yang sama sekali berbeda (bukan
+inkremental) untuk kedua nilai, karena `panic` mengubah seluruh graf. Setelah pengukuran, `Cargo.toml`
+dikembalikan ke `unwind` dan `app/build.sh` dijalankan ulang, jadi binary di `app/dist/` cocok
+dengan profil yang berlaku.
+
 ## Temuan
 
 - **python/postgres (baseline-python, n=1): baris pertama 722 ms setelah connect**, sementara targetnya < 200 ms.

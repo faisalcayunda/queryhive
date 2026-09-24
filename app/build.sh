@@ -1,14 +1,14 @@
 #!/bin/bash
-# Builds "dist/QueryHive.app" around the Rust engine's shared library.
+# Builds "dist/QueryHive.app" around the Rust engine.
 # Needs only the Xcode Command Line Tools.
 #
-# Known limitation, deliberately not solved here: the Swift binary links
-# `libqh_ffi.dylib` by the absolute install name Cargo gives a `cdylib`, so the
-# bundle runs on this machine (where `target/release` exists) and not on another
-# one. Making the bundle relocatable means building the crate as a `staticlib`
-# and packaging it as an XCFramework from an xtask -- a change to the FFI crate
-# rather than to this script (app/Package.swift says the same thing at
-# `ffiLibraryDirectory`).
+# The bundle is self-contained. `app/build-ffi.sh` stages the engine's static archive
+# (target/ffi/static/release/libqh_ffi.a) and this script's `swift build` links that
+# archive rather than the `cdylib`, so the Rust code is copied into the app binary and
+# the app loads no Rust library at runtime: `otool -L dist/QueryHive.app/Contents/MacOS/
+# QueryHive` lists Apple frameworks and nothing from `target/`. That is what makes the
+# DMG portable. The bundle is one Mach-O, and the signing loop below stays a loop so a
+# second one would not go unsigned.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -62,10 +62,11 @@ if [ -f ../assets/icon.icns ]; then
     cp ../assets/icon.icns "$app/Contents/Resources/AppIcon.icns"
 fi
 
-# The bundle holds one Mach-O, the app binary, and its engine is whatever
-# `libqh_ffi.dylib` it links. Sign that, then the bundle. Static objects/archives
-# are never executed and codesign refuses to sign them anyway, so the find skips
-# them; it stays a loop because a future XCFramework would add more Mach-Os.
+# The bundle holds one Mach-O, the app binary, and the engine is inside it: `swift build`
+# copied the static archive's code into that binary, so there is no second file to sign.
+# The loop stays a loop because a second Mach-O would otherwise go unsigned. Static
+# objects and archives are never executed and codesign refuses to sign them anyway, so
+# the find skips them; a `.a` never reaches this bundle in the first place.
 find "$app" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in
         *.o|*.a) continue ;;

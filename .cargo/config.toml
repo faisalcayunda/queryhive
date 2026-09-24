@@ -1,0 +1,33 @@
+# Why this file exists: one environment variable that decides what the app can run on.
+#
+# The app declares macOS 14.0 as its minimum (`app/Package.swift` platforms, and
+# `LSMinimumSystemVersion` in the bundle `app/build.sh` writes). Rust objects honour that,
+# but C and assembly objects do not: the `cc` crate asks for MACOSX_DEPLOYMENT_TARGET,
+# and when nothing sets it, it falls back to the *current SDK's* default deployment
+# target (`cc-1.4.7/src/lib.rs`, "If no explicit target is passed, `cc` defaults to the
+# current Xcode SDK's DefaultDeploymentTarget"). On this machine that is 26.2, which is
+# why linking `libqh_ffi.a` into the app printed two hundred lines of
+#
+#     ld: warning: object file (...-curve25519.o) was built for newer 'macOS' version
+#     (26.2) than being linked (14.0)
+#
+# for `ring`'s crypto and `libsqlite3-sys`'s `sqlite3.o`. The warning is not cosmetic:
+# it means the archive may reference symbols that do not exist on the system the app
+# claims to support, and the app cannot tell anyone which ones, because the object's
+# `minos` is all the linker sees. Left alone, every bundle built on a new macOS would
+# quietly raise the real floor while `Info.plist` kept saying 14.0.
+#
+# Pinned here rather than in `app/build-ffi.sh` so that it holds for every cargo
+# invocation in this repository, including `cargo test` and any build someone runs by
+# hand, and so that the value lives beside the artifacts it describes rather than in a
+# script one of them happens to go through. It has to match `app/Package.swift` and the
+# `LSMinimumSystemVersion` heredoc in `app/build.sh`; three files, one number, and this
+# is the one that decides what the linker will accept.
+#
+# `force = true` because a stale value inherited from a shell would otherwise win
+# silently -- the failure mode this file exists to remove. If a dependency's C code ever
+# needs an API newer than 14.0, the build now fails with an availability error instead of
+# shipping a bundle that lies about its floor. Raising the number is a deliberate edit
+# here, plus the two places above.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "14.0", force = true }

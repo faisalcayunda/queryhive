@@ -3,10 +3,16 @@
 <!--
   Entitlements for the Developer ID / notarized build (app/build-dmg.sh --developer-id).
 
-  Only the hardened runtime needs these; the ad-hoc build uses none of them. They exist because
-  the engine is a Rust dylib loaded across the FFI boundary rather than a Mach-O inside the
-  bundle: `libqh_ffi.dylib` is linked out of `target/release/deps` and is not signed with the
-  app's own identity. ADR-0014 is the decision record and argues both keys.
+  Only the hardened runtime needs these; the ad-hoc build uses none of them. Both keys were
+  written when the engine was a Rust dylib loaded across the FFI boundary. That is no longer
+  the build: `crates/qh-ffi` also produces a `staticlib`, and the app links the archive, so
+  the engine's code is inside the app binary and nothing is loaded from outside the bundle.
+
+  Which means disable-library-validation may now be unnecessary. It is kept until that is
+  measured rather than argued: proving it means launching a hardened-runtime bundle without
+  the key, and this machine has no Developer ID certificate to sign one with. Dropping a key
+  on reasoning alone risks an app that crashes for the users who signed correctly. ADR-0014
+  records the same conclusion.
 
   NOT YET VERIFIED against a real Developer ID: this machine has no such certificate, so the
   first notarized build must be launched and its engine exercised (Test Connection, then an
@@ -14,17 +20,16 @@
 -->
 <plist version="1.0">
 <dict>
-  <!-- The engine library is loaded from outside the bundle and carries none of the app's
-       signature. The hardened runtime validates each loaded library against the main
-       executable's signing team, so without this the app dies at launch before any of its
-       own code runs. -->
+  <!-- Suspected dead weight since the engine became static; see the note above and ADR-0014.
+       If it is still needed, the reason is narrower than it used to be. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
 
   <!-- Kept for the FFI call path rather than for the engine's own code: the Swift/libffi
        marshalling layer around a call into Rust allocates executable pages, which the
        hardened runtime refuses by default. The Rust crates themselves forbid `unsafe_code`
-       and need no writable-executable memory of their own. -->
+       and need no writable-executable memory of their own. A static engine does not change
+       this: it is the same trampoline making the same call. -->
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
 </dict>

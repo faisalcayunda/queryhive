@@ -48,8 +48,11 @@ yang sepadan di sini.
 
 ## Konsekuensi
 
-- XCFramework membawa unwinding table; ukuran akhirnya dicatat di `docs/benchmarks.md` sebagai
-  angka, bukan dugaan.
+- Unwinding table menambah ukuran artefak, dan itu **sudah diukur** 24 Sep 2026, bukan lagi
+  dijanjikan: `docs/benchmarks.md` §"Ongkos `panic = \"unwind\"`" mencatat 1,69 MiB pada binary app
+  yang dikirim (16,32 MiB berbanding 14,63 MiB bila `panic = "abort"`), dan 9,93 MiB pada arsip
+  mentah yang tidak pernah dikirim. Angka arsip sengaja ditulis berdampingan supaya tidak ada yang
+  membacanya sebagai ongkos distribusi.
 - `guard()` wajib ada di setiap entry point, dan **diuji**: satu test sengaja memicu panic pada
   jalur data server (mis. decoder `Value` dengan byte rusak) dan memastikan proses Swift tetap
   hidup serta menerima error yang bisa ditampilkan.

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Builds the Rust engine's shared library and regenerates app/Generated/ from it: the Swift
+# Builds the Rust engine's static archive and regenerates app/Generated/ from it: the Swift
 # bindings the app links against, and the C module they call into.
 #
 #   ./build-ffi.sh        # release library, then bindings
 #   ./build-ffi.sh debug  # debug library instead (faster to build, ~4x bigger)
+#
+# Two artifacts come out of one `cargo build`. The generator reads the `cdylib`
+# (target/<profile>/libqh_ffi.dylib) because it has to see a compiled library; the app links
+# the `staticlib` (target/<profile>/libqh_ffi.a), staged into target/ffi/static/ so the two
+# can never be confused for one another. Only the second ends up inside the bundle.
 #
 # app/Generated/ is committed, and regenerating it is a visible diff on purpose: the FFI surface
 # is a contract the app is written against (`DatabaseEngine`, blueprint §1.6), so a change to it
@@ -17,8 +22,10 @@
 # (`crates/qh-ffi/src/bin/uniffi-bindgen.rs` says the same thing from the Rust side).
 #
 # Why this is a script and not a SwiftPM plugin: `swift build` has no pre-build hook, so the
-# library has to exist before it links, and the plugin that would do this belongs with the
-# XCFramework the blueprint plans rather than with a path into `target/`.
+# artifact has to exist before it links, and a plugin cannot write into `target/` for a package
+# whose own sources are what gets built. The blueprint's XCFramework would carry this as a
+# plugin, but it is not built and not needed while the app is arm64-only: an archive plus the
+# framework list in `app/Package.swift` is enough, and it is one fewer artifact to keep in step.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(dirname "$(pwd)")"
@@ -29,6 +36,16 @@ PROFILE="${1:-release}"
 # root instead, and the renames below then fail with "No such file or directory".
 GENERATED="$(pwd)/Generated"
 LIBRARY="$ROOT/target/$PROFILE/libqh_ffi.dylib"
+ARCHIVE="$ROOT/target/$PROFILE/libqh_ffi.a"
+# Where `app/Package.swift` links from, and the reason it is its own directory rather
+# than `target/$PROFILE`: a linker handed `-L target/release -lqh_ffi` finds
+# `libqh_ffi.dylib` beside the archive and prefers the dylib, which puts the absolute
+# install name straight back into the app. A directory holding the archive and nothing
+# else leaves `ld` no choice. Kept per profile so that a debug build cannot be linked
+# into a release app: `Package.swift` tries `release` first, exactly as it did when it
+# was looking for the dylib. `target/` is gitignored, so staging adds no file to the
+# tree.
+STATIC_DIR="$ROOT/target/ffi/static/$PROFILE"
 
 log() { echo "[build-ffi] $*"; }
 die() { echo "[build-ffi] error: $*" >&2; exit 1; }
@@ -41,6 +58,15 @@ esac
 log "cargo build -p qh-ffi --profile $PROFILE"
 (cd "$ROOT" && cargo build -p qh-ffi --profile "$PROFILE")
 [ -f "$LIBRARY" ] || die "cargo reported success but $LIBRARY is missing"
+[ -f "$ARCHIVE" ] || die "cargo reported success but $ARCHIVE is missing (is 'staticlib' still in the crate-type list?)"
+
+# Stage the archive for the linker. Cleared first so that a build that stops somewhere
+# above cannot leave the previous build's archive looking current, and so that a stray
+# `libqh_ffi.dylib` from an older layout cannot make the static link a dynamic one.
+log "stage $(basename "$ARCHIVE") in ${STATIC_DIR#"$ROOT"/}"
+rm -rf "$STATIC_DIR"
+mkdir -p "$STATIC_DIR"
+cp "$ARCHIVE" "$STATIC_DIR/"
 
 # `--library` on the compiled dylib rather than on the source: it is the only way the generator
 # can see the types the proc macros produced, and the bindings' checksums have to match what the

@@ -23,18 +23,25 @@
 >
 > **Dua angka di bawah sudah tidak menggambarkan keadaan hari ini** dan sudah dianotasi di
 > tempatnya: klaim golden live "22/22" (sekarang **12/22**, selisihnya terklasifikasi) dan
-> "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 9 lulus). Verifikasi
+> "16 kasus identik" (sekarang **17**, `cargo test -p qh-ffi --test golden` → 11 lulus). Verifikasi
 > berat per 24 Sep 2026: `cargo fmt --all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`
-> ✅, `cargo test --workspace` → **547 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+> ✅, `cargo test --workspace` → **549 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
 > `swift build && swift test` → **16 tes / 0 gagal** ✅, `app/build.sh` → `Built dist/QueryHive.app` ✅.
+> Bundle sekarang bersifat self-contained: mesinnya statis, jadi `otool -L` pada
+> `Contents/MacOS/QueryHive` tidak lagi menyebut library Rust mana pun. Perubahan itu ada di
+> working tree, **belum di-commit** per penulisan catatan ini.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
 
-- **Branch aktif:** `feat/rust-engine` (dibuat dari `main` @ `602bfb7`)
+- **Branch aktif:** `feat/rust-engine` (dibuat dari `main` @ `602bfb7`). Lima commit sudah mendarat;
+  `253362a` adalah flip + penghapusan mesin Python, dan `852f5ad` di atasnya membuat `preview` serta
+  `explain` benar-benar berhenti saat Stop ditekan
 - **Fase aktif:** **Fase 2 selesai** — aplikasi berjalan di atas `RustEngine`, mesin Python sudah
-  dibuang. Yang tersisa bukan Fase 2, melainkan pekerjaan yang berdiri sendiri: portabilitas bundle
-  (staticlib/XCFramework) dan uji baca-balik kredensial yang butuh tangan manusia
+  dibuang. Portabilitas bundle **juga sudah selesai** 24 Sep 2026 (mesin kini statis, `otool -L` pada
+  bundle bersih dari `qh_ffi`). Yang tersisa pekerjaan yang butuh tangan manusia: uji baca-balik
+  kredensial lewat GUI dan Keychain, plus mengukur apakah `disable-library-validation` masih perlu
+  (ADR-0014)
 - **Mesin:** macOS arm64, `rustc 1.98.1`, `cargo 1.98.1`, Swift 6.2.3, podman (VM
   `podman-machine-default` sudah start)
 
@@ -845,7 +852,7 @@ kenapa itu tidak akan berubah lewat protokol ini.
 | K3 | ~~Zoo tipe belum diuji terhadap server nyata~~ **Sebagian selesai** | PostgreSQL sudah tervalidasi uji integrasi; MySQL belum | Snapshot server nyata untuk MySQL masuk tugas berikutnya #1 |
 | K4 | `tools/deps.py` (referensi di `docs/dependencies.md`) belum ada | Tabel dependency masih dibuat manual | Dibuat bersama job CI `cargo deny` |
 | K5 | Trino belum pernah dijalankan | Driver Trino (ADR-0006) belum punya validasi terhadap protokol nyata | [BUTUH TINDAKAN MANUAL] #4 |
-| K6 | Ukuran XCFramework belum diukur | `panic = "unwind"` (ADR-0009) menambah unwinding table; konsekuensinya dijanjikan dicatat sebagai angka | Diukur begitu `qh-ffi` menghasilkan artefak |
+| K6 | ~~Ukuran XCFramework belum diukur~~ **Selesai, tapi pertanyaannya bergeser** | Yang diukur bukan XCFramework — artefak itu tidak dibangun. Yang diukur ongkos `panic = "unwind"` pada apa yang benar-benar dikirim: **1,69 MiB** pada binary app (16,32 → 14,63 MiB bila `abort`), dan 9,93 MiB pada arsip mentah yang tidak pernah dikirim. Angka lengkapnya di `docs/benchmarks.md` §"Ongkos `panic = \"unwind\"`" | — |
 | K7 | ~~Driver PostgreSQL belum ada~~ **Selesai** | — | Bentuknya ditentukan temuan API di bawah; celah yang tersisa ada di K8 dan K9 |
 | K8 | **TLS PostgreSQL belum diimplementasikan** | Driver **menolak** `Prefer`/`Require`/`RequireNoVerify` dengan error yang jelas, jadi tidak ada penurunan senyap ke plaintext — tetapi koneksi yang butuh TLS belum bisa dipakai | Butuh connector `rustls` + root store sistem; dijadwalkan bersama `qh-credentials` |
 | K9 | SQL multi-statement ditolak driver | `prepare` mendeskripsikan satu statement; skrip banyak statement gagal dengan pesan yang menyebutkan penyebabnya | Pemanggil memecah dengan `qh-sql::scan`/`strip_terminator`, yang sudah ada dan teruji |

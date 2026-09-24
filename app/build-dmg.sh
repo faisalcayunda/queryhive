@@ -68,9 +68,9 @@ MISSING
     exit 1
   fi
   echo "    signing as: $IDENTITY"
-  # Every Mach-O inside the bundle, then the bundle. Today that is the app binary alone; the
-  # loop is here so that adding the engine's own library (the XCFramework
-  # app/build.sh names) does not silently leave it unsigned.
+  # Every Mach-O inside the bundle, then the bundle. Today that is the app binary alone -- the
+  # engine is static, so its code is inside that binary rather than beside it; the loop is here
+  # so that a second Mach-O would not silently go unsigned.
   find "$BUNDLE" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in *.o|*.a) continue ;; esac
     if file -b "$f" | grep -q "Mach-O"; then

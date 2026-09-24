@@ -929,20 +929,29 @@ Contents/MacOS/QueryHive
 Contents/Resources/AppIcon.icns
 ```
 
-That is the whole bundle, and the engine is not in it. `app/build-ffi.sh` builds
-`target/release/libqh_ffi.dylib`, regenerates the committed `app/Generated/` from it, and
-`swift build` links the app against that library where Cargo left it. The version comes from
+That is the whole bundle, and the engine is *inside* the one Mach-O it holds. `app/build-ffi.sh`
+builds `crates/qh-ffi` as both a `cdylib` and a `staticlib`; the generator reads the dylib, and the
+app links the archive, which `app/build-ffi.sh` stages into `target/ffi/static/<profile>/` so the
+linker cannot pick the dylib instead. `swift build` copies the archive's code into the executable,
+regenerates nothing, and the committed `app/Generated/` stays what it was. The version comes from
 `crates/qh-ffi/Cargo.toml`, which is also what `engineVersion()` returns at runtime, so a bundle
 whose Info.plist and whose engine disagree cannot be built.
 
-**Known limitation.** Because the library is linked out of `target/release` and never copied into
-the bundle, the app's install name for it is an absolute path on this machine: `otool -L` on the
-binary shows `…/target/release/deps/libqh_ffi.dylib`, with an rpath to match and no Rust dylib
-beside the executable. `dist/QueryHive.app` therefore runs here and is not yet a bundle to hand to
-a second machine. The fix is the artifact `app/Package.swift` already names: build `qh-ffi` as a
-`staticlib` and package it as `target/ffi/QueryHiveFFI.xcframework` from an xtask. That is a crate
-type in `crates/qh-ffi/Cargo.toml` and a packaging step, not an app change, so it is reported here
-rather than done.
+`otool -L` on the built binary lists the Swift runtime and Apple frameworks and **no** `qh_ffi`
+entry, which is the check that says the bundle no longer needs anything from `target/`. Two things
+that were once limitations are now deliberate obligations instead:
+
+- An archive cannot record its own dependencies, unlike a dylib. The system frameworks Rust's std
+  needs are therefore named explicitly in `app/Package.swift`; they are what
+  `cargo rustc -p qh-ffi --release --lib -- --print native-static-libs` prints.
+- `.cargo/config.toml` pins `MACOSX_DEPLOYMENT_TARGET` to the 14.0 this bundle declares. The `cc`
+  crate otherwise defaults to the *current* SDK's deployment target -- 26.2 on the machine this was
+  written on -- so `ring`'s assembly and `libsqlite3-sys`'s `sqlite3.o` would be linked into an app
+  that claims to run on 14.0 while being built for a system two major versions newer.
+
+The blueprint's XCFramework (`docs/architecture/rust-engine-blueprint.md` §3.2, §8) remains unbuilt
+and is not needed for this: an XCFramework exists to carry several architectures and a headers
+directory, and `app/build-dmg.sh` already refuses to build for anything but arm64.
 
 ### Distribution
 

@@ -35,18 +35,24 @@ hands each batch straight to a writer that appends to disk, so:
 open app/dist/QueryHive.app
 ```
 
-A native SwiftUI app, no browser involved. `app/build.sh` builds the Rust
-engine's shared library as a release `cdylib` (`app/build-ffi.sh`), regenerates
-the committed Swift bindings from it, then builds and ad-hoc signs the bundle.
-The `.app` is unsigned, so Gatekeeper blocks the first launch: right-click →
-Open, or `xattr -dr com.apple.quarantine app/dist/QueryHive.app`.
+A native SwiftUI app, no browser involved. `app/build.sh` builds the Rust engine
+(`app/build-ffi.sh`), regenerates the committed Swift bindings from it, then
+builds and ad-hoc signs the bundle. The `.app` is unsigned, so Gatekeeper blocks
+the first launch: right-click → Open, or
+`xattr -dr com.apple.quarantine app/dist/QueryHive.app`.
 
-Known limitation: the Swift binary links the engine by the absolute install name
-Cargo gives a `cdylib`, so `dist/QueryHive.app` runs on a machine that has
-`target/release/` and is not yet a bundle you can hand to someone else. Making it
-relocatable means building `qh-ffi` as a `staticlib` and packaging it as an
-XCFramework from an xtask; that is a change to the FFI crate, not to the app, and
-`app/Package.swift` names it at `ffiLibraryDirectory`.
+The bundle is self-contained: the app links the engine's **static archive**, so
+the Rust code is copied into the app binary and `otool -L` on it lists only Apple
+frameworks. Nothing in `dist/QueryHive.app` points at `target/`, which is what
+made the DMG portable. Two consequences worth knowing:
+
+- The archive cannot record its own dependencies, so the system frameworks Rust's
+  own std needs are named by hand in `app/Package.swift`. If a dependency starts
+  using another one, the link fails there with an undefined symbol.
+- The deployment target is pinned in `.cargo/config.toml` to the same macOS 14.0
+  the app declares. Without it the C and assembly objects inside the archive
+  (`ring`, `libsqlite3-sys`) would be built for whatever macOS is doing the
+  building, and the bundle would quietly require more than its `Info.plist` says.
 
 
 **Run shows you the rows; Export writes them.** Run fetches the first N (the `LIMIT` in the grid's
@@ -164,9 +170,14 @@ The engine is a Rust workspace; the app and the golden corpus are two consumers 
 
 ```bash
 cargo build --release --bin queryhive-engine   # target/release/queryhive-engine
-cargo build -p qh-ffi                           # target/release/libqh_ffi.dylib, for the app
+cargo build -p qh-ffi                           # the library the app links
 ./app/build-ffi.sh                              # ...then regenerate app/Generated/ from it
 ```
+
+`cargo build -p qh-ffi` produces two libraries from one run: `libqh_ffi.dylib`, which the binding
+generator reads, and `libqh_ffi.a`, which the app links. Only `build-ffi.sh` stages the archive
+where `app/Package.swift` looks for it (`target/ffi/static/<profile>/`), so run it rather than
+`cargo build` alone if you are about to build the app.
 
 ## Run the engine from the CLI
 

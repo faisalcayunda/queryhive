@@ -49,17 +49,35 @@ menegakkan ini untuk mencegat library injection.
 
 **Mengapa ini diperlukan:** `libqh_ffi.dylib` dibangun dari workspace Rust
 (`crates/qh-ffi/`) dan tidak ditandatangani dengan identitas yang sama dengan aplikasi
-Swift. Jalur build-nya:
+Swift. Jalur build saat keputusan ini dibuat adalah:
 
 1. `cargo build --release -p qh-ffi` → `target/release/libqh_ffi.dylib`
 2. `swift build` menautkannya dari `target/release` — dylib itu **tidak** disalin ke dalam
    bundle, jadi install name-nya tetap path absolut ke `target/release/deps/`
 3. App me-load lib saat launch lewat FFI binding yang di-generate UniFFI
 
-Langkah 2 itulah alasan entitlement ini masih diperlukan, dan sekaligus batas yang diketahui:
-bundle hasil `app/build.sh` hanya jalan di mesin yang punya `target/release`. Membuat bundle
-portabel berarti membangun crate ini sebagai `staticlib` dan mengemasnya sebagai XCFramework —
-perubahan pada crate FFI, dicatat sebagai pekerjaan terpisah.
+**Diperbarui 24 Sep 2026 — jalur di atas sudah tidak berlaku.** Langkah 2 diganti: `qh-ffi`
+kini juga menghasilkan `staticlib`, `app/build-ffi.sh` menaruh arsipnya di
+`target/ffi/static/release/libqh_ffi.a`, dan `app/Package.swift` menautkan arsip itu, bukan
+dylib. Kode Rust disalin ke dalam binary app, jadi tidak ada library terpisah yang dimuat
+saat launch. Buktinya satu perintah:
+
+```
+otool -L app/dist/QueryHive.app/Contents/MacOS/QueryHive   # tidak ada entri qh_ffi
+```
+
+Dua akibatnya, dan keduanya belum diselesaikan:
+
+- **Alasan entitlement ini bisa jadi sudah hilang**, karena tidak ada lagi library pihak
+  ketiga untuk divalidasi. Belum diukur: membuktikannya perlu menjalankan bundle dengan
+  hardened runtime (`./app/build-dmg.sh --developer-id`) tanpa entitlement ini dan melihat
+  apakah ia masih launch. Selama itu belum dijalankan, entitlement ini tetap dipasang —
+  mencopotnya berdasarkan penalaran saja adalah cara membuat app yang crash hanya untuk
+  pengguna yang menandatanganinya dengan benar.
+- **Entitlement `com.apple.security.cs.allow-unsigned-executable-memory` tidak terpengaruh oleh
+  perubahan ini.** Ia ada untuk halaman executable yang dialokasikan lapisan marshalling FFI,
+  bukan untuk validasi library, dan kode Rust yang kini statis tetap berjalan di dalam proses
+  yang sama lewat jalur pemanggilan yang sama.
 
 Tanpa entitlement ini, aplikasi akan crash saat launch dengan error signature validation
 atau library load failure.
@@ -119,6 +137,12 @@ akses `~/.ssh` tidak bisa diminta lewat entitlement manapun).
 
 ## Keputusan
 
+> **Catatan 24 Sep 2026.** Sejak 24 Sep 2026 mesin tidak lagi berupa dylib yang dimuat: `qh-ffi`
+> menghasilkan `staticlib` dan app menautkan arsipnya, jadi tidak ada library pihak ketiga yang
+> dimuat saat launch. Bagian di bawah tetap dibiarkan sebagai catatan keputusan pada masanya, tapi
+> setiap kalimat yang berbunyi "Rust dylib" tidak lagi menggambarkan build sekarang. Lihat bagian
+> di atas untuk status terkininya.
+
 **Terima kedua entitlement ini sebagai konsekuensi arsitektur FFI**, dan dokumentasikan
 mengapa masing-masing diperlukan.
 
@@ -136,23 +160,29 @@ Alasan:
 
 ## Konsekuensi
 
-1. **`app/QueryHive.entitlements` adalah file yang benar**, dan kedua entitlement di atas
-   harus tetap ada selama aplikasi memakai FFI ke Rust dylib.
+1. **`app/QueryHive.entitlements` adalah file yang benar**, dan `allow-unsigned-executable-memory`
+   tetap diperlukan selama aplikasi memakai trampolin FFI ke Rust. `disable-library-validation`
+   **diduga sudah tidak diperlukan** sejak mesin menjadi statis — tapi belum diukur, dan ADR ini
+   tidak mencopotnya atas dasar dugaan.
 
 2. **App tidak boleh notarized tanpa review.** Apple notarization service memeriksa
    entitlements dan dapat menolak app dengan `allow-unsigned-executable-memory` kalau tidak
    ada justifikasi yang jelas. Saat submission:
    - Sebutkan FFI trampolines sebagai alasan `allow-unsigned-executable-memory`
-   - Sebutkan unsigned Rust library sebagai alasan `disable-library-validation`
+   - `disable-library-validation`, kalau masih dibawa, tidak lagi punya alasan "unsigned Rust
+     library" untuk disebutkan — mesinnya statis. Sebutkan sejujurnya kalau kuncinya masih ada
+     karena belum sempat diuji tanpa itu, atau ukur dulu lalu copot.
 
 3. **Dokumentasi harus jujur tentang tradeoff ini.** Jangan klaim "fully sandboxed" atau
    "maximum security" — ini app dengan hardened runtime tapi **bukan** sandbox, dan dengan
    dua entitlement yang melonggarkan proteksi default.
 
-4. **Future work: sign `libqh_ffi.dylib` bila friction berkurang.** Kalau cargo plugin
-   untuk auto-sign atau CI yang handle signing jadi tersedia, revisit
-   `disable-library-validation`. Tapi `allow-unsigned-executable-memory` tetap diperlukan
-   selama Swift FFI memakai trampolines.
+4. **Future work: copot `disable-library-validation` setelah diukur, bukan setelah diyakini.**
+   Alasan aslinya — "unsigned Rust library" — hilang bersama dylib, jadi pertanyaannya berubah
+   dari "bagaimana menandatangani lib" menjadi "apakah app masih launch tanpanya". Itu satu
+   pengukuran pada bundle hardened-runtime, dan itulah bentuk pekerjaan yang tersisa.
+   `allow-unsigned-executable-memory` tetap diperlukan selama Swift FFI memakai trampolines,
+   apa pun bentuk artefaknya.
 
 ## Referensi
 

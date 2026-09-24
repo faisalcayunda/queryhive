@@ -68,14 +68,27 @@ Terapan untuk repo ini:
    uniffi, jadi ia Larger Work dalam pengertian §1.7, dan §3.3 memberi kebebasan memilih lisensi
    untuknya. Tidak ada satu pun kewajiban MPL-2.0 yang menempel pada `crates/qh-*`, dan `LICENSE`
    tidak berubah.
-2. **Kita memang mendistribusikan uniffi dalam Executable Form, jadi §3.2 berlaku.** Lib yang
-   dikirim aplikasi adalah `libqh_ffi.dylib` (`app/build-ffi.sh:27`), dibangun dari
-   `crate-type = ["lib", "cdylib"]` (`crates/qh-ffi/Cargo.toml:15`), dan runtime uniffi benar-benar
-   ada di dalamnya: `nm -a target/debug/libqh_ffi.dylib | grep -c uniffi_core` → **1731** simbol.
-   (`target/release/libqh_ffi.dylib` menunjukkan 0 karena profil release memakai
-   `strip = "symbols"` — `Cargo.toml:71`; kodenya ada, namanya dibuang.) Binding yang di-commit pun
-   memanggil scaffolding uniffi secara langsung, mis. `ffi_qh_ffi_rustbuffer_from_bytes` dan
-   `ffi_qh_ffi_rustbuffer_free` (`app/Generated/QueryHiveFFI/qh_ffi.swift:28`).
+2. **Kita memang mendistribusikan uniffi dalam Executable Form, jadi §3.2 berlaku.** Bentuk
+   kirimannya berubah 24 Sep 2026 dan kesimpulannya tidak: dulu yang dikirim adalah
+   `libqh_ffi.dylib` (`crate-type = ["lib", "cdylib"]`, `crates/qh-ffi/Cargo.toml:15`), sekarang
+   crate yang sama juga menghasilkan `staticlib` dan kode itu disalin ke dalam binary app —
+   `app/dist/QueryHive.app/Contents/MacOS/QueryHive`. Runtime uniffi ada di sana, dan itu
+   terukur pada artefak yang benar-benar dikirim, bukan pada artefak perantara:
+
+   ```
+   nm -a app/dist/QueryHive.app/Contents/MacOS/QueryHive | grep -c uniffi_core    # 42
+   nm -a app/dist/QueryHive.app/Contents/MacOS/QueryHive | grep -c ffi_qh_ffi_    # 24
+   ```
+
+   Dua angka itu menjawab dua hal berbeda. `uniffi_core` yang hadir membuktikan runtime-nya ikut,
+   dan `ffi_qh_ffi_*` adalah scaffolding yang benar-benar dipanggil binding yang di-commit
+   (`ffi_qh_ffi_rustbuffer_from_bytes` dan `ffi_qh_ffi_rustbuffer_free`,
+   `app/Generated/QueryHiveFFI/qh_ffi.swift:28`), jadi yang tersalin bukan hanya barang mati.
+
+   Kenapa arsipnya sendiri tidak bisa dihitung: `nm -a target/ffi/static/release/libqh_ffi.a`
+   menjawab **0**, sebab profil release memakai `strip = "symbols"` (`Cargo.toml:71`) — kodenya
+   ada, namanya dibuang di titik itu. Yang mengembalikannya adalah langkah link app, jadi
+   artefak terakhirlah yang layak dikutip, dan itu memang yang didistribusikan.
 3. **Yang §3.2 minta dari kita karena itu bukan apa-apa:** Source Code Form yang harus tersedia
    adalah Source Code Form uniffi — versi yang persis, tanpa perubahan dari kita. `Cargo.lock`
    menyebut versi dan checksum-nya, crates.io menyediakan sumbernya, dan repositori hulu uniffi
@@ -207,8 +220,9 @@ dinyatakan terang-terangan, bukan dikubur: seluruh permukaan FFI empat belas per
 ditulis tangan (pemetaan `Result`→`throws`, `Sendable`, kepemilikan buffer, dan pemetaan error yang
 justru menjadi alasan UniFFI dipilih di ADR-0004), binding Swift yang di-commit diganti dengan
 yang dirawat tangan beserta pemeriksaan kesegarannya, dan ADR-0004 harus dibuka ulang. Memindahkan
-uniffi menjadi build-dependency saja **tidak** menyelesaikannya: yang dikirim aplikasi adalah
-`libqh_ffi.dylib`, dan di dalamnya ada runtime uniffi (`nm -a target/debug/libqh_ffi.dylib` → 1731
-simbol `uniffi_core`), jadi selama binding yang di-generate masih dipakai, `uniffi_core` tetap
+uniffi menjadi build-dependency saja **tidak** menyelesaikannya: yang dikirim aplikasi memuat
+runtime uniffi, sekarang di dalam binary app karena mesinnya statis
+(`nm -a app/dist/QueryHive.app/Contents/MacOS/QueryHive` → 42 simbol `uniffi_core` dan 24 simbol
+`ffi_qh_ffi_*`), jadi selama binding yang di-generate masih dipakai, `uniffi_core` tetap
 tertaut. Perhatikan juga bahwa ongkos itu dibayar untuk menghilangkan lisensi yang, sesuai analisis
 di atas, tidak menuntut apa pun dari kode kita selain menyebut sumbernya.
