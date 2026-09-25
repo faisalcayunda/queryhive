@@ -207,10 +207,23 @@ struct TreeRow: View {
             }
             .buttonStyle(.plain)
 
-            Image(systemName: node.kind.symbol)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(iconTint)
-                .frame(width: 15)
+            // A connection wears its driver's mark, on its own colour. Every connection used to be
+            // the same `server.rack`, so the one row that says *which database* this is said
+            // nothing at all — and the tile is already how the rest of the app answers that
+            // question, in the toolbar picker and on the connection sheet.
+            //
+            // Built from the node's values rather than from the model's connection: see
+            // `connectionTile(colour:kind:size:)` for why a row must not read that array.
+            Group {
+                if node.kind == .connection {
+                    connectionTile(colour: node.color, kind: node.connectionKind, size: 16)
+                } else {
+                    Image(systemName: node.kind.symbol)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(iconTint)
+                }
+            }
+            .frame(width: 16)
 
             Text(node.title)
                 .font(.ui(12, weight: node.kind == .connection ? .semibold : .regular))

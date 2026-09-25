@@ -1,23 +1,33 @@
 import SwiftUI
 
-/// 22pt-default rounded tile filled with a connection's colour gradient, carrying the
-/// "this is a Trino coordinator" glyph. Shared by the tree, the toolbar picker and the title
-/// strip so a connection reads the same way everywhere it appears.
+/// 22pt-default rounded tile filled with a connection's colour gradient, carrying that driver's
+/// brand mark. Shared by the tree, the toolbar picker and the title strip so a connection reads the
+/// same way everywhere it appears.
 func connectionTile(_ connection: Connection, size: CGFloat = 22) -> some View {
+    connectionTile(colour: connection.color, kind: connection.kind, size: size)
+}
+
+/// The same tile built from a **tree node's own values**.
+///
+/// Split out because a tree row must not read the model's `connections`: that would subscribe every
+/// visible row to the array, so one edit — a colour, a rename, a move between groups — would re-run
+/// all of them. This is the same trap the selection hit. A node already carries its colour and its
+/// driver, so the row can draw the tile without asking anyone anything.
+func connectionTile(colour: ConnectionColor, kind: ConnectionKind, size: CGFloat = 22) -> some View {
     RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
         // The tile's own subtle ramp, flattened under a flat tone like every other gradient.
         .fill(ThemeStore.shared.tone.isLuminous
-              ? LinearGradient(colors: [connection.color.color, connection.color.color.opacity(0.55)],
+              ? LinearGradient(colors: [colour.color, colour.color.opacity(0.55)],
                                startPoint: .topLeading, endPoint: .bottomTrailing)
-              : LinearGradient(colors: [connection.color.color, connection.color.color],
+              : LinearGradient(colors: [colour.color, colour.color],
                                startPoint: .topLeading, endPoint: .bottomTrailing))
         .frame(width: size, height: size)
         .overlay {
-            if let logo = DriverLogo.image(for: connection.kind) {
+            if let logo = DriverLogo.image(for: kind) {
                 Image(nsImage: logo).resizable().scaledToFit()
                     .frame(width: size * 0.68, height: size * 0.68)
             } else {
-                Image(systemName: connection.kind.symbol)
+                Image(systemName: kind.symbol)
                     .font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
             }
         }

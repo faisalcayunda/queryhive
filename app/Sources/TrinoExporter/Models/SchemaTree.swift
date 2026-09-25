@@ -51,8 +51,14 @@ final class TreeNode: Identifiable {
     /// below a connection inherits its id, so the only nil here is a group.
     let connectionID: UUID?
     /// The driver this node belongs to. Required for quoting: a double-click on a MySQL table
-    /// must produce backticks, not the double quotes Trino and Postgres use.
-    let connectionKind: ConnectionKind
+    /// must produce backticks, not the double quotes Trino and Postgres use — and for the row's
+    /// brand mark.
+    ///
+    /// `var`, not `let`: the driver can be edited on a saved connection, and `rebuildTree` reuses
+    /// the node that already exists. While this was a `let` nothing updated it, so changing Trino
+    /// to Postgres left the node claiming Trino — wrong quoting on every table under it, and the
+    /// wrong mark on its row.
+    var connectionKind: ConnectionKind
     var color: ConnectionColor
     /// Trino's catalog, MySQL's database. Postgres has no such level, so it stays nil there.
     let database: String?

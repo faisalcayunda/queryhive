@@ -52,7 +52,7 @@ struct SQLEditor: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.smartInsertDeleteEnabled = false
-        textView.textContainerInset = NSSize(width: 8, height: 9)
+        textView.textContainerInset = LineNumberRulerView.textInset
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -437,7 +437,7 @@ final class LineNumberRulerView: NSRulerView {
         self.textView = textView
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
-        ruleThickness = Self.width(for: 1)
+        ruleThickness = Self.gutterWidth(forLines: 1)
     }
 
     required init(coder: NSCoder) {
@@ -450,17 +450,70 @@ final class LineNumberRulerView: NSRulerView {
             if character == "\n" { count += 1 }
         }
         lineCount = lines
-        let wanted = Self.width(for: lines)
+        let wanted = Self.gutterWidth(forLines: lines)
         if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
         needsDisplay = true
+    }
+
+    /// The text's own inset inside the text view. Named because the placeholder overlay in
+    /// `EditorPane` has to start at the same x the text does, or it draws under the gutter.
+    static let textInset = NSSize(width: 8, height: 9)
+
+    /// Where the text starts, measured from the editor box's left edge: the gutter, then the text
+    /// view's own inset.
+    ///
+    /// An overlay that wants to sit exactly where the text sits has to add both, and this is that
+    /// sum in one place. Guessing it produced a placeholder drawn *under* the line numbers.
+    static func textOriginX(forLines lines: Int) -> CGFloat {
+        gutterWidth(forLines: lines) + textInset.width
     }
 
     /// Wide enough for the number it will have to show, so the gutter does not jump sideways when
     /// the hundredth line arrives — and no wider, because every point here is a point the text
     /// does not get.
-    private static func width(for lines: Int) -> CGFloat {
+    ///
+    /// Internal rather than private so the placeholder can be told where the text starts.
+    static func gutterWidth(forLines lines: Int) -> CGFloat {
         let digits = CGFloat(max(2, String(max(lines, 1)).count))
         return digits * 7.5 + 20
+    }
+
+    /// The gutter draws **no background of its own**.
+    ///
+    /// `NSRulerView`'s default fill is a system control grey. On a themed window that is a strip of
+    /// somebody else's palette down the side of the editor: measured on the midnight theme, the
+    /// gutter band sat at luminance 25 while the editor's own surface was 12 and the text area 7 —
+    /// the one part of the editor that did not follow the theme. Leaving it unfilled lets the
+    /// editor box's surface show through, which is the same fill that sits behind the text.
+    ///
+    /// Overridden here rather than painted over `super`: `super.draw` would fill its grey first and
+    /// then the marks on top of it, so the call to draw the marks has to be the whole body.
+    override func draw(_ dirtyRect: NSRect) {
+        // A touch brighter than the surface behind it, so the gutter reads as its own strip without
+        // becoming a strip of somebody else's palette — which is what the default fill was.
+        //
+        // White at 3.5% *over* whatever is behind, rather than an absolute colour: the result is the
+        // editor's own themed surface lifted a step, so a theme change moves it too. A fixed grey
+        // was the bug this replaces.
+        //
+        // Only one direction can brighten, and that is white. On a light theme the surface is
+        // already near-white, so the step is necessarily tiny there (measured: 248.1 -> 248.1,
+        // which is to say invisible); on a dark theme it is plain (7.9 -> 15.3). If the strip needs
+        // to be visible on light themes as well, the direction has to flip there — say the word and
+        // it becomes a recess instead of a lift.
+        NSColor.white.withAlphaComponent(0.035).setFill()
+        bounds.fill()
+
+        drawHashMarksAndLabels(in: dirtyRect)
+
+        // And one hairline down its trailing edge, because with only a 3.5% lift the gutter would
+        // otherwise run into the text with no seam at all. The default ruler draws a separator as
+        // part of its background, so replacing that background took the separator with it.
+        //
+        // `Tone.ink` at 7%, the same hairline the panes use between each other, so the seam belongs
+        // to the theme rather than to the system.
+        Tone.inkNS(0.07).setFill()
+        NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
@@ -472,7 +525,10 @@ final class LineNumberRulerView: NSRulerView {
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: numberFont,
-            .foregroundColor: NSColor.secondaryLabelColor,
+            // The app's own readout grey. `secondaryLabelColor` is the system's, which is a different
+            // colour from `Tone.secondary` on every theme — and it resolved per appearance, so a
+            // theme switch left the gutter in the system's grey while everything around it moved.
+            .foregroundColor: Tone.readoutNS,
         ]
 
         for entry in numberedLines(in: scrollView.contentView.bounds) {

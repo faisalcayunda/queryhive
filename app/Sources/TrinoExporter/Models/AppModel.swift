@@ -941,6 +941,10 @@ final class AppModel {
             if let reused = existing[id] {
                 reused.title = connection.name
                 reused.color = connection.color
+                // The driver is editable, and this node is reused across edits: without this a
+                // connection switched from Trino to Postgres kept quoting with double quotes and
+                // wearing the Trino mark.
+                reused.connectionKind = connection.kind
                 return reused
             }
             return TreeNode.connection(connection)

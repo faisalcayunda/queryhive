@@ -307,12 +307,14 @@ struct EditorPane: View {
     /// through `textDidBeginEditing` / `textDidEndEditing`.
     @State private var focused = false
 
-    /// The line count, for the corner readout.
+    /// The number of lines the query has, for the corner readout.
     ///
-    /// An empty editor counts zero lines rather than one: `split` on "" returns nothing, and a
-    /// blank editor showing "1 line" would be counting the caret, not the text.
+    /// An empty editor counts **one**, which is what the gutter shows. It used to count zero, so an
+    /// empty editor displayed "0 lines" in the corner beside a "1" in the gutter — two answers to
+    /// one question, and the wrong one was the corner's: the caret is on line 1. Every editor with
+    /// an empty file says the same.
     private var lineCount: Int {
-        tab.sql.isEmpty ? 0 : tab.sql.split(whereSeparator: \.isNewline).count
+        max(1, tab.sql.split(whereSeparator: \.isNewline).count)
     }
 
     var body: some View {
@@ -342,7 +344,10 @@ struct EditorPane: View {
                             .font(.ui(11.5))
                             .foregroundStyle(Tone.ink.opacity(0.22))
                     }
-                    .padding(.leading, 13)
+                    // Starts where the text starts: past the gutter, then past the text view's
+                    // own inset. A fixed 13 put the first line *under* the line numbers, so an
+                    // empty editor read as "S1ELECT".
+                    .padding(.leading, LineNumberRulerView.textOriginX(forLines: lineCount))
                     .padding(.top, 10)
                     .allowsHitTesting(false)
                 }
@@ -367,7 +372,9 @@ struct EditorPane: View {
             .overlay(alignment: .bottomTrailing) {
                 Text(pluralized(lineCount, "line"))
                     .font(.code(10.5))
-                    .foregroundStyle(Tone.secondary.opacity(0.55))
+                    // The same grey as the gutter numbers, so the two read as one readout rather
+                    // than as two greys that happen to be nearby.
+                    .foregroundStyle(Tone.readout)
                     .padding(.trailing, 12)
                     .padding(.bottom, 7)
                     .allowsHitTesting(false)

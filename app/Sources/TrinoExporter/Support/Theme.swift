@@ -97,6 +97,37 @@ enum Tone {
 
     /// Secondary body text: the chrome's ink at 68%, which is what `Tone.secondary` has always been.
     static var secondary: Color { ink.opacity(0.68) }
+
+    /// The quiet readouts: the editor's line numbers and the line count in its corner.
+    ///
+    /// One colour for both, because they sit inches apart saying the same thing and drifted apart
+    /// the moment they were written separately: the gutter was drawn at 0.55 and the count at 0.374,
+    /// so the count looked washed out beside the number it was reporting.
+    ///
+    /// The gutter also borrowed AppKit's `secondaryLabelColor`. Measured, that resolves to white at
+    /// 0.55 on a dark appearance and black at 0.55 on a light one — the same value this writes out.
+    /// It is stated here anyway because the system's label grey is the system's to change, and a
+    /// themed app whose chrome is one palette should not have one readout resolved by somebody
+    /// else's.
+    static var readout: Color { ink.opacity(readoutOpacity) }
+
+    /// The same colour for AppKit.
+    static var readoutNS: NSColor { inkNS(readoutOpacity) }
+
+    /// `Tone.ink` at an opacity, for the AppKit drawing that cannot take a SwiftUI `Color`.
+    ///
+    /// Resolved per appearance rather than converted once: `NSColor(Color)` snapshots whichever
+    /// appearance happened to be current, so a ruler painted that way keeps its grey after the
+    /// appearance flips.
+    static func inkNS(_ opacity: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.isDark ? NSColor.white.withAlphaComponent(opacity)
+                              : NSColor.black.withAlphaComponent(opacity)
+        }
+    }
+
+    /// Written once and read by both, so the two readouts cannot drift apart again.
+    private static let readoutOpacity: CGFloat = 0.55
 }
 
 extension NSAppearance {

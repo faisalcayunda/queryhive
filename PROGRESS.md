@@ -1532,6 +1532,92 @@ Diverifikasi: sha256 berkas user sebelum dan sesudah `swift test` penuh **identi
 baru membuktikan `.bak` benar-benar satu penyimpanan di belakang. Berkas fixture yang tertinggal
 dibuang (dipindahkan ke Trash) atas persetujuan user; aplikasi mulai dari keadaan bersih.
 
+### Ikon koneksi sesuai jenisnya, dan satu bug staleness yang menyertainya (25 Sep 2026)
+
+Diminta ikon koneksi disesuaikan dengan jenis koneksinya. Semua baris koneksi sebelumnya memakai
+simbol yang sama, `server.rack`, jadi baris yang justru mengatakan **database mana** ini tidak
+mengatakan apa pun. Padahal `connectionTile` sudah ada — tile bergradasi warna koneksi yang membawa
+mark brand driver — dan komentarnya sendiri sudah mengklaim dipakai bersama oleh "the tree, the
+toolbar picker and the title strip". Klaim itu tidak benar: pemakainya hanya picker di toolbar.
+Sekarang benar.
+
+**Tile dibangun dari nilai node, bukan dari model.** `connectionTile(colour:kind:size:)` dipisah dari
+`connectionTile(_ connection:)` karena baris pohon tidak boleh membaca `model.connections`: itu akan
+melanggankan **setiap baris yang terlihat** ke array tersebut, sehingga satu edit — warna, nama,
+pindah group — menjalankan ulang semuanya. Ini perangkap yang sama dengan seleksi baris sebelumnya. Node sudah membawa
+warna dan drivernya sendiri, jadi baris bisa menggambar tanpa bertanya ke siapa pun.
+
+**Bug yang ketemu saat mengerjakan ini: `TreeNode.connectionKind` adalah `let` dan tidak pernah
+diperbarui.** `rebuildTree` memakai ulang node agar server yang sudah terbuka tetap terbuka; harga
+dari pemakaian ulang itu adalah setiap field yang disalin ke node harus disegarkan, dan yang
+terlewat menjadi basi **dengan senyap** — barisnya tetap mengatakan yang lama. Mengganti driver
+sebuah koneksi dari Trino ke Postgres meninggalkan node yang mengaku Trino: **quoting yang salah
+untuk setiap table di bawahnya** (kutip ganda alih-alih backtick, statement yang ditolak server) dan
+mark yang salah di barisnya. `connectionKind` kini `var` dan disegarkan di `rebuildTree`, dengan
+3 tes baru yang mengunci perilakunya termasuk konsekuensi quoting-nya.
+
+**Diverifikasi dari piksel.** Scene `cascade-postgres` dirender dan keempat baris koneksi diukur:
+empat tile 16pt dengan warna berbeda, dan mark di dalamnya **berbeda per jenis** — dua baris Trino
+(biru dan amber) berpola sama, baris Postgres (violet) dan MySQL (amber) berbeda. Scene snapshot baru
+`--scene groups` ditambahkan supaya baris folder dan koneksi di dalamnya bisa ditinjau: terukur, baris
+group menggambar ikon folder dan ikon koneksi di dalamnya menjorok satu tingkat (x 82 vs x 56).
+`swift test` **101 lulus / 0 gagal**.
+
+### Tiga cacat di sekitar nomor baris (25 Sep 2026)
+
+Dilaporkan dari layar setelah gutter dipasang. Ketiganya nyata.
+
+1. **Placeholder editor tertimpa nomor baris.** Placeholder digambar sebagai overlay dengan
+   `padding(.leading, 13)` — angka tetap yang dipilih sebelum ada gutter — sehingga barisnya dimulai
+   **di dalam** gutter dan terbaca "S1ELECT". Kini posisinya dihitung:
+   `LineNumberRulerView.textOriginX(forLines:)` = lebar gutter + inset text view sendiri, satu fungsi
+   yang juga dipakai ruler, jadi keduanya tidak bisa melenceng. Terukur dari piksel: pada build lama
+   teks placeholder mulai di kolom 567 (dalam band gutter), pada build baru nomor "1" ada di dalam
+   band gutter (x 608–615) dan teks mulai di x 664 — setelah gutter, sejajar dengan tempat teks
+   sungguhan mulai.
+2. **Sudut bilang "0 lines" sementara gutter bilang "1".** Dua jawaban untuk satu pertanyaan, dan
+   yang salah adalah sudutnya: karet ada di baris 1, dan setiap editor menyebut berkas kosong sebagai
+   satu baris. Keduanya sekarang menghitung hal yang sama.
+3. **Dua readout digambar dengan opasitas berbeda.** Gutter di 0.55, hitungan sudut di 0.374
+   (`Tone.secondary` 0.68 dikali 0.55), jadi hitungannya terlihat pudar di sebelah angka yang justru
+   dilaporkannya. Keduanya kini satu warna, `Tone.readout`, dengan opasitas ditulis sekali di
+   `Tone.readoutOpacity` dan dibaca oleh dua-duanya.
+
+4. **Latar gutter-nya sendiri abu-abu sistem.** Ini yang dilaporkan berikutnya, dan inilah cacat
+   keempat yang sebenarnya. `NSRulerView` menggambar latarnya sendiri: abu-abu kontrol sistem, bukan
+   warna tema. Terukur pada tema Midnight, band gutter berada di luminance **25** sementara permukaan
+   editor sendiri 12 dan area teks 7 — satu-satunya bagian editor yang tidak mengikuti tema, dan
+   itulah strip abu-abu di sisi kiri. `draw(_:)` di-override agar **tidak mengisi apa pun** dan hanya
+   menggambar marka; `super.draw` akan mengisi abu-abunya lebih dulu lalu markanya di atasnya, jadi
+   pemanggilan gambar marka harus jadi seluruh isi body. Terukur sesudahnya: gutter **7,9** sama
+   persis dengan permukaan editor (**7,9**), sedangkan kanvas 12,2 — di tema terang Cloud, gutter
+   248,1 sama dengan area teks 248,1 sementara kanvas 245,1.
+
+   Konsekuensinya garis pemisah ikut hilang, karena ruler bawaan menggambar pemisah itu sebagai
+   bagian dari latarnya. Diminta user: kembalikan sebagai border tipis. Kini digambar sendiri di
+   `draw(_:)` sebagai satu hairline di tepi kanan gutter, memakai `Tone.ink` pada 7% — opacity yang
+   sama dengan hairline antar-panel, jadi jahitannya milik tema dan bukan milik sistem. Terukur:
+   gelap **25** melawan permukaan 7,9, terang **230** melawan permukaan 248,1 — arahnya benar di
+   keduanya karena `Tone.ink` memang putih di gelap dan hitam di terang. Warna ink untuk AppKit kini
+   satu pintu, `Tone.inkNS(_:)`, dipakai bersama `Tone.readoutNS`.
+
+   Diminta lagi: kontainer penomorannya diberi warna **agak lebih terang**. Dipasang sebagai **lift
+   relatif**: putih pada 3,5% *di atas* apa pun yang ada di belakangnya, bukan warna absolut — jadi
+   hasilnya adalah permukaan tema itu sendiri yang naik satu langkah, dan pergantian tema ikut
+   menggerakkannya. Terukur: pada Midnight gutter **16,8** melawan permukaan 7,9 (+8,9); pada Cloud
+   **248,1** melawan 248,1 (**+0,0**, artinya tidak terlihat). Itu bukan bug melainkan batas arah:
+   hanya putih yang bisa menerangkan, dan permukaan tema terang sudah mendekati putih sehingga
+   langkahnya mustahil terlihat. Kalau strip itu perlu terlihat di tema terang juga, arahnya harus
+   dibalik menjadi recess di sana — belum dilakukan karena permintaannya "lebih terang".
+
+**Koreksi atas dugaan pertama gue.** Gue sempat menyimpulkan gutter memakai warna **sistem**
+(`NSColor.secondaryLabelColor`) yang berbeda dari `Tone.secondary` app. Diukur, **tidak berbeda**:
+warna sistem itu resolve ke putih@0.55 di appearance gelap dan hitam@0.55 di terang — persis nilai
+yang gue tulis. Yang benar-benar terlihat berbeda adalah **opasitasnya** (poin 3). Warnanya tetap
+ditulis sendiri di app karena abu-abu label sistem itu milik sistem untuk diubah, bukan karena
+nilainya beda hari ini. Tes yang mengklaim "berbeda dari warna sistem" sudah dibuang, bukan
+dilonggarkan — mengukurnya membuktikan klaim itu salah. `swift test` **104 lulus / 0 gagal**.
+
 ## Perkakas lokal (sengaja tidak masuk repo)`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
 dikirim produk. Karena itu ia **di-gitignore** dan tidak ada di repo — alasannya sama seperti skrip
 sekali pakai tidak di-commit: pohon repo seharusnya menggambarkan produknya.

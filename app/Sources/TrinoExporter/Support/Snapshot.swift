@@ -288,6 +288,21 @@ enum Snapshot {
         }
 
         switch scene {
+        // Groups holding the seeded connections, so the folder rows — their mark, their count of
+        // connections and the way a connection reads inside one — are reviewable without clicking
+        // through the menu that makes them.
+        case "groups":
+            let production = ConnectionGroup(name: "Production")
+            let staging = ConnectionGroup(name: "Staging")
+            model.groups = [production, staging]
+            model.connections[0].group = production.id
+            model.connections[2].group = production.id
+            model.connections[3].group = staging.id
+            model.rebuildTree()
+            // One folder open and one shut, because both states are part of the picture.
+            for node in model.tree where node.kind == .group {
+                node.expanded = node.title == "Production"
+            }
         // A tab that has been opened and not used: no rows, no log lines, no files. This is the
         // state the panel's default is about, and it is what `--scene fresh-tab` is for.
         case "fresh-tab":
