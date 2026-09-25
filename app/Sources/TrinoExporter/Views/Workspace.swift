@@ -119,7 +119,7 @@ struct TabChip: View {
         HStack(spacing: 7) {
             Circle().fill(dot).frame(width: 6, height: 6)
             Text(tab.title)
-                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .font(.ui(12, weight: selected ? .semibold : .regular))
                 .lineLimit(1)
                 .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
             Button { model.closeTab(tab.id) } label: {
@@ -279,7 +279,7 @@ struct WriteModeButton: View {
                 Image(systemName: mode.symbol)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(mode.tint)
-                Text(mode.label).font(.system(size: 12))
+                Text(mode.label).font(.ui(12))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(Tone.secondary)
@@ -307,67 +307,78 @@ struct EditorPane: View {
     /// through `textDidBeginEditing` / `textDidEndEditing`.
     @State private var focused = false
 
+    /// The line count, for the corner readout.
+    ///
+    /// An empty editor counts zero lines rather than one: `split` on "" returns nothing, and a
+    /// blank editor showing "1 line" would be counting the caret, not the text.
     private var lineCount: Int {
         tab.sql.isEmpty ? 0 : tab.sql.split(whereSeparator: \.isNewline).count
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Everything on the left, together. These two act on the text directly below them, so
-            // parking them at the far edge of a 1240pt window meant an 800pt mouse journey to
-            // reach "Clear" — and left a row whose two ends did not look related to each other.
-            // A header that is empty on the right reads as calm; a header with a label at one end
-            // and its actions at the other reads as broken.
-            HStack(spacing: 8) {
-                SectionLabel(text: "Query")
-                Text("·").font(.system(size: 10.5)).foregroundStyle(Tone.ink.opacity(0.25))
-                Text(pluralized(lineCount, "line"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Tone.secondary)
-                PillButton(title: "Load File…", symbol: "folder", compact: true) { tab.loadSQLFromFile() }
-                    .keyboardShortcut(model.shortcut(for: .openFile))
-                    .help("Load SQL from a file (⌘O)")
-                    .padding(.leading, 6)
-                // Quiet: clearing is not a commitment, and giving it the same weight as
-                // "Load File…" made the pair read as two equal choices.
-                PillButton(title: "Clear", symbol: "xmark", role: .quiet, compact: true) { tab.sql = "" }
-                    .disabled(tab.sql.isEmpty)
-                Spacer(minLength: 0)
-            }
-
-            .padding(.horizontal, Metrics.gutter)
-            .frame(height: Metrics.paneHeader)
-
-            SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
-                      completion: model.completion,
-                      candidates: { prefix, qualified in
-                          model.suggestions(for: tab, prefix: prefix, qualified: qualified)
-                      })
-                .editorBox(focused: focused)
-                // NSTextView has no placeholder of its own, so it is drawn over the text
-                // container's own inset (8 wide, 9 tall) plus its line fragment padding.
-                .overlay(alignment: .topLeading) {
-                    if tab.sql.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("SELECT * FROM hive.analytics.penerima_manfaat")
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(Tone.ink.opacity(0.26))
-                            Text("Suggestions appear as you type · ⌃Space to ask for them")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Tone.ink.opacity(0.22))
-                        }
-                        .padding(.leading, 13)
-                        .padding(.top, 10)
-                        .allowsHitTesting(false)
+        // No header row above the editor any more. It carried a "Query · N lines" label, a
+        // "Load File…" button and a "Clear" button, and the label earned none of its height: the
+        // tab already says which query this is, and a line count is not something anyone acts on.
+        //
+        // The two buttons were *moved*, not dropped. Clear sits over the top-right corner of the
+        // text it clears, and Load SQL File moved to the File menu, which is where ⌘O is looked
+        // for — deleting it from here without that would have removed the feature, since this
+        // button was its only entry point and the only holder of the shortcut.
+        SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
+                  completion: model.completion,
+                  candidates: { prefix, path in
+                      model.suggestions(for: tab, prefix: prefix, path: path)
+                  })
+            .editorBox(focused: focused)
+            // NSTextView has no placeholder of its own, so it is drawn over the text
+            // container's own inset (8 wide, 9 tall) plus its line fragment padding.
+            .overlay(alignment: .topLeading) {
+                if tab.sql.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("SELECT * FROM hive.analytics.penerima_manfaat")
+                            .font(.code(13))
+                            .foregroundStyle(Tone.ink.opacity(0.26))
+                        Text("Suggestions appear as you type · ⌃Space to ask for them")
+                            .font(.ui(11.5))
+                            .foregroundStyle(Tone.ink.opacity(0.22))
                     }
+                    .padding(.leading, 13)
+                    .padding(.top, 10)
+                    .allowsHitTesting(false)
                 }
-                .overlay { SuggestionOverlay(completion: model.completion) }
-                .padding(.horizontal, Metrics.gutter)
-                .padding(.bottom, 10)
-        }
-        .frame(maxHeight: .infinity)
-        // A list left over from another tab would be pinned to the wrong caret.
-        .onChange(of: model.selectedTabID) { _, _ in model.completion.dismiss() }
+            }
+            // Shown only while there is something to clear. It replaced a permanently visible
+            // button that spent most of its life disabled; an action that cannot do anything is
+            // noise. Nothing reflows when it comes and goes, because it is an overlay rather than
+            // a row.
+            .overlay(alignment: .topTrailing) {
+                if !tab.sql.isEmpty {
+                    IconButton(symbol: "xmark", help: "Clear the editor", diameter: 22) {
+                        tab.sql = ""
+                    }
+                    .padding(.trailing, 11)
+                    .padding(.top, 8)
+                }
+            }
+            // The line count, in the corner of the text it counts. Faint on purpose: it is a
+            // readout, not a control, and the editor scrolls under it — at anything stronger it
+            // would compete with the last line of a long query. Monospaced so the number does not
+            // shift sideways as it grows from 9 to 10.
+            .overlay(alignment: .bottomTrailing) {
+                Text(pluralized(lineCount, "line"))
+                    .font(.code(10.5))
+                    .foregroundStyle(Tone.secondary.opacity(0.55))
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 7)
+                    .allowsHitTesting(false)
+            }
+            .overlay { SuggestionOverlay(completion: model.completion) }
+            .padding(.horizontal, Metrics.gutter)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
+            .frame(maxHeight: .infinity)
+            // A list left over from another tab would be pinned to the wrong caret.
+            .onChange(of: model.selectedTabID) { _, _ in model.completion.dismiss() }
     }
 }
 
@@ -439,7 +450,7 @@ struct FormatTile: View {
                                            : AnyShapeStyle(format.tint.opacity(0.14)))
                     }
                 Text(format.label)
-                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .font(.code(10.5, weight: .semibold))
                     .foregroundStyle(selected ? .white : Tone.secondary)
             }
             .frame(maxWidth: .infinity)
@@ -493,7 +504,7 @@ struct FormatOptionsPanel: View {
                 }
             case .xml, .html:
                 Text("This format takes no options.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             }
         }
@@ -522,7 +533,7 @@ struct StreamingOptions: View {
             Text(tab.format.splitsItself
                  ? "\(tab.format.label) splits by its own row ceiling, so no split is needed."
                  : "0 writes one file however big it gets.")
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ChipToggle(label: "Zip the result files", isOn: $tab.zip)
@@ -574,13 +585,13 @@ struct ObjectsPane: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Tone.secondary)
             Text(tab.objectScope?.title ?? tab.title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.ui(12, weight: .semibold))
                 .foregroundStyle(Tone.ink)
             if tab.objectLoading {
                 ProgressView().controlSize(.mini)
             } else if !tab.objectRows.isEmpty {
                 Text(pluralized(tab.objectRows.count, "object"))
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             }
             Spacer()
@@ -633,7 +644,7 @@ struct ObjectsPane: View {
             HStack(spacing: 0) {
                 ForEach(tab.objectColumns, id: \.self) { name in
                     Text(name)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.ui(11, weight: .semibold))
                         .foregroundStyle(Tone.secondary)
                         .frame(width: columnWidth, alignment: .leading)
                 }
@@ -678,7 +689,7 @@ private struct ObjectRow: View {
             // worse than a blank cell.
             ForEach(tab.objectColumns.indices, id: \.self) { column in
                 Text(column < row.count ? (row[column] ?? "") : "")
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.code(11))
                     .foregroundStyle(Tone.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -762,13 +773,13 @@ private struct ObjectInspector: View {
     private var summary: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(tab.objectDetailTable ?? "Table")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.ui(13, weight: .semibold))
                 .foregroundStyle(Tone.ink)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             if let scope = tab.objectScope, !scope.title.isEmpty {
                 Text(scope.title)
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.code(10.5))
                     .foregroundStyle(Tone.secondary)
                     .textSelection(.enabled)
             }
@@ -802,25 +813,25 @@ private struct ObjectInspector: View {
             }
             if let error = tab.objectDetailError {
                 Text(error)
-                    .font(.system(size: 10.5))
+                    .font(.ui(10.5))
                     .foregroundStyle(Tone.coral)
                     .fixedSize(horizontal: false, vertical: true)
             } else if tab.objectDetailColumns.isEmpty {
                 Text(tab.objectDetailLoading ? "Reading…" : "No columns reported.")
-                    .font(.system(size: 10.5))
+                    .font(.ui(10.5))
                     .foregroundStyle(Tone.secondary)
             } else {
                 ForEach(Array(tab.objectDetailColumns.enumerated()), id: \.offset) { _, column in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(column.name)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.code(11))
                             .foregroundStyle(Tone.ink.opacity(0.9))
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .textSelection(.enabled)
                         Spacer(minLength: 4)
                         Text(column.type)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.code(10))
                             .foregroundStyle(Tone.secondary)
                             .lineLimit(1)
                     }
@@ -850,7 +861,7 @@ private struct ObjectInspector: View {
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text.uppercased())
-            .font(.system(size: 9.5, weight: .bold))
+            .font(.ui(9.5, weight: .bold))
             .tracking(0.8)
             .foregroundStyle(Tone.secondary)
     }
@@ -858,10 +869,10 @@ private struct ObjectInspector: View {
     private func field(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
-                .font(.system(size: 9.5, weight: .semibold))
+                .font(.ui(9.5, weight: .semibold))
                 .foregroundStyle(Tone.secondary)
             Text(value)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.code(11))
                 .foregroundStyle(Tone.ink.opacity(0.9))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)

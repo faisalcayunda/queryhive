@@ -59,7 +59,7 @@ struct DestinationPopover: View {
                 SectionLabel(text: "Destination")
                 Segmented(selection: $tab.destination, options: [Destination.file, .table]) { $0.label }
                 Text(summary)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.code(11))
                     .foregroundStyle(Tone.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -82,7 +82,7 @@ struct DestinationPopover: View {
                         LabeledField("Folder") {
                             HStack(spacing: 8) {
                                 Text(tab.outputDirectory?.path ?? "No folder chosen")
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.code(11))
                                     .foregroundStyle(tab.outputDirectory == nil ? Tone.coral : Tone.ink)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -107,7 +107,7 @@ struct DestinationPopover: View {
 
             HStack(spacing: 8) {
                 if let blocked {
-                    Text(blocked).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                    Text(blocked).font(.ui(11)).foregroundStyle(Tone.coral)
                         .lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
@@ -203,10 +203,10 @@ struct TableTargetFields: View {
                             .padding(.top, 1)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.statement)
-                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                .font(.code(11.5, weight: .semibold))
                                 .foregroundStyle(mode == .replace ? Tone.coral : Tone.ink)
                             Text(mode.help)
-                                .font(.system(size: 11))
+                                .font(.ui(11))
                                 .foregroundStyle(Tone.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }

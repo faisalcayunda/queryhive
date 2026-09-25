@@ -46,6 +46,25 @@ struct RootView: View {
         } message: {
             Text(model.notice?.message ?? "")
         }
+        // Naming a group, for both "New Group…" and "Rename Group…". One alert for both because
+        // they are the same question — what is this folder called — and the only difference is
+        // whether the answer creates a group or changes one.
+        .alert(model.groupNaming?.groupID == nil ? "New Group" : "Rename Group",
+               isPresented: Binding(
+                   get: { model.groupNaming != nil },
+                   set: { if !$0 { model.groupNaming = nil } }
+               )) {
+            TextField("Name", text: Binding(
+                get: { model.groupNaming?.name ?? "" },
+                set: { model.groupNaming?.name = $0 }
+            ))
+            Button("Save") { model.commitGroupNaming() }
+            Button("Cancel", role: .cancel) { model.groupNaming = nil }
+        } message: {
+            Text(model.groupNaming?.fileConnectionID == nil
+                 ? "Connections can be moved into it from a connection's Group menu."
+                 : "The connection will be filed into it.")
+        }
     }
 }
 
@@ -76,7 +95,7 @@ struct StatusBar: View {
         HStack(spacing: 9) {
             Circle().fill(dot).frame(width: 7, height: 7)
             Text(model.statusConnection)
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .lineLimit(1)
                 .layoutPriority(1)
@@ -86,7 +105,7 @@ struct StatusBar: View {
                     ProgressView().controlSize(.mini)
                 }
                 Text(tab.summary)
-                    .font(.system(size: 11, weight: tab.stage == .failed ? .semibold : .regular))
+                    .font(.ui(11, weight: tab.stage == .failed ? .semibold : .regular))
                     .foregroundStyle(tab.stage == .failed ? Tone.coral : Tone.ink.opacity(0.9))
                     .lineLimit(1)
             }

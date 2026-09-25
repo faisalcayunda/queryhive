@@ -259,6 +259,8 @@ final class ThemeStore {
     private static let toneKey = "surfaceTone"
     private static let modeKey = "appearanceMode"
     private static let lightThemeKey = "lightTheme"
+    private static let uiFontKey = "uiFontFamily"
+    private static let codeFontKey = "codeFontFamily"
 
     /// While true, changes are held in memory and never written to `UserDefaults`. Set by
     /// `pin(theme:accent:)` for a render that must not rewrite the user's preferences — an icon
@@ -293,6 +295,14 @@ final class ThemeStore {
     private var storedTone: SurfaceTone = {
         let raw = UserDefaults.standard.string(forKey: toneKey) ?? ""
         return SurfaceTone(rawValue: raw) ?? .glow
+    }()
+    /// Empty means the system font, which is the default and stays the default: an app that
+    /// shipped a font choice nobody made would be restyling itself on first launch.
+    private var storedUIFont: String = {
+        UserDefaults.standard.string(forKey: uiFontKey) ?? ""
+    }()
+    private var storedCodeFont: String = {
+        UserDefaults.standard.string(forKey: codeFontKey) ?? ""
     }()
 
     /// Whether the app follows the system's appearance or pins one.
@@ -362,6 +372,19 @@ final class ThemeStore {
         set { storedTone = newValue; persist() }
     }
 
+    /// The family the chrome draws in. Empty is the system font, and stays the default.
+    var uiFontFamily: String {
+        get { storedUIFont }
+        set { storedUIFont = newValue; persist() }
+    }
+
+    /// The family the code draws in — the editor, the grid, every monospaced value. Empty is the
+    /// system's monospaced font.
+    var codeFontFamily: String {
+        get { storedCodeFont }
+        set { storedCodeFont = newValue; persist() }
+    }
+
     private func persist() {
         guard !isPinned else { return }
         UserDefaults.standard.set(storedDarkTheme.rawValue, forKey: Self.themeKey)
@@ -370,6 +393,8 @@ final class ThemeStore {
         UserDefaults.standard.set(storedGlow, forKey: Self.glowKey)
         UserDefaults.standard.set(storedTone.rawValue, forKey: Self.toneKey)
         UserDefaults.standard.set(storedMode.rawValue, forKey: Self.modeKey)
+        UserDefaults.standard.set(storedUIFont, forKey: Self.uiFontKey)
+        UserDefaults.standard.set(storedCodeFont, forKey: Self.codeFontKey)
     }
 
     /// The backdrop opacity for a glow the design drew at `base`, scaled by the user's choice and
@@ -395,6 +420,8 @@ final class ThemeStore {
         accent = .ice
         glow = 1.0
         tone = .glow
+        uiFontFamily = FontChoice.system
+        codeFontFamily = FontChoice.system
     }
 
     /// Apply a named pair in one step. Goes through the same setters, so it persists the same way
@@ -425,7 +452,8 @@ final class ThemeStore {
     /// `lightTheme` straight into the user's preferences — the exact thing this method promises not
     /// to do.
     func pin(theme: AppTheme? = nil, accent: AccentChoice? = nil, tone: SurfaceTone? = nil,
-             mode: AppearanceMode? = nil, systemIsDark: Bool? = nil) {
+             mode: AppearanceMode? = nil, systemIsDark: Bool? = nil,
+             uiFont: String? = nil, codeFont: String? = nil) {
         isPinned = true
         // A snapshot render has no real window, so it cannot ask AppKit which appearance is in
         // effect; the caller states it. This is what lets `--mode system --system-appearance light`
@@ -439,5 +467,7 @@ final class ThemeStore {
         }
         if let accent { storedAccent = accent }
         if let tone { storedTone = tone }
+        if let uiFont { storedUIFont = uiFont }
+        if let codeFont { storedCodeFont = codeFont }
     }
 }

@@ -18,9 +18,11 @@ struct SQLEditor: NSViewRepresentable {
     @Binding var selection: NSRange
     /// Shared with the popup overlay drawn by the parent.
     let completion: EditorCompletion
-    /// Candidates for a typed prefix. `qualified` is true when the word follows a `.`, which is
-    /// the signal to drop keywords and offer objects only.
-    let candidates: (_ prefix: String, _ qualified: Bool) -> [SQLSuggestion]
+    /// Candidates for a typed prefix. `path` is the `.`-separated qualifier the word is being
+    /// written under — empty for a bare word, `["hive", "analytics"]` for `hive.analytics.` — which
+    /// is what decides whether the answer is a table in that schema, a schema in that catalog, or
+    /// a catalog in that connection. Without it the list is every object in the tree.
+    let candidates: (_ prefix: String, _ path: [String]) -> [SQLSuggestion]
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -33,7 +35,7 @@ struct SQLEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
-        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.font = FontChoice.codeNSFont(size: 13, weight: .regular)
         // Adaptive, not pinned white: this NSTextView draws on `Tone.canvas`, which is near-black
         // in a dark appearance and off-white in a light one. AppKit resolves both of these per
         // appearance, so the caret and the default text colour follow the canvas with no observer.
@@ -69,8 +71,17 @@ struct SQLEditor: NSViewRepresentable {
         scrollView.frame = container.bounds
         container.addSubview(scrollView)
 
+        // The gutter. Created after the document view is set, because the ruler needs a scroll view
+        // to attach to.
+        let ruler = LineNumberRulerView(textView: textView)
+        scrollView.verticalRulerView = ruler
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+
         context.coordinator.textView = textView
         context.coordinator.container = container
+        context.coordinator.ruler = ruler
+        ruler.update(for: textView.string)
         textView.interceptKey = { [weak coordinator = context.coordinator] event in
             coordinator?.handle(event) ?? false
         }
@@ -86,6 +97,9 @@ struct SQLEditor: NSViewRepresentable {
         // The coordinator reads bindings and callbacks through `parent`, so it has to be refreshed
         // on every update or it keeps calling into a stale view value.
         context.coordinator.parent = self
+        // Before the early return below: the gutter's font follows the code-font setting, and a
+        // setting change does not alter the text, so it would otherwise never reach the ruler.
+        context.coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)
         guard let textView = context.coordinator.textView else { return }
         guard textView.string != text else { return }
         let previous = textView.string
@@ -108,6 +122,7 @@ struct SQLEditor: NSViewRepresentable {
         var parent: SQLEditor
         weak var textView: SQLTextView?
         weak var container: NSView?
+        weak var ruler: LineNumberRulerView?
 
         private var debounce: DispatchWorkItem?
         private var suppressAutoTrigger = false
@@ -148,6 +163,9 @@ struct SQLEditor: NSViewRepresentable {
             isColouring = true
             SQLSyntax.apply(to: textView)
             isColouring = false
+            // The gutter is numbered from the text, so it has to be told when the text changed.
+            // `NSRulerView` handles scrolling on its own; it cannot know about typing.
+            ruler?.update(for: textView.string)
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -226,7 +244,7 @@ struct SQLEditor: NSViewRepresentable {
                 parent.completion.dismiss()
                 return
             }
-            let items = parent.candidates(context.prefix, context.qualified)
+            let items = parent.candidates(context.prefix, context.path)
             guard !items.isEmpty else {
                 parent.completion.dismiss()
                 return
@@ -238,7 +256,11 @@ struct SQLEditor: NSViewRepresentable {
 
         private struct WordContext {
             let prefix: String
-            let qualified: Bool
+            /// The `.`-separated segments the word is being qualified *by*, outermost first. Typing
+            /// `hive.analytics.` gives `["hive", "analytics"]` with an empty prefix; typing
+            /// `hive.analytics.pen` gives the same path with the prefix `pen`. Empty when the word
+            /// stands alone.
+            let path: [String]
             let minimumPrefix: Int
         }
 
@@ -248,13 +270,9 @@ struct SQLEditor: NSViewRepresentable {
             guard caret <= text.length else { return nil }
             // No SQL suggestions inside a string literal: the user is writing data, not code.
             guard !insideStringLiteral(text, upTo: caret) else { return nil }
-
-            var start = caret
-            while start > 0, Self.isWordCharacter(text.character(at: start - 1)) { start -= 1 }
-            let prefix = text.substring(with: NSRange(location: start, length: caret - start))
-            // A `.` means the word is being qualified, so only objects can be what comes next.
-            let qualified = start > 0 && text.character(at: start - 1) == 0x2E
-            return WordContext(prefix: prefix, qualified: qualified, minimumPrefix: qualified ? 0 : 2)
+            guard let parsed = WordScope.parse(text, upTo: caret) else { return nil }
+            return WordContext(prefix: parsed.prefix, path: parsed.path,
+                               minimumPrefix: parsed.path.isEmpty ? 2 : 0)
         }
 
         private func wordRange(in textView: NSTextView) -> NSRange {
@@ -268,6 +286,17 @@ struct SQLEditor: NSViewRepresentable {
         private static func isWordCharacter(_ character: unichar) -> Bool {
             guard let scalar = Unicode.Scalar(character) else { return false }
             return CharacterSet.alphanumerics.contains(scalar) || character == 0x5F  // _
+        }
+
+        /// A `.` between two name segments.
+        private static func isQualifierSeparator(_ character: unichar) -> Bool {
+            character == 0x2E
+        }
+
+        /// The quote characters the three drivers use for identifiers: `"` for Trino and Postgres,
+        /// a backtick for MySQL.
+        private static func isQuote(_ character: unichar) -> Bool {
+            character == 0x22 || character == 0x60
         }
 
         /// An odd number of unescaped quotes before the caret means the caret is inside one.
@@ -312,5 +341,235 @@ final class SQLTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         if let interceptKey, interceptKey(event) { return }
         super.keyDown(with: event)
+    }
+}
+
+/// The word under the caret and the qualifier it sits under, parsed out of the text.
+///
+/// Split out of the editor's coordinator as a pure function so it can be tested directly: this is
+/// the part that decides *which* schema's tables an answer may contain, and getting it wrong is
+/// silent — the list still looks plausible, it is just mostly wrong. The coordinator only has the
+/// `NSTextView` wiring around it.
+enum WordScope {
+    struct Parsed: Equatable {
+        /// The partial word being typed, which the candidate list filters by.
+        let prefix: String
+        /// The `.`-separated names the word is qualified by, outermost first and without quotes.
+        /// `hive.analytics.pen` gives `["hive", "analytics"]` and the prefix `pen`.
+        let path: [String]
+    }
+
+    /// Parse the word that would be completed at `caret`.
+    ///
+    /// Returns nil when there is nothing to complete at that position.
+    static func parse(_ text: NSString, upTo caret: Int) -> Parsed? {
+        guard caret <= text.length else { return nil }
+        var start = caret
+        while start > 0, isWordCharacter(text.character(at: start - 1)) { start -= 1 }
+        let prefix = text.substring(with: NSRange(location: start, length: caret - start))
+
+        // Walk back over the qualifier. This is what tells the candidate list which schema's tables
+        // to offer: without it every table in the tree is a candidate for every position, so
+        // `hive.analytics.` offered tables from other schemas and other connections entirely.
+        var path: [String] = []
+        var cursor = start
+        while cursor > 0, isSeparator(text.character(at: cursor - 1)) {
+            let end = cursor - 1
+            // A quoted identifier is one segment even though it can contain spaces and dots:
+            // `"my schema"` and `"a.b"` are each a single name to the server.
+            if end > 0, isQuote(text.character(at: end - 1)) {
+                let quote = text.character(at: end - 1)
+                var begin = end - 1
+                while begin > 0, text.character(at: begin - 1) != quote { begin -= 1 }
+                guard begin > 0 else { break }
+                path.insert(text.substring(with: NSRange(location: begin, length: end - 1 - begin)), at: 0)
+                cursor = begin - 1
+                continue
+            }
+            var begin = end
+            while begin > 0, isWordCharacter(text.character(at: begin - 1)) { begin -= 1 }
+            // A `.` with no name before it — `t.` where `t` is not a name, or a leading dot —
+            // ends the walk rather than inventing an empty segment.
+            guard begin < end else { break }
+            path.insert(text.substring(with: NSRange(location: begin, length: end - begin)), at: 0)
+            cursor = begin
+        }
+        return Parsed(prefix: prefix, path: path)
+    }
+
+    static func isWordCharacter(_ character: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(character) else { return false }
+        return CharacterSet.alphanumerics.contains(scalar) || character == 0x5F  // _
+    }
+
+    /// A `.` between two name segments.
+    static func isSeparator(_ character: unichar) -> Bool { character == 0x2E }
+
+    /// The identifier quotes the three drivers use: `"` for Trino and Postgres, a backtick for
+    /// MySQL.
+    static func isQuote(_ character: unichar) -> Bool { character == 0x22 || character == 0x60 }
+}
+
+/// The line-number gutter down the left of the editor.
+///
+/// An `NSRulerView` rather than a SwiftUI column beside the editor. The ruler is part of the scroll
+/// view, so AppKit keeps it aligned with the text as it scrolls and as lines wrap; a column drawn
+/// next to the editor would have to re-derive the scroll offset every frame and would drift the
+/// first time a long line wrapped.
+///
+/// It numbers **logical** lines — the ones the query has — not the visual fragments wrapping
+/// produces, which is also what the corner readout counts. A wrapped continuation gets no number,
+/// so the two cannot disagree about how many lines the query is.
+final class LineNumberRulerView: NSRulerView {
+    private weak var textView: NSTextView?
+
+    /// The font the numbers are drawn in. Set from the same family as the code, so a font chosen in
+    /// Settings reaches the gutter instead of leaving it in the system's monospaced face.
+    var numberFont: NSFont = .monospacedSystemFont(ofSize: 10.5, weight: .regular) {
+        didSet { needsDisplay = true }
+    }
+
+    /// Lines in the text, kept by the coordinator on every change. Used only for the gutter's width,
+    /// so it is not recomputed per draw.
+    private var lineCount = 1
+
+    init(textView: NSTextView) {
+        self.textView = textView
+        super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
+        clientView = textView
+        ruleThickness = Self.width(for: 1)
+    }
+
+    required init(coder: NSCoder) {
+        fatalError("LineNumberRulerView is only created in code")
+    }
+
+    /// The text changed: recount for the width, and repaint.
+    func update(for text: String) {
+        let lines = text.isEmpty ? 1 : text.reduce(into: 1) { count, character in
+            if character == "\n" { count += 1 }
+        }
+        lineCount = lines
+        let wanted = Self.width(for: lines)
+        if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
+        needsDisplay = true
+    }
+
+    /// Wide enough for the number it will have to show, so the gutter does not jump sideways when
+    /// the hundredth line arrives — and no wider, because every point here is a point the text
+    /// does not get.
+    private static func width(for lines: Int) -> CGFloat {
+        let digits = CGFloat(max(2, String(max(lines, 1)).count))
+        return digits * 7.5 + 20
+    }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let textView, let scrollView else { return }
+        // The text view's origin in the ruler's own coordinates. `convert` accounts for one being
+        // flipped and the other not, which is the whole reason this is not arithmetic on offsets.
+        let origin = convert(NSPoint.zero, from: textView)
+        let inset = textView.textContainerInset
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: numberFont,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+
+        for entry in numberedLines(in: scrollView.contentView.bounds) {
+            let label = "\(entry.number)" as NSString
+            let size = label.size(withAttributes: attributes)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 8,
+                                   y: origin.y + inset.height + entry.minY
+                                      + (entry.height - size.height) / 2),
+                       withAttributes: attributes)
+        }
+    }
+
+    /// One number to draw: which line it is, and where its line fragment sits in the text
+    /// container's coordinates.
+    struct NumberedLine: Equatable {
+        let number: Int
+        let minY: CGFloat
+        let height: CGFloat
+    }
+
+    /// Which line numbers to draw for a visible region, and where.
+    ///
+    /// Split out of the drawing so the decision can be tested without a screen. The decision that
+    /// matters is which fragments are *lines*: a query line long enough to wrap produces several
+    /// fragments and only the first is a line of the query, so numbering every fragment would
+    /// report more lines than the query has — and disagree with the count in the corner, which
+    /// counts newlines.
+    func numberedLines(in visibleRect: NSRect) -> [NumberedLine] {
+        guard let textView,
+              let layoutManager = textView.layoutManager,
+              let container = textView.textContainer
+        else { return [] }
+
+        let string = textView.string as NSString
+
+        // An empty editor still has a line 1, where the caret is. Left to `enumerateLineFragments`
+        // it would produce nothing, and the gutter would go blank the moment the last character was
+        // deleted.
+        if string.length == 0 {
+            let height = layoutManager.defaultLineHeight(for: textView.font ?? .systemFont(ofSize: 13))
+            return [NumberedLine(number: 1, minY: 0, height: height)]
+        }
+
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
+        let firstCharacter = layoutManager.characterIndexForGlyph(at: glyphRange.location)
+
+        // Counting starts from the top of the text, not from the top of the view, so scrolling
+        // does not renumber the query. The count then advances with the fragments in order, which
+        // enumerates them front to back.
+        var line = 1 + newlines(in: string, before: firstCharacter)
+        var cursor = firstCharacter
+        var seen = -1
+        var out: [NumberedLine] = []
+
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { fragmentRect, _, _, fragmentGlyphs, _ in
+            let index = layoutManager.characterIndexForGlyph(at: fragmentGlyphs.location)
+            while cursor < index {
+                if string.character(at: cursor) == 0x0A { line += 1 }
+                cursor += 1
+            }
+            // Not the start of a line: a wrapped continuation, which gets no number.
+            guard index == 0 || string.character(at: index - 1) == 0x0A else { return }
+            // A fragment on the boundary of the visible range can be enumerated twice.
+            guard index != seen else { return }
+            seen = index
+            out.append(NumberedLine(number: line, minY: fragmentRect.minY, height: fragmentRect.height))
+        }
+
+        // A trailing newline puts the caret on a line the layout manager has no glyph for, and on
+        // some paths it does not create a fragment for it either. The query does have that line —
+        // the caret is sitting on it — so it is added here rather than being left to chance.
+        if string.character(at: string.length - 1) == 0x0A {
+            let height = layoutManager.defaultLineHeight(for: textView.font ?? .systemFont(ofSize: 13))
+            let last = out.last
+            out.append(NumberedLine(number: line + 1,
+                                    minY: last.map { $0.minY + $0.height } ?? 0,
+                                    height: height))
+        }
+        return out
+    }
+
+    /// How many newlines the text holds before `index`.
+    ///
+    /// Searched with `range(of:)` rather than by reading character by character: the call is a scan
+    /// in C, and this runs when the view is scrolled, where the text above can be long.
+    private func newlines(in string: NSString, before index: Int) -> Int {
+        let limit = min(index, string.length)
+        guard limit > 0 else { return 0 }
+        var count = 0
+        var cursor = 0
+        while cursor < limit {
+            let found = string.range(of: "\n", options: [],
+                                     range: NSRange(location: cursor, length: limit - cursor))
+            guard found.location != NSNotFound else { break }
+            count += 1
+            cursor = found.location + 1
+        }
+        return count
     }
 }

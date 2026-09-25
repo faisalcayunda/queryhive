@@ -40,12 +40,14 @@ enum Snapshot {
         return arguments[index + 1]
     }
 
-    /// `--theme <name>`, `--accent <name>` and `--tone <name>`: draw the shell in an appearance
-    /// the user has not chosen. All three go through `ThemeStore.pin`, so reviewing one never
-    /// leaves it behind in the user's preferences — which matters because these flags are how the
-    /// design is checked, and a check that rewrites what it is checking is not a check.
+    /// `--theme <name>`, `--accent <name>`, `--tone <name>`, `--ui-font <family>` and
+    /// `--code-font <family>`: draw the shell in an appearance the user has not chosen. All five go
+    /// through `ThemeStore.pin`, so reviewing one never leaves it behind in the user's preferences
+    /// — which matters because these flags are how the design is checked, and a check that rewrites
+    /// what it is checking is not a check.
     static func requestedAppearance() -> (theme: AppTheme?, accent: AccentChoice?, tone: SurfaceTone?,
-                                          mode: AppearanceMode?, systemIsDark: Bool?)? {
+                                          mode: AppearanceMode?, systemIsDark: Bool?,
+                                          uiFont: String?, codeFont: String?)? {
         let arguments = CommandLine.arguments
         func value(_ flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -59,8 +61,13 @@ enum Snapshot {
         // no real window, so it cannot ask AppKit; this is how `--mode system` is drawn as light on
         // a machine that is currently dark.
         let systemIsDark = value("--system-appearance").map { $0 == "dark" }
-        guard theme != nil || accent != nil || tone != nil || mode != nil || systemIsDark != nil else { return nil }
-        return (theme, accent, tone, mode, systemIsDark)
+        // Font families are taken verbatim: any installed family is valid, so there is nothing to
+        // validate against and no reason to reject one this build has not heard of.
+        let uiFont = value("--ui-font")
+        let codeFont = value("--code-font")
+        guard theme != nil || accent != nil || tone != nil || mode != nil || systemIsDark != nil
+                || uiFont != nil || codeFont != nil else { return nil }
+        return (theme, accent, tone, mode, systemIsDark, uiFont, codeFont)
     }
 
     @MainActor
@@ -75,7 +82,8 @@ enum Snapshot {
         let store = ThemeStore.shared
         if let requested {
             store.pin(theme: requested.theme, accent: requested.accent, tone: requested.tone,
-                      mode: requested.mode, systemIsDark: requested.systemIsDark)
+                      mode: requested.mode, systemIsDark: requested.systemIsDark,
+                      uiFont: requested.uiFont, codeFont: requested.codeFont)
         }
         let scheme = store.mode.colorScheme
         let app = NSApplication.shared
@@ -86,8 +94,10 @@ enum Snapshot {
         // Settings is its own scene in the running app, so it needs its own root here or it stays
         // the one screen nobody can look at without launching.
         let hosting: NSHostingView<AnyView>
-        if scene == "settings" || scene == "settings-keyboard" {
-            hosting = NSHostingView(rootView: AnyView(SettingsView(pane: scene == "settings-keyboard" ? .keyboard : .appearance)
+        if scene.hasPrefix("settings") {
+            let pane: SettingsView.Pane = scene == "settings-keyboard" ? .keyboard
+                : scene == "settings-fonts" ? .fonts : .appearance
+            hosting = NSHostingView(rootView: AnyView(SettingsView(pane: pane)
                 .environment(model)
                 .preferredColorScheme(scheme)))
         } else {
@@ -96,7 +106,7 @@ enum Snapshot {
                 .frame(width: width, height: height)
                 .preferredColorScheme(scheme)))
         }
-        hosting.frame = scene == "settings" || scene == "settings-keyboard"
+        hosting.frame = scene.hasPrefix("settings")
             ? NSRect(x: 0, y: 0, width: 560, height: 640)
             : NSRect(x: 0, y: 0, width: width, height: height)
 
@@ -278,6 +288,17 @@ enum Snapshot {
         }
 
         switch scene {
+        // A tab that has been opened and not used: no rows, no log lines, no files. This is the
+        // state the panel's default is about, and it is what `--scene fresh-tab` is for.
+        case "fresh-tab":
+            tab.logLines = []
+            tab.preview = nil
+            tab.files = []
+            tab.stage = .idle
+            tab.panel = .result
+            // The seeded lines above are what the other scenes read; this scene is the absence of
+            // them, so the panel's content check has to run the way `newTab` runs it.
+            model.panelCollapsed = true
         case "files":
             tab.panel = .files
         case "columns":
@@ -608,6 +629,13 @@ enum Snapshot {
                                       text: "312,480 rows written to hive.analytics.penerima_manfaat_2026")
         default:
             break
+        }
+        // The scenes above fill in content by hand, so the panel's own rule has to be applied after
+        // them rather than before: it is what the app does when a tab changes, and a render that
+        // skipped it would show a state the app cannot reach (a grid full of rows behind a closed
+        // panel, or a header open over nothing). `fresh-tab` sets its own state on purpose.
+        if scene != "fresh-tab" {
+            model.syncPanelToSelectedTab()
         }
         return model
     }

@@ -90,7 +90,7 @@ struct ResultGrid: View {
                 ProgressView().controlSize(.small)
             }
             Text(text)
-                .font(.system(size: 11.5))
+                .font(.ui(11.5))
                 .foregroundStyle(tint)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -127,7 +127,7 @@ struct ResultGrid: View {
             ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
                 VStack(alignment: isNumeric(column.type) ? .trailing : .leading, spacing: 3) {
                     Text(column.name)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.code(12, weight: .semibold))
                         .foregroundStyle(Tone.ink.opacity(0.92))
                         .lineLimit(1)
                     Chip(text: column.type, tint: typeTint(column.type))
@@ -168,7 +168,7 @@ struct ResultGrid: View {
     /// The row-number column, shared by the header and every row so they cannot drift apart.
     private func gutter(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10.5, design: .monospaced))
+            .font(.code(10.5))
             .foregroundStyle(Tone.ink.opacity(0.35))
             .frame(width: 44, alignment: .trailing)
             .padding(.horizontal, 8)
@@ -223,11 +223,11 @@ struct ResultGrid: View {
             if tab.countingRows {
                 HStack(spacing: 5) {
                     ProgressView().controlSize(.mini)
-                    Text("Counting…").font(.system(size: 11)).foregroundStyle(Tone.secondary)
+                    Text("Counting…").font(.ui(11)).foregroundStyle(Tone.secondary)
                 }
             } else if let error = tab.countError {
                 Text(error)
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.coral)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -291,13 +291,13 @@ struct ResultGrid: View {
             Text("This narrows the \((tab.preview?.rows.count ?? 0).formatted()) rows already "
                  + "fetched — it does not re-run the query, so a row outside the limit is not "
                  + "searched.")
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 if browsable {
                     Text("\(values.count) distinct value\(values.count == 1 ? "" : "s")")
-                        .font(.system(size: 10.5))
+                        .font(.ui(10.5))
                         .foregroundStyle(Tone.secondary)
                 }
                 Spacer(minLength: 0)
@@ -334,14 +334,14 @@ struct ResultGrid: View {
                 // "1.000 rows" was the fetched count wearing a total's clothes. The wording now
                 // says which it is, and a fetched total makes the two one sentence.
                 Text(summaryText(preview))
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty ? Tone.amber : Tone.secondary)
                 countControl
                 if preview.elapsedMS > 0 {
-                    Text("· \(preview.elapsedMS) ms").font(.system(size: 11)).foregroundStyle(Tone.secondary)
+                    Text("· \(preview.elapsedMS) ms").font(.ui(11)).foregroundStyle(Tone.secondary)
                 }
             } else {
-                Text("No result yet").font(.system(size: 11)).foregroundStyle(Tone.secondary)
+                Text("No result yet").font(.ui(11)).foregroundStyle(Tone.secondary)
             }
 
             Spacer(minLength: 8)
@@ -350,11 +350,11 @@ struct ResultGrid: View {
             // counting the lines of a plan is not a question anyone has.
             if !tab.showingPlan {
                 HStack(spacing: 5) {
-                    Text("LIMIT").font(.system(size: 10, weight: .semibold)).tracking(0.6)
+                    Text("LIMIT").font(.ui(10, weight: .semibold)).tracking(0.6)
                         .foregroundStyle(Tone.secondary)
                     TextField("1000", value: $tab.rowLimit, format: .number.grouping(.never))
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.code(11))
                         .frame(width: 52)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
@@ -417,7 +417,7 @@ private struct ValuePickerList: View {
 
             if values.isEmpty {
                 Text("No values in the rows fetched.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             } else {
                 ScrollView {
@@ -454,7 +454,7 @@ private struct ValuePickerList: View {
                     .font(.system(size: 11))
                     .foregroundStyle(checked ? Tone.accent : Tone.ink.opacity(0.35))
                 Text(title)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.code(11.5))
                     .foregroundStyle(title == "null" ? Tone.ink.opacity(0.45) : Tone.ink.opacity(0.92))
                     .italic(title == "null")
                     .lineLimit(1)
@@ -503,7 +503,7 @@ private struct SearchFilterField: View {
             TextField("Cari", text: binding).field()
             Text("Too many distinct values to list, so this matches text: contains by default. "
                  + "Prefix with =, >, <, >= or <= to compare instead.")
-                .font(.system(size: 10.5))
+                .font(.ui(10.5))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

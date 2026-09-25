@@ -29,11 +29,12 @@ struct SettingsView: View {
     }
 
     enum Pane: String, CaseIterable, Hashable {
-        case appearance, keyboard
+        case appearance, fonts, keyboard
 
         var title: String {
             switch self {
             case .appearance: "Appearance"
+            case .fonts: "Fonts"
             case .keyboard: "Keyboard"
             }
         }
@@ -43,6 +44,7 @@ struct SettingsView: View {
         var symbol: String {
             switch self {
             case .appearance: "paintpalette"
+            case .fonts: "textformat"
             case .keyboard: "keyboard"
             }
         }
@@ -66,6 +68,7 @@ struct SettingsView: View {
             ScrollView {
                 switch pane {
                 case .appearance: AppearanceSettings()
+                case .fonts: FontSettings()
                 case .keyboard: KeyboardSettings()
                 }
             }
@@ -101,7 +104,7 @@ struct SettingsView: View {
                         Image(systemName: option.symbol)
                             .font(.system(size: 11.5, weight: .medium))
                         Text(option.title)
-                            .font(.system(size: 12, weight: active ? .semibold : .regular))
+                            .font(.ui(12, weight: active ? .semibold : .regular))
                     }
                     .foregroundStyle(active ? Tone.ink : Tone.secondary)
                     .frame(maxWidth: .infinity)
@@ -140,7 +143,7 @@ private struct SettingsCard<Content: View>: View {
                 SectionLabel(text: title)
                 if let detail {
                     Text(detail)
-                        .font(.system(size: 11))
+                        .font(.ui(11))
                         .foregroundStyle(Tone.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -168,12 +171,12 @@ private struct SettingsRow<Control: View>: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 Text(label)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.ui(12, weight: .medium))
                     .foregroundStyle(Tone.ink)
                 Spacer(minLength: 8)
                 if let trailing {
                     Text(trailing)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.code(11))
                         .foregroundStyle(Tone.secondary)
                 }
             }
@@ -248,7 +251,7 @@ struct AppearanceSettings: View {
         HStack(alignment: .center, spacing: 12) {
             Text("Reset returns to System appearance and the Classic preset: midnight in the dark, "
                  + "daylight in the light, ice, glow, 100%.")
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -300,7 +303,7 @@ struct AppearanceSettings: View {
                             .strokeBorder(active ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
                                           lineWidth: active ? 1.5 : 1))
                         Text(tone.title)
-                            .font(.system(size: 11, weight: active ? .semibold : .regular))
+                            .font(.ui(11, weight: active ? .semibold : .regular))
                             .foregroundStyle(active ? Tone.ink : Tone.secondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -348,14 +351,14 @@ struct AppearanceSettings: View {
                     .strokeBorder(Tone.ink.opacity(0.22)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(preset.title)
-                    .font(.system(size: 12, weight: active ? .semibold : .medium))
+                    .font(.ui(12, weight: active ? .semibold : .medium))
                     .foregroundStyle(active ? Tone.ink : Tone.secondary)
                 // "Blue · Glow", not "Graphite · Blue · Glow": the theme is already shown by the
                 // tile's own background, and the bar beside this line shows the accent under the
                 // tone. Spelling all three out at 10pt monospaced needs ~191pt inside a ~168pt
                 // tile, so it truncated to "Graphite · Blue · Gl…" — a label that names nothing.
                 Text("\(preset.accent.title) · \(preset.tone.title)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.code(10))
                     .foregroundStyle(Tone.ink.opacity(0.62))
                     .lineLimit(1)
             }
@@ -401,7 +404,7 @@ struct AppearanceSettings: View {
                                           lineWidth: store.theme == theme ? 1.5 : 1))
 
                         Text(theme.title)
-                            .font(.system(size: 11, weight: store.theme == theme ? .semibold : .regular))
+                            .font(.ui(11, weight: store.theme == theme ? .semibold : .regular))
                             .foregroundStyle(store.theme == theme ? Tone.ink : Tone.secondary)
                     }
                     .contentShape(Rectangle())
@@ -434,6 +437,106 @@ struct AppearanceSettings: View {
     }
 }
 
+// MARK: Fonts
+
+/// Which family the chrome and the code draw in.
+///
+/// Two choices rather than one, because they are two jobs. The chrome wants whatever the user reads
+/// labels in; the code wants a fixed-pitch face, and every client this app is measured against
+/// (DataGrip, Navicat) separates the two. The lists are read from the families actually installed
+/// on this machine — see `FontChoice` — so a picker never offers a font that would silently fall
+/// back to the system one.
+struct FontSettings: View {
+    @Bindable private var store = ThemeStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Interface",
+                         detail: "The family the chrome draws in: labels, tabs, buttons and every panel. System means the macOS system font, which is what the app ships with.") {
+                SettingsRow(label: "Family", trailing: uiLabel) {
+                    familyPicker(selection: $store.uiFontFamily,
+                                 families: FontChoice.uiFamilies,
+                                 fallback: "System")
+                }
+                RowDivider()
+                // A sample set in the chosen family, at the size the chrome actually uses. The
+                // point of a font picker is to see the font, and a picker that only lists names
+                // makes the user pick blind.
+                SettingsRow(label: "Sample") {
+                    Text("The quick brown fox jumps over the lazy dog · 0123456789")
+                        .font(FontChoice.sample(family: store.uiFontFamily, size: 12))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+
+            SettingsCard(title: "Code",
+                         detail: "The family the code draws in: the SQL editor, the result grid, and every monospaced value. System means the system's fixed-pitch font.") {
+                SettingsRow(label: "Family", trailing: codeLabel) {
+                    familyPicker(selection: $store.codeFontFamily,
+                                 families: FontChoice.codeFamilies,
+                                 fallback: "System")
+                }
+                RowDivider()
+                SettingsRow(label: "Sample") {
+                    Text("SELECT id, name FROM warehouse.orders WHERE total > 100;")
+                        .font(FontChoice.sample(family: store.codeFontFamily, size: 12))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                // The two counts are the honest statement of what the picker can offer: a family
+                // that is not fixed-pitch is not in the code list, and saying how many were dropped
+                // is better than a list that silently looks short.
+                Text("\(FontChoice.codeFamilies.count) of \(FontChoice.uiFamilies.count) installed families are fixed-pitch and offered here.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary.opacity(0.85))
+            }
+        }
+    }
+
+    private var uiLabel: String {
+        store.uiFontFamily.isEmpty ? "System" : store.uiFontFamily
+    }
+
+    private var codeLabel: String {
+        store.codeFontFamily.isEmpty ? "System" : store.codeFontFamily
+    }
+
+    /// A `Menu` rather than a `Picker`: the list is every font on the machine, which is hundreds of
+    /// rows, and a menu scrolls and searches without turning the settings window into a list of
+    /// fonts. Each row is drawn *in its own family* so the list previews what it offers.
+    private func familyPicker(selection: Binding<String>, families: [String], fallback: String) -> some View {
+        Menu {
+            Button(fallback) { selection.wrappedValue = FontChoice.system }
+            Divider()
+            ForEach(families, id: \.self) { family in
+                Button(family) { selection.wrappedValue = family }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(selection.wrappedValue.isEmpty ? fallback : selection.wrappedValue)
+                    .font(FontChoice.sample(family: selection.wrappedValue, size: 11.5))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Tone.secondary)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: Metrics.control)
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Tone.ink.opacity(0.10)))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 // MARK: Keyboard
 
 /// Whose keys this app answers to.
@@ -456,7 +559,7 @@ struct KeyboardSettings: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 Text(model.shortcutScheme.detail)
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -476,12 +579,12 @@ struct KeyboardSettings: View {
                 if index > 0 { RowDivider() }
                 HStack(spacing: 8) {
                     Text(action.title)
-                        .font(.system(size: 11.5))
+                        .font(.ui(11.5))
                         .foregroundStyle(Tone.ink.opacity(0.9))
                     Spacer(minLength: 12)
                     if let shortcut = model.shortcutScheme.shortcut(for: action) {
                         Text(shortcut.display)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(.code(11, weight: .medium))
                             .foregroundStyle(Tone.ink.opacity(0.85))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -489,7 +592,7 @@ struct KeyboardSettings: View {
                                         in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                     } else {
                         Text("not bound")
-                            .font(.system(size: 10.5))
+                            .font(.ui(10.5))
                             .foregroundStyle(Tone.secondary.opacity(0.7))
                     }
                 }

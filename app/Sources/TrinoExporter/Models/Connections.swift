@@ -214,11 +214,18 @@ struct Connection: Identifiable, Codable, Equatable {
     /// in the object tree too, instead of hiding them. Meaningful only where a schema level exists
     /// and the engine filters it.
     var showAllSchemas: Bool
+    /// The group this connection is filed under in the sidebar, or nil for the top level.
+    ///
+    /// A group **id**, not its name: renaming a group must not orphan the connections in it, and a
+    /// name is not an identity — two groups could be called "Production" and the file would have no
+    /// way to say which one a connection meant. Decoded with `decodeIfPresent`, so a
+    /// connections.json written before groups existed loads with everything at the top level.
+    var group: UUID?
 
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
          user: String, database: String, schema: String, verify: Bool,
-         showAllSchemas: Bool = false) {
+         showAllSchemas: Bool = false, group: UUID? = nil) {
         self.id = id
         self.name = name
         self.color = color
@@ -232,11 +239,12 @@ struct Connection: Identifiable, Codable, Equatable {
         self.schema = schema
         self.verify = verify
         self.showAllSchemas = showAllSchemas
+        self.group = group
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
-        case showAllSchemas
+        case showAllSchemas, group
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -267,6 +275,8 @@ struct Connection: Identifiable, Codable, Equatable {
         verify = try container.decodeIfPresent(Bool.self, forKey: .verify) ?? true
         // Absent on a connections.json written before "Show all schemas" existed: stay hidden.
         showAllSchemas = try container.decodeIfPresent(Bool.self, forKey: .showAllSchemas) ?? false
+        // Absent on a file written before groups existed: everything sits at the top level.
+        group = try container.decodeIfPresent(UUID.self, forKey: .group)
     }
 
     /// One-line identity for the sidebar and the picker: `host:port/database.schema`.
@@ -354,6 +364,58 @@ enum ConnectionURL {
     }
 }
 
+/// A folder in the sidebar that connections can be gathered into.
+///
+/// A group is a name and an identity, nothing else: it holds connections and does not nest. One
+/// level is what "keep these together" needs, and nesting would bring a tree of folders to manage
+/// plus a question with no good answer — what does a folder inside a folder mean to the catalogs
+/// and schemas underneath?
+struct ConnectionGroup: Identifiable, Codable, Equatable {
+    var id: UUID
+    var name: String
+
+    init(id: UUID = UUID(), name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+/// What `connections.json` holds: the connections, and the groups they can be filed under.
+///
+/// An envelope rather than a bare array, because a group has to outlive the connections in it.
+/// "New Group" on a side bar with nothing in it must still be there after a relaunch, and it cannot
+/// be if groups are inferred from the connections that point at them — an empty group would leave
+/// no trace to infer from.
+///
+/// The decoder still accepts the bare array this file used to be, so an existing connections.json
+/// loads rather than being moved aside as corrupt. That is the same promise `Connection`'s legacy
+/// keys keep.
+struct ConnectionsDocument: Codable, Equatable {
+    var groups: [ConnectionGroup]
+    var connections: [Connection]
+
+    init(groups: [ConnectionGroup] = [], connections: [Connection] = []) {
+        self.groups = groups
+        self.connections = connections
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case groups, connections
+    }
+
+    init(from decoder: Decoder) throws {
+        // The envelope, if this is one. `container(keyedBy:)` throws on an array, which is exactly
+        // the signal to fall through to the form this file had before groups existed.
+        if let keyed = try? decoder.container(keyedBy: CodingKeys.self), keyed.contains(.connections) {
+            groups = try keyed.decodeIfPresent([ConnectionGroup].self, forKey: .groups) ?? []
+            connections = try keyed.decode([Connection].self, forKey: .connections)
+            return
+        }
+        groups = []
+        connections = try decoder.singleValueContainer().decode([Connection].self)
+    }
+}
+
 /// JSON array of connections in Application Support. No secrets in this file.
 enum ConnectionStore {
     struct StoreError: Error, LocalizedError {
@@ -366,9 +428,35 @@ enum ConnectionStore {
     /// preserve for inspection.
     private static var blockedURL: URL?
 
+    /// Where connections.json lives, when something other than the app is asking — the test suite.
+    static var root: URL?
+
+    /// True while this process is a test run.
+    ///
+    /// The suite constructs `AppModel`, which **reads** this store, and then calls actions that
+    /// **write** it. Pointed at the real file that is a data loss waiting to happen, and it has
+    /// already happened once: a test that filed a fixture connection into a fixture group wrote the
+    /// fixture over a real `connections.json`, and the app keeps no backup of that file.
+    ///
+    /// Checked here rather than left to each test to remember, because "remember to redirect the
+    /// store" is exactly the kind of instruction a new test fails to follow. A test that wants its
+    /// own directory sets `root`; one that says nothing gets a private temporary one.
+    private static var isTesting: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
+
     static func directory() throws -> URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("QueryHive")
+        if let root {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            return root
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // Per-process, so two test runs cannot see each other's connections — a suite that read the
+        // previous run's fixtures would pass for the wrong reason.
+        let dir = isTesting
+            ? FileManager.default.temporaryDirectory
+                .appendingPathComponent("QueryHive-tests-\(ProcessInfo.processInfo.processIdentifier)")
+            : base.appendingPathComponent("QueryHive")
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
@@ -380,35 +468,48 @@ enum ConnectionStore {
     /// Missing file reads back as no connections. A file that fails to decode is renamed aside
     /// (so a later save can never overwrite it) and reported back as a notice; the caller
     /// starts from an empty list rather than guessing at recovery.
-    static func load() -> (connections: [Connection], notice: Notice?) {
+    static func load() -> (document: ConnectionsDocument, notice: Notice?) {
         guard let dir = try? directory() else {
-            return ([], Notice(title: "Couldn't read connections",
+            return (ConnectionsDocument(), Notice(title: "Couldn't read connections",
                                 message: "Couldn't create the QueryHive folder in Application Support."))
         }
         let url = dir.appendingPathComponent("connections.json")
-        guard let data = try? Data(contentsOf: url) else { return ([], nil) }
+        guard let data = try? Data(contentsOf: url) else { return (ConnectionsDocument(), nil) }
         do {
-            return (try JSONDecoder().decode([Connection].self, from: data), nil)
+            return (try JSONDecoder().decode(ConnectionsDocument.self, from: data), nil)
         } catch {
             let broken = dir.appendingPathComponent("connections.json.broken-\(Int(Date().timeIntervalSince1970))")
             do {
                 try FileManager.default.moveItem(at: url, to: broken)
-                return ([], Notice(title: "Couldn't read your saved connections",
-                                    message: "connections.json didn't parse and was moved to \(broken.lastPathComponent). Starting with no connections; nothing was overwritten."))
+                return (ConnectionsDocument(),
+                        Notice(title: "Couldn't read your saved connections",
+                               message: "connections.json didn't parse and was moved to \(broken.lastPathComponent). Starting with no connections; nothing was overwritten."))
             } catch let moveError {
                 blockedURL = url
-                return ([], Notice(title: "Couldn't read your saved connections",
-                                    message: "connections.json didn't parse and couldn't be moved aside (\(moveError.localizedDescription)). Saving is disabled until \(url.lastPathComponent) is resolved by hand."))
+                return (ConnectionsDocument(),
+                        Notice(title: "Couldn't read your saved connections",
+                               message: "connections.json didn't parse and couldn't be moved aside (\(moveError.localizedDescription)). Saving is disabled until \(url.lastPathComponent) is resolved by hand."))
             }
         }
     }
 
-    static func save(_ connections: [Connection]) throws {
+    static func save(_ document: ConnectionsDocument) throws {
         if let blockedURL {
             throw StoreError(message: "connections.json is corrupt and couldn't be moved aside earlier; resolve \(blockedURL.path) before saving again.")
         }
         let url = try directory().appendingPathComponent("connections.json")
-        let data = try JSONEncoder().encode(connections)
+        // One save behind, kept beside the file. This is here because the file was destroyed once
+        // and there was nothing to restore it from: no Time Machine snapshot, nothing in the trash,
+        // and the app itself keeps no history. A single previous copy turns "the connections file
+        // was overwritten" from a loss into an inconvenience.
+        //
+        // Best effort on purpose: a failure to copy must not block the save the user asked for.
+        let previous = url.appendingPathExtension("bak")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.copyItem(at: url, to: previous)
+        }
+        let data = try JSONEncoder().encode(document)
         try data.write(to: url, options: .atomic)
     }
 

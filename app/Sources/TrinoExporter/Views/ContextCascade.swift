@@ -114,7 +114,7 @@ struct ContextCascade: View {
         } label: {
             HStack(spacing: 6) {
                 Text(value.isEmpty ? label : value)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.code(11.5))
                     .foregroundStyle(showing ? Tone.ink.opacity(0.92) : Tone.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

@@ -1256,9 +1256,283 @@ ke 560x640 karena sebelumnya meng-crop view yang tingginya 640). Dari piksel: ke
 mode terang maupun gelap (latar kartu berbeda dari kanvas di keduanya), dan baris binding keyboard
 berjumlah 13 sesuai isi enum.
 
-## Perkakas lokal (sengaja tidak masuk repo)
+### Pemilihan font: dua seam, dan default yang tidak bergeser (24 Sep 2026)
 
-`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
+Diminta "tambahkan pemilihan font". Font dipakai di **140 call site** `.font(.system(size:…))` plus
+dua `NSFont` di editor, jadi menempelkan pilihan di beberapa tempat akan jadi setengah fitur.
+Sebaliknya dibuat **satu seam**: `Support/Fonts.swift` dengan `Font.ui(_:weight:rounded:)` dan
+`Font.code(_:weight:)`, dan seluruh call site diarahkan ke sana. Dua seam, bukan satu, karena
+chrome dan kode itu dua pekerjaan berbeda: setiap klien pembanding (DataGrip, Navicat) memisahkan
+font UI dan font editor.
+
+**Sifat yang menopang seluruh perubahan: default tidak mengubah apa pun.** Selama tidak ada family
+yang dipilih, `Font.ui`/`Font.code` mengembalikan panggilan `.system(...)` yang **persis** sama
+dengan sebelumnya, termasuk tidak menyebut `weight:` bila memang tidak ada. Itu bukan detail gaya:
+`.system(size:weight:.regular,design:.monospaced)` terbukti **bukan** font yang sama dengan
+`.system(size:design:.monospaced)` — terukur, render scene yang sama bergeser ~14 200 piksel. Karena
+itu dicek dengan diff render, bukan diyakini: scene `cascade-postgres` dan `table-opened` dengan
+setelan default **pixel-identical** terhadap render dari tree sebelum seam ada.
+
+**Yang ditemukan saat menguji, dan diperbaiki.**
+
+1. **29 SF Symbol sempat ikut ter-rewrite.** `Image(systemName:)` dirender dari font simbol sistem,
+   jadi mengarahkannya ke family teks akan merusak ikon begitu user memilih font — bug laten yang
+   belum terlihat karena default mengembalikan font sistem yang sama. Semuanya dikembalikan ke
+   `.system(...)`.
+2. **5 call site kehilangan `weight:` kondisional.** Regex rewrite pertama hanya menangkap weight
+   literal, sehingga `weight: selected ? .semibold : .regular` menjadi `.ui(12)` polos. Ditemukan
+   dengan membandingkan diff per-hunk, bukan dengan mata; setelah perbaikan jumlahnya nol.
+3. **Filter font monospace salah.** `NSFont.isFixedPitch` dan CoreText `traitMonoSpace` melaporkan
+   `false` untuk font yang metadatanya ditulis ulang patcher — dan build Nerd Font dari Fira Code
+   dan Fira Mono persis begitu. Artinya dua font yang paling mungkin dimiliki developer justru
+   tersingkir: flag menemukan 5 family, pengukuran menemukan 9. Filter diganti dengan **mengukur
+   advance glyph** (`i` vs `W` vs `m` harus sama lebar).
+4. **Highlighter SQL membekukan font.** `SQLSyntax` menyimpan atributnya sebagai `static let`, jadi
+   dictionary termasuk font dibangun sekali di akses pertama dan tidak akan pernah melihat
+   pergantian font. Warna (dynamic `NSColor`) tetap static; font kini di-resolve per pass di
+   `apply(to:)`, dan italic khusus komentar ikut lewat jalur yang sama.
+
+**Pane Fonts.** Pane ketiga di Settings: picker family untuk Interface dan Code, masing-masing
+dengan sampel yang digambar di family-nya sendiri, plus keterangan "N dari 181 family terpasang yang
+fixed-pitch". Daftarnya dibaca dari `NSFontManager` (bukan daftar hardcode) dan disaring agar hanya
+berisi family yang benar-benar bisa diresolusi, supaya tidak ada baris yang tidak melakukan apa-apa.
+
+**Diverifikasi.** `swift build` bersih tanpa peringatan; `swift test` **36 lulus / 0 gagal** (9 tes
+baru di `FontChoiceTests`). Flag snapshot `--ui-font` dan `--code-font` ditambahkan lewat
+`ThemeStore.pin`, jadi pengujian tidak menulis preferensi user. Bukti fungsional dari piksel: default
+identik dengan tree lama, `--ui-font "Avenir Next"` mengubah chrome (39 685 piksel), `--code-font
+"FiraCode Nerd Font"` mengubah area editor/grid (90 196 piksel), keduanya 129 440 piksel.
+
+### Panel bawah: tertutup saat tab tidak punya isi (24 Sep 2026)
+
+Dilaporkan dari layar: bagian bawah jendela "defaultnya ketika kosong seperti ini hide". Benar, dan
+sebabnya satu default: `panelCollapsed = false` dengan `panelHeight = 480`. Artinya tab yang baru
+dibuka dan belum dipakai langsung memakai **480 pt — lebih dari separuh jendela — untuk menampilkan
+"No result yet"**. Yang membuang ruang editor bukan isinya, melainkan kebiasaan membuka panel
+sebelum ada yang perlu ditampilkan.
+
+**Aturannya kini satu baris: panel terbuka kalau tab-nya punya isi.** Isi berarti ada baris
+(`preview != nil`, termasuk hasil nol baris — "0 rows" itu jawaban, dan header kolomnya yang
+dibaca), ada baris log, ada berkas, atau ada query yang sedang berjalan. Setiap jalur yang
+menghasilkan sesuatu memang sudah membuka panel sendiri (Run, Explain, buka tabel), jadi aturan ini
+hanya memperbaiki default-nya, bukan mengubah perilaku saat ada isi.
+
+**Diterapkan di tiga saat, bukan satu.** Tab baru, tab yang dipilih, dan tab yang ditinggal setelah
+penutupan — karena masalah yang sama muncul di ketiganya: pindah dari tab berisi baris ke tab kosong
+meninggalkan panel 480 pt di atas "No result yet". Ketiganya kini lewat satu fungsi,
+`syncPanelToSelectedTab()`, supaya tidak ada jalur yang tertinggal.
+
+**Dua bug nyata yang ketemu saat menguji.**
+
+1. **Menutup tab terakhir tidak menutup panel.** `closeTab` hanya memperbarui panel bila masih ada
+   tab pengganti; saat tidak ada sisa, panel tetap terbuka di atas workspace kosong. Ketahuan dari
+   tes `testClosingTheLastTabLeavesNothingSelectedAndThePanelClosed`, bukan dari membaca kode.
+2. **`panelExpanded` diwarisi antar-tab.** Keadaan "baris menutupi seluruh jendela" disimpan di
+   model, bukan di tab, jadi pindah dari tabel yang dibuka penuh ke tab kosong meninggalkan panel
+   penuh layar berisi "No result yet" — kesalahan yang sama, satu langkah lebih jauh. Kini
+   dibersihkan bersama `panelCollapsed` saat tab tanpa isi tampil.
+
+**Snapshot ikut diperbaiki.** Scene snapshot mengisi isi tab dengan tangan dan sebelumnya
+mengandalkan default `panelCollapsed = false`, jadi begitu default berubah seluruh scene panelnya
+tertutup. Aturan yang sama kini dijalankan **setelah** seeding (`model.syncPanelToSelectedTab()`),
+kecuali scene `fresh-tab` yang memang menggambarkan ketiadaan isi. Terukur dari piksel: scene
+`fresh-tab` punya panel setinggi **74 pt** (header saja) sementara `grid` dan `files` **463 pt**,
+`table-opened` **538 pt**.
+
+**Uji.** `swift test` **46 lulus / 0 gagal** (10 tes baru di `PanelDefaultTests`), `swift build`
+bersih.
+
+### Ikon aplikasi: tile gelap dengan sarang yang benar-benar terpisah (24 Sep 2026)
+
+Diminta ikon baru yang "lebih futuristik tapi enak dilihat dan simple". Ikon ini bukan berkas gambar
+melainkan **digambar dari kode** (`QueryHiveIcon` di `Support/AppIcon.swift`), jadi setiap perubahan
+harus bisa dinyatakan sebagai path, gradient, dan opacity.
+
+**Arahan desain diminta dari agent `ui-ux-designer` lebih dulu**, dengan brief yang menyebut seluruh
+geometri dan warna yang ada. Dua klaim agent diuji sebelum dipakai, dan keduanya akurat:
+
+- Kontras putih terhadap tile lama: **1.67:1** di ujung cyan (`#4FD8FF`) dan **4.20:1** di ujung
+  violet (`#7B61FF`). Dihitung ulang dengan relative luminance WCAG, angkanya persis. Artinya tanda
+  sarangnya **di bawah ambang 3:1** untuk elemen non-teks, dan selama ini hanya terbaca karena ada
+  drop shadow di bawahnya.
+- Prediksi falsifiabel "artwork sekarang menyatu jadi 1–2 komponen pada 64pt": diukur, hasilnya
+  **1 komponen**. Terbukti.
+
+**Yang berubah.**
+
+1. **Tile jadi gelap, dan itu keputusan keterbacaan, bukan selera.** `#3B2AA8` → `#12103A`
+   membawa putih yang sama ke **10.1:1** dan **18.1:1**, jadi tanda tidak lagi bergantung pada efek
+   untuk terlihat. Cyan tidak hilang: ia turun pangkat dari permukaan menjadi **cahaya** — glow inti
+   di belakang sarang dan rim light di tepi tile.
+2. **Rim light itu bukan hiasan.** Pada Dock gelap (`#1C1C1E`) tile nyaris hitam hanya **1.06:1**
+   terhadap latarnya; rim inilah yang memberinya tepi (**13.4:1**).
+3. **Sel dibuat benar-benar terpisah.** Inset sel 0.94 → **0.80**: pada 0.94 jarak antar-sel 0.104r
+   = 0.57 px pada 64pt, sehingga tujuh heksagon menyatu jadi satu blob. Pada 0.80 jaraknya 0.346r
+   (2.0 px pada 64pt, 4.0 px pada 128pt). Parameter `inset` ditambahkan ke `hiveCells` dengan
+   default 0.94 supaya ilustrasi `HiveHero` di aplikasi tidak ikut berubah.
+4. **Enam sel redup digambar sebagai isian, bukan garis tepi.** Garis rambut adalah hal pertama yang
+   hilang saat ikon diperkecil, jadi struktur tanda tadinya bergantung pada detail yang memang tidak
+   bisa bertahan. Isian datar membawa struktur sebagai *tone*, yang rata dengan baik di semua ukuran.
+   Sel menyala tetap punya bloom, karena bentuk lembut besar juga sesuatu yang bertahan saat
+   diperkecil — yang tidak bertahan adalah garis rambut.
+
+**Dua kesalahan yang ditemukan lewat pengukuran, bukan lewat membaca kode.** Keduanya soal glow
+yang mengalahkan subjeknya sendiri:
+
+- Glow inti sempat `0.34` dengan radius `0.62` tile, dan terukur mencapai luminance **97–130** di
+  tengah tile — sama dengan sel redup pada `0.26` putih. Glow-nya menghapus enam sel yang justru
+  ingin ditampilkannya. Diperbaiki jadi `0.24` dengan radius `0.45`.
+- Sel redup `0.20` berada **di bawah** luminance glow, jadi selnya tenggelam ke dalam cahaya.
+  Dinaikkan ke `0.38`, cukup di atas glow dan tetap jauh di bawah sel menyala.
+
+**Diverifikasi dengan pengukuran, bukan dengan mata.** Menghitung komponen terhubung pada ambang
+yang memisahkan sel dari glow: sebelum perubahan **1 komponen** pada 64pt dan 128pt; sesudah
+**7 sel** pada 64pt dan **7 sel + 1 bloom** pada 128pt (target agent: 7 pada ≥128pt, ≥5 pada 64pt).
+Kontras putih-terhadap-tile terukur 10.1:1 sampai 18.1:1, dari 1.67:1. `assets/icon.icns` diregenerasi
+lewat `make-icon.sh`; mean luminance slot 128 dan 256 turun dari ~140 ke **40**, memastikan berkasnya
+memang memuat artwork baru. Seluruh 10 slot ukuran terisi.
+
+### Saran editor menghormati jalur yang diketik (25 Sep 2026)
+
+Dilaporkan: mengetik `select * from catalog.schema.table` menampilkan saran schema dan table yang
+**tidak sesuai** isi schema itu. Benar, dan sebabnya bukan daftar yang kurang pintar melainkan daftar
+yang **terlalu luas**: `suggestions` menerima `prefix` dan satu boolean `qualified`, lalu menyapu
+`allNodes()` — **seluruh pohon, semua koneksi** — dan menawarkan setiap katalog, schema, dan table
+yang namanya cocok. Jadi `hive.analytics.` menawarkan `penerima_manfaat` (benar), `raw_kpm` dari
+schema **bronze**, dan table dari koneksi lain: daftar yang terlihat masuk akal dan sebagian besar
+salah. Pengguna tidak punya cara tahu baris mana yang benar.
+
+**Jalurnya kini di-parse, bukan diabaikan.** Editor tidak lagi cuma melaporkan "kata ini mengikuti
+titik", melainkan seluruh kualifikasinya: `hive.analytics.pen` menghasilkan path
+`["hive", "analytics"]` dengan prefix `pen`. Parsingnya menangani pengenal ber-kuota sebagai **satu
+segmen** meski mengandung spasi atau titik (`"my schema"`, `"a.b"`), karena begitulah server
+membacanya.
+
+**Resolusi mengikuti bentuk driver, bukan posisi tetap.** `["hive", "analytics"]` adalah
+katalog-lalu-schema di Trino, schema-lalu-table di Postgres (databasenya tetap pada koneksi dan tidak
+pernah muncul di nama), dan database-lalu-table di MySQL. Pencarian mengikuti `ConnectionKind.levels`
+sehingga sebuah jalur tidak bisa mendarat di node dengan jenis yang salah — `hive.analytics` tidak
+akan menyentuh *table* bernama `analytics` hanya karena ada satu di tempat lain. Koneksi milik tab
+dicoba lebih dulu, karena dua koneksi bisa sama-sama punya katalog `hive` dan query-nya hanya jalan
+di satu.
+
+**Jalur yang tidak menemukan apa pun tidak menawarkan apa pun.** Ini disengaja: jatuh kembali ke
+seluruh pohon akan menghidupkan lagi bug yang sedang diperbaiki — table salah dari schema lain lebih
+buruk daripada tidak ada saran.
+
+**Muat-saat-dibutuhkan.** Node yang anaknya belum pernah dimuat akan **diminta** anaknya saat
+jalurnya diketik, jadi `FROM hive.` terisi tanpa perlu lebih dulu meng-expand katalog itu di sidebar.
+Daftarnya tidak bisa ditambal saat jawaban tiba — popup tidak memegang referensi ke array itu — jadi
+ketikan berikutnya yang mengulang dan menemukannya. Itu tawar-menawar yang sama dengan yang sudah
+dipakai pohon, dan lebih baik daripada menahan satu ketikan pada satu round trip jaringan.
+
+**Kolom dan kata kunci hanya untuk kata tanpa jalur.** Setelah titik, kata berikutnya adalah objek;
+nama kolom dan kata kunci cuma jadi derau.
+
+**Diuji.** `WordScope.parse` diekstrak jadi fungsi murni supaya bisa diuji langsung — bagian ini gagal
+dengan senyap, daftarnya tetap terlihat masuk akal. `swift test` **70 lulus / 0 gagal**: 11 tes untuk
+lingkup kandidat (per-driver, lintas-koneksi, jalur tak dikenal, muat-saat-dibutuhkan) dan 13 tes
+untuk parser (kata ber-kuota, titik di tengah, caret di tengah teks, operator). Dua mutasi
+membuktikan tesnya bergigi: mengembalikan sapuan seluruh-pohon menggagalkan **12** tes, dan
+menghentikan penelusuran jalur setelah satu segmen menggagalkan **4** tes.
+
+### Editor: nomor baris, header dibuang (25 Sep 2026)
+
+Diminta nomor baris di kiri editor, dan header di atas editor dibuang.
+
+**Nomor baris lewat `NSRulerView`, bukan kolom SwiftUI di sebelah editor.** Ruler adalah bagian dari
+scroll view, jadi AppKit sendiri yang menjaganya sejajar saat teks digulir dan saat baris wrap; kolom
+yang digambar di samping harus menghitung ulang offset gulir tiap frame dan akan melenceng begitu ada
+baris panjang yang wrap.
+
+**Yang dinomori adalah baris logis, bukan fragmen hasil wrap** — sama dengan yang dihitung indikator
+sudut. Satu baris query yang wrap tetap dapat satu nomor; memberi nomor tiap fragmen akan melaporkan
+baris lebih banyak daripada isi query, dan bertentangan dengan angka di sudut. Nomor dihitung mulai
+dari **atas teks**, bukan dari atas layar, jadi menggulir tidak menomori ulang. Hanya baris yang
+terlihat yang digambar.
+
+Tiga perilaku tepi yang ditangani eksplisit, karena ketiganya mudah salah dan tidak terlihat: editor
+kosong tetap punya baris 1 (tempat karetnya berada), teks berakhiran newline memunculkan baris
+berikutnya (layout manager tidak selalu membuat fragmen untuk baris kosong itu), dan fragmen di tepi
+area terlihat bisa dienumerasi dua kali sehingga nomornya bisa dobel. Lebar gutter mengikuti jumlah
+digit, dan tesnya memastikan nomor terlebar benar-benar muat.
+
+**Header editor dibuang seluruhnya**: label `Query`, pemisah, `N lines`, tombol `Load File…` dan
+`Clear`. Yang dipindah, bukan dihapus: `Clear` jadi tombol `xmark` di pojok kanan atas editor
+(muncul hanya bila ada teks — aksi yang tidak bisa berbuat apa-apa itu derau), hitungan baris ke pojok
+kanan bawah dengan opacity tipis, dan **Load SQL File ke menu File dengan ⌘O** — tombol itu
+satu-satunya pintu ke fitur tersebut sekaligus satu-satunya pemegang shortcut-nya, jadi menghapusnya
+tanpa memindahkannya berarti menghilangkan fiturnya. `Metrics.paneHeader` (32pt) yang jadi konstanta
+mati ikut dibuang: konstanta jarak yang tidak diukur siapa pun lebih buruk daripada tidak ada, karena
+panel berikutnya akan menyelaraskan diri ke tinggi yang sudah tidak ada.
+
+`swift test` **79 lulus / 0 gagal** pada tahap ini (9 tes baru untuk ruler), `swift build` bersih.
+
+## Group koneksi di sidebar (25 Sep 2026)
+
+Diminta koneksi bisa dikumpulkan dalam folder/group.
+
+**Berkas `connections.json` jadi envelope `{groups, connections}` dengan migrasi.** Sebelumnya berkas
+itu array telanjang. Group disimpan eksplisit, bukan disimpulkan dari koneksi yang menunjuknya,
+karena group kosong harus tetap ada setelah relaunch dan tidak ada jejak untuk menyimpulkannya.
+Decoder menerima **kedua bentuk**: envelope, dan array lama. Ini penting bukan sebagai kerapian —
+`ConnectionStore.load` memperlakukan berkas yang gagal di-decode sebagai "tidak ada koneksi" lalu
+**memindahkannya sebagai rusak**, jadi decoder yang hanya tahu envelope akan menghabiskan seluruh
+daftar server user sambil tidak menampilkan error apa pun. Diverifikasi dengan tiga tes format lama.
+
+**`Connection.group` menyimpan id, bukan nama**: mengganti nama group tidak boleh mengorbankan
+koneksi di dalamnya, dan nama bukan identitas. Dibaca dengan `decodeIfPresent`, jadi berkas sebelum
+group ada tetap termuat dengan semuanya di tingkat teratas.
+
+**Satu tingkat, tidak bersarang.** Satu tingkat adalah yang dibutuhkan "kumpulkan ini"; bersarang
+menambah pohon folder untuk diurus plus pertanyaan yang tidak punya jawaban bagus — apa arti folder
+di dalam folder bagi katalog dan schema di bawahnya.
+
+**`TreeNode` dapat jenis `.group`, dan `connectionID` jadi opsional** karena group bukan bagian dari
+koneksi mana pun. Compiler kemudian menunjukkan setiap tempat yang mengasumsikan koneksi selalu ada:
+`connectionState` (titik status), breadcrumb `selectTab`, `loadedNames`, dan resolusi jalur saran
+editor. Semuanya kini lewat `connectionNode(for:)` yang mencari **dua tingkat** — bukan `allNodes()`,
+karena fungsi ini melayani titik status pada setiap redraw dan menjelajah pohon objek yang dalam
+untuk itu akan membebankan biaya pohon ke status bar.
+
+**Node dipakai ulang berdasarkan id**, jadi memindahkan satu koneksi tidak menguncupkan server yang
+sudah dibuka user. Ada tesnya.
+
+**Koneksi yang menunjuk group tak dikenal tetap tampil di tingkat teratas**, tidak menghilang — pohon
+adalah satu-satunya jalan mencapai koneksi tersimpan, jadi ia tidak boleh jadi tempat koneksi lenyap.
+**Menghapus group tidak menghapus koneksinya**; koneksi di dalamnya pindah ke tingkat teratas.
+
+**Diuji**: 19 tes baru (bentuk berkas + migrasi ketiga format lama, bentuk pohon, pencarian lintas
+posisi, aksi buat/ganti nama/hapus/pindah, dan backup). Suite penuh **98 lulus / 0 gagal**.
+
+### Insiden: berkas koneksi user tertimpa tes, dan penangkalnya (25 Sep 2026)
+
+Tes untuk fitur group memanggil aksi yang menyimpan (`move`, `deleteGroup`, `commitGroupNaming`).
+`AppModel()` membaca `~/Library/Application Support/QueryHive/connections.json`, sehingga tes menulis
+ke berkas **user** dan menimpanya dengan fixture. Tidak ada salinan: tidak ada snapshot Time Machine,
+tidak ada di Trash, `backup.zip` tidak memuatnya, aplikasi tidak di-sandbox sehingga tidak ada
+container, dan proses lama pemegang data di memori sudah berhenti. Password masih ada di Keychain
+(41 item), tetapi terikat pada id koneksi yang tidak lagi dirujuk apa pun.
+
+Dua penangkal, keduanya karena kejadian ini:
+
+1. **Store diisolasi dari suite.** `ConnectionStore.directory()` mengarah ke direktori temporary
+   setiap kali prosesnya test run, jadi tes **tidak bisa** menyentuh berkas user walau ada tes baru
+   yang lupa. Diperiksa di store, bukan diserahkan ke tiap tes untuk mengingat, karena "ingat untuk
+   mengalihkan store" justru instruksi yang akan dilanggar tes berikutnya. Selain itu setiap kelas
+   tes yang membuat `AppModel` memanggil `isolateConnectionStore()` untuk direktori sendiri
+   per-tes — tanpa itu seluruh kelas berbagi satu direktori per proses, dan fixture satu kelas
+   terbaca kelas lain (itu sebabnya 9 tes ikut gagal pada saat yang sama).
+2. **Backup satu-save-di-belakang.** Setiap `save` menyalin berkas sebelumnya ke
+   `connections.json.bak` sebelum menulis. Aplikasi tidak menyimpan riwayat apa pun, jadi ini yang
+   mengubah "berkas koneksi tertimpa" dari kehilangan menjadi ketidaknyamanan. Gagal menyalin tidak
+   memblokir penyimpanan yang diminta user.
+
+Diverifikasi: sha256 berkas user sebelum dan sesudah `swift test` penuh **identik**, dan satu tes
+baru membuktikan `.bak` benar-benar satu penyimpanan di belakang. Berkas fixture yang tertinggal
+dibuang (dipindahkan ke Trash) atas persetujuan user; aplikasi mulai dari keadaan bersih.
+
+## Perkakas lokal (sengaja tidak masuk repo)`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
 dikirim produk. Karena itu ia **di-gitignore** dan tidak ada di repo — alasannya sama seperti skrip
 sekali pakai tidak di-commit: pohon repo seharusnya menggambarkan produknya.
 

@@ -9,6 +9,14 @@ import XCTest
 /// change. The pane's appearance is checked by `--snapshot --scene objects`, which renders the real
 /// view, and the round trip itself is checked by the engine's own suite.
 final class ObjectScreenTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // Before any AppModel is built: that constructor reads connections.json, and the actions
+        // these tests drive write it.
+        isolateConnectionStore()
+    }
+
+
     private func tab(columns: [String], rows: [[String?]]) -> QueryTab {
         let tab = QueryTab(title: "analytics")
         tab.objectScope = ObjectScope(connectionID: UUID(), catalog: "hive", schema: "analytics")

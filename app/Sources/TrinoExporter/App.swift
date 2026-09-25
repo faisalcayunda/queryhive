@@ -60,6 +60,12 @@ struct QueryHiveApp: App {
             // Kept off a key shortcut on purpose: importing writes to the Keychain and to the
             // connections file, so it should not be one keystroke away from an unrelated edit.
             CommandGroup(after: .newItem) {
+                // Moved here from the editor's header row, which no longer exists. The shortcut
+                // came with it: the button was the only thing holding ⌘O, and deleting the row
+                // without re-homing it would have quietly removed the feature.
+                Button("Load SQL File…") { model.selectedTab?.loadSQLFromFile() }
+                    .keyboardShortcut(model.shortcut(for: .openFile))
+                    .disabled(model.selectedTab == nil)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
             }
             // Every binding here comes from the current scheme, so switching scheme in Settings

@@ -43,10 +43,10 @@ struct ConnectionPickerButton: View {
             HStack(spacing: 7) {
                 if let connection = model.connections.first(where: { $0.id == selection }) {
                     connectionTile(connection, size: 18)
-                    Text(connection.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Text(connection.name).font(.ui(12, weight: .semibold)).lineLimit(1)
                 } else {
                     Text(model.connections.isEmpty ? "No connections" : "Choose a connection…")
-                        .font(.system(size: 12))
+                        .font(.ui(12))
                         .foregroundStyle(Tone.secondary)
                 }
                 Spacer(minLength: 4)
@@ -197,7 +197,7 @@ struct ConnectionEditorSheet: View {
     private var typePicker: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("New Connection")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.ui(18, weight: .bold, rounded: true))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
@@ -210,7 +210,7 @@ struct ConnectionEditorSheet: View {
                 }
                 Text("The driver decides the default port, which fields are required, and what the "
                      + "object tree can browse.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -244,7 +244,7 @@ struct ConnectionEditorSheet: View {
     private var urlStep: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("New Connection with URI")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.ui(18, weight: .bold, rounded: true))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
@@ -254,14 +254,14 @@ struct ConnectionEditorSheet: View {
                     .field(invalid: urlError != nil)
                     .onSubmit { applyURL() }
                 if let urlError {
-                    Text(urlError).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                    Text(urlError).font(.ui(11)).foregroundStyle(Tone.coral)
                 }
                 Text("""
                      trino://user:password@host:8443/hive/analytics
                      postgresql://user:password@host:5432/mydb
                      mysql://user:password@host:3306/mydb
                      """)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.code(11))
                     .foregroundStyle(Tone.ink.opacity(0.4))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -326,16 +326,16 @@ struct ConnectionEditorSheet: View {
             ConnectionBrandTile(kind: kind, size: 56)
             VStack(alignment: .leading, spacing: 2) {
                 Text(editingID == nil ? "New Connection" : (name.isEmpty ? "Connection" : name))
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.ui(18, weight: .bold, rounded: true))
                     .lineLimit(1)
                 Text(editingID == nil ? "Not saved yet." : "Saved \(kind.label) connection.")
-                    .font(.system(size: 12))
+                    .font(.ui(12))
                     .foregroundStyle(Tone.secondary)
             }
             Spacer(minLength: 12)
             if isDirty {
                 Label("Unsaved changes", systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.ui(11, weight: .medium))
                     .foregroundStyle(Tone.amber)
                     .labelStyle(.titleAndIcon)
             }
@@ -398,7 +398,7 @@ struct ConnectionEditorSheet: View {
                 SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
                     .field()
                 Text(passwordHint)
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -477,7 +477,7 @@ struct ConnectionEditorSheet: View {
     /// One spoken line where a control would be, for a transport with no verification to answer.
     private func tlsNote(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(.ui(11))
             .foregroundStyle(Tone.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -492,7 +492,7 @@ struct ConnectionEditorSheet: View {
 
     @ViewBuilder private func requiredHint(_ key: String) -> some View {
         if attemptedSave && missingRequired.contains(key) {
-            Text("Required").font(.system(size: 11)).foregroundStyle(Tone.coral)
+            Text("Required").font(.ui(11)).foregroundStyle(Tone.coral)
         }
     }
 
@@ -521,7 +521,7 @@ struct ConnectionEditorSheet: View {
         HStack(spacing: 7) {
             Circle().fill(tint).frame(width: 7, height: 7).layoutPriority(1)
             Text(text)
-                .font(.system(size: 12))
+                .font(.ui(12))
                 .foregroundStyle(tint == Tone.coral ? Tone.coral : Tone.ink.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(truncation)
@@ -546,7 +546,7 @@ struct ConnectionEditorSheet: View {
             if case .running = testState {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
-                    Text("Testing…").font(.system(size: 12.5, weight: .medium))
+                    Text("Testing…").font(.ui(12.5, weight: .medium))
                 }
                 .foregroundStyle(Tone.ink)
                 .padding(.horizontal, 13)
@@ -636,9 +636,16 @@ struct ConnectionEditorSheet: View {
             if let index = next.firstIndex(where: { $0.id == id }) {
                 next[index] = connection
             } else {
-                next.append(connection)
+                // A connection created from a group's menu is filed into it on creation. Set here
+                // rather than on the form, because which folder it belongs in is the tree's
+                // business and not a field of the connection — and read once, then cleared, so
+                // creating a second connection from the header does not inherit the first's group.
+                var created = connection
+                created.group = model.newConnectionGroup
+                model.newConnectionGroup = nil
+                next.append(created)
             }
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: model.groups, connections: next))
             model.connections = next
         } catch {
             model.notice = Notice(title: "Couldn't save connection", message: error.localizedDescription)
@@ -751,10 +758,10 @@ struct ConnectionTypeTile: View {
                     .shadow(color: hue.accent.opacity(hovering ? 0.6 : 0.35), radius: hovering ? 16 : 10, y: 4)
 
                 Text(kind.label)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.ui(13, weight: .semibold, rounded: true))
                     .foregroundStyle(Tone.ink)
                 Text(verbatim: "port \(kind.defaultPort)")
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.code(10.5))
                     .foregroundStyle(Tone.secondary)
             }
             .frame(maxWidth: .infinity)

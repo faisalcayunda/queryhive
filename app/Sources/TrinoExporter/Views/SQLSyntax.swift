@@ -35,7 +35,12 @@ enum SQLSyntax {
     /// app opens is that big; a pasted dump might be.
     private static let ceiling = 200_000
 
-    static func attributes(for sql: String) -> [(NSRange, [NSAttributedString.Key: Any])] {
+    /// The attribute runs for a statement, with the fonts already merged in.
+    ///
+    /// The fonts arrive as arguments rather than being read from a static here, because they are
+    /// the one part of a run that changes while the app runs. The colours stay static: they are
+    /// dynamic `NSColor`s that resolve per appearance, so they never need rebuilding.
+    static func attributes(for sql: String, baseFont: NSFont, commentFont: NSFont) -> [(NSRange, [NSAttributedString.Key: Any])] {
         guard sql.utf16.count <= ceiling else { return [] }
         let whole = NSRange(location: 0, length: sql.utf16.count)
         var out: [(NSRange, [NSAttributedString.Key: Any])] = []
@@ -47,7 +52,9 @@ enum SQLSyntax {
             let text = ns.substring(with: range)
 
             if match.range(at: 1).location != NSNotFound {
-                out.append((range, comment))
+                // The only token that changes shape: a comment is the one run drawn in an italic
+                // cut, so it is the only one that has to carry its own font.
+                out.append((range, comment.merging([.font: commentFont]) { _, new in new }))
             } else if match.range(at: 2).location != NSNotFound {
                 out.append((range, string))
             } else if match.range(at: 3).location != NSNotFound {
@@ -74,10 +81,17 @@ enum SQLSyntax {
         let sql = storage.string
         let whole = NSRange(location: 0, length: (sql as NSString).length)
 
+        // Both fonts resolved once per pass, from the current setting. The comment's italic is the
+        // one token that differs, and it is the only reason there are two.
+        let upright = font(italic: false)
+        let italic = font(italic: true)
+        let base = Self.base.merging([.font: upright]) { _, new in new }
+
         storage.beginEditing()
         // Reset first: a word that stopped being a keyword must stop looking like one.
         storage.setAttributes(base, range: whole)
-        for (range, attributes) in attributes(for: sql) where NSMaxRange(range) <= whole.length {
+        for (range, attributes) in attributes(for: sql, baseFont: upright, commentFont: italic)
+        where NSMaxRange(range) <= whole.length {
             storage.addAttributes(attributes, range: range)
         }
         storage.endEditing()
@@ -114,17 +128,18 @@ enum SQLSyntax {
     /// against the Daylight canvas (`#F4F6FB`), and each dark value still clears 4.5:1 against
     /// Midnight (`#0A0B1E`). `comment` is deliberately below that in the dark — it is the one token
     /// meant to recede — but is kept legible in the light.
-    private static func colour(_ dark: UInt32, _ light: UInt32, italic: Bool = false) -> [NSAttributedString.Key: Any] {
-        let plain = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        // Through the descriptor, not NSFontManager: the monospaced system face has no italic cut
-        // for the manager to convert to, and it returns nil.
-        let font = italic
-            ? (NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: 12.5) ?? plain)
-            : plain
+    /// The colours only, with no font in them.
+    ///
+    /// The font used to be baked in here, and these are `static let`, so the whole attribute
+    /// dictionary — font included — was built once, on first use, and then reused for the life of
+    /// the process. That is why the code font is applied per pass in `apply(to:)` instead: a
+    /// settings change has to reach the editor without a relaunch, and a cached dictionary cannot
+    /// notice one.
+    private static func colour(_ dark: UInt32, _ light: UInt32) -> [NSAttributedString.Key: Any] {
         let adaptive = NSColor(name: nil) { appearance in
             NSColor(Color(hex: appearance.isDark ? dark : light))
         }
-        return [.foregroundColor: adaptive, .font: font]
+        return [.foregroundColor: adaptive]
     }
 
     static let base = colour(0xE8EAF2, 0x1C1F26)
@@ -134,6 +149,18 @@ enum SQLSyntax {
     static let number = colour(0xFFB547, 0x9A5B00)
     static let quotedIdentifier = colour(0xE8C468, 0x7A5C00)
     static let literal = colour(0xFF7A8A, 0xBE2F45)
-    static let comment = colour(0x5A6072, 0x5F6672, italic: true)
+    static let comment = colour(0x5A6072, 0x5F6672)
     static let punctuation = colour(0x8A90A6, 0x565C6B)
+
+    /// The font the highlighter paints in, resolved fresh so it follows the code-font setting.
+    ///
+    /// Italic is asked for through the descriptor rather than `NSFontManager`: a fixed-pitch face
+    /// often has no italic cut for the manager to convert to, and it returns nil. When the chosen
+    /// family has no italic either, the descriptor returns nil and the upright font is kept — a
+    /// comment that is not slanted is a smaller loss than a comment that does not draw.
+    private static func font(italic: Bool) -> NSFont {
+        let plain = FontChoice.codeNSFont(size: 12.5, weight: .regular)
+        guard italic else { return plain }
+        return NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: 12.5) ?? plain
+    }
 }

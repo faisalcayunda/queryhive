@@ -5,8 +5,22 @@ import SwiftUI
 ///
 /// Drawn from the same lattice as the in-app mark (`hiveCells`), so the Dock and the sidebar
 /// cannot drift apart. Where the sidebar mark is two colours on the app's dark canvas, the icon
-/// inverts it: a CleanMyMac gradient tile carrying the comb in white, which is what survives
-/// being shrunk to 16pt in the Dock.
+/// inverts it: a deep emissive tile carrying the comb in white.
+///
+/// ## Why the tile went dark
+///
+/// It used to be a bright cyan-to-violet gradient with the mark in white, and the mark's contrast
+/// against that surface was the problem: **1.67:1 at the cyan corner**, well under the 3:1 that
+/// non-text elements are expected to clear. The comb was legible only because of the drop shadow
+/// under it. Measured with WCAG relative luminance against the two gradient ends: white on
+/// `#4FD8FF` is 1.67:1, on `#7B61FF` is 4.20:1. A dark base puts the same white at 10.1:1 and
+/// 18.1:1, so the mark stops depending on an effect to be seen.
+///
+/// That is also what makes it read as a tool for data engineers rather than a consumer utility:
+/// the instrument-panel vocabulary is a dark field with an emissive subject. Cyan does not leave —
+/// it is demoted from the surface to the *light*, as a core glow behind the comb and a rim light on
+/// the tile edge. The rim is load-bearing rather than decoration: on a dark Dock (`#1C1C1E`) the
+/// dark tile is 1.06:1 against its background, and the rim is what gives it an edge (13.4:1).
 ///
 /// Regenerate with `app/make-icon.sh` — never by hand.
 struct QueryHiveIcon: View {
@@ -14,7 +28,7 @@ struct QueryHiveIcon: View {
     /// macOS asks for 16 and 32 point artwork as well as the big sizes, and the seven-cell comb
     /// turns to a smudge at those — measured, not assumed: at 32pt only the lit centre survived
     /// and the icon read as a dot on a blue square. The compact variant is the same identity
-    /// distilled to one bold cell, which is also what the sidebar mark uses.
+    /// distilled to one bold ring.
     var compact = false
 
     /// Apple's icon grid: the squircle is about 824/1024 of the canvas, with a corner ratio of
@@ -29,23 +43,31 @@ struct QueryHiveIcon: View {
             // The mark's own pair, pinned: this render becomes assets/icon.icns, a fixed file no
             // user setting can reach, so it must not follow the accent the user happened to pick.
             RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(LinearGradient(colors: [Tone.brandGlow, Tone.brandDeep],
+                .fill(LinearGradient(colors: [Tone.brandTileTop, Tone.brandTileBase],
                                      startPoint: .topLeading, endPoint: .bottomTrailing))
                 .overlay {
-                    // Top sheen, the glossy highlight every CleanMyMac tile carries.
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(LinearGradient(colors: [.white.opacity(0.22), .clear],
-                                             startPoint: .top, endPoint: .center))
+                    // The emissive core: cyan light rising from behind the comb rather than a
+                    // sheen lying on top of it. Off-centre and above middle, because a light
+                    // source exactly at the centre reads as a printed gradient instead of light.
+                    //
+                    // Deliberately tight and dim. A tile-wide wash at 0.34 was measured to reach
+                    // luminance 97-130 across the middle of the tile, which is the same as the
+                    // quiet cells at 0.26 white — so the wash erased the six cells it was meant to
+                    // sit behind, and filled the gaps between them until the comb resolved as two
+                    // blobs instead of seven shapes. Light that outshines its subject is not light.
+                    RadialGradient(colors: [Tone.brandGlow.opacity(0.24), .clear],
+                                   center: UnitPoint(x: 0.5, y: 0.44),
+                                   startRadius: 0,
+                                   endRadius: tile * 0.45)
                 }
                 .overlay {
-                    // A touch of weight at the bottom so the tile reads as an object, not a swatch.
+                    // Rim light. The one effect on this tile that is not decoration: it is what
+                    // separates a near-black tile from a near-black Dock. Two colours so the edge
+                    // agrees with the core above and the violet base below.
                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .fill(LinearGradient(colors: [.clear, Color(hex: 0x1B0B4A).opacity(0.28)],
-                                             startPoint: .center, endPoint: .bottom))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: radius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.25), lineWidth: size * 0.007)
+                        .strokeBorder(LinearGradient(colors: [Tone.brandRim, Tone.brandDeep.opacity(0.14)],
+                                                     startPoint: .top, endPoint: .bottom),
+                                      lineWidth: size * 0.011)
                 }
                 .frame(width: tile, height: tile)
 
@@ -55,13 +77,18 @@ struct QueryHiveIcon: View {
             comb
                 .frame(width: tile * (compact ? 0.62 : 0.58),
                        height: tile * (compact ? 0.62 : 0.58))
-                .shadow(color: Color(hex: 0x1B0B4A).opacity(0.35), radius: size * 0.012, y: size * 0.006)
         }
         .frame(width: size, height: size)
     }
 
-    /// The lit centre cell is solid; the six around it are outlined so the comb still has
-    /// structure when the whole thing is 16pt wide, instead of turning into one white blob.
+    /// One lit cell that emits, and six that are present but quiet.
+    ///
+    /// The six used to be *outlined* rather than filled, and the outline was the wrong instrument:
+    /// a hairline stroke is the first thing to vanish when an icon is scaled down, so the mark's
+    /// structure depended on exactly the detail that could not survive. Flat fills carry structure
+    /// as *tone* instead, which averages cleanly at every size. The lit cell keeps a bloom, because
+    /// a large soft shape is also something that survives downscaling — it is the hairlines that do
+    /// not.
     private var comb: some View {
         Canvas { context, canvasSize in
             if compact {
@@ -69,6 +96,10 @@ struct QueryHiveIcon: View {
                 // read -- the vertices anti-alias away and it looks like a rounded square -- while
                 // the negative space in the middle defines the shape even at 16pt. Drawn as one
                 // very thick stroke so the corners stay mitered and hexagonal.
+                //
+                // Honest limit: at 16pt a regular hexagon cannot really read *as* a hexagon -- six
+                // vertices across five pixels is under a pixel each. What carries it is the flat top
+                // and bottom edges, which is why the ring is drawn with a flat-top orientation.
                 let radius = min(canvasSize.width, canvasSize.height) / 2 * 0.98
                 let centre = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
                 context.stroke(hexagonPath(centre: centre, radius: radius * 0.72),
@@ -77,13 +108,30 @@ struct QueryHiveIcon: View {
                 return
             }
             let unit = min(canvasSize.width, canvasSize.height) / 5.5
-            for cell in hiveCells(in: canvasSize) {
+            // 0.80, not 0.94: at 0.94 the gap between neighbouring cells is 0.104r, which is 0.57px
+            // at 64pt and fuses all seven hexagons into a single blob. At 0.80 the gap is 0.346r —
+            // 2.0px at 64, 4.0px at 128 — and the comb reads as a comb.
+            for cell in hiveCells(in: canvasSize, inset: 0.80) {
                 if cell.lit {
-                    context.fill(cell.path, with: .color(.white))
+                    // The bloom goes down *first*, under the cell, so the light spills around a
+                    // white shape rather than tinting it cyan. Drawn as a second blurred copy of
+                    // the same path: a shadow would be clipped to the outside of the shape, and a
+                    // shadow of a white cell is not what "emissive" means.
+                    context.drawLayer { glow in
+                        glow.addFilter(.blur(radius: unit * 0.22))
+                        glow.fill(cell.path, with: .color(Tone.brandGlow.opacity(0.55)))
+                    }
+                    context.fill(cell.path, with: .linearGradient(
+                        Gradient(colors: [.white, Color(hex: 0xE6F7FF)]),
+                        startPoint: CGPoint(x: 0, y: 0),
+                        endPoint: CGPoint(x: canvasSize.width, y: canvasSize.height)))
                 } else {
-                    context.fill(cell.path, with: .color(.white.opacity(0.10)))
-                    context.stroke(cell.path, with: .color(.white.opacity(0.92)),
-                                   lineWidth: max(1, unit * 0.12))
+                    // 0.38, not 0.20: the quiet cells have to out-read the core glow behind them,
+                    // and 0.20 white measured below the glow's own luminance across the middle of
+                    // the tile — the cells disappeared into the light. At 0.38 they sit clearly
+                    // above it while staying well below the lit cell, which is what keeps the comb
+                    // legible as seven shapes rather than one bright smear.
+                    context.fill(cell.path, with: .color(.white.opacity(0.38)))
                 }
             }
         }
@@ -144,7 +192,7 @@ struct QueryHiveIconSheet: View {
                     QueryHiveIcon(size: size, compact: size <= 32)
                         .frame(width: size, height: size)
                     Text("\(Int(size))")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.code(11))
                         .foregroundStyle(.white.opacity(0.45))
                 }
             }
