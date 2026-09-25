@@ -1618,6 +1618,43 @@ ditulis sendiri di app karena abu-abu label sistem itu milik sistem untuk diubah
 nilainya beda hari ini. Tes yang mengklaim "berbeda dari warna sistem" sudah dibuang, bukan
 dilonggarkan — mengukurnya membuktikan klaim itu salah. `swift test` **104 lulus / 0 gagal**.
 
+### Proyek pindah ke `~/Workspaces/Lab/Experiments/query_hive` (25 Sep 2026)
+
+Dipindahkan atas permintaan pemiliknya, dari `~/Workspaces/Organizations/BGN/tools/trino_exporter`.
+Dua hal yang membuat ini bukan sekadar `mv`.
+
+**`target/` dibuang lebih dulu.** Proyeknya 24 GB dan 23 GB di antaranya `target/` — output build
+cargo yang di-gitignore dan bisa dibangun ulang, dan yang cache-nya toh akan dibuang sendiri oleh
+cargo begitu path sumbernya berubah. `cargo clean` menghapus 244.826 berkas (30 GiB menurut
+hitungannya sendiri); proyeknya turun dari **24 GB ke 764 MB**. Karena keduanya satu filesystem,
+`mv` sesudahnya hanya rename, bukan salin.
+
+**Sesi agen dipindahkan pemetaannya, bukan filenya.** `mcode --continue` berarti "continue the latest
+Session in the current workspace", dan *workspace* itu sebuah **path**. Runtime menyimpannya di
+`~/.minimax/v2/sqlite/runtime-state.sqlite` di tiga tempat: `local_runtime_sessions.record_json` →
+`workspaceDir` (sumber kebenarannya, blob JSON), kolom proyeksi `workspace_dir` dan
+`project_workspace_dir` pada baris yang sama, dan `local_runtime_projects.workspace_dir`. Pindahkan
+direktorinya tanpa memindahkan ketiganya, dan **seluruh 36 sesi proyek ini jadi tidak terjangkau**
+dari path baru: `-c` tidak menemukan workspace, sementara baris workspace-nya masih menyebut
+direktori yang sudah tidak ada.
+
+`tools/adopt-workspace.sh` melakukan pemindahan itu: backup DB lewat `.backup` (snapshot konsisten,
+bukan `cp` yang tidak sadar WAL), lalu satu transaksi yang memperbarui project, `record_json` sesi,
+dua kolom proyeksinya, dan `local_runtime_v2_memory_session_states.workspace_dir`. Dijalankan
+terhadap **salinan** DB dulu sebagai bukti: 1 project pindah, **36 sesi pindah**, 0 tersisa di path
+lama, dan sesi paling baru di workspace baru adalah sesi yang sedang berjalan. Skripnya boleh
+dijalankan dua kali dan aman.
+
+Satu peringatan yang ditulis di skripnya sendiri: **jalankan saat mcode tertutup.** Selama satu sesi
+terbuka, runtime memegang salinan record-nya di memori dan bisa menuliskannya kembali, yang akan
+mengembalikan path lama. Kalau `mcode -c` tidak melanjutkan sesinya, tutup mcode dan jalankan
+skripnya sekali lagi.
+
+**Transkrip sesi diarsipkan ke dalam proyek** di `docs/session-archive/2026-09-25/` (77 MB: transkrip,
+`reports/` yang dirujuk transkrip, snapshot runtime, dan berkas indeks sesinya) beserta README yang
+menerangkan isinya dan bahwa ia snapshot dari sesi yang masih berjalan sehingga bagian akhirnya tidak
+ikut. Di-gitignore, karena 77 MB transkrip tidak bisa ditarik keluar dari riwayat git begitu masuk.
+
 ## Perkakas lokal (sengaja tidak masuk repo)`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
 dikirim produk. Karena itu ia **di-gitignore** dan tidak ada di repo — alasannya sama seperti skrip
 sekali pakai tidak di-commit: pohon repo seharusnya menggambarkan produknya.
