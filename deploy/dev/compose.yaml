@@ -1,0 +1,77 @@
+# Dev databases for the integration tests and the benchmark baseline.
+#
+#   podman compose -f deploy/dev/compose.yaml up -d
+#   # or, if no compose provider is installed (this machine's case):
+#   deploy/dev/up.sh all
+#
+# `up.sh` is the supported path here: it uses plain `podman run` commands and
+# loads the fixtures afterwards, so it needs nothing beyond podman itself. This
+# file exists so the same environment is reproducible for contributors who do
+# have a compose provider.
+#
+# Ports are off the defaults (55432, 53306, 58080) so a database already
+# listening locally is neither shadowed nor accidentally used.
+#
+# The credentials below are throwaway fixtures for generated data in a local
+# container. They are not secrets and grant access to nothing else; a real
+# connection's password never reaches this file or any other in the repository.
+name: queryhive-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: qh-postgres
+    environment:
+      POSTGRES_USER: qh
+      POSTGRES_PASSWORD: qh-dev-only
+      POSTGRES_DB: qh
+    ports:
+      - "55432:5432"
+    volumes:
+      - qh-postgres-data:/var/lib/postgresql/data
+      # Loaded once, on an empty data directory, by the image's own entrypoint.
+      - ./seed-postgres.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qh -d qh"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    container_name: qh-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: qh-dev-root-only
+      MYSQL_DATABASE: qh
+      MYSQL_USER: qh
+      MYSQL_PASSWORD: qh-dev-only
+    ports:
+      - "53306:3306"
+    volumes:
+      - qh-mysql-data:/var/lib/mysql
+      - ./seed-mysql.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pqh-dev-root-only"]
+      interval: 2s
+      timeout: 5s
+      retries: 45
+
+  # Trino is not started by up.sh by default: a single-node coordinator wants
+  # roughly 2 GiB of its own, and the podman VM on this machine has 2 GiB total,
+  # so it would fail slowly rather than usefully. Raise the VM's memory first
+  # (`podman machine stop && podman machine set --memory 8192 && podman machine
+  # start`), then this service works unchanged.
+  #
+  # The tag is deliberately unpinned: the version to support has to come from the
+  # upstream release list, and pinning a number nobody has verified would be
+  # worse than leaving it visible. See docs/compatibility.md.
+  trino:
+    image: trinodb/trino:latest
+    container_name: qh-trino
+    ports:
+      - "58080:8080"
+    profiles: ["trino"]
+
+volumes:
+  qh-postgres-data:
+  qh-mysql-data:

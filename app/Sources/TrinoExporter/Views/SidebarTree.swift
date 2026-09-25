@@ -28,7 +28,7 @@ struct SidebarTree: View {
                     } else {
                         ForEach(model.tree) { node in
                             TreeRow(node: node, depth: 0, visible: visibleIDs,
-                                    selected: model.selectedNodeID == node.id)
+                                    selectedID: model.selectedNodeID)
                         }
                     }
                 }
@@ -52,7 +52,7 @@ struct SidebarTree: View {
             HStack(spacing: 7) {
                 HiveMark(size: 15)
                 Text("QUERYHIVE")
-                    .font(.system(size: 10.5, weight: .bold))
+                    .font(.ui(10.5, weight: .bold))
                     .tracking(1.1)
                     .foregroundStyle(Tone.secondary)
                 Spacer()
@@ -103,9 +103,9 @@ struct SidebarTree: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("No connections yet.")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.ui(12, weight: .semibold))
             Text("Add a Trino coordinator to browse its catalogs.")
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             PillButton(title: "New Connection", symbol: "plus") { model.presentConnectionEditor(nil) }
@@ -119,7 +119,7 @@ struct SidebarTree: View {
 
     private var noMatches: some View {
         Text("Nothing loaded matches “\(model.treeFilter)”.")
-            .font(.system(size: 11))
+            .font(.ui(11))
             .foregroundStyle(Tone.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .padding(12)
@@ -139,11 +139,20 @@ struct TreeRow: View {
     @Bindable var node: TreeNode
     let depth: Int
     let visible: Set<String>?
-    /// Passed in rather than read from the model. A body that reads no observable property is one
-    /// SwiftUI can skip re-running when something unrelated changes — and with a few hundred rows
-    /// on screen, "something unrelated" happens on every keystroke in the editor.
-    var selected = false
+    /// The selected row's id, passed down from the root rather than read from the model here.
+    ///
+    /// Reading `model.selectedNodeID` inside this body subscribed **every visible row** to the
+    /// selection, so one click re-ran every row's body instead of the two whose highlight moved
+    /// — with a few hundred rows on screen that is the click that felt heavy. As a plain `let`,
+    /// SwiftUI compares it per row and skips every body whose value did not change. The same
+    /// reason `visible` above is a value, and the reason the comment on the old `selected` flag
+    /// gave for passing it in.
+    let selectedID: String?
     @State private var hovering = false
+
+    /// Whether this row is the selected one. Computed from the passed-in id, so the body still
+    /// reads nothing from the model.
+    private var selected: Bool { node.id == selectedID }
 
     private var isVisible: Bool { visible?.contains(node.id) ?? true }
     /// A filter auto-opens every level it can see, so a deep match is not hidden behind a node
@@ -176,7 +185,7 @@ struct TreeRow: View {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     ForEach(children) { child in
                         TreeRow(node: child, depth: depth + 1, visible: visible,
-                                selected: model.selectedNodeID == child.id)
+                                selectedID: selectedID)
                     }
                 }
             }
@@ -198,13 +207,26 @@ struct TreeRow: View {
             }
             .buttonStyle(.plain)
 
-            Image(systemName: node.kind.symbol)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(iconTint)
-                .frame(width: 15)
+            // A connection wears its driver's mark, on its own colour. Every connection used to be
+            // the same `server.rack`, so the one row that says *which database* this is said
+            // nothing at all — and the tile is already how the rest of the app answers that
+            // question, in the toolbar picker and on the connection sheet.
+            //
+            // Built from the node's values rather than from the model's connection: see
+            // `connectionTile(colour:kind:size:)` for why a row must not read that array.
+            Group {
+                if node.kind == .connection {
+                    connectionTile(colour: node.color, kind: node.connectionKind, size: 16)
+                } else {
+                    Image(systemName: node.kind.symbol)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(iconTint)
+                }
+            }
+            .frame(width: 16)
 
             Text(node.title)
-                .font(.system(size: 12, weight: node.kind == .connection ? .semibold : .regular))
+                .font(.ui(12, weight: node.kind == .connection ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
@@ -230,7 +252,7 @@ struct TreeRow: View {
             } else {
                 ProgressView().controlSize(.mini)
             }
-            Text(text).font(.system(size: 10.5)).foregroundStyle(tint).lineLimit(2)
+            Text(text).font(.ui(10.5)).foregroundStyle(tint).lineLimit(2)
             Spacer(minLength: 2)
         }
         .padding(.leading, CGFloat(depth + 1) * Metrics.treeIndent + 6)
@@ -242,69 +264,94 @@ struct TreeRow: View {
         switch node.kind {
         case .connection:
             // Navicat's connection menu, minus the entries this app has nothing behind: no
-            // connection profiles, no server-side "New Database", no groups or sharing. What is
-            // left is what the app can actually do.
-            Button("Open Connection") { model.expand(node) }
-            // Only Postgres filters system schemas away, so only there does "show all" reveal
-            // anything. MySQL and Trino already list everything `SHOW DATABASES` / `SHOW SCHEMAS`
-            // return, so offering the switch there would be a control with nothing behind it.
-            if let connection = model.connections.first(where: { $0.id == node.connectionID }),
-               connection.kind == .postgres {
-                Button {
-                    model.toggleShowAllSchemas(node.connectionID)
-                } label: {
-                    if connection.showAllSchemas {
-                        Label("Show System Schemas", systemImage: "checkmark")
-                    } else {
-                        Text("Show System Schemas")
-                    }
-                }
-            }
-            Divider()
-            Button("Edit Connection…") { model.presentConnectionEditor(node.connectionID) }
-            Button("Duplicate Connection") { model.duplicateConnection(node.connectionID) }
-            Button("Delete Connection…") { model.requestDelete(node.connectionID) }
-            Divider()
-            Button("New Connection") { model.presentConnectionEditor(nil) }
-            Divider()
-            // No keyboard shortcuts in here: this app's ⌘R is Run and ⌘T is already New Query
-            // from the Query menu, so printing either beside a different action would mislead,
-            // and declaring one twice can fire it twice.
-            Button("New Query") { model.newTab(connectionID: node.connectionID) }
-            Button("Open SQL File…") { model.runSQLFile(connectionID: node.connectionID) }
-            Divider()
-            Menu("Color") {
-                ForEach(ConnectionColor.allCases) { color in
+            // connection profiles, no server-side "New Database", no sharing. What is left is what
+            // the app can actually do — plus groups, which is where a connection is filed.
+            //
+            // The whole menu is written once against `id`, the one thing on this branch that is
+            // certain: a group is the only node without a connection, and a group is not this case.
+            if let id = node.connectionID {
+                Button("Open Connection") { model.expand(node) }
+                // Only Postgres filters system schemas away, so only there does "show all" reveal
+                // anything. MySQL and Trino already list everything `SHOW DATABASES` / `SHOW SCHEMAS`
+                // return, so offering the switch there would be a control with nothing behind it.
+                if let connection = model.connections.first(where: { $0.id == id }),
+                   connection.kind == .postgres {
                     Button {
-                        model.setColor(color, for: node.connectionID)
+                        model.toggleShowAllSchemas(id)
                     } label: {
-                        // The colour's own name, with a tick on the one in use. A context menu
-                        // cannot draw swatches, and inventing a row of coloured dots that only
-                        // works in one menu would be worse than saying the colour.
-                        if node.color == color {
-                            Label(color.rawValue.capitalized, systemImage: "checkmark")
+                        if connection.showAllSchemas {
+                            Label("Show System Schemas", systemImage: "checkmark")
                         } else {
-                            Text(color.rawValue.capitalized)
+                            Text("Show System Schemas")
                         }
                     }
                 }
-            }
-            Divider()
-            Button("Refresh") { model.refresh(node) }
-            Button("Reveal connections.json") {
-                if let url = try? ConnectionStore.directory() {
-                    NSWorkspace.shared.activateFileViewerSelecting([url.appendingPathComponent("connections.json")])
+                Divider()
+                Button("Edit Connection…") { model.presentConnectionEditor(id) }
+                Button("Duplicate Connection") { model.duplicateConnection(id) }
+                Button("Delete Connection…") { model.requestDelete(id) }
+                Divider()
+                groupMenu(for: id)
+                Divider()
+                Button("New Connection") { model.presentConnectionEditor(nil) }
+                Divider()
+                // No keyboard shortcuts in here: this app's ⌘R is Run and ⌘T is already New Query
+                // from the Query menu, so printing either beside a different action would mislead,
+                // and declaring one twice can fire it twice.
+                Button("New Query") { model.newTab(connectionID: id) }
+                Button("Open SQL File…") { model.runSQLFile(connectionID: id) }
+                Divider()
+                Menu("Color") {
+                    ForEach(ConnectionColor.allCases) { color in
+                        Button {
+                            model.setColor(color, for: id)
+                        } label: {
+                            // The colour's own name, with a tick on the one in use. A context menu
+                            // cannot draw swatches, and inventing a row of coloured dots that only
+                            // works in one menu would be worse than saying the colour.
+                            if node.color == color {
+                                Label(color.rawValue.capitalized, systemImage: "checkmark")
+                            } else {
+                                Text(color.rawValue.capitalized)
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("Refresh") { model.refresh(node) }
+                Button("Reveal connections.json") {
+                    if let url = try? ConnectionStore.directory() {
+                        NSWorkspace.shared.activateFileViewerSelecting([url.appendingPathComponent("connections.json")])
+                    }
                 }
             }
+        case .group:
+            // A group holds connections and nothing else, so its menu is about the filing: what to
+            // call it, what goes in it, and how to get rid of it without losing what is inside.
+            Button("New Connection in Group") {
+                model.presentConnectionEditor(nil, inGroup: node.groupID)
+            }
+            Divider()
+            Button("Rename Group…") { model.presentRenameGroup(node.groupID) }
+            // Deleting a group does **not** delete its connections. A folder that took its contents
+            // with it would make this the most dangerous item in the side bar, and there is nothing
+            // in the gesture that says "and the servers too".
+            Button("Delete Group") { model.deleteGroup(node.groupID) }
+            Divider()
+            Button("Refresh") { model.refresh(node) }
         case .catalog, .database, .schema:
             Button("Refresh") { model.refresh(node) }
             Button("Copy Name") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(node.title, forType: .string)
             }
-            Divider()
-            Button("New Query") { model.newTab(connectionID: node.connectionID) }
-            Button("Open SQL File…") { model.runSQLFile(connectionID: node.connectionID) }
+            // A catalog, database or schema always belongs to a connection — only a group has none —
+            // so the unwrap is a formality the compiler needs and the tree can always satisfy.
+            if let id = node.connectionID {
+                Divider()
+                Button("New Query") { model.newTab(connectionID: id) }
+                Button("Open SQL File…") { model.runSQLFile(connectionID: id) }
+            }
         case .table:
             Button("Insert into Query") { model.insert(node) }
             if let qualified = node.insertableText {
@@ -319,6 +366,37 @@ struct TreeRow: View {
             }
             Divider()
             Button("Refresh") { model.refresh(node) }
+        }
+    }
+
+    /// Which group a connection is filed under: the list of groups that exist, the way out of all
+    /// of them, and the way to make a new one. Every answer to "where should this live" is in this
+    /// menu, including "nowhere", which is a real answer.
+    @ViewBuilder
+    private func groupMenu(for id: UUID) -> some View {
+        let filed = model.connections.first(where: { $0.id == id })?.group
+        Menu("Group") {
+            Button {
+                model.move(id, toGroup: nil)
+            } label: {
+                if filed == nil { Label("No Group", systemImage: "checkmark") } else { Text("No Group") }
+            }
+            if !model.groups.isEmpty {
+                Divider()
+                ForEach(model.groups) { group in
+                    Button {
+                        model.move(id, toGroup: group.id)
+                    } label: {
+                        if filed == group.id {
+                            Label(group.name, systemImage: "checkmark")
+                        } else {
+                            Text(group.name)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("New Group…") { model.presentNewGroup(with: id) }
         }
     }
 
@@ -349,6 +427,7 @@ struct TreeRow: View {
 
     private var iconTint: Color {
         switch node.kind {
+        case .group: Tone.secondary
         case .connection: node.color.color
         case .catalog: Tone.violet
         case .database: Tone.ice
@@ -360,6 +439,8 @@ struct TreeRow: View {
 
     private var helpText: String {
         switch node.kind {
+        case .group:
+            "Group \(node.title) — holds connections. Right-click to rename or delete it."
         case .connection:
             "\(node.title) · \(node.connectionKind.label) — double-click to expand. Right-click to edit."
         case .catalog:

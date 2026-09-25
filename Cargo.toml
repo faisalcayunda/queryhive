@@ -1,0 +1,76 @@
+# Workspace root.
+#
+# Members are added phase by phase as each crate is implemented for real: the
+# blueprint's target tree (docs/architecture/rust-engine-blueprint.md, section 3.2)
+# lists the destination, not a promise that every crate exists today. A crate is
+# only added here once it holds working code, so that `cargo test` never runs
+# against a stub.
+[workspace]
+resolver = "2"
+members = [
+    "crates/qh-core",
+    "crates/qh-credentials",
+    "crates/qh-driver",
+    "crates/qh-driver-mysql",
+    "crates/qh-driver-postgres",
+    "crates/qh-driver-trino",
+    "crates/qh-export",
+    "crates/qh-ffi",
+    "crates/qh-rt",
+    "crates/qh-result-store",
+    "crates/qh-sql",
+    "crates/qh-storage",
+    "crates/qh-sync",
+    "crates/qh-tunnel",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Faisal Nugraha Cayunda"]
+repository = "https://github.com/data-ecosystem/queryhive"
+
+[workspace.dependencies]
+qh-core = { path = "crates/qh-core" }
+qh-driver = { path = "crates/qh-driver" }
+qh-driver-mysql = { path = "crates/qh-driver-mysql" }
+qh-driver-postgres = { path = "crates/qh-driver-postgres" }
+qh-driver-trino = { path = "crates/qh-driver-trino" }
+qh-credentials = { path = "crates/qh-credentials" }
+qh-export = { path = "crates/qh-export" }
+qh-ffi = { path = "crates/qh-ffi" }
+qh-rt = { path = "crates/qh-rt" }
+qh-result-store = { path = "crates/qh-result-store" }
+qh-sql = { path = "crates/qh-sql" }
+qh-storage = { path = "crates/qh-storage" }
+qh-sync = { path = "crates/qh-sync" }
+qh-tunnel = { path = "crates/qh-tunnel" }
+thiserror = "2"
+serde_json = { version = "1", features = ["preserve_order"] }
+# The Keychain, and the values that hold a password. `security-framework-sys` is the
+# raw attribute list and `SecItem*` calls; `core-foundation` builds the dictionary
+# they take. See crates/qh-credentials for why the item is spelled out by hand.
+security-framework = "3"
+security-framework-sys = "2"
+core-foundation = "0.10"
+secrecy = "0.10"
+zeroize = "1"
+# SQLite, compiled in: the local database is small metadata, and `bundled` removes any
+# dependence on the SQLite the machine happens to have (ADR-0005's sibling decision in
+# §5 of the blueprint). Used from a blocking thread, never from a tokio worker.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# UUIDv7 for row identity: time-ordered, so an index on the primary key stays close to
+# insertion order instead of scattering like a random UUID.
+uuid = { version = "1", features = ["v7"] }
+
+# Release profile for the FFI artifact.
+#
+# `panic = "unwind"`, deliberately: the FFI boundary catches panics and turns them
+# into an errored call rather than letting them cross into Swift, and that needs
+# unwinding tables. See docs/decisions/0009-panic-unwind-across-ffi.md.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

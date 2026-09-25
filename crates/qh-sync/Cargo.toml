@@ -1,0 +1,12 @@
+[package]
+name = "qh-sync"
+version = "0.1.0"
+description = "The shape a stored row has to have to be syncable later, and nothing that syncs"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+uuid.workspace = true
+thiserror.workspace = true

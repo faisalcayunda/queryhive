@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_type_zoo_live",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "The wire shape psycopg hands over for every hard Postgres type, as the engine renders it: a numeric(38,10) with its digits, the scientific spelling psycopg's Decimal gives a tiny negative, a timestamptz the server converted to UTC (the seeded +07:00 is *not* what comes back), a naive timestamp that must not gain a zone, an interval, json and jsonb text in the server's own key order, arrays, bytea with a NUL and 0xFF, a uuid, an enum label, a point, a NULL, an empty string and the four characters NULL. The `columns` type is the type OID psycopg reports; the identifier of the seeded `mood` enum is masked to `<OID>` because it climbs every time the seed is replayed."
+}

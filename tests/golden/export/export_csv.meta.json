@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "export_csv",
+  "command": "export",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "The CSV writer's bytes: header, quoting, and a NULL rendered as empty."
+}

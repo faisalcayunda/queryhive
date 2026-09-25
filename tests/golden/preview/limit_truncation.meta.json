@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "limit_truncation",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "A row cap that ends on a page boundary: `truncated` says whether more exists."
+}

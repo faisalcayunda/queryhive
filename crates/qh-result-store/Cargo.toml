@@ -1,0 +1,15 @@
+[package]
+name = "qh-result-store"
+version = "0.1.0"
+description = "Columnar result store with O(1) cell access and disk spill for very large results"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-core.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

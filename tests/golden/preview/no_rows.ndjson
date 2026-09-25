@@ -1,0 +1,3 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "id", "type": "integer"}], "event": "columns"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 0, "truncated": false}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_objects",
+  "command": "objects",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "MySQL declares four object columns: Name, Engine, Rows, Comment."
+}

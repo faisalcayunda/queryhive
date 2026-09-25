@@ -1,0 +1,51 @@
+[package]
+name = "qh-driver-trino"
+version = "0.1.0"
+description = "Trino driver: the HTTP client protocol by hand, one page at a time, with DELETE cancel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+qh-core.workspace = true
+qh-driver.workspace = true
+# `strip_terminator` for `explain`: Trino rejects the caller's trailing `;` the
+# same way PostgreSQL and MySQL do, and the shared scanner is what tells a real
+# terminator from a `;` inside a literal. One implementation, not a second copy.
+qh-sql.workspace = true
+thiserror.workspace = true
+# default-features = false, and the two features that are actually wanted:
+# `json` for the page bodies, `rustls-tls` so TLS is pure Rust. ADR-0006 chose
+# reqwest with rustls, and no other transport feature is switched on, so nothing
+# here pulls in a second TLS stack by accident.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The TLS layer itself, because a per-mode `ClientConfig` has to be built here:
+# reqwest only ever hands out *its* default trust store, and the whole point of the
+# verifying modes is which roots they are checked against. `ring` rather than the
+# default `aws_lc_rs` so one crypto provider is compiled, the one reqwest's
+# `rustls-tls` already pulls in; a second provider would be dead weight in the
+# shipped binary and one more thing to keep in step.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The platform trust store: on macOS the Keychain, which is what makes a corporate
+# CA the user installed work. Blueprint section 5; the alternative, `webpki-roots`,
+# would silently reject every private CA.
+rustls-platform-verifier = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+# A local TLS coordinator for the tests that must not need podman: the verifying
+# path is real code, so it is exercised against a real handshake with a root store
+# the test controls rather than left to the integration suite.
+rcgen = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
+# `default-features = false` for the same reason as the runtime dependency above:
+# tokio-rustls defaults to `aws_lc_rs`, and a second crypto provider would both
+# inflate the test build and make the provider lookup ambiguous.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[lints.rust]
+unsafe_code = "forbid"

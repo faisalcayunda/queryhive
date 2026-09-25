@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_catalogs_live",
+  "command": "catalogs",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`catalogs` on the driver whose object tree has no catalog level: the pg_database listing, filtered to connectable non-template databases, in the query's own ORDER BY."
+}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_type_zoo_live",
+  "command": "preview",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "Trino's own decoding of the types that matter, from expressions rather than a table: a decimal(38,10) with its digits intact, a tiny negative decimal, a timestamp with a zone, a naive timestamp, a date, a time, an interval, a NULL and an empty string."
+}

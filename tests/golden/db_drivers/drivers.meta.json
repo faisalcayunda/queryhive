@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "drivers",
+  "command": "db_drivers",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The three drivers and the object-tree levels each declares. No network, no settings."
+}

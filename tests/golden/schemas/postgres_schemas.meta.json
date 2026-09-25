@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_schemas",
+  "command": "schemas",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Postgres has no catalog level; schema listing is its top level."
+}

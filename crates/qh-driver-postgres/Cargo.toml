@@ -1,0 +1,36 @@
+[package]
+name = "qh-driver-postgres"
+version = "0.1.0"
+description = "PostgreSQL driver: streaming batches, exact decimals, and server-side cancel"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false }
+qh-core.workspace = true
+qh-driver.workspace = true
+qh-sql.workspace = true
+# TLS, as the blueprint's §5 table requires (blueprint line 580): `rustls` so the
+# binary does not link OpenSSL, and `rustls-platform-verifier` so the roots come
+# from the platform store — the macOS Keychain — which is what makes a corporate
+# CA the user installed work. `tokio-postgres` speaks TLS only through a
+# `MakeTlsConnect`, which `tokio-postgres-rustls` supplies.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.6"
+thiserror.workspace = true
+tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.14"
+
+[dev-dependencies]
+# The tests put a CA they generated into a root store, and the fixtures beside them
+# are PEM. `io-util` because the fake server in `tests/tls.rs` reads and writes the
+# negotiation bytes by hand.
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"

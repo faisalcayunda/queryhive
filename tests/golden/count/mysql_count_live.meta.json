@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_count_live",
+  "command": "count",
+  "event_lines": 3,
+  "exit_code": 0,
+  "notes": "The count wrapper on MySQL over 500,000 real rows."
+}

@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "QUERY PLAN", "type": "25"}], "event": "columns"}
+{"data": [["Index Scan using type_zoo_pkey on type_zoo  (cost=0.14..8.16 rows=1 width=432)"], ["  Index Cond: (id = 1)"]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 2}

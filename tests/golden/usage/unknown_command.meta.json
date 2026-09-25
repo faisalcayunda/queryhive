@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "unknown_command",
+  "command": "usage",
+  "event_lines": 1,
+  "exit_code": 1,
+  "notes": "A usage error is one error event and exit 1 -- never a traceback on stdout."
+}

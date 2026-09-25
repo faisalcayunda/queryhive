@@ -1,0 +1,1 @@
+{"data": [["customer", "BASE TABLE"], ["lineitem", "BASE TABLE"], ["nation", "BASE TABLE"], ["orders", "BASE TABLE"], ["part", "BASE TABLE"], ["partsupp", "BASE TABLE"], ["region", "BASE TABLE"], ["supplier", "BASE TABLE"]], "event": "objects", "object_columns": ["Name", "Type"]}

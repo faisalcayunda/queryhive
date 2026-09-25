@@ -9,17 +9,43 @@ import SwiftUI
 /// The panes are drawn with this app's own controls rather than `TabView`. A system tab bar would
 /// sit on the window's own material in the system's own colours, which is the one surface in the
 /// app that would then not be wearing the palette the user just chose two inches below it.
+///
+/// ## Structure
+///
+/// The pane is **grouped rows inside titled cards**, not a flat list. Apple's HIG for settings on
+/// macOS asks for a stable pane switcher that always marks the active pane, settings organised in
+/// groups, and as few controls on screen at once as the job allows. The previous layout was one
+/// `VStack` of seven equally weighted sections separated by nothing but a divider: Preset, Theme,
+/// Accent and Tone all read as siblings even though Preset *is* a theme, an accent and a tone
+/// chosen together. Grouping them puts the relationship on screen — pick a preset, or open the
+/// Appearance card and set the three parts yourself.
 struct SettingsView: View {
-    @Environment(AppModel.self) private var model
-    @State private var pane: Pane = .appearance
+    @State private var pane: Pane
 
-    private enum Pane: String, CaseIterable, Hashable {
-        case appearance, keyboard
+    /// The pane is settable at init only so a snapshot render can photograph the Keyboard pane
+    /// without a person clicking over to it. In the running app nothing passes this.
+    init(pane: Pane = .appearance) {
+        _pane = State(initialValue: pane)
+    }
+
+    enum Pane: String, CaseIterable, Hashable {
+        case appearance, fonts, keyboard
 
         var title: String {
             switch self {
             case .appearance: "Appearance"
+            case .fonts: "Fonts"
             case .keyboard: "Keyboard"
+            }
+        }
+
+        /// A symbol per pane, so the switcher reads as navigation rather than as a segmented
+        /// filter. Both are SF Symbols the platform already uses for these ideas.
+        var symbol: String {
+            switch self {
+            case .appearance: "paintpalette"
+            case .fonts: "textformat"
+            case .keyboard: "keyboard"
             }
         }
     }
@@ -28,8 +54,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Outside the scroll view on purpose: the pane switch stays put while a pane scrolls,
             // so it cannot end up off-screen behind the content it switches.
-            Segmented(selection: $pane, options: Pane.allCases) { $0.title }
-                .frame(width: 240)
+            paneBar
 
             // The pane scrolls and the window does not grow with it.
             //
@@ -43,6 +68,7 @@ struct SettingsView: View {
             ScrollView {
                 switch pane {
                 case .appearance: AppearanceSettings()
+                case .fonts: FontSettings()
                 case .keyboard: KeyboardSettings()
                 }
             }
@@ -61,6 +87,111 @@ struct SettingsView: View {
         .frame(width: 560, height: 640)
         .background(Tone.canvas)
     }
+
+    /// The pane switcher, drawn as a bar of equal-width buttons rather than a small segmented
+    /// control pinned to the left.
+    ///
+    /// Two reasons it is its own control. HIG asks a settings window for a switcher that stays
+    /// visible and *always marks the active pane*, and it asks for the switcher to read as
+    /// navigation between areas — which is what the symbol plus the recessed track says, and what
+    /// a 240pt segmented control floating above a 520pt pane did not.
+    private var paneBar: some View {
+        HStack(spacing: 3) {
+            ForEach(Pane.allCases, id: \.self) { option in
+                let active = pane == option
+                Button { pane = option } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: option.symbol)
+                            .font(.system(size: 11.5, weight: .medium))
+                        Text(option.title)
+                            .font(.ui(12, weight: active ? .semibold : .regular))
+                    }
+                    .foregroundStyle(active ? Tone.ink : Tone.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 28)
+                    .background(Tone.ink.opacity(active ? 0.14 : 0),
+                                in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(active ? [.isSelected] : [])
+            }
+        }
+        .padding(3)
+        .background(Tone.recess.opacity(0.32), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .strokeBorder(Tone.ink.opacity(0.08)))
+    }
+}
+
+// MARK: Grouping
+
+/// A titled card: a section label, an optional one-line explanation, then the controls.
+///
+/// The card is what gives the pane its hierarchy. Every group is the same shape, so the eye reads
+/// the pane as "a few groups" rather than as "a list of things", and the gap between cards (18)
+/// is visibly larger than the gap inside one (12) — which is the whole difference between a
+/// deliberate layout and a stack.
+private struct SettingsCard<Content: View>: View {
+    let title: String
+    var detail: String?
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                SectionLabel(text: title)
+                if let detail {
+                    Text(detail)
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glass(12)
+    }
+}
+
+/// One labelled row inside a card: the name of the thing, then the control that sets it.
+///
+/// Used where the control is short enough to sit under its own label without crowding, which is
+/// every control in the Appearance card. The label is what the previous layout lacked — its
+/// controls were separated by nothing but whitespace, so a tile row and a swatch row read as the
+/// same kind of thing.
+private struct SettingsRow<Control: View>: View {
+    let label: String
+    var trailing: String?
+    @ViewBuilder let control: Control
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(label)
+                    .font(.ui(12, weight: .medium))
+                    .foregroundStyle(Tone.ink)
+                Spacer(minLength: 8)
+                if let trailing {
+                    Text(trailing)
+                        .font(.code(11))
+                        .foregroundStyle(Tone.secondary)
+                }
+            }
+            control
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A hairline between two rows of the same card, so the rows read as a group rather than as one
+/// paragraph of controls.
+private struct RowDivider: View {
+    var body: some View {
+        Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
+    }
 }
 
 // MARK: Appearance
@@ -70,115 +201,67 @@ struct AppearanceSettings: View {
     @Bindable private var store = ThemeStore.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Mode")
-                Text("System follows macOS and keeps following it — switch the system appearance with "
-                     + "this window open and everything below repaints. Light and Dark pin one instead, "
-                     + "whatever the system is set to.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 18) {
+            // The named combinations first, because choosing one is the whole decision for most
+            // people. The card below is where the same choice is taken apart.
+            SettingsCard(title: "Preset",
+                         detail: "Three combinations worth a single click. Each names a canvas for the dark and another for the light, so switching mode stays inside the preset. Everything below still works on its own.") {
+                presetButtons
             }
 
-            Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Preset")
-                Text("Three combinations worth a single click. Each one names a canvas for the dark "
-                     + "and another for the light, so switching mode stays inside the preset. "
-                     + "Everything below still works on its own.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            presetButtons
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Theme")
-                Text("The canvas, for the appearance you are in. Each is listed on its own side — "
-                     + "the dark ones in the dark, the light ones in the light — because a canvas "
-                     + "belongs to one appearance and there is no such thing as a light Midnight.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            themeTiles
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Accent")
-                Text("Paints the interactive chrome: the Run capsule, focus rings, the selected tab "
-                     + "and tile. The object tree's own colours do not move — they are how the tree "
-                     + "tells a table from a column, and the app's mark keeps its own pair.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            accentSwatches
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Tone")
-                Text("How the coloured surfaces are painted, independent of the colours themselves. "
-                     + "Plain and Soft draw no gradient at all — no ramp on the Run capsule, no "
-                     + "sheen, no coloured shadow, and a flat backdrop.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            tonePicker
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            VStack(alignment: .leading, spacing: 7) {
-                HStack {
-                    SectionLabel(text: "Backdrop glow")
-                    Spacer()
-                    Text(glowLabel)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Tone.secondary)
+            // Mode, Theme, Accent and Tone in one card: they are four parts of one question, and
+            // the divider between rows says so without the weight of four separate sections.
+            SettingsCard(title: "Appearance",
+                         detail: "The canvas, the accent that paints the chrome, and how the coloured surfaces are filled.") {
+                SettingsRow(label: "Mode") {
+                    Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
                 }
-                Slider(value: $store.glow, in: 0...1.5)
-                    .tint(Tone.accent)
-                    .disabled(!store.tone.isLuminous)
-                Text(store.tone.isLuminous
-                     ? "The two radial glows behind the workspace. 0 leaves a flat canvas."
-                     : "The \(store.tone.title) tone draws a flat backdrop, so there is nothing to scale.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                RowDivider()
+                SettingsRow(label: "Theme") { themeTiles }
+                RowDivider()
+                SettingsRow(label: "Accent") { accentSwatches }
+                RowDivider()
+                SettingsRow(label: "Tone",
+                            trailing: store.tone.isLuminous ? nil : "flat") { tonePicker }
             }
 
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            HStack {
-                Text("Reset returns to System appearance and the Classic preset: midnight in the dark, "
-                     + "daylight in the light, ice, glow, 100%.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Tone.secondary)
-                Spacer(minLength: 12)
-                PillButton(title: "Reset", symbol: "arrow.uturn.backward", role: .quiet) {
-                    store.reset()
+            SettingsCard(title: "Backdrop",
+                         detail: store.tone.isLuminous
+                            ? "How hard the two radial glows behind the workspace burn. 0 leaves a flat canvas."
+                            : "The \(store.tone.title) tone draws a flat backdrop, so there is nothing to scale.") {
+                SettingsRow(label: "Glow", trailing: glowLabel) {
+                    Slider(value: $store.glow, in: 0...1.5)
+                        .tint(Tone.accent)
+                        .disabled(!store.tone.isLuminous)
                 }
-                .disabled(store.theme == .midnight && store.accent == .ice
-                          && store.tone == .glow && store.glow == 1.0)
             }
+
+            resetFooter
         }
     }
 
     private var glowLabel: String {
         "\(Int((store.glow * 100).rounded()))%"
+    }
+
+    /// Reset sits apart from the cards, under its own hairline: it is not a setting, it is the
+    /// way back from all of them, and drawing it as a fourth card would give it the same weight as
+    /// the choices it undoes.
+    private var resetFooter: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text("Reset returns to System appearance and the Classic preset: midnight in the dark, "
+                 + "daylight in the light, ice, glow, 100%.")
+                .font(.ui(11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            PillButton(title: "Reset", symbol: "arrow.uturn.backward", role: .quiet) {
+                store.reset()
+            }
+            .disabled(store.theme == .midnight && store.accent == .ice
+                      && store.tone == .glow && store.glow == 1.0)
+        }
+        .padding(.top, 2)
     }
 
     /// How an accent looks under a given tone, for a swatch or a tile preview.
@@ -220,7 +303,7 @@ struct AppearanceSettings: View {
                             .strokeBorder(active ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
                                           lineWidth: active ? 1.5 : 1))
                         Text(tone.title)
-                            .font(.system(size: 11, weight: active ? .semibold : .regular))
+                            .font(.ui(11, weight: active ? .semibold : .regular))
                             .foregroundStyle(active ? Tone.ink : Tone.secondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -268,14 +351,14 @@ struct AppearanceSettings: View {
                     .strokeBorder(Tone.ink.opacity(0.22)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(preset.title)
-                    .font(.system(size: 12, weight: active ? .semibold : .medium))
+                    .font(.ui(12, weight: active ? .semibold : .medium))
                     .foregroundStyle(active ? Tone.ink : Tone.secondary)
                 // "Blue · Glow", not "Graphite · Blue · Glow": the theme is already shown by the
                 // tile's own background, and the bar beside this line shows the accent under the
                 // tone. Spelling all three out at 10pt monospaced needs ~191pt inside a ~168pt
                 // tile, so it truncated to "Graphite · Blue · Gl…" — a label that names nothing.
                 Text("\(preset.accent.title) · \(preset.tone.title)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.code(10))
                     .foregroundStyle(Tone.ink.opacity(0.62))
                     .lineLimit(1)
             }
@@ -283,7 +366,7 @@ struct AppearanceSettings: View {
         }
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity)
-        .frame(height: 40)
+        .frame(height: 44)
         .background(canvas, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
             .strokeBorder(active ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
@@ -315,13 +398,13 @@ struct AppearanceSettings: View {
                             .padding(9)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
-                        .frame(height: 52)
+                        .frame(height: 46)
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .strokeBorder(store.theme == theme ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
                                           lineWidth: store.theme == theme ? 1.5 : 1))
 
                         Text(theme.title)
-                            .font(.system(size: 11, weight: store.theme == theme ? .semibold : .regular))
+                            .font(.ui(11, weight: store.theme == theme ? .semibold : .regular))
                             .foregroundStyle(store.theme == theme ? Tone.ink : Tone.secondary)
                     }
                     .contentShape(Rectangle())
@@ -354,6 +437,106 @@ struct AppearanceSettings: View {
     }
 }
 
+// MARK: Fonts
+
+/// Which family the chrome and the code draw in.
+///
+/// Two choices rather than one, because they are two jobs. The chrome wants whatever the user reads
+/// labels in; the code wants a fixed-pitch face, and every client this app is measured against
+/// (DataGrip, Navicat) separates the two. The lists are read from the families actually installed
+/// on this machine — see `FontChoice` — so a picker never offers a font that would silently fall
+/// back to the system one.
+struct FontSettings: View {
+    @Bindable private var store = ThemeStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Interface",
+                         detail: "The family the chrome draws in: labels, tabs, buttons and every panel. System means the macOS system font, which is what the app ships with.") {
+                SettingsRow(label: "Family", trailing: uiLabel) {
+                    familyPicker(selection: $store.uiFontFamily,
+                                 families: FontChoice.uiFamilies,
+                                 fallback: "System")
+                }
+                RowDivider()
+                // A sample set in the chosen family, at the size the chrome actually uses. The
+                // point of a font picker is to see the font, and a picker that only lists names
+                // makes the user pick blind.
+                SettingsRow(label: "Sample") {
+                    Text("The quick brown fox jumps over the lazy dog · 0123456789")
+                        .font(FontChoice.sample(family: store.uiFontFamily, size: 12))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+
+            SettingsCard(title: "Code",
+                         detail: "The family the code draws in: the SQL editor, the result grid, and every monospaced value. System means the system's fixed-pitch font.") {
+                SettingsRow(label: "Family", trailing: codeLabel) {
+                    familyPicker(selection: $store.codeFontFamily,
+                                 families: FontChoice.codeFamilies,
+                                 fallback: "System")
+                }
+                RowDivider()
+                SettingsRow(label: "Sample") {
+                    Text("SELECT id, name FROM warehouse.orders WHERE total > 100;")
+                        .font(FontChoice.sample(family: store.codeFontFamily, size: 12))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                // The two counts are the honest statement of what the picker can offer: a family
+                // that is not fixed-pitch is not in the code list, and saying how many were dropped
+                // is better than a list that silently looks short.
+                Text("\(FontChoice.codeFamilies.count) of \(FontChoice.uiFamilies.count) installed families are fixed-pitch and offered here.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary.opacity(0.85))
+            }
+        }
+    }
+
+    private var uiLabel: String {
+        store.uiFontFamily.isEmpty ? "System" : store.uiFontFamily
+    }
+
+    private var codeLabel: String {
+        store.codeFontFamily.isEmpty ? "System" : store.codeFontFamily
+    }
+
+    /// A `Menu` rather than a `Picker`: the list is every font on the machine, which is hundreds of
+    /// rows, and a menu scrolls and searches without turning the settings window into a list of
+    /// fonts. Each row is drawn *in its own family* so the list previews what it offers.
+    private func familyPicker(selection: Binding<String>, families: [String], fallback: String) -> some View {
+        Menu {
+            Button(fallback) { selection.wrappedValue = FontChoice.system }
+            Divider()
+            ForEach(families, id: \.self) { family in
+                Button(family) { selection.wrappedValue = family }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(selection.wrappedValue.isEmpty ? fallback : selection.wrappedValue)
+                    .font(FontChoice.sample(family: selection.wrappedValue, size: 11.5))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Tone.secondary)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: Metrics.control)
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Tone.ink.opacity(0.10)))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 // MARK: Keyboard
 
 /// Whose keys this app answers to.
@@ -365,32 +548,23 @@ struct KeyboardSettings: View {
 
     var body: some View {
         @Bindable var model = model
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "Keyboard")
-                Text("Choose whose keys this app answers to. Every binding below comes from the "
-                     + "scheme's own definitions, so the two never drift apart.")
-                    .font(.system(size: 11))
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Scheme",
+                         detail: "Choose whose keys this app answers to. Every binding below comes from the scheme's own definitions, so the two never drift apart.") {
+                Picker("", selection: $model.shortcutScheme) {
+                    ForEach(ShortcutScheme.allCases) { scheme in
+                        Text(scheme.title).tag(scheme)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(model.shortcutScheme.detail)
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Picker("", selection: $model.shortcutScheme) {
-                ForEach(ShortcutScheme.allCases) { scheme in
-                    Text(scheme.title).tag(scheme)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            Text(model.shortcutScheme.detail)
-                .font(.system(size: 11))
-                .foregroundStyle(Tone.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider().overlay(Tone.ink.opacity(0.08))
-
-            bindingTable
+            SettingsCard(title: "Bindings") { bindingTable }
         }
     }
 
@@ -400,16 +574,17 @@ struct KeyboardSettings: View {
     /// needs to know about — it is why "Run" under DBeaver is ⌘↩ and not the ⌘R they are reaching
     /// for — and silently omitting the row would make the scheme look complete when it is not.
     private var bindingTable: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(ShortcutAction.allCases) { action in
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(ShortcutAction.allCases.enumerated()), id: \.element) { index, action in
+                if index > 0 { RowDivider() }
                 HStack(spacing: 8) {
                     Text(action.title)
-                        .font(.system(size: 11.5))
+                        .font(.ui(11.5))
                         .foregroundStyle(Tone.ink.opacity(0.9))
                     Spacer(minLength: 12)
                     if let shortcut = model.shortcutScheme.shortcut(for: action) {
                         Text(shortcut.display)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(.code(11, weight: .medium))
                             .foregroundStyle(Tone.ink.opacity(0.85))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -417,11 +592,11 @@ struct KeyboardSettings: View {
                                         in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                     } else {
                         Text("not bound")
-                            .font(.system(size: 10.5))
+                            .font(.ui(10.5))
                             .foregroundStyle(Tone.secondary.opacity(0.7))
                     }
                 }
-                .padding(.vertical, 3)
+                .padding(.vertical, 6)
             }
         }
     }

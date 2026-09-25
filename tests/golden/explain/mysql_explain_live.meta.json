@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_explain_live",
+  "command": "explain",
+  "event_lines": 4,
+  "exit_code": 0,
+  "notes": "MySQL is the driver whose EXPLAIN is not one text column: a real multi-column plan table, which is why `explain` emits preview's protocol rather than a plan shape"
+}

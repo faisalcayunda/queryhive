@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "no_rows",
+  "command": "preview",
+  "event_lines": 3,
+  "exit_code": 0,
+  "notes": "An empty result still emits columns and done."
+}

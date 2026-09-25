@@ -21,7 +21,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="QueryHive"
-VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../exporter/__init__.py)"
+# The crate the app is built against, which is also what `engineVersion()` reports.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo.toml)"
 VERSION="${VERSION:-0.0.1}"
 ARCH="$(uname -m)"
 DEVELOPER_ID=false
@@ -67,8 +68,9 @@ MISSING
     exit 1
   fi
   echo "    signing as: $IDENTITY"
-  # Every Mach-O inside the bundle, then the bundle. The bundled CPython and its extension
-  # modules are why this is a loop and not one codesign call.
+  # Every Mach-O inside the bundle, then the bundle. Today that is the app binary alone -- the
+  # engine is static, so its code is inside that binary rather than beside it; the loop is here
+  # so that a second Mach-O would not silently go unsigned.
   find "$BUNDLE" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in *.o|*.a) continue ;; esac
     if file -b "$f" | grep -q "Mach-O"; then
@@ -124,8 +126,8 @@ QueryHive
 
 3.  Requires an Apple Silicon Mac (M1 or later) and macOS 14 or later.
 
-4.  Nothing else to install. The app carries its own Python engine — no Python, no pip,
-    no PATH setup, no virtualenv.
+4.  Nothing else to install. The engine is native Rust. No Python, no pip, no
+    virtualenv, no PATH setup.
 README
 
 rm -f "$DMG"

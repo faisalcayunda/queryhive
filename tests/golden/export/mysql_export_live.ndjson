@@ -1,0 +1,5 @@
+{"event": "step", "step": "connect"}
+{"event": "step", "step": "write"}
+{"columns": [{"name": "id", "type": "3"}, {"name": "exact_money", "type": "246"}, {"name": "tiny_negative", "type": "246"}, {"name": "a_datetime", "type": "12"}, {"name": "a_timestamp", "type": "7"}, {"name": "a_date", "type": "10"}, {"name": "a_time", "type": "11"}, {"name": "a_json", "type": "245"}, {"name": "raw_bytes", "type": "252"}, {"name": "a_enum", "type": "254"}, {"name": "a_char_uuid", "type": "254"}, {"name": "a_binary_uuid", "type": "254"}, {"name": "no_value", "type": "252"}, {"name": "empty_text", "type": "252"}, {"name": "the_word_null", "type": "252"}], "event": "start", "query_id": "<QUERY_ID>"}
+{"event": "progress", "rows": 1}
+{"cancelled": false, "event": "done", "files": [{"bytes": 398, "path": "<TMP>/qh-golden-mysql_export_live/type_zoo.csv"}], "query_id": "<QUERY_ID>", "rows": 1, "warnings": []}

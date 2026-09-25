@@ -1,0 +1,22 @@
+[package]
+name = "qh-driver"
+version = "0.1.0"
+description = "The driver/session/cursor contract every database crate implements"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+qh-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Only for `#[tokio::test]`: the traits are async, so exercising them needs a
+# runtime. Minimal features, so this does not pull the whole of tokio into a
+# crate that otherwise has no runtime dependency at all.
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints.rust]
+unsafe_code = "forbid"

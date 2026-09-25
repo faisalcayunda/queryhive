@@ -11,15 +11,17 @@ conflicts with this file, stop and report the conflict instead of choosing silen
   json, xml, html, sql, xls, xlsx, dbf) without ever holding the result set in memory, or is
   handed to Trino to write into a table.
 - Object browser: connection → catalog → schema → table, loaded lazily.
-- Built-in engine: a bundled standalone CPython 3.12 with pinned packages. The user never
-  configures a Python path.
+- Built-in engine: the Rust workspace under `crates/`, linked across UniFFI
+  (`Support/RustEngine.swift`). No interpreter is bundled and there is no runtime path to
+  configure.
 - Saved connections, Navicat style. The password lives in the macOS Keychain.
 - Out of scope: universal or Intel builds, notarization, editing table data, saved query files,
   a result data grid (the export *is* the result).
 
-The browser UI (`exporter/static/index.html`, served by `exporter/web.py`) and the CLI
-(`exporter/cli.py`) stay as they are. All three front ends drive the same `exporter` package;
-only the app talks to it through the JSON-event engine below.
+There is one engine and two front ends: this app over UniFFI, and the `queryhive-engine` CLI
+(`crates/qh-ffi/src/main.rs`) that the golden harness runs. Both call the same `qh_ffi` commands,
+which is what keeps the two from drifting. The browser UI is gone with the Python tree — a
+deliberate removal, not a port still to come.
 
 ## Design language
 
@@ -152,7 +154,7 @@ things worth having were fitted to the rows that already exist:
 | object pickers on their own strip | at the right of the editor header, which was empty | they are a lookup, not an action, so they take the far side of a row whose actions sit left |
 | `Run ⌄` | Run with a chevron menu beside it | the primary action stays one click; the variants stay one more |
 | `□ Stop` beside Run | Stop beside Run, disabled when idle | it used to swap into Run's slot, which moved the button out from under the pointer exactly when it was being reached for |
-| icon toolbar: EXPLAIN, format, layout toggles | **not copied** | the engine has no EXPLAIN, no formatter, and one grid — a button with nothing behind it is worse than no button |
+| icon toolbar: EXPLAIN, format, layout toggles | **not copied as icons** | Explain is a button beside Stop, not an icon (§Explain); there is no formatter; and there is one grid, so the layout toggles have nothing to switch — a button with nothing behind it is worse than no button |
 | "Continue on Error" | **not copied** | one statement runs per run; there is no script to continue |
 
 The pickers follow the connection's driver levels exactly as the tree does — no schema picker for
@@ -600,10 +602,19 @@ The form shows only the fields the driver has:
 
 | | Trino | PostgreSQL | MySQL |
 |---|---|---|---|
-| transport | Scheme (http/https) + Verify TLS | SSL mode | SSL mode |
+| transport | Transport (https/http/prefer) + Verify TLS (https only) | SSL mode | SSL mode |
 | `database` field | "Catalog" | "Database · Required" | "Database" |
 | `schema` field | yes | yes (`search_path`) | **no** |
 | tree | catalog → schema → table | schema → table | database → table |
+
+Trino's encryption is a transport rather than a list of mode words, because the engine decides it
+from a scheme: **HTTPS** encrypts and checks the certificate, **HTTP** is clear, and **Prefer** — the
+one outcome the scheme words cannot spell — tries HTTPS first and falls back to plain HTTP only when
+the coordinator answers the handshake with something that is not TLS. `prefer` is the shared
+vocabulary's own word for that, already shown by the other two drivers; the app stores it in the
+connection's `scheme` slot and sends it as `DB_SSLMODE`, which outranks `DB_SCHEME` in the engine.
+The Verify checkbox is drawn for HTTPS alone: it is the only transport with a verification answer,
+and the other two say so in that row instead of showing a box that could not change the connection.
 
 `ConnectionKind.levels` and the engine's `db_drivers` command are the same contract stated twice,
 and they have to agree. A `connections.json` written before QueryHive spoke to more than Trino
@@ -751,20 +762,29 @@ lookup and the popup — so it proves the whole suggestion chain rather than jus
 drawing. The fixture is fixed, so two runs of one build produce the same image, and the
 connections file and the Keychain are never touched.
 
-## Engine CLI (`app/engine/queryhive_engine.py`)
+## Engine CLI (`queryhive-engine`)
 
-Commands: `db_drivers`, `test`, `catalogs`, `schemas`, `tables`, `export`, `to_table`. Every
-stdout line is one compact JSON object. Every failure, including a usage error, emits
-`{"event": "error", "message": ...}` and exits 1. Tracebacks go to stderr.
+The app's own entry point is `RustEngine` over UniFFI. This section describes the same fourteen
+commands as the CLI binary reaches them, because that binary is what the golden corpus and the
+benchmark harness drive, and because the CLI is where a command can be run by hand.
+
+Commands: `db_drivers`, `connections`, `import_connections`, `credential`, `objects`, `test`,
+`catalogs`, `schemas`, `tables`, `export`, `to_table`, `preview`, `count`, `explain` — the arms of
+`Command::parse` (`crates/qh-ffi/src/commands.rs`), which is also the order its usage line prints.
+One argument per run: the command name and nothing else. Every failure, including a usage error,
+emits `{"event": "error", "message": ...}` and exits 1. Panics are caught at the top of `main.rs`
+and reported the same way, so a command can never leave the app with a truncated protocol.
 
 Settings come from environment variables only, so a password never appears in a process listing.
 The app additionally never puts the password inside a URL, so a URL echoed back in an error
-message cannot leak it.
+message cannot leak it. `ConnectionConfig` implements `Debug` by hand and prints
+`password: <redacted>` rather than its value, because one `{:?}` in an error path is the easiest
+way to write a live credential into a log (`crates/qh-driver/src/lib.rs`).
 
 Three drivers sit behind the one protocol, chosen by `DB_KIND`: `trino` (the default), `postgres`
-(`psycopg` 3.x) and `mysql` (`pymysql`). They are described by `exporter/drivers.py`; every DB_*
-name has its old `TRINO_*` alias and `DB_*` wins when both are set, so an app that sends only the
-parts and an older one that still sends `TRINO_*` both work.
+and `mysql`, each a crate of its own (`crates/qh-driver-*/`). Every `DB_*` name has its old
+`TRINO_*` alias and `DB_*` wins when both are set, so an app that sends only the parts and an
+older one that still sends `TRINO_*` both work.
 
 | Key | Used by | Meaning |
 |---|---|---|
@@ -774,16 +794,16 @@ parts and an older one that still sends `TRINO_*` both work.
 | `DB_DATABASE` / `TRINO_CATALOG` | all | trino: catalog; postgres: `dbname`; mysql: database. Also what the browse commands list from. |
 | `DB_SCHEMA` / `TRINO_SCHEMA` | all | trino: schema; postgres: `search_path`; mysql: unused. |
 | `DB_SCHEME` | trino | `http` or `https`. A password implies https, as does port 443/8443. |
-| `DB_SSLMODE` | postgres, mysql | postgres `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full`; mysql `disable`\|`require`. |
+| `DB_SSLMODE` | postgres, mysql; trino for `prefer` only | postgres `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full`; mysql `disable`\|`require`; trino `prefer` (the app's third transport), sent alone so it always outranks the scheme. |
 | `DB_INSECURE` / `TRINO_INSECURE` | all | `1` skips certificate verification. |
 | `SQL`, `SQL_PATH` | export, to_table | The statement, or a file holding it. One is required. |
 | `TARGET_CATALOG`, `TARGET_SCHEMA`, `TARGET_TABLE` | to_table | Where the rows are written. The driver decides which it uses; a blank one it *does* use is a usage error. Postgres ignores `TARGET_CATALOG`, MySQL ignores `TARGET_SCHEMA`. |
 | `WRITE_MODE` | to_table | `create` (default), `replace`, `append`. All three drivers support all three. |
 | `FORMAT` | export | `txt` `csv` `json` `xml` `html` `sql` `xls` `xlsx` `dbf`. Default `csv`. |
 | `OUT_DIR`, `NAME`, `ZIP` | export | Where the files land, their base name, and whether to zip a multi-file result. |
-| `BATCH_SIZE`, `ROWS_PER_FILE`, `RETRIES` | export, browse | Rows per `fetchmany`, split threshold (`0`/blank = never), transient-error retries. `RETRIES` is floored at 1: the trino connector crashes on `max_attempts = 0`. |
-| `DELIMITER`, `ENCODING`, `HEADER`, `BOM`, `NULL_TEXT`, `JSONL`, `SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH`, `DBF_ENCODING` | export | Per-writer options, exactly the `opts` keys `cli.py` builds. |
-| `PROGRESS_MS` | export | Minimum gap between `progress` events (default 250). |
+| `BATCH_SIZE`, `ROWS_PER_FILE`, `RETRIES` | export, browse | Rows per fetch, split threshold (`0`/blank = never), transient-error retries. `RETRIES` is floored at 0 (`RETRIES=-1` means "do not retry"), so a number that is not a whole count is the only usage error. |
+| `DELIMITER`, `ENCODING`, `HEADER`, `BOM`, `NULL_TEXT`, `JSONL`, `SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH`, `DBF_ENCODING` | export | Per-writer options, read by `export_options` (`crates/qh-ffi/src/commands.rs`). |
+| `PROGRESS_MS` | export | Minimum gap between `progress` events (default 250, `crates/qh-ffi/src/progress.rs`). |
 
 Events:
 
@@ -802,8 +822,10 @@ Events:
 - `step connect` is emitted before the network is touched; `step write` and `start` fire
   together, once the cursor is open and the first page exists.
 - `progress` is throttled to `PROGRESS_MS` and floored at one event per 1000 rows; a final
-  `progress` always precedes `done`. psycopg and pymysql have no `stats_callback`, so those runs
-  emit only that final line and `done` carries `cursor.rowcount`-or-`-1`.
+  `progress` always precedes `done`. The Rust drivers have no per-page stats callback, so a
+  `to_table` run emits at most that final line and `done` carries the server's own count or `-1`
+  when it reported none. `progress.state` exists on the wire and is always `null`; the values it
+  once carried came from the trino Python client's callback (see `docs/golden-deltas.md`, D-6).
 - `test` reports `catalog_count`, **not** `catalogs`: `catalogs` is also the name of the browse
   *event*, whose payload is a string array. One key cannot be two types, so the count is named.
   It runs whichever top-level probe the driver has, so it never needs a catalog or schema set.
@@ -816,10 +838,12 @@ Events:
   driver has no level for is a usage error naming the driver, never `FROM ""`: `catalogs` on
   postgres ("postgres has no catalog level; the database is set on the connection") and `schemas`
   on mysql. The settings a command needs being blank is a usage error too.
-- `SIGTERM`/`SIGINT` set a cancel flag that `run_export`'s `cancel` callback reads. A cancelled
-  run still emits a well-formed `done` with `cancelled: true` and the files written so far, then
-  exits 0. `Engine.run` redacts every env value whose key looks secret, plus each long `:`-split
-  piece of one, out of stderr and out of `error` messages.
+- `SIGTERM`/`SIGINT` set a `CancelFlag` (`crates/qh-ffi/src/lib.rs`) that the run polls, and the
+  app's Stop presses the same flag through `RunCancel`. A cancelled run still emits a well-formed
+  `done` with `cancelled: true` and the files written so far, then exits 0.
+- One limit worth stating: `preview` and `explain` do not poll for a cancel mid-statement
+  (`crates/qh-ffi/src/commands.rs` says so at the call site), so Stop on a Run takes effect when
+  the statement returns. `export` and `to_table` check between batches and between statements.
 
 ### The table destination
 
@@ -828,44 +852,26 @@ connection, runs `CREATE TABLE … AS <select>` (or `DROP TABLE IF EXISTS` + `CR
 `INSERT INTO … <select>`) and the database writes the rows itself. A 500M-row CTAS costs the
 client one request and some polling, not 500M rows over the wire.
 
-That means `QueryStream` is unusable here — it exists to pull rows and explicitly rejects a
-statement with no result set. `exporter/to_table.py` uses the driver's DBAPI directly and leans
-on three things I verified in the installed client rather than assumed:
+That means the streaming path is unusable here — it exists to pull rows and explicitly rejects a
+statement with no result set. `to_table` therefore calls `session.execute` directly for each of its
+statements and waits each one out by driving the cursor to its end, because a DDL statement is not
+finished when `execute` returns; driving it is what waits for the server and what the affected
+count arrives with. Three consequences follow, and all three are behaviour rather than intent:
 
-- `cursor.execute()` blocks until the statement is **FINISHED**, so its return is the completion.
-- `cursor.rowcount` carries Trino's `update_count` for CTAS and INSERT, and is **-1** when the
-  server reported none. The engine never turns that into a number.
-- `stats_callback` fires on every coordinator update, which is the only progress signal available
-  for a statement whose rows never arrive. It drives the `progress` events, and it is also where
-  cancellation is noticed — the callback calls `cursor.cancel()` once, because a signal handler
-  cannot interrupt a blocking socket read reliably. It is **trino only**: `psycopg` and `pymysql`
-  cursors take no such keyword, so `Driver.cursor` passes it for a driver that has progress stats
-  and not for one that does not. Those runs emit no intermediate `progress` and no cancel path,
-  and `done` carries `rowcount` or `-1`.
-
-**Every error path goes through `describe_error`.** trino-python-client 0.339.0 raises, at
-`client.py:985`,
-
-```python
-TrinoUserError("Query has been cancelled", self.query_id)
-```
-
-a bare string where `TrinoQueryError.__init__` expects an error *dict*. Its `__str__` is
-`repr(self)` → `self.error_type` → `self._error.get(...)`, so `str(exc)` on the client's own
-cancellation error raises `AttributeError: 'str' object has no attribute 'get'`. The naive code
-therefore turned every cancel into a nonsense error — and in `main()`, where `str(exc)` formats
-the last line of defence, it would have thrown before writing the `error` event at all, leaving
-the app an empty stdout to parse. `describe_error` in `exporter/source.py` falls back to the
-exception's `args`, which is where the client's message actually still is.
-
-Two checks pin it, and they run in **both** environments on purpose: the local trino stub defines
-a well-behaved `TrinoUserError`, so on a checkout without trino installed the real shape is never
-exercised — which is exactly how this shipped green.
+- The statements are **not retried**. A `DROP` / `CREATE TABLE AS` / `INSERT` is not safe to
+  re-issue blind, so this path calls `session.execute` and never `retry::execute`;
+  `crates/qh-ffi/src/retry.rs` carries the whole argument.
+- `done.rows` is the server's own affected count when it reports one and `-1` when it does not —
+  the same value the Python engine used for the same silence, so a caller that has learned to read
+  it sees the same thing from both. A fabricated `0` would read as "wrote nothing".
+- `progress.state` is always `null`. The values it once carried came from the trino client's
+  `stats_callback`, and no Rust driver has that stream; `docs/golden-deltas.md` D-6 records it as
+  the known limitation it is.
 
 `replace` deserves its own warning: `DROP TABLE IF EXISTS` runs **before** the query. If the
-CREATE then fails, the old table is gone. `TableExportError` carries the warnings collected so
-far so the app can say exactly that instead of reporting a bare failure, and the toolbar draws
-Replace in coral and asks for confirmation before starting.
+CREATE then fails, the old table is gone — and the engine says so, because `CliError::Warned`
+carries the `dropped the existing table <name>` warning it had already earned even though the next
+statement failed. The toolbar draws Replace in coral and asks for confirmation before starting.
 
 The target catalog/schema are deliberately **not** the session's `DB_DATABASE`/`DB_SCHEMA`:
 a query may read from one database and write into another.
@@ -921,18 +927,31 @@ color: gray | green | amber | red | blue | violet
 ```
 Contents/MacOS/QueryHive
 Contents/Resources/AppIcon.icns
-Contents/Resources/engine/queryhive_engine.py
-Contents/Resources/engine/exporter/        (web.py, cli.py and static/ removed)
-Contents/Resources/engine/python/          standalone CPython 3.12, arm64
-Contents/Resources/engine/site-packages/   pinned: trino, openpyxl, xlwt
 ```
 
-`app/build-engine.sh` builds `.engine/` and is a no-op while its stamp matches. The engine is
-launched as
-`engine/python/bin/python3 -s -u engine/queryhive_engine.py <command>` with
-`PYTHONPATH=<bundle>/Contents/Resources/engine/site-packages`, `PYTHONNOUSERSITE=1`,
-`PYTHONDONTWRITEBYTECODE=1`, every inherited `PYTHON*` variable removed, and the working
-directory `~/Library/Application Support/QueryHive/`.
+That is the whole bundle, and the engine is *inside* the one Mach-O it holds. `app/build-ffi.sh`
+builds `crates/qh-ffi` as both a `cdylib` and a `staticlib`; the generator reads the dylib, and the
+app links the archive, which `app/build-ffi.sh` stages into `target/ffi/static/<profile>/` so the
+linker cannot pick the dylib instead. `swift build` copies the archive's code into the executable,
+regenerates nothing, and the committed `app/Generated/` stays what it was. The version comes from
+`crates/qh-ffi/Cargo.toml`, which is also what `engineVersion()` returns at runtime, so a bundle
+whose Info.plist and whose engine disagree cannot be built.
+
+`otool -L` on the built binary lists the Swift runtime and Apple frameworks and **no** `qh_ffi`
+entry, which is the check that says the bundle no longer needs anything from `target/`. Two things
+that were once limitations are now deliberate obligations instead:
+
+- An archive cannot record its own dependencies, unlike a dylib. The system frameworks Rust's std
+  needs are therefore named explicitly in `app/Package.swift`; they are what
+  `cargo rustc -p qh-ffi --release --lib -- --print native-static-libs` prints.
+- `.cargo/config.toml` pins `MACOSX_DEPLOYMENT_TARGET` to the 14.0 this bundle declares. The `cc`
+  crate otherwise defaults to the *current* SDK's deployment target -- 26.2 on the machine this was
+  written on -- so `ring`'s assembly and `libsqlite3-sys`'s `sqlite3.o` would be linked into an app
+  that claims to run on 14.0 while being built for a system two major versions newer.
+
+The blueprint's XCFramework (`docs/architecture/rust-engine-blueprint.md` §3.2, §8) remains unbuilt
+and is not needed for this: an XCFramework exists to carry several architectures and a headers
+directory, and `app/build-dmg.sh` already refuses to build for anything but arm64.
 
 ### Distribution
 
@@ -952,8 +971,9 @@ signing the bundle with one yields `spctl: rejected, origin=Apple Development: �
 ad-hoc. It is therefore not used.
 
 `build-dmg.sh --notarize` is the whole remaining path, and `QueryHive.entitlements` carries the
-two hardened-runtime exceptions a bundled CPython needs (`disable-library-validation` for the
-extension modules dlopen'd out of the bundle, `allow-unsigned-executable-memory` for ctypes).
-Those entitlements are **unverified against a real Developer ID** — this machine has none — so the
-first notarized build has to be launched and its engine exercised (Test Connection, then an
-export) before it is published.
+two hardened-runtime exceptions the FFI boundary needs (`disable-library-validation` because the
+engine library is loaded from outside the bundle and is not signed with the app's identity,
+`allow-unsigned-executable-memory` for the Swift/libffi marshalling around a Rust call); ADR-0014
+argues both. Those entitlements are **unverified against a real Developer ID** — this machine has
+none — so the first notarized build has to be launched and its engine exercised (Test Connection,
+then an export) before it is published.

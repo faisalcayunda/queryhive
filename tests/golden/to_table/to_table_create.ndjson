@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"event": "step", "step": "write"}
+{"event": "progress", "rows": 5, "state": null}
+{"cancelled": false, "event": "done", "mode": "create", "query_id": "<QUERY_ID>", "rows": 5, "table": "hive.analytics.people_copy", "warnings": []}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "test_probe",
+  "command": "test",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The connection probe. The count key is `catalog_count`, never `catalogs`."
+}

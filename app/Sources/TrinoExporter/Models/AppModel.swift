@@ -13,6 +13,11 @@ final class AppModel {
     // MARK: Connections
 
     var connections: [Connection] = []
+    /// The folders connections can be filed under, in the order the user made them.
+    ///
+    /// Kept beside `connections` rather than inside it, because a group exists on its own: it can
+    /// be empty, and it should still be there after a relaunch.
+    var groups: [ConnectionGroup] = []
 
     // MARK: Object tree
 
@@ -73,7 +78,8 @@ final class AppModel {
 
     init() {
         let loaded = ConnectionStore.load()
-        connections = loaded.connections
+        connections = loaded.document.connections
+        groups = loaded.document.groups
         notice = loaded.notice
         rebuildTree()
         newTab()
@@ -167,7 +173,7 @@ final class AppModel {
     /// user is looking at; this cannot.
     func connectionState(for connectionID: UUID?) -> ConnectionState {
         guard let connectionID,
-              let root = tree.first(where: { $0.connectionID == connectionID })
+              let root = connectionNode(for: connectionID)
         else { return .disconnected }
         if root.loading { return .connecting }
         if root.error != nil { return .disconnected }
@@ -203,8 +209,9 @@ final class AppModel {
     /// One tab per scope: asking for the same schema twice brings the tab you already have to the
     /// front and reloads it, rather than stacking duplicates whose contents drift apart.
     func openObjects(_ node: TreeNode) {
-        guard connections.contains(where: { $0.id == node.connectionID }) else { return }
-        let scope = ObjectScope(connectionID: node.connectionID,
+        guard let connectionID = node.connectionID,
+              connections.contains(where: { $0.id == connectionID }) else { return }
+        let scope = ObjectScope(connectionID: connectionID,
                                 catalog: node.database ?? "",
                                 schema: node.schema ?? "")
         if let existing = tabs.first(where: { $0.objectScope == scope }) {
@@ -227,6 +234,16 @@ final class AppModel {
     /// The environment is built the same way every other browse command builds it, so a connection
     /// that browses in the tree lists objects here without any second set of rules.
     func loadObjects(_ tab: QueryTab) {
+        // Cleared first, before anything can return early, because the clear belongs to "this
+        // listing is about to be replaced" -- which the caller's request already decided -- and not
+        // to whether the connection lookup below succeeds.
+        //
+        // Clearing at the *end* of the run was a race the user could lose: the rows are painted by
+        // the `objects` event, which arrives before the run exits, so a click landing in that window
+        // was wiped by the exit handler a moment later. The row stayed highlighted and the inspector
+        // never appeared. Clearing here cannot be raced, because no new row is on screen yet.
+        clearObjectSelection(tab)
+
         guard let scope = tab.objectScope,
               let connection = connections.first(where: { $0.id == scope.connectionID }) else { return }
         guard var env = try? connectionEnvironment(connection) else { return }
@@ -240,7 +257,7 @@ final class AppModel {
         tab.objectToken = token
         tab.objectLoading = true
         tab.objectError = nil
-        tab.objectProcess = Engine.run("objects", env: env, onEvent: { event in
+        tab.objectProcess = Engine.current.run("objects", env: env, onEvent: { event in
             guard tab.objectToken == token else { return }
             switch event.event {
             case "objects":
@@ -267,6 +284,125 @@ final class AppModel {
         })
     }
 
+    /// Drops the object screen's selection and whatever detail it had fetched.
+    func clearObjectSelection(_ tab: QueryTab) {
+        tab.objectSelection = nil
+        tab.objectDetailColumns = []
+        tab.objectDetailError = nil
+        tab.objectDetailTable = nil
+        tab.objectDetailLoading = false
+        // The token, so a detail fetch still in flight cannot land on the cleared pane.
+        tab.objectDetailToken = nil
+        tab.objectDetailProcess?.terminate()
+        tab.objectDetailProcess = nil
+    }
+
+    /// Selects one row of the object screen and fetches that table's columns.
+    ///
+    /// The click is what asks for the detail, not a timer or a prefetch: this is one round trip
+    /// per table on a server that may be far away, and the user asked for exactly one row.
+    func selectObject(_ tab: QueryTab, row: Int) {
+        guard let scope = tab.objectScope, let name = tab.objectName(at: row) else { return }
+        tab.objectSelection = row
+        tab.objectDetailColumns = []
+        tab.objectDetailError = nil
+        tab.objectDetailLoading = false
+        tab.objectDetailTable = name
+
+        // Every failure below writes a reason rather than returning quietly. A silent return would
+        // leave the inspector saying "No columns reported", which is a claim about the table when
+        // the truth is that this app never asked about it.
+        guard let connection = connections.first(where: { $0.id == scope.connectionID }) else {
+            tab.objectDetailError = "The connection for this schema is gone."
+            return
+        }
+        let env: [String: String]
+        do {
+            var built = try connectionEnvironment(connection)
+            built["RETRIES"] = "2"
+            if !scope.catalog.isEmpty { built["DB_DATABASE"] = scope.catalog }
+            if !scope.schema.isEmpty { built["DB_SCHEMA"] = scope.schema }
+            // A `preview` of `SELECT *` under a one-row cap is how the column list is asked for: the
+            // engine describes the result set before it sends rows, so the `columns` event arrives
+            // without waiting for data, and `LIMIT=1` keeps a wide table from being read to answer a
+            // question about its shape. `count` is deliberately not used: it answers a number, not a
+            // shape, and it would run the statement over every row.
+            built["SQL"] = objectColumnsSQL(database: scope.catalog.isEmpty ? nil : scope.catalog,
+                                            schema: scope.schema.isEmpty ? nil : scope.schema,
+                                            table: name, for: connection.kind)
+            built["LIMIT"] = "1"
+            env = built
+        } catch {
+            tab.objectDetailError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+
+        let token = UUID()
+        tab.objectDetailToken = token
+        tab.objectDetailLoading = true
+        tab.objectDetailProcess = Engine.current.run("preview", env: env, onEvent: { event in
+            guard tab.objectDetailToken == token else { return }
+            switch event.event {
+            case "columns":
+                tab.objectDetailColumns = event.columns ?? []
+                tab.objectDetailLoading = false
+            case "error":
+                tab.objectDetailError = event.message ?? "Reading the table's columns failed."
+                tab.objectDetailLoading = false
+            default:
+                break
+            }
+        }, onExit: { status, log in
+            guard tab.objectDetailToken == token else { return }
+            tab.objectDetailProcess = nil
+            tab.objectDetailLoading = false
+            if status != 0, tab.objectDetailError == nil {
+                tab.objectDetailError = log.split(separator: "\n").last.map(String.init)
+                    ?? "Reading the table's columns failed."
+            }
+        })
+    }
+
+    /// Opens one object-screen row as a query tab, the same way double-clicking the table in the
+    /// tree does. Both go through `openTable`, so the two entry points cannot drift into producing
+    /// different SQL for the same table.
+    ///
+    /// Takes the row rather than reading the selection, because a double-click or a right-click can
+    /// land on a row the user has not single-clicked first, and a gesture that only worked on an
+    /// already-selected row would look broken exactly when the user is moving fastest. Selecting
+    /// first is also what makes the inspector agree with the tab that just opened.
+    func openObject(_ tab: QueryTab, row: Int) {
+        selectObject(tab, row: row)
+        guard let node = objectNode(tab, row: row) else { return }
+        openTable(node)
+    }
+
+    /// Inserts one row's table into the active query, the tree's own context-menu action.
+    func insertObject(_ tab: QueryTab, row: Int) {
+        selectObject(tab, row: row)
+        guard let node = objectNode(tab, row: row) else { return }
+        insert(node)
+    }
+
+    /// A tree-shaped node for one object-screen row, so the row can reuse the tree's own actions
+    /// rather than growing a second copy of "how this driver spells a qualified name".
+    private func objectNode(_ tab: QueryTab, row: Int) -> TreeNode? {
+        guard let scope = tab.objectScope, let name = tab.objectName(at: row),
+              let connection = connections.first(where: { $0.id == scope.connectionID }) else { return nil }
+        let connectionNode = TreeNode.connection(connection)
+        let parent: TreeNode
+        switch connection.kind {
+        case .trino:
+            let catalog = TreeNode.catalog(scope.catalog, parent: connectionNode)
+            parent = TreeNode.schema(scope.schema, parent: catalog)
+        case .postgres:
+            parent = TreeNode.schema(scope.schema, parent: connectionNode)
+        case .mysql:
+            parent = TreeNode.database(scope.catalog, parent: connectionNode)
+        }
+        return TreeNode.table(name, parent: parent)
+    }
+
     func newTab(connectionID: UUID? = nil) {
         tabCounter += 1
         let tab = QueryTab(title: "Query \(tabCounter)")
@@ -279,6 +415,37 @@ final class AppModel {
         }
         tabs.append(tab)
         selectedTabID = tab.id
+        // A new tab has nothing to put in the panel: no rows, no log lines, no files. Opening it at
+        // `panelHeight` — 480 points, more than half the window — spent the editor's room on a
+        // message about the absence of content. It starts as its header alone, and every path that
+        // produces something (Run, Explain, opening a table) already sets `panelCollapsed = false`.
+        panelCollapsed = true
+    }
+
+    /// Whether the panel has anything to show for this tab, which is what decides whether it is
+    /// open by default.
+    ///
+    /// A run in progress counts: the panel is where its progress goes. A preview counts even when it
+    /// holds zero rows — "0 rows" is an answer, and the grid's column header is how it is read.
+    ///
+    /// Internal rather than private because `Snapshot` seeds tabs directly and has to reach the same
+    /// answer the app would: a scene that filled the grid by hand and then left the panel closed
+    /// would photograph a state the app cannot produce.
+    func panelHasContent(_ tab: QueryTab) -> Bool {
+        tab.stage == .running || tab.preview != nil || !tab.logLines.isEmpty || !tab.files.isEmpty
+    }
+
+    /// Open or close the panel for the tab in front, by the rule above. Called wherever the tab in
+    /// front changes: a new one, a selected one, and the one left behind by a close.
+    ///
+    /// `panelExpanded` is cleared here too. It lives on the model rather than the tab, so switching
+    /// from a table opened full-window (`openTable` turns it on) to an empty tab would otherwise
+    /// leave a full-window panel over "No result yet" — the same mistake as the default, one state
+    /// further along.
+    func syncPanelToSelectedTab() {
+        let hasContent = selectedTab.map(panelHasContent) ?? false
+        panelCollapsed = !hasContent
+        if !hasContent { panelExpanded = false }
     }
 
     func closeTab(_ id: UUID) {
@@ -287,6 +454,9 @@ final class AppModel {
         tabs.remove(at: index)
         if selectedTabID == id {
             selectedTabID = tabs.indices.contains(index) ? tabs[index].id : tabs.last?.id
+            // Including the case where nothing is left: the empty workspace replaces the panel, so
+            // leaving it open would be state that contradicts what is on screen.
+            syncPanelToSelectedTab()
         }
     }
 
@@ -297,8 +467,12 @@ final class AppModel {
 
     func selectTab(_ id: UUID) {
         selectedTabID = id
+        // The panel follows the tab, because an empty tab has nothing to show and a tab with rows
+        // should show them without a second click. Without this, switching from a tab with results
+        // to an empty one left the panel open at 480 points over "No result yet".
+        syncPanelToSelectedTab()
         if let connectionID = tabs.first(where: { $0.id == id })?.connectionID,
-           let node = tree.first(where: { $0.connectionID == connectionID }) {
+           let node = connectionNode(for: connectionID) {
             selectedNodeID = node.id
         }
     }
@@ -311,10 +485,19 @@ final class AppModel {
     // MARK: Connections
 
     func presentConnectionEditor(_ connectionID: UUID?, startAtURL: Bool = false,
-                                 previewTestCount: Int? = nil) {
+                                 previewTestCount: Int? = nil, inGroup: UUID? = nil) {
         editingConnection = ConnectionEditorTarget(connectionID, startAtURL: startAtURL,
                                                    previewTestCount: previewTestCount)
+        // Filing is remembered here rather than passed through the sheet: the sheet's job is to
+        // produce a connection, and which folder it belongs in is the tree's business, not a field
+        // on the form. Cleared on every other way in, so editing an existing connection from the
+        // header cannot silently move it.
+        newConnectionGroup = inGroup
     }
+
+    /// The group a connection created from the editor should be filed into. nil when the editor was
+    /// opened from anywhere but a group's menu.
+    var newConnectionGroup: UUID?
 
     /// Whether the target popover is open. On the model rather than in the view so the snapshot
     /// tool can open it — it is otherwise unreachable, and it went a long time unseen.
@@ -330,7 +513,6 @@ final class AppModel {
     /// Set while a delete is waiting for the user to confirm. Held on the model rather than in a
     /// row so the tree's context menu and the editor's Delete button ask the same question.
     var pendingDeletion: UUID?
-
     var pendingDeletionName: String {
         guard let id = pendingDeletion else { return "this connection" }
         return connections.first { $0.id == id }?.name ?? "this connection"
@@ -340,13 +522,99 @@ final class AppModel {
         pendingDeletion = id
     }
 
+    // MARK: Groups
+
+    /// A group name being typed: a new group, or a rename of an existing one.
+    ///
+    /// On the model rather than in a row, for the same reason as `pendingDeletion`: the sidebar
+    /// menu, the connection's own menu and any future entry point all have to open the same prompt.
+    struct GroupNaming: Identifiable {
+        let id = UUID()
+        /// nil while creating; the group being renamed otherwise.
+        var groupID: UUID?
+        var name: String
+        /// The connection to file into the new group, when the prompt was opened from a
+        /// connection's own menu. "New Group…" there means "put this one in a new group", not
+        /// "make an empty folder somewhere".
+        var fileConnectionID: UUID?
+    }
+
+    var groupNaming: GroupNaming?
+
+    /// Prompt for a new group; `connectionID` files that connection into it once named.
+    func presentNewGroup(with connectionID: UUID? = nil) {
+        groupNaming = GroupNaming(groupID: nil, name: "New Group", fileConnectionID: connectionID)
+    }
+
+    func presentRenameGroup(_ groupID: UUID?) {
+        guard let groupID, let group = groups.first(where: { $0.id == groupID }) else { return }
+        groupNaming = GroupNaming(groupID: groupID, name: group.name, fileConnectionID: nil)
+    }
+
+    /// Commits the name being typed. A blank name is refused rather than saved: a group with no
+    /// name is a row the user cannot identify, and it is one keystroke to avoid.
+    func commitGroupNaming() {
+        guard let naming = groupNaming else { return }
+        groupNaming = nil
+        let name = naming.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        if let groupID = naming.groupID {
+            guard let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
+            groups[index].name = name
+        } else {
+            let group = ConnectionGroup(name: name)
+            groups.append(group)
+            if let connectionID = naming.fileConnectionID,
+               let index = connections.firstIndex(where: { $0.id == connectionID }) {
+                connections[index].group = group.id
+            }
+        }
+        persistConnections()
+        rebuildTree()
+    }
+
+    /// Removes a group, keeping every connection that was in it.
+    ///
+    /// The connections move to the top level instead of being deleted. A folder that took its
+    /// contents with it would be the most dangerous item in the sidebar, and nothing about the
+    /// gesture says "and the servers as well".
+    func deleteGroup(_ groupID: UUID?) {
+        guard let groupID, let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups.remove(at: index)
+        for position in connections.indices where connections[position].group == groupID {
+            connections[position].group = nil
+        }
+        persistConnections()
+        rebuildTree()
+    }
+
+    /// Files a connection under a group, or at the top level when `groupID` is nil.
+    func move(_ connectionID: UUID, toGroup groupID: UUID?) {
+        guard let index = connections.firstIndex(where: { $0.id == connectionID }) else { return }
+        guard connections[index].group != groupID else { return }
+        connections[index].group = groupID
+        persistConnections()
+        rebuildTree()
+    }
+
+    /// Writes connections.json. Failures become a notice rather than an error thrown into a menu
+    /// action, which has nowhere to put one.
+    func persistConnections() {
+        do {
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: connections))
+        } catch {
+            notice = Notice(title: "Couldn't save connections", message: error.localizedDescription)
+        }
+    }
+
     /// Removes a connection, its Keychain item, and its hold on any open tab. The JSON is written
     /// before the Keychain so a failure never leaves a saved connection whose password is gone.
     func deleteConnection(_ id: UUID) {
         var next = connections
         next.removeAll { $0.id == id }
         do {
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't delete connection", message: error.localizedDescription)
             return
@@ -373,7 +641,7 @@ final class AppModel {
         var next = connections
         next.append(copy)
         do {
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't duplicate the connection", message: error.localizedDescription)
             return
@@ -528,7 +796,7 @@ final class AppModel {
         }
 
         do {
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't save the imported connections",
                             message: error.localizedDescription)
@@ -597,7 +865,7 @@ final class AppModel {
         var next = connections
         next[index].color = color
         do {
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't save the colour", message: error.localizedDescription)
             return
@@ -614,7 +882,7 @@ final class AppModel {
         var next = connections
         next[index].showAllSchemas.toggle()
         do {
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't save the setting", message: error.localizedDescription)
             return
@@ -657,21 +925,68 @@ final class AppModel {
 
     /// Rebuilds the roots from `connections`, reusing the node that already exists for an id so
     /// everything the user expanded stays expanded after a save, a rename or a delete.
+    /// Rebuilds the root of the side bar: one node per group, then the connections that are in no
+    /// group.
+    ///
+    /// Nodes are reused by id, which is what keeps an expanded connection expanded across a rename,
+    /// a recolour or a move between groups. Reusing them matters more now that a move rebuilds the
+    /// whole tree: without it, filing one connection would collapse every server the user had
+    /// opened.
     func rebuildTree() {
         var existing: [String: TreeNode] = [:]
         for node in allNodes() { existing[node.id] = node }
-        tree = connections.map { connection in
+
+        func node(for connection: Connection) -> TreeNode {
             let id = "c:\(connection.id.uuidString)"
-            if let node = existing[id] {
-                node.title = connection.name
-                node.color = connection.color
-                return node
+            if let reused = existing[id] {
+                reused.title = connection.name
+                reused.color = connection.color
+                // The driver is editable, and this node is reused across edits: without this a
+                // connection switched from Trino to Postgres kept quoting with double quotes and
+                // wearing the Trino mark.
+                reused.connectionKind = connection.kind
+                return reused
             }
             return TreeNode.connection(connection)
         }
+
+        // A connection pointing at a group that is not in the file — a hand-edited
+        // connections.json, or one written by a build that knew a group this one does not — is
+        // shown at the top level rather than dropped. The tree is the only way to reach a saved
+        // connection, so it must not be the place one disappears.
+        let orphans = Set(connections.compactMap(\.group)).subtracting(groups.map(\.id))
+
+        var rebuilt: [TreeNode] = groups.map { group in
+            let id = "g:\(group.id.uuidString)"
+            let node = existing[id] ?? TreeNode.group(group)
+            node.title = group.name
+            node.children = connections.filter { $0.group == group.id }.map(node(for:))
+            return node
+        }
+        rebuilt += connections
+            .filter { $0.group == nil || orphans.contains($0.group!) }
+            .map(node(for:))
+        tree = rebuilt
+
         if let selected = selectedNodeID, allNodes().contains(where: { $0.id == selected }) == false {
             selectedNodeID = nil
         }
+    }
+
+    /// The tree node for a connection, wherever it is filed.
+    ///
+    /// Not `allNodes()`: this answers the status bar's dot, which is read on every redraw, and
+    /// walking a deep object tree for it would put that cost on the status bar. Groups are one
+    /// level, so two levels of search covers the whole space.
+    func connectionNode(for connectionID: UUID) -> TreeNode? {
+        for node in tree {
+            if node.connectionID == connectionID { return node }
+            if let children = node.children,
+               let found = children.first(where: { $0.connectionID == connectionID }) {
+                return found
+            }
+        }
+        return nil
     }
 
     func toggleExpansion(_ node: TreeNode) {
@@ -755,7 +1070,7 @@ final class AppModel {
         // `catalogs` means a catalog for Trino and a database for MySQL; the command is shared
         // because it is the same question ("what is directly under the connection?").
         let catalogNode = connection.kind == .mysql ? TreeNode.database : TreeNode.catalog
-        Engine.run(command, env: env, onEvent: { event in
+        Engine.current.run(command, env: env, onEvent: { event in
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
             case "schemas": node.children = (event.names ?? []).map { TreeNode.schema($0, parent: node) }
@@ -806,7 +1121,7 @@ final class AppModel {
         guard var env = try? connectionEnvironment(connection) else { return }
         env["RETRIES"] = "2"
         loadingOptions.insert(key)
-        Engine.run("catalogs", env: env, onEvent: { [weak self] event in
+        Engine.current.run("catalogs", env: env, onEvent: { [weak self] event in
             guard event.event == "catalogs" else { return }
             self?.catalogOptions[connectionID] = event.names ?? []
         }, onExit: { [weak self] _, _ in
@@ -825,7 +1140,7 @@ final class AppModel {
         // Blank means "the connection's own database", which is the Postgres case.
         if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
         loadingOptions.insert(key)
-        Engine.run("schemas", env: env, onEvent: { [weak self] event in
+        Engine.current.run("schemas", env: env, onEvent: { [weak self] event in
             guard event.event == "schemas" else { return }
             self?.schemaOptions[key] = event.names ?? []
         }, onExit: { [weak self] _, _ in
@@ -850,7 +1165,7 @@ final class AppModel {
             switch kind {
             case .catalog, .database: names.formUnion(catalogOptions[connectionID] ?? [])
             case .schema: names.formUnion(schemaOptions[optionKey(connectionID, database)] ?? [])
-            case .connection, .table: break
+            case .group, .connection, .table: break
             }
         }
         return names.sorted()
@@ -865,7 +1180,7 @@ final class AppModel {
     /// made the breadcrumb expensive on a server with thirty catalogs.
     func loadedNames(for connectionID: UUID?, kind: TreeNode.Kind, database: String = "") -> [String] {
         guard let connectionID,
-              let root = tree.first(where: { $0.connectionID == connectionID }) else { return [] }
+              let root = connectionNode(for: connectionID) else { return [] }
         var names: [String] = []
         func walk(_ nodes: [TreeNode]) {
             for node in nodes {
@@ -908,11 +1223,16 @@ final class AppModel {
 
     /// Candidates for the word under the caret.
     ///
-    /// Sources, in the order they are ranked: object names already loaded in the tree, the columns
-    /// the last run reported, then SQL keywords. Objects come from the tree, so a completely
-    /// collapsed tree offers keywords only — browsing is a network round trip per level and
-    /// blocking a keystroke on one would be worse than a short list.
-    func suggestions(for tab: QueryTab, prefix: String, qualified: Bool) -> [SQLSuggestion] {
+    /// Sources, in the order they are ranked: the children of the node the typed path names, the
+    /// columns the last run reported, then SQL keywords. A bare word with no path is offered
+    /// objects from the whole tree, which is right for `FROM ta…`; a word under a path is offered
+    /// **only that node's children**, which is the part that was missing.
+    ///
+    /// It used to ignore the path entirely and sweep every node in the tree for every position. So
+    /// `hive.analytics.` offered `penerima_manfaat` (correct), `raw_kpm` from the *bronze* schema,
+    /// and tables from other connections — a list that looked plausible and was mostly wrong. The
+    /// fix is to resolve the path first and list one node's children.
+    func suggestions(for tab: QueryTab, prefix: String, path: [String]) -> [SQLSuggestion] {
         let needle = prefix.lowercased()
         func matches(_ name: String) -> Bool {
             needle.isEmpty || name.lowercased().hasPrefix(needle)
@@ -925,19 +1245,50 @@ final class AppModel {
             found.append(SQLSuggestion(text: text, kind: kind))
         }
 
-        for node in allNodes() where matches(node.title) {
-            switch node.kind {
-            case .catalog, .database: add(node.title, .catalog)
-            case .schema: add(node.title, .schema)
-            case .table: add(node.title, .table)
-            case .connection: break
+        // A node whose children are not loaded yet is asked for them, so `FROM hive.` fills in
+        // without the user having to expand that catalog in the sidebar first. The list cannot be
+        // patched when the answer arrives — the popup is not holding a reference to this array —
+        // so the next keystroke re-runs this and finds them. That is the same bargain the tree
+        // itself makes, and it beats blocking a keystroke on a network round trip.
+        func offerChildren(of node: TreeNode) {
+            guard let children = node.children else {
+                loadChildren(of: node)
+                return
+            }
+            for child in children where matches(child.title) {
+                switch child.kind {
+                case .catalog, .database: add(child.title, .catalog)
+                case .schema: add(child.title, .schema)
+                case .table: add(child.title, .table)
+                case .group, .connection: break
+                }
             }
         }
-        for column in tab.columns where matches(column.name) {
-            add(column.name, .column)
+
+        if path.isEmpty {
+            for node in allNodes() where matches(node.title) {
+                switch node.kind {
+                case .catalog, .database: add(node.title, .catalog)
+                case .schema: add(node.title, .schema)
+                case .table: add(node.title, .table)
+                // A group is how the side bar files connections; it is not a name a statement can
+                // use, so it is never a suggestion.
+                case .group, .connection: break
+                }
+            }
+        } else if let scope = node(atPath: path, connectionID: tab.connectionID) {
+            offerChildren(of: scope)
         }
-        // After a `.` the next word can only be an object, so a keyword would just be noise.
-        if !qualified {
+        // A path that resolves to nothing offers nothing. Falling back to the whole tree would
+        // reproduce the bug this method exists to fix: a wrong table from another schema is worse
+        // than no suggestion at all.
+
+        // A column is only in scope where a bare name could be one — never after a path, where the
+        // next word is an object and a column name would be noise.
+        if path.isEmpty {
+            for column in tab.columns where matches(column.name) {
+                add(column.name, .column)
+            }
             for keyword in SQLSuggestions.keywords where matches(keyword) {
                 add(keyword, .keyword)
             }
@@ -951,6 +1302,62 @@ final class AppModel {
             }
             .prefix(8)
             .map { $0 }
+    }
+
+    /// The node a typed path names, or nil when the tree cannot answer for it.
+    ///
+    /// The path is matched **against the shape the driver actually has**, not against fixed
+    /// positions: `["hive", "analytics"]` is catalog-then-schema on Trino, database-then-schema on
+    /// Postgres (where the database is fixed by the connection and never appears in a name), and
+    /// database-only on MySQL. `ConnectionKind.levels` is that contract, and the search follows it
+    /// so a path cannot resolve to a node of the wrong kind — `hive.analytics` must not land on a
+    /// table called `analytics` just because one exists somewhere.
+    func node(atPath path: [String], connectionID: UUID?) -> TreeNode? {
+        guard !path.isEmpty else { return nil }
+        // The tab's own connection first: two connections can both hold a `hive` catalog, and the
+        // query runs against one of them. Falling back to any connection would offer objects the
+        // statement cannot reach.
+        let roots: [TreeNode]
+        if let connectionID, let own = connectionNode(for: connectionID) {
+            roots = [own]
+        } else {
+            roots = tree
+        }
+
+        /// One level down, by name, case-insensitively — SQL identifiers are not case sensitive in
+        /// the places this is used, and the tree stores them as the server spelled them.
+        func child(_ node: TreeNode, named name: String, of kind: TreeNode.Kind) -> TreeNode? {
+            node.children?.first {
+                $0.kind == kind && $0.title.compare(name, options: .caseInsensitive) == .orderedSame
+            }
+        }
+
+        /// The levels this driver puts in a name, outermost first, mapped to the node kind each
+        /// one is.
+        func levels(for kind: ConnectionKind) -> [(TreeNode.Kind, String)] {
+            switch kind {
+            case .trino: [(.catalog, "catalog"), (.schema, "schema"), (.table, "table")]
+            case .postgres: [(.schema, "schema"), (.table, "table")]
+            case .mysql: [(.database, "database"), (.table, "table")]
+            }
+        }
+
+        for root in roots {
+            let shape = levels(for: root.connectionKind)
+            guard path.count <= shape.count else { continue }
+            var current = root
+            var matched = true
+            for (index, segment) in path.enumerated() {
+                let (nodeKind, _) = shape[index]
+                guard let next = child(current, named: segment, of: nodeKind) else {
+                    matched = false
+                    break
+                }
+                current = next
+            }
+            if matched { return current }
+        }
+        return nil
     }
 
     // MARK: Running a tab
@@ -1021,7 +1428,7 @@ final class AppModel {
         var rows: [[String?]] = []
         var truncated = false
         var finished = false
-        tab.previewProcess = Engine.run("preview", env: env, onEvent: { event in
+        tab.previewProcess = Engine.current.run("preview", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
@@ -1095,7 +1502,7 @@ final class AppModel {
         var columns: [Event.Column] = []
         var rows: [[String?]] = []
         var finished = false
-        tab.previewProcess = Engine.run("explain", env: env, onEvent: { event in
+        tab.previewProcess = Engine.current.run("explain", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
@@ -1152,7 +1559,7 @@ final class AppModel {
         tab.countError = nil
         let run = UUID()
         tab.countToken = run
-        tab.countProcess = Engine.run("count", env: env, onEvent: { event in
+        tab.countProcess = Engine.current.run("count", env: env, onEvent: { event in
             guard tab.countToken == run else { return }
             if event.event == "error" { tab.countError = event.message }
             if let count = event.count { tab.totalRows = count }
@@ -1240,7 +1647,7 @@ final class AppModel {
         let run = UUID()
         tab.runToken = run
         var message: String?
-        tab.process = Engine.run(command, env: env, onEvent: { [weak self] event in
+        tab.process = Engine.current.run(command, env: env, onEvent: { [weak self] event in
             guard let self, tab.runToken == run else { return }
             if event.event == "error" { message = event.message }
             self.handle(event, in: tab)
@@ -1324,7 +1731,8 @@ final class AppModel {
     static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
                                       password: String?, database: String, schema: String,
                                       scheme: String, sslmode: String, verify: Bool) -> [String: String] {
-        [
+        let transport = TrinoTransport(stored: scheme)
+        return [
             "DB_KIND": kind.rawValue,
             "DB_HOST": host,
             "DB_PORT": String(port),
@@ -1335,9 +1743,26 @@ final class AppModel {
             // Trino's transport is a scheme; the other two express encryption through sslmode.
             // Sending the wrong one is harmless — the engine ignores what a driver has no use
             // for — but sending both would be confusing to read in a bug report.
-            "DB_SCHEME": kind == .trino ? (scheme.isEmpty ? "http" : scheme) : "",
-            "DB_SSLMODE": kind.hasSSLModes ? (sslmode.isEmpty ? kind.defaultSSLMode : sslmode) : "",
-            "DB_INSECURE": verify ? "" : "1",
+            //
+            // `prefer` is the one mode that needs both, and needs `sslmode` to be the one that
+            // names it: a scheme can say "clear" or "encrypt", never "encrypt if you can". So
+            // `DB_SCHEME=https` still goes out — it is where the mode starts, and the engine
+            // reads it — and `DB_SSLMODE=prefer` decides, because a named sslmode outranks the
+            // scheme in `qh_ffi::config`. The scheme word is sent unchanged rather than
+            // normalised, so a value the engine would refuse is still refused out loud.
+            "DB_SCHEME": kind == .trino ? (transport == .prefer ? "https" : (scheme.isEmpty ? "http" : scheme)) : "",
+            // Only `prefer` is named for Trino. A stored Trino connection's `sslmode` is
+            // whatever an earlier editor left there (it wrote Postgres's default into it), and
+            // sending that for the other transports would outrank the scheme — turning a
+            // connection the user set to https into a clear one, silently.
+            "DB_SSLMODE": kind == .trino
+                ? (transport == .prefer ? TrinoTransport.prefer.rawValue : "")
+                : (sslmode.isEmpty ? kind.defaultSSLMode : sslmode),
+            // `prefer` decides its own verification, and it never checks: `DB_INSECURE` would
+            // otherwise demote it to a required, unverified connection, which is a different
+            // mode and not the fallback the user asked for. Every other transport keeps the
+            // stored flag, `http` included — the engine ignores it in clear.
+            "DB_INSECURE": kind == .trino && transport == .prefer ? "" : (verify ? "" : "1"),
         ]
     }
 

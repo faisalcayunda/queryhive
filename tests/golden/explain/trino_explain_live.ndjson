@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "Query Plan", "type": "varchar(721)"}], "event": "columns"}
+{"data": [["Trino version: 483\nFragment 0 [SOURCE]\n    Output layout: [nationkey, name, regionkey, comment]\n    Output partitioning: SINGLE []\n    Output[columnNames = [nationkey, name, regionkey, comment]]\n    │   Layout: [nationkey:bigint, name:varchar(25), regionkey:bigint, comment:varchar(152)]\n    │   Estimates: {rows: 25 (2.67kB), cpu: 0, memory: 0B, network: 0B}\n    └─ TableScan[table = tpch:tiny:nation]\n           Layout: [nationkey:bigint, name:varchar(25), regionkey:bigint, comment:varchar(152)]\n           Estimates: {rows: 25 (2.67kB), cpu: 2.67k, memory: 0B, network: 0B}\n           comment := tpch:comment\n           regionkey := tpch:regionkey\n           nationkey := tpch:nationkey\n           name := tpch:name\n\n"]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 1}

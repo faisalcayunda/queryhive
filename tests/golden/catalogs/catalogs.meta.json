@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "catalogs",
+  "command": "catalogs",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "Top-level names, in the server's own order -- never re-sorted."
+}

@@ -368,9 +368,46 @@ final class QueryTab: Identifiable {
     /// Guards a stale reply: a second load updates the token, and the first run's late events are
     /// then ignored instead of overwriting the newer list.
     var objectToken: UUID?
-    var objectProcess: Process?
+    var objectProcess: (any EngineRun)?
+
+    /// The row the user has clicked, by index into `objectRows`.
+    ///
+    /// An index rather than the name, because the grid has to keep the same row highlighted while
+    /// a reload is in flight and the driver's own ordering is the only order there is. A reload
+    /// that changes the list clears it, since the index would then point at a different table.
+    var objectSelection: Int?
+
+    /// The selected table's own columns, fetched when the row is clicked.
+    ///
+    /// Separate from `objectColumns`, which is the *listing's* shape — Name/Type on Trino,
+    /// Name/OID/Owner/ACL on Postgres. This is the table's schema, and it is a different question
+    /// with a different answer, so it gets its own fields rather than sharing a list whose meaning
+    /// depends on which one was loaded last.
+    var objectDetailColumns: [Event.Column] = []
+    var objectDetailLoading = false
+    var objectDetailError: String?
+    /// Guards a stale reply, exactly as `objectToken` does for the listing.
+    var objectDetailToken: UUID?
+    var objectDetailProcess: (any EngineRun)?
+
+    /// The table the detail fields describe, so the inspector can name it while it loads and can
+    /// tell that a stale answer belongs to a row the user has already left.
+    var objectDetailTable: String?
 
     var isObjects: Bool { objectScope != nil }
+
+    /// The `Name` cell of one row, which is the table name every driver puts first.
+    ///
+    /// Found by header rather than by position: the three drivers agree that the first column is
+    /// the name, but the *rest* of the columns differ, so the index has to come from the header
+    /// the driver actually sent rather than from a constant that only holds for two of them.
+    func objectName(at row: Int) -> String? {
+        guard objectRows.indices.contains(row),
+              let column = objectColumns.firstIndex(where: { $0.caseInsensitiveCompare("Name") == .orderedSame }),
+              objectRows[row].indices.contains(column) else { return nil }
+        let name = objectRows[row][column]?.trimmingCharacters(in: .whitespaces) ?? ""
+        return name.isEmpty ? nil : name
+    }
 
     // MARK: Query
 
@@ -494,15 +531,15 @@ final class QueryTab: Identifiable {
     var startedAt = Date.now
     var finishedAt = Date.now
 
-    var process: Process?
+    var process: (any EngineRun)?
     var runToken = UUID()
-    /// A preview is its own process and its own token: pressing Run while an export is in flight
+    /// A preview is its own run and its own token: pressing Run while an export is in flight
     /// must not be able to cancel the export, or vice versa.
-    var previewProcess: Process?
+    var previewProcess: (any EngineRun)?
     var previewToken = UUID()
-    /// The count is its own process and token too: asking for a total must not disturb the run it
+    /// The count is its own run and token too: asking for a total must not disturb the run it
     /// is asking about.
-    var countProcess: Process?
+    var countProcess: (any EngineRun)?
     var countToken = UUID()
     var cancelled = false
     /// Set while the debounced... no: set when the user has asked to stop but the engine has

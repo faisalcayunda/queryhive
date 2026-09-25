@@ -11,10 +11,11 @@ import SwiftUI
 @Observable
 final class TreeNode: Identifiable {
     enum Kind {
-        case connection, catalog, database, schema, table
+        case group, connection, catalog, database, schema, table
 
         var symbol: String {
             switch self {
+            case .group: "folder.badge.gearshape"
             case .connection: "server.rack"
             case .catalog: "bolt.horizontal"
             case .database: "cylinder"
@@ -27,6 +28,7 @@ final class TreeNode: Identifiable {
         /// error or a tooltip without hard-coding "catalog" everywhere.
         var noun: String {
             switch self {
+            case .group: "group"
             case .connection: "connection"
             case .catalog: "catalog"
             case .database: "database"
@@ -44,10 +46,19 @@ final class TreeNode: Identifiable {
     /// `var`, not `let`: renaming or recolouring a saved connection has to show up on the
     /// node that already exists, and `rebuildTree` reuses nodes by id to keep them expanded.
     var title: String
-    let connectionID: UUID
+    /// The connection this node belongs to. Optional because a **group** is not part of one: it
+    /// holds connections at the top level of the side bar and belongs to none of them. Everything
+    /// below a connection inherits its id, so the only nil here is a group.
+    let connectionID: UUID?
     /// The driver this node belongs to. Required for quoting: a double-click on a MySQL table
-    /// must produce backticks, not the double quotes Trino and Postgres use.
-    let connectionKind: ConnectionKind
+    /// must produce backticks, not the double quotes Trino and Postgres use — and for the row's
+    /// brand mark.
+    ///
+    /// `var`, not `let`: the driver can be edited on a saved connection, and `rebuildTree` reuses
+    /// the node that already exists. While this was a `let` nothing updated it, so changing Trino
+    /// to Postgres left the node claiming Trino — wrong quoting on every table under it, and the
+    /// wrong mark on its row.
+    var connectionKind: ConnectionKind
     var color: ConnectionColor
     /// Trino's catalog, MySQL's database. Postgres has no such level, so it stays nil there.
     let database: String?
@@ -61,7 +72,7 @@ final class TreeNode: Identifiable {
 
     var isExpandable: Bool { kind.isExpandable }
 
-    private init(kind: Kind, id: String, title: String, connectionID: UUID,
+    private init(kind: Kind, id: String, title: String, connectionID: UUID?,
                  connectionKind: ConnectionKind, color: ConnectionColor,
                  database: String? = nil, schema: String? = nil) {
         self.kind = kind
@@ -72,6 +83,13 @@ final class TreeNode: Identifiable {
         self.color = color
         self.database = database
         self.schema = schema
+    }
+
+    /// A folder holding connections. Its children are assigned by `rebuildTree`, so it never asks
+    /// the server for anything — a group is a filing decision, not a place on a server.
+    static func group(_ group: ConnectionGroup) -> TreeNode {
+        TreeNode(kind: .group, id: "g:\(group.id.uuidString)", title: group.name,
+                 connectionID: nil, connectionKind: .trino, color: .gray)
     }
 
     static func connection(_ connection: Connection) -> TreeNode {
@@ -112,8 +130,17 @@ final class TreeNode: Identifiable {
         return qualifiedName(database: database, schema: schema, table: title, for: connectionKind)
     }
 
+    /// The group this node *is*, read back out of its id rather than stored a second time — the
+    /// same trick `AppModel.connectionID(fromNodeID:)` uses for connections, and for the same
+    /// reason: two copies of the same fact can disagree.
+    var groupID: UUID? {
+        guard kind == .group, id.hasPrefix("g:") else { return nil }
+        return UUID(uuidString: String(id.dropFirst(2)))
+    }
+
     var subtitle: String? {
         switch kind {
+        case .group: "group"
         case .connection: connectionKind.label
         case .catalog: "catalog"
         case .database: "database"
@@ -176,4 +203,22 @@ func qualifiedName(database: String?, schema: String?, table: String,
         guard let database else { return nil }
         return "`\(database)`.`\(table)`"
     }
+}
+
+/// The statement the object screen's inspector runs to learn one table's columns.
+///
+/// A `SELECT *` under a one-row cap, rather than a metadata query per driver: all three servers
+/// describe a result set before they send any row of it, so the engine's `columns` event answers
+/// the question, and the cap keeps a wide table from being read to answer a question about its
+/// shape. Each driver would otherwise need its own information_schema query, and those three
+/// queries are three more places for the answer to disagree with what a `SELECT` actually returns.
+///
+/// The fallback to the bare name is for a caller whose scope has no name to qualify with. It is
+/// deliberately not an error: `qualifiedName` returning nil means this connection cannot qualify
+/// the table, and the server will resolve the bare name against the connection's own default
+/// rather than refusing to answer at all.
+func objectColumnsSQL(database: String?, schema: String?, table: String,
+                      for kind: ConnectionKind) -> String {
+    let name = qualifiedName(database: database, schema: schema, table: table, for: kind) ?? table
+    return "SELECT * FROM \(name)"
 }

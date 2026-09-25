@@ -22,7 +22,12 @@ struct Workspace: View {
                     // Rows over the whole window. The toolbar, editor and resizer all go with the
                     // editor they belong to -- a resizer under a full-height panel would have
                     // nothing left to resize. The panel's minimise control is the way back.
-                    BottomPanel(tab: tab, ceiling: workspaceHeight)
+                    //
+                    // `fills` is what makes "over the whole window" true rather than "over 480
+                    // points of it": without it the panel kept its own height and the stack around
+                    // it centred the remainder, which showed up as a band of nothing above the tab
+                    // strip.
+                    BottomPanel(tab: tab, ceiling: workspaceHeight, fills: true)
                 } else {
                     QueryToolbar(tab: tab)
                     // Keyed by tab: sharing one editor across tabs would carry the previous
@@ -114,7 +119,7 @@ struct TabChip: View {
         HStack(spacing: 7) {
             Circle().fill(dot).frame(width: 6, height: 6)
             Text(tab.title)
-                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .font(.ui(12, weight: selected ? .semibold : .regular))
                 .lineLimit(1)
                 .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
             Button { model.closeTab(tab.id) } label: {
@@ -274,7 +279,7 @@ struct WriteModeButton: View {
                 Image(systemName: mode.symbol)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(mode.tint)
-                Text(mode.label).font(.system(size: 12))
+                Text(mode.label).font(.ui(12))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(Tone.secondary)
@@ -302,67 +307,85 @@ struct EditorPane: View {
     /// through `textDidBeginEditing` / `textDidEndEditing`.
     @State private var focused = false
 
+    /// The number of lines the query has, for the corner readout.
+    ///
+    /// An empty editor counts **one**, which is what the gutter shows. It used to count zero, so an
+    /// empty editor displayed "0 lines" in the corner beside a "1" in the gutter — two answers to
+    /// one question, and the wrong one was the corner's: the caret is on line 1. Every editor with
+    /// an empty file says the same.
     private var lineCount: Int {
-        tab.sql.isEmpty ? 0 : tab.sql.split(whereSeparator: \.isNewline).count
+        max(1, tab.sql.split(whereSeparator: \.isNewline).count)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Everything on the left, together. These two act on the text directly below them, so
-            // parking them at the far edge of a 1240pt window meant an 800pt mouse journey to
-            // reach "Clear" — and left a row whose two ends did not look related to each other.
-            // A header that is empty on the right reads as calm; a header with a label at one end
-            // and its actions at the other reads as broken.
-            HStack(spacing: 8) {
-                SectionLabel(text: "Query")
-                Text("·").font(.system(size: 10.5)).foregroundStyle(Tone.ink.opacity(0.25))
-                Text(pluralized(lineCount, "line"))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Tone.secondary)
-                PillButton(title: "Load File…", symbol: "folder", compact: true) { tab.loadSQLFromFile() }
-                    .keyboardShortcut(model.shortcut(for: .openFile))
-                    .help("Load SQL from a file (⌘O)")
-                    .padding(.leading, 6)
-                // Quiet: clearing is not a commitment, and giving it the same weight as
-                // "Load File…" made the pair read as two equal choices.
-                PillButton(title: "Clear", symbol: "xmark", role: .quiet, compact: true) { tab.sql = "" }
-                    .disabled(tab.sql.isEmpty)
-                Spacer(minLength: 0)
-            }
-
-            .padding(.horizontal, Metrics.gutter)
-            .frame(height: Metrics.paneHeader)
-
-            SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
-                      completion: model.completion,
-                      candidates: { prefix, qualified in
-                          model.suggestions(for: tab, prefix: prefix, qualified: qualified)
-                      })
-                .editorBox(focused: focused)
-                // NSTextView has no placeholder of its own, so it is drawn over the text
-                // container's own inset (8 wide, 9 tall) plus its line fragment padding.
-                .overlay(alignment: .topLeading) {
-                    if tab.sql.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("SELECT * FROM hive.analytics.penerima_manfaat")
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(Tone.ink.opacity(0.26))
-                            Text("Suggestions appear as you type · ⌃Space to ask for them")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(Tone.ink.opacity(0.22))
-                        }
-                        .padding(.leading, 13)
-                        .padding(.top, 10)
-                        .allowsHitTesting(false)
+        // No header row above the editor any more. It carried a "Query · N lines" label, a
+        // "Load File…" button and a "Clear" button, and the label earned none of its height: the
+        // tab already says which query this is, and a line count is not something anyone acts on.
+        //
+        // The two buttons were *moved*, not dropped. Clear sits over the top-right corner of the
+        // text it clears, and Load SQL File moved to the File menu, which is where ⌘O is looked
+        // for — deleting it from here without that would have removed the feature, since this
+        // button was its only entry point and the only holder of the shortcut.
+        SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
+                  completion: model.completion,
+                  candidates: { prefix, path in
+                      model.suggestions(for: tab, prefix: prefix, path: path)
+                  })
+            .editorBox(focused: focused)
+            // NSTextView has no placeholder of its own, so it is drawn over the text
+            // container's own inset (8 wide, 9 tall) plus its line fragment padding.
+            .overlay(alignment: .topLeading) {
+                if tab.sql.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("SELECT * FROM hive.analytics.penerima_manfaat")
+                            .font(.code(13))
+                            .foregroundStyle(Tone.ink.opacity(0.26))
+                        Text("Suggestions appear as you type · ⌃Space to ask for them")
+                            .font(.ui(11.5))
+                            .foregroundStyle(Tone.ink.opacity(0.22))
                     }
+                    // Starts where the text starts: past the gutter, then past the text view's
+                    // own inset. A fixed 13 put the first line *under* the line numbers, so an
+                    // empty editor read as "S1ELECT".
+                    .padding(.leading, LineNumberRulerView.textOriginX(forLines: lineCount))
+                    .padding(.top, 10)
+                    .allowsHitTesting(false)
                 }
-                .overlay { SuggestionOverlay(completion: model.completion) }
-                .padding(.horizontal, Metrics.gutter)
-                .padding(.bottom, 10)
-        }
-        .frame(maxHeight: .infinity)
-        // A list left over from another tab would be pinned to the wrong caret.
-        .onChange(of: model.selectedTabID) { _, _ in model.completion.dismiss() }
+            }
+            // Shown only while there is something to clear. It replaced a permanently visible
+            // button that spent most of its life disabled; an action that cannot do anything is
+            // noise. Nothing reflows when it comes and goes, because it is an overlay rather than
+            // a row.
+            .overlay(alignment: .topTrailing) {
+                if !tab.sql.isEmpty {
+                    IconButton(symbol: "xmark", help: "Clear the editor", diameter: 22) {
+                        tab.sql = ""
+                    }
+                    .padding(.trailing, 11)
+                    .padding(.top, 8)
+                }
+            }
+            // The line count, in the corner of the text it counts. Faint on purpose: it is a
+            // readout, not a control, and the editor scrolls under it — at anything stronger it
+            // would compete with the last line of a long query. Monospaced so the number does not
+            // shift sideways as it grows from 9 to 10.
+            .overlay(alignment: .bottomTrailing) {
+                Text(pluralized(lineCount, "line"))
+                    .font(.code(10.5))
+                    // The same grey as the gutter numbers, so the two read as one readout rather
+                    // than as two greys that happen to be nearby.
+                    .foregroundStyle(Tone.readout)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 7)
+                    .allowsHitTesting(false)
+            }
+            .overlay { SuggestionOverlay(completion: model.completion) }
+            .padding(.horizontal, Metrics.gutter)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
+            .frame(maxHeight: .infinity)
+            // A list left over from another tab would be pinned to the wrong caret.
+            .onChange(of: model.selectedTabID) { _, _ in model.completion.dismiss() }
     }
 }
 
@@ -434,7 +457,7 @@ struct FormatTile: View {
                                            : AnyShapeStyle(format.tint.opacity(0.14)))
                     }
                 Text(format.label)
-                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .font(.code(10.5, weight: .semibold))
                     .foregroundStyle(selected ? .white : Tone.secondary)
             }
             .frame(maxWidth: .infinity)
@@ -488,7 +511,7 @@ struct FormatOptionsPanel: View {
                 }
             case .xml, .html:
                 Text("This format takes no options.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             }
         }
@@ -517,7 +540,7 @@ struct StreamingOptions: View {
             Text(tab.format.splitsItself
                  ? "\(tab.format.label) splits by its own row ceiling, so no split is needed."
                  : "0 writes one file however big it gets.")
-                .font(.system(size: 11))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ChipToggle(label: "Zip the result files", isOn: $tab.zip)
@@ -540,12 +563,25 @@ struct ObjectsPane: View {
     /// Wide enough for a schema-qualified name without truncating it to nothing, narrow enough
     /// that four columns still fit the window the editor normally occupies.
     private let columnWidth: CGFloat = 170
+    /// The inspector's width. Fixed rather than resizable: the pane beside it scrolls on both
+    /// axes, so a wider inspector costs the grid columns rather than a layout, and one number is
+    /// one thing to get right.
+    private let inspectorWidth: CGFloat = 260
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
-            grid
+            HStack(spacing: 0) {
+                grid
+                // Only while a row is chosen. An inspector on an empty selection would be a panel
+                // of blanks, which reads as a table whose shape could not be read rather than as
+                // nothing being selected.
+                if tab.objectSelection != nil {
+                    Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
+                    ObjectInspector(tab: tab).frame(width: inspectorWidth)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -556,13 +592,13 @@ struct ObjectsPane: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Tone.secondary)
             Text(tab.objectScope?.title ?? tab.title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.ui(12, weight: .semibold))
                 .foregroundStyle(Tone.ink)
             if tab.objectLoading {
                 ProgressView().controlSize(.mini)
             } else if !tab.objectRows.isEmpty {
                 Text(pluralized(tab.objectRows.count, "object"))
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             }
             Spacer()
@@ -597,8 +633,8 @@ struct ObjectsPane: View {
                 ScrollView([.horizontal, .vertical]) {
                     VStack(alignment: .leading, spacing: 0) {
                         headerRow
-                        ForEach(Array(tab.objectRows.enumerated()), id: \.offset) { _, row in
-                            rowView(row)
+                        ForEach(Array(tab.objectRows.enumerated()), id: \.offset) { index, row in
+                            ObjectRow(tab: tab, index: index, row: row, columnWidth: columnWidth)
                         }
                     }
                     .padding(.horizontal, Metrics.gutter)
@@ -615,7 +651,7 @@ struct ObjectsPane: View {
             HStack(spacing: 0) {
                 ForEach(tab.objectColumns, id: \.self) { name in
                     Text(name)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.ui(11, weight: .semibold))
                         .foregroundStyle(Tone.secondary)
                         .frame(width: columnWidth, alignment: .leading)
                 }
@@ -623,23 +659,6 @@ struct ObjectsPane: View {
             .padding(.vertical, 6)
             Rectangle().fill(Tone.ink.opacity(0.09)).frame(height: 1)
         }
-    }
-
-    private func rowView(_ row: [String?]) -> some View {
-        HStack(spacing: 0) {
-            // Driven by the headers, not by the row: a driver that answered a short row would
-            // otherwise shift every value one column to the left, under the wrong header, which is
-            // worse than a blank cell.
-            ForEach(tab.objectColumns.indices, id: \.self) { index in
-                Text(index < row.count ? (row[index] ?? "") : "")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Tone.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(width: columnWidth, alignment: .leading)
-            }
-        }
-        .padding(.vertical, 3)
     }
 
     private func note(_ text: String, symbol: String) -> some View {
@@ -652,5 +671,218 @@ struct ObjectsPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(30)
+    }
+}
+
+/// One object row, and the click that chooses it.
+///
+/// A row of its own rather than a `ForEach` body inside `ObjectsPane`, for one reason that matters
+/// here: the hover state is per row, and a `@State` inside a loop body is shared by every
+/// iteration, so hovering one row would light all of them.
+private struct ObjectRow: View {
+    @Environment(AppModel.self) private var model
+    let tab: QueryTab
+    let index: Int
+    let row: [String?]
+    let columnWidth: CGFloat
+    @State private var hovering = false
+
+    private var selected: Bool { tab.objectSelection == index }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Driven by the headers, not by the row: a driver that answered a short row would
+            // otherwise shift every value one column to the left, under the wrong header, which is
+            // worse than a blank cell.
+            ForEach(tab.objectColumns.indices, id: \.self) { column in
+                Text(column < row.count ? (row[column] ?? "") : "")
+                    .font(.code(11))
+                    .foregroundStyle(Tone.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: columnWidth, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        // Full width, so the highlight reads as a *row* rather than as a band behind two cells.
+        // Without this the `background` is only as wide as the HStack's own content, which is the
+        // sum of the fixed column widths: a two-column Trino listing highlighted about 340 pt of a
+        // 1600 pt pane, which looked like a stray rectangle rather than a selection.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // The fill spans every column, so the row reads as one thing rather than as a run of
+        // separately highlighted cells.
+        .background(Tone.accent.opacity(selected ? 0.22 : (hovering ? 0.09 : 0)),
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        // Double-click first, then single, which is the order the tree already uses and the order
+        // SwiftUI needs: a single-tap recogniser attached first claims the first click immediately,
+        // so the double-tap gesture never sees its second one. The two actions also compose in this
+        // order -- `openObject` selects before it opens, so a double-click leaves the inspector on
+        // the table it just opened.
+        .onTapGesture(count: 2) { model.openObject(tab, row: index) }
+        .onTapGesture { model.selectObject(tab, row: index) }
+        .contextMenu { menu }
+        .help(tab.objectName(at: index).map { "\($0) — click for its columns, double-click to open" } ?? "")
+    }
+
+    @ViewBuilder private var menu: some View {
+        Button("Open") { model.openObject(tab, row: index) }
+        Button("Insert into Query") { model.insertObject(tab, row: index) }
+        if let name = tab.objectName(at: index),
+           let scope = tab.objectScope,
+           let connection = model.connection(for: tab),
+           let qualified = qualifiedName(database: scope.catalog.isEmpty ? nil : scope.catalog,
+                                         schema: scope.schema.isEmpty ? nil : scope.schema,
+                                         table: name, for: connection.kind) {
+            Button("Copy Qualified Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(qualified, forType: .string)
+            }
+        }
+        if let name = tab.objectName(at: index) {
+            Button("Copy Name") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(name, forType: .string)
+            }
+        }
+    }
+}
+
+/// What the chosen table is: the row's own values, and the columns the server reports for it.
+///
+/// Navicat's Objects tab shows the listing; the detail belongs beside it, not instead of it, which
+/// is why this is a pane and not a sheet. The two halves answer different questions: the listing
+/// columns are whatever the driver chose to say about *all* the tables (Trino: Name and Type), and
+/// the columns below are what one table actually has.
+private struct ObjectInspector: View {
+    @Environment(AppModel.self) private var model
+    let tab: QueryTab
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    summary
+                    listing
+                    columns
+                }
+                .padding(.horizontal, Metrics.gutter)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            footer
+        }
+        .background(Tone.recess.opacity(0.14))
+    }
+
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(tab.objectDetailTable ?? "Table")
+                .font(.ui(13, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if let scope = tab.objectScope, !scope.title.isEmpty {
+                Text(scope.title)
+                    .font(.code(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    /// Every cell of the selected row, under the driver's own header for it. This is what makes
+    /// the inspector driver-independent: Postgres contributes OID, Owner and ACL here, Trino its
+    /// Type, MySQL its Engine and Rows, without this view naming any of them.
+    @ViewBuilder private var listing: some View {
+        if let row = tab.objectSelection, tab.objectRows.indices.contains(row) {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionTitle("Listing")
+                ForEach(tab.objectColumns.indices, id: \.self) { column in
+                    let cell = tab.objectRows[row].indices.contains(column)
+                        ? (tab.objectRows[row][column] ?? "") : ""
+                    if !cell.isEmpty {
+                        field(tab.objectColumns[column], cell)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var columns: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                sectionTitle("Columns")
+                if tab.objectDetailLoading { ProgressView().controlSize(.mini) }
+                Spacer(minLength: 0)
+            }
+            if let error = tab.objectDetailError {
+                Text(error)
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.coral)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if tab.objectDetailColumns.isEmpty {
+                Text(tab.objectDetailLoading ? "Reading…" : "No columns reported.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+            } else {
+                ForEach(Array(tab.objectDetailColumns.enumerated()), id: \.offset) { _, column in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(column.name)
+                            .font(.code(11))
+                            .foregroundStyle(Tone.ink.opacity(0.9))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 4)
+                        Text(column.type)
+                            .font(.code(10))
+                            .foregroundStyle(Tone.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            // The inspector only exists while a row is chosen, so the selection is what these act
+            // on; there is no row index in scope here and there does not need to be one.
+            PillButton(title: "Open", symbol: "arrow.up.forward.app", compact: true) {
+                guard let row = tab.objectSelection else { return }
+                model.openObject(tab, row: row)
+            }
+            PillButton(title: "Insert", symbol: "text.insert", role: .quiet, compact: true) {
+                guard let row = tab.objectSelection else { return }
+                model.insertObject(tab, row: row)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 6)
+        .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.ui(9.5, weight: .bold))
+            .tracking(0.8)
+            .foregroundStyle(Tone.secondary)
+    }
+
+    private func field(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.ui(9.5, weight: .semibold))
+                .foregroundStyle(Tone.secondary)
+            Text(value)
+                .font(.code(11))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

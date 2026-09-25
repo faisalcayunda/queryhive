@@ -1,0 +1,743 @@
+//! Integration tests against a real Trino server.
+//!
+//! ```bash
+//! deploy/dev/up.sh trino
+//! QH_TEST_TRINO=1 cargo test -p qh-driver-trino --test integration
+//! ```
+//!
+//! Without `QH_TEST_TRINO=1` each test prints why it is skipping and returns. A
+//! silent pass would be worse than a visible skip.
+//!
+//! What these prove that the unit tests cannot: the unit tests check the decoding
+//! rules given a type name, but *which* type names and *which* JSON encodings a
+//! live coordinator produces are facts about the wire. Every encoding asserted
+//! here was read off Trino 483 first and then pinned, and the release is named in
+//! the tests because Trino makes no cross-version guarantees.
+
+use std::time::{Duration, Instant};
+
+use qh_core::{FailureKind, IntervalValue, Value};
+use qh_driver::{
+    BrowseLevel, ConnectionConfig, Driver, DriverKind, ExecuteOptions, ObjectPath, Session, TlsMode,
+};
+use qh_driver_trino::TrinoDriver;
+
+const SKIP_HINT: &str = "skipped: set QH_TEST_TRINO=1 with deploy/dev/up.sh trino running";
+
+/// The dev container's settings, matching deploy/dev/up.sh.
+fn config() -> Option<ConnectionConfig> {
+    if std::env::var("QH_TEST_TRINO").as_deref() != Ok("1") {
+        return None;
+    }
+    Some(
+        ConnectionConfig::new(
+            DriverKind::Trino,
+            std::env::var("QH_TRINO_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+            std::env::var("QH_TRINO_PORT")
+                .ok()
+                .and_then(|port| port.parse().ok())
+                .unwrap_or(58080),
+            // The fourth argument is the *user*, not the database. Trino needs a
+            // catalog whenever a schema is set, and it answers 400 with "Schema is
+            // set but catalog is not" when one is missing -- which is how this was
+            // found rather than assumed.
+            "queryhive",
+        )
+        .database("tpch")
+        .schema("tiny")
+        .tls(TlsMode::Disable),
+    )
+}
+
+async fn connect() -> Option<Box<dyn Session>> {
+    let config = config()?;
+    Some(TrinoDriver::new().connect(&config).await.expect("connect"))
+}
+
+/// Run a statement to completion and return its rows.
+async fn rows(session: &mut Box<dyn Session>, sql: &str) -> Vec<Vec<Value>> {
+    let mut cursor = session
+        .execute(sql, &ExecuteOptions::default())
+        .await
+        .unwrap_or_else(|error| panic!("execute {sql}: {error:?}"));
+    let mut out = Vec::new();
+    while let Some(batch) = cursor.next_batch(1024).await.expect("next_batch") {
+        let columns = batch.columns();
+        let height = columns.first().map_or(0, Vec::len);
+        for index in 0..height {
+            out.push(columns.iter().map(|column| column[index].clone()).collect());
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn connects_and_reports_what_it_is() {
+    let Some(session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let capabilities = session.capabilities();
+    // No socket is kept between statements: an HTTP exchange, then nothing. This
+    // is what ADR-0006 decided, and anything that assumes a connection must ask.
+    assert!(!capabilities.persistent_connection);
+    assert!(!capabilities.transactions);
+    assert!(capabilities.cancel, "DELETE reaches the server");
+    assert_eq!(
+        capabilities.levels,
+        vec![
+            BrowseLevel::Catalog,
+            BrowseLevel::Schema,
+            BrowseLevel::Table
+        ]
+    );
+    assert_eq!(capabilities.objects_columns, vec!["Name", "Type"]);
+}
+
+#[tokio::test]
+async fn a_query_streams_rows_with_the_types_the_server_reported() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let mut cursor = session
+        .execute(
+            "SELECT CAST(1 AS BIGINT) AS n, 'x' AS t, true AS b, CAST(NULL AS INTEGER) AS nul",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+
+    // By design the columns are not known until a page carries them: the first
+    // POST answers QUEUED, and waiting for the columns there would mean waiting
+    // for the whole query. This asserts the deliberate deviation rather than
+    // leaving it to be discovered.
+    assert!(
+        cursor.columns().is_empty(),
+        "a queued query has no columns yet, and pretending otherwise costs a blocked execute"
+    );
+
+    let batch = cursor
+        .next_batch(64)
+        .await
+        .expect("next_batch")
+        .expect("a batch");
+
+    // ...and they are there by the time rows are, which is when a grid needs them.
+    let columns: Vec<(String, String)> = cursor
+        .columns()
+        .iter()
+        .map(|column| (column.name.to_string(), column.type_name.to_string()))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            ("n".to_owned(), "bigint".to_owned()),
+            ("t".to_owned(), "varchar(1)".to_owned()),
+            ("b".to_owned(), "boolean".to_owned()),
+            ("nul".to_owned(), "integer".to_owned()),
+        ]
+    );
+
+    assert_eq!(batch.columns()[0], vec![Value::Int(1)]);
+    assert_eq!(batch.columns()[1], vec![Value::Text("x".into())]);
+    assert_eq!(batch.columns()[2], vec![Value::Bool(true)]);
+    assert_eq!(batch.columns()[3], vec![Value::Null]);
+}
+
+#[tokio::test]
+async fn a_decimal_keeps_every_digit_through_the_real_protocol() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // 38 significant digits. Trino sends a decimal as a JSON *string*, which is
+    // why it survives: a float could not carry this and the engine's promise is
+    // that nothing is quietly rounded.
+    let rows = rows(
+        &mut session,
+        "SELECT CAST(1234567890123456789012345678.1234567890 AS DECIMAL(38, 10))",
+    )
+    .await;
+    assert_eq!(
+        rows[0][0],
+        Value::Decimal {
+            unscaled: 12_345_678_901_234_567_890_123_456_781_234_567_890,
+            scale: 10,
+        }
+    );
+}
+
+#[tokio::test]
+async fn both_interval_kinds_survive_the_real_protocol() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The only type this driver once left unmodelled, so the unit tests for it check
+    // the decoder against text this file has to keep honest. Measured on 483, the
+    // three expressions and what the coordinator said for each:
+    //
+    //   INTERVAL '3' DAY + INTERVAL '4' HOUR + INTERVAL '5' MINUTE + INTERVAL '6' SECOND
+    //     type: INTERVAL DAY TO SECOND     value: "3 04:05:06.000"
+    //   INTERVAL '2-3' YEAR TO MONTH
+    //     type: INTERVAL YEAR TO MONTH     value: "2-3"
+    //   INTERVAL '-3' DAY + INTERVAL '-4' HOUR
+    //     type: INTERVAL DAY TO SECOND     value: "-3 04:00:00.000"
+    //
+    // The type name is upper case here and lower case for every other type Trino
+    // reports, which is asserted rather than assumed. The negative value is the one
+    // whose sign covers both fields: read as -3 days *plus* 4 hours it would be an
+    // interval 8 hours from the server's own reading of it.
+    let rows = rows(
+        &mut session,
+        "SELECT INTERVAL '3' DAY + INTERVAL '4' HOUR + INTERVAL '5' MINUTE + INTERVAL '6' SECOND, \
+         INTERVAL '2-3' YEAR TO MONTH, \
+         INTERVAL '-3' DAY + INTERVAL '-4' HOUR",
+    )
+    .await;
+    assert_eq!(
+        rows[0],
+        vec![
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: 3,
+                micros: 14_706_000_000,
+            }),
+            Value::Interval(IntervalValue {
+                months: 27,
+                days: 0,
+                micros: 0,
+            }),
+            Value::Interval(IntervalValue {
+                months: 0,
+                days: -3,
+                micros: -14_400_000_000,
+            }),
+        ]
+    );
+
+    // And the cell's text is the shared renderer's, not the wire's: `3 04:05:06.000`
+    // would mean this driver formatted it itself.
+    assert_eq!(rows[0][0].render_text().as_deref(), Some("3 days, 4:05:06"));
+    assert_eq!(
+        rows[0][1].render_text().as_deref(),
+        Some("27 months, 0:00:00")
+    );
+}
+
+#[tokio::test]
+async fn the_announced_capability_buys_microseconds_through_the_real_protocol() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The server holds microseconds and *reports* them only to a client that says
+    // it can read them: `X-Trino-Client-Capabilities: PARAMETRIC_DATETIME`.
+    // Measured on 483, that one header apart and nothing else:
+    //
+    //   without: "timestamp with time zone" / "time"
+    //            "2026-01-31 12:00:00.123 +07:00" / "00:00:00.000"
+    //   with:    "timestamp(6) with time zone" / "time(6)"
+    //            "2026-01-31 12:00:00.123456 +07:00" / "23:59:59.999999"
+    //
+    // So both halves below are a claim about the header rather than about the
+    // decoder: drop it from the request and the server stops putting `(6)` in the
+    // type and stops sending the digits, and this fails on the type name first.
+    // The third value is the one that shows why the header is not cosmetic --
+    // 999.999 ms rounds up into the next second, so the downgrade is not a
+    // truncation the grid could be read past.
+    let mut cursor = session
+        .execute(
+            "SELECT TIMESTAMP '2026-01-31 12:00:00.123456 +07:00' AS tz_aware, \
+             TIMESTAMP '2026-01-31 12:00:00.123456' AS tz_naive, \
+             TIME '23:59:59.999999' AS a_time",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+
+    let batch = cursor
+        .next_batch(16)
+        .await
+        .expect("next_batch")
+        .expect("a batch");
+
+    let columns: Vec<(String, String)> = cursor
+        .columns()
+        .iter()
+        .map(|column| (column.name.to_string(), column.type_name.to_string()))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            (
+                "tz_aware".to_owned(),
+                "timestamp(6) with time zone".to_owned()
+            ),
+            ("tz_naive".to_owned(), "timestamp(6)".to_owned()),
+            ("a_time".to_owned(), "time(6)".to_owned()),
+        ],
+        "the server only reports these type names to a client that announced \
+         PARAMETRIC_DATETIME"
+    );
+
+    assert_eq!(
+        batch.columns()[0],
+        vec![Value::Timestamp {
+            micros: 1_769_835_600_123_456,
+            offset_secs: Some(25_200),
+        }]
+    );
+    assert_eq!(
+        batch.columns()[1],
+        vec![Value::Timestamp {
+            micros: 1_769_860_800_123_456,
+            offset_secs: None,
+        }]
+    );
+    assert_eq!(
+        batch.columns()[2],
+        vec![Value::Time {
+            micros: 86_399_999_999,
+        }]
+    );
+
+    // And the text a grid shows keeps all six digits, in the zone the server
+    // reported the value in.
+    assert_eq!(
+        batch.columns()[0][0].render_text().as_deref(),
+        Some("2026-01-31 12:00:00.123456+07:00")
+    );
+    assert_eq!(
+        batch.columns()[2][0].render_text().as_deref(),
+        Some("23:59:59.999999")
+    );
+}
+
+#[tokio::test]
+async fn varbinary_arrives_base64_and_is_decoded_to_bytes() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // X'00FF' arrives as "AP8=". A NUL byte is the case that shows whether the
+    // decoder was base64 or optimistic text handling.
+    let rows = rows(&mut session, "SELECT X'00FF'").await;
+    assert_eq!(rows[0][0], Value::Bytes(vec![0x00, 0xff]));
+}
+
+#[tokio::test]
+async fn browse_walks_the_catalogs_schemas_and_tables_tree() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let catalogs = session
+        .browse(BrowseLevel::Catalog, &ObjectPath::new(), false)
+        .await
+        .expect("catalogs");
+    assert!(catalogs.contains(&"tpch".to_owned()), "got {catalogs:?}");
+
+    let schemas = session
+        .browse(
+            BrowseLevel::Schema,
+            &ObjectPath::new().catalog("tpch"),
+            false,
+        )
+        .await
+        .expect("schemas");
+    assert!(schemas.contains(&"tiny".to_owned()), "got {schemas:?}");
+
+    let tables = session
+        .browse(
+            BrowseLevel::Table,
+            &ObjectPath::new().catalog("tpch").schema("tiny"),
+            false,
+        )
+        .await
+        .expect("tables");
+    assert!(tables.contains(&"orders".to_owned()), "got {tables:?}");
+}
+
+#[tokio::test]
+async fn the_objects_grid_carries_name_and_type_and_invents_nothing() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let page = session
+        .objects(&ObjectPath::new().catalog("tpch").schema("tiny"))
+        .await
+        .expect("objects");
+
+    // Two columns, because two are true here. Trino's information_schema exposes
+    // no OID, owner or ACL, so a wider grid would be a wider invention.
+    assert_eq!(page.columns, vec!["Name".to_owned(), "Type".to_owned()]);
+    assert!(
+        page.rows.iter().any(|row| row[0] == "orders"),
+        "got {:?}",
+        page.rows
+    );
+    assert!(
+        page.rows
+            .iter()
+            .all(|row| row[1] == "BASE TABLE" || row[1] == "VIEW"),
+        "every row should carry the server's own type: {:?}",
+        page.rows
+    );
+    assert!(
+        page.rows.iter().all(|row| row.len() == 2),
+        "a ragged grid row would be a bug in the driver, not in the data"
+    );
+}
+
+#[tokio::test]
+async fn a_syntax_error_carries_the_servers_code_and_is_not_retried() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The POST itself succeeds: Trino answers 200 with a `nextUri`, and the error
+    // arrives on a page when that URI is fetched. Measured, not assumed -- so the
+    // driver maps errors in *both* places, and this test would pass either way but
+    // only be honest about one.
+    let mut cursor = session
+        .execute("SELECT nope FROM", &ExecuteOptions::default())
+        .await
+        .expect("the POST answers with a page; the error comes with the next one");
+
+    let error = cursor
+        .next_batch(8)
+        .await
+        .expect_err("a syntax error should surface when the page is fetched");
+
+    match error {
+        qh_core::EngineError::Query {
+            kind,
+            code,
+            message,
+            ..
+        } => {
+            // Trino's own code for a syntax error, and `USER_ERROR`, which means
+            // repeating the statement produces the same thing forever: a retry
+            // loop here would spin.
+            assert_eq!(kind, FailureKind::Permanent, "{message}");
+            assert_eq!(code.as_deref(), Some("1"), "{message}");
+            assert!(message.contains("SYNTAX_ERROR"), "{message}");
+        }
+        other => panic!("expected a query error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cancel_stops_a_running_query_and_is_reported_as_cancelled() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    // Long enough to interrupt, and it is genuinely still running when the cursor
+    // comes back -- which is the point: a caller that has to wait for the result
+    // set to begin has nothing to cancel.
+    let started = Instant::now();
+    let mut cursor = session
+        .execute(
+            "SELECT count(*) FROM tpch.tiny.lineitem a \
+             CROSS JOIN tpch.tiny.lineitem b CROSS JOIN tpch.tiny.lineitem c",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute should return while the query is still queued");
+    let submit = started.elapsed();
+    assert!(
+        submit < Duration::from_secs(5),
+        "execute took {submit:?}; a caller without a cursor cannot cancel anything"
+    );
+    assert!(
+        session.query_id().is_some(),
+        "the running query should be known"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    session.cancel().await.expect("cancel");
+
+    // Bounded, so a regression fails with a message instead of hanging the suite.
+    let outcome = tokio::time::timeout(Duration::from_secs(20), cursor.next_batch(8))
+        .await
+        .expect("cancel did not stop the query within twenty seconds");
+
+    match outcome {
+        Err(qh_core::EngineError::Query {
+            kind,
+            code,
+            message,
+            ..
+        }) => {
+            // Trino answers a successful cancel with `USER_CANCELED` carrying
+            // `errorType = USER_ERROR`. Reporting that as a plain user error would
+            // tell the user their stop button was a failure.
+            assert_eq!(kind, FailureKind::Cancelled, "{message}");
+            assert_eq!(code.as_deref(), Some("3"), "{message}");
+        }
+        Err(other) => panic!("expected a cancellation, got {other:?}"),
+        Ok(batch) => panic!("the query was not cancelled: got {batch:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cancelling_with_nothing_running_is_not_an_error() {
+    let Some(session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The button can be pressed after the query finished. Calling that a failure
+    // would put an error in front of the user for doing the right thing.
+    session.cancel().await.expect("cancel with nothing running");
+}
+
+#[tokio::test]
+async fn a_level_trino_does_not_have_is_refused_with_a_usable_message() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // Trino's tree is catalog, schema, table. Asking for a database level gets an
+    // explanation rather than an empty list that looks like an empty catalog.
+    let error = session
+        .browse(BrowseLevel::Database, &ObjectPath::new(), false)
+        .await
+        .expect_err("Trino has no database level");
+    match error {
+        qh_core::EngineError::Usage { message } => {
+            assert!(message.contains("catalog"), "{message}")
+        }
+        other => panic!("expected a usage error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_browse_call_uses_the_connections_own_catalog_and_schema() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // An empty path is not an error: the connection's own catalog and schema are
+    // the fallback, which is what makes the tree open on something sensible without
+    // the UI having to pass the whole path down. The refusal path -- a *missing*
+    // catalog with nothing to fall back to -- is covered by the unit tests, where
+    // it can be provoked without a server.
+    let tables = session
+        .browse(BrowseLevel::Table, &ObjectPath::new(), false)
+        .await
+        .expect("the connection's catalog and schema should be used");
+    assert!(tables.contains(&"orders".to_owned()), "got {tables:?}");
+}
+
+#[tokio::test]
+async fn the_callers_row_ceiling_is_honoured_across_pages() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let mut cursor = session
+        .execute(
+            "SELECT * FROM tpch.tiny.orders",
+            &ExecuteOptions {
+                max_batch_rows: None,
+                row_limit: Some(7),
+            },
+        )
+        .await
+        .expect("execute");
+
+    let mut total = 0usize;
+    while let Some(batch) = cursor.next_batch(3).await.expect("next_batch") {
+        let rows = batch.columns().first().map_or(0, Vec::len);
+        assert!(rows <= 3, "a batch of {rows} exceeds what was asked for");
+        total += rows;
+    }
+    // The row limit is the caller's ceiling, not a rewrite of the statement: the
+    // query the user sees is the query that ran.
+    assert_eq!(total, 7);
+}
+
+#[tokio::test]
+async fn explain_returns_the_servers_own_plan_without_the_callers_terminator() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The caller wrote SQL, so their statement ends the way SQL may end: with a
+    // `;`. Trino answers `EXPLAIN SELECT 1;` with a SYNTAX_ERROR on the `;`
+    // (measured on 483), so the terminator has to be gone before the request is
+    // sent -- which is where the live golden case found it was not.
+    let statement = session.explain_statement("SELECT 1;");
+    assert_eq!(statement, "EXPLAIN SELECT 1");
+    let rows = rows(&mut session, &statement).await;
+    // Trino's plan is one text column, one row per plan line.
+    assert!(!rows.is_empty(), "a plan should have at least one line");
+    assert!(
+        !rows.iter().any(|row| row.iter().any(|value| matches!(
+            value,
+            Value::Text(text) if text.contains("SYNTAX_ERROR")
+        ))),
+        "a syntax error must not be able to arrive as a plan: {rows:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TLS against real coordinators
+//
+// Two coordinators, both real, and the difference between them is the whole
+// subject: the plaintext dev one on 58080, and `qh-trino-tls` on 58081, which
+// serves HTTPS behind a self-signed keystore.
+// ---------------------------------------------------------------------------
+
+/// The TLS coordinator's port. Its own, so nothing else is disturbed.
+fn tls_port() -> u16 {
+    std::env::var("QH_TRINO_TLS_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(58081)
+}
+
+fn tls_config(mode: TlsMode) -> ConnectionConfig {
+    ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", tls_port(), "queryhive").tls(mode)
+}
+
+const TLS_SKIP_HINT: &str =
+    "skipped: set QH_TEST_TRINO=1 with deploy/dev/qh-trino-tls.sh running on 58081";
+
+/// Gate for the TLS-coordinator tests: the usual `QH_TEST_TRINO` switch **and** a
+/// coordinator actually listening.
+///
+/// The second half is not a convenience. `qh-trino-tls` is a second single-node
+/// Trino, and this machine's VM (3.6 GiB, shared with the dev containers and the
+/// fixtures other work brings up) cannot hold two of them at once — measured, not
+/// assumed: bringing this one up OOM-killed `qh-trino`, twice. Requiring both at
+/// once would mean the suite could never be green, so the coordinator's own
+/// reachability is checked and its absence is printed, the same way the
+/// `QH_TEST_TRINO` gate prints its own.
+fn tls_gate() -> bool {
+    if config().is_none() {
+        eprintln!("{TLS_SKIP_HINT}");
+        return false;
+    }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], tls_port()));
+    if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_err() {
+        eprintln!(
+            "skipped: no TLS coordinator listening on {address}; start it with \
+             deploy/dev/qh-trino-tls.sh (it cannot run alongside `qh-trino` on this \
+             machine's VM, so the two halves of this suite are run one at a time)"
+        );
+        return false;
+    }
+    true
+}
+
+#[tokio::test]
+async fn require_refuses_the_self_signed_certificate_of_the_tls_coordinator() {
+    if !tls_gate() {
+        return;
+    }
+    // The failure is the feature: `Require` checks the certificate against the
+    // platform trust store, and the coordinator's keystore is signed by nobody that
+    // store knows. A driver that connected here would be a driver that checks
+    // nothing.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::Require))
+        .await
+        .expect("connect builds the client; the handshake is where this fails");
+    match session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await
+    {
+        Err(qh_core::EngineError::Connect { message, .. }) => {
+            assert!(message.contains("https://"), "{message}");
+        }
+        Err(other) => panic!("expected a connect failure, got {other:?}"),
+        Ok(_) => panic!("a self-signed certificate must not verify"),
+    }
+}
+
+#[tokio::test]
+async fn require_no_verify_reaches_the_tls_coordinator() {
+    if !tls_gate() {
+        return;
+    }
+    // Same coordinator, same certificate, and it works: the difference between this
+    // and the test above is a user's per-connection choice, not a different server.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::RequireNoVerify))
+        .await
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn prefer_encrypts_against_the_tls_coordinator_without_verifying_it() {
+    if !tls_gate() {
+        return;
+    }
+    // `Prefer` does not verify, so the self-signed keystore is no obstacle and the
+    // statement runs. That it ran over TLS rather than by falling back is a fact
+    // about this coordinator rather than about the absence of an error: 58081 is
+    // published to 8443 and nothing else, so a plaintext attempt has nowhere to
+    // succeed.
+    let mut session = TrinoDriver::new()
+        .connect(&tls_config(TlsMode::Prefer))
+        .await
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn prefer_falls_back_against_the_plaintext_dev_coordinator() {
+    let Some(_) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // The real coordinator with no TLS configured: it answers the ClientHello with
+    // an HTTP response, which is the one signal allowed to downgrade. Measured
+    // against a real server rather than only the test's own listener, because "a
+    // plaintext server answers a handshake this way" is a fact about Jetty.
+    let mut session = TrinoDriver::new()
+        .connect(
+            &ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "queryhive")
+                .tls(TlsMode::Prefer),
+        )
+        .await
+        .expect("connect");
+    let rows = rows(&mut session, "SELECT 1").await;
+    assert_eq!(rows, vec![vec![Value::Int(1)]]);
+}
+
+#[tokio::test]
+async fn require_never_connects_to_a_coordinator_without_tls() {
+    let Some(_) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // `Require` means required: no fallback exists, so a coordinator that cannot
+    // complete a handshake is an error even though it is reachable.
+    let mut session = TrinoDriver::new()
+        .connect(
+            &ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 58080, "queryhive")
+                .tls(TlsMode::Require),
+        )
+        .await
+        .expect("connect");
+    let outcome = session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await;
+    assert!(
+        matches!(outcome, Err(qh_core::EngineError::Connect { .. })),
+        "require over a plaintext coordinator should fail, got {:?}",
+        outcome.is_ok()
+    );
+}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_batching_live",
+  "command": "preview",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "250 real rows through the 200-row preview batch: the boundary, the second batch and `truncated: true`."
+}

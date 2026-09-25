@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_export_live",
+  "command": "export",
+  "event_lines": 5,
+  "exit_code": 0,
+  "notes": "The CSV writer fed by psycopg's real decoding rather than a fake cursor's rows: the `start` columns carry the server's own type OIDs (the seeded `mood` enum's masked to `<OID>` for the reason above), the header is the table's, and `done` reports the real row count and the file's real byte size. The path is masked to <TMP>; the size is not -- it is a fact about the bytes the writer produced from the values psycopg handed over."
+}

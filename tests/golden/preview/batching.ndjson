@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "varchar"}], "event": "columns"}
+{"data": [["1", "name-1"], ["2", "name-2"], ["3", null], ["4", "name-4"], ["5", "name-5"], ["6", null], ["7", "name-7"], ["8", "name-8"], ["9", null], ["10", "name-10"], ["11", "name-11"], ["12", null], ["13", "name-13"], ["14", "name-14"], ["15", null], ["16", "name-16"], ["17", "name-17"], ["18", null], ["19", "name-19"], ["20", "name-20"], ["21", null], ["22", "name-22"], ["23", "name-23"], ["24", null], ["25", "name-25"]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 25, "truncated": false}

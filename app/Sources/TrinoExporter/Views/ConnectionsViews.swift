@@ -1,23 +1,33 @@
 import SwiftUI
 
-/// 22pt-default rounded tile filled with a connection's colour gradient, carrying the
-/// "this is a Trino coordinator" glyph. Shared by the tree, the toolbar picker and the title
-/// strip so a connection reads the same way everywhere it appears.
+/// 22pt-default rounded tile filled with a connection's colour gradient, carrying that driver's
+/// brand mark. Shared by the tree, the toolbar picker and the title strip so a connection reads the
+/// same way everywhere it appears.
 func connectionTile(_ connection: Connection, size: CGFloat = 22) -> some View {
+    connectionTile(colour: connection.color, kind: connection.kind, size: size)
+}
+
+/// The same tile built from a **tree node's own values**.
+///
+/// Split out because a tree row must not read the model's `connections`: that would subscribe every
+/// visible row to the array, so one edit — a colour, a rename, a move between groups — would re-run
+/// all of them. This is the same trap the selection hit. A node already carries its colour and its
+/// driver, so the row can draw the tile without asking anyone anything.
+func connectionTile(colour: ConnectionColor, kind: ConnectionKind, size: CGFloat = 22) -> some View {
     RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
         // The tile's own subtle ramp, flattened under a flat tone like every other gradient.
         .fill(ThemeStore.shared.tone.isLuminous
-              ? LinearGradient(colors: [connection.color.color, connection.color.color.opacity(0.55)],
+              ? LinearGradient(colors: [colour.color, colour.color.opacity(0.55)],
                                startPoint: .topLeading, endPoint: .bottomTrailing)
-              : LinearGradient(colors: [connection.color.color, connection.color.color],
+              : LinearGradient(colors: [colour.color, colour.color],
                                startPoint: .topLeading, endPoint: .bottomTrailing))
         .frame(width: size, height: size)
         .overlay {
-            if let logo = DriverLogo.image(for: connection.kind) {
+            if let logo = DriverLogo.image(for: kind) {
                 Image(nsImage: logo).resizable().scaledToFit()
                     .frame(width: size * 0.68, height: size * 0.68)
             } else {
-                Image(systemName: connection.kind.symbol)
+                Image(systemName: kind.symbol)
                     .font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(.white)
             }
         }
@@ -43,10 +53,10 @@ struct ConnectionPickerButton: View {
             HStack(spacing: 7) {
                 if let connection = model.connections.first(where: { $0.id == selection }) {
                     connectionTile(connection, size: 18)
-                    Text(connection.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Text(connection.name).font(.ui(12, weight: .semibold)).lineLimit(1)
                 } else {
                     Text(model.connections.isEmpty ? "No connections" : "Choose a connection…")
-                        .font(.system(size: 12))
+                        .font(.ui(12))
                         .foregroundStyle(Tone.secondary)
                 }
                 Spacer(minLength: 4)
@@ -126,7 +136,7 @@ struct ConnectionEditorSheet: View {
     @State private var showAllSchemas = false
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
-    @State private var testProcess: Process?
+    @State private var testProcess: (any EngineRun)?
     @State private var testRun = UUID()
     @State private var attemptedSave = false
     /// The id a brand-new connection will save under, reused across retries so a Save that fails
@@ -173,7 +183,13 @@ struct ConnectionEditorSheet: View {
         }
         .frame(width: 620, height: 660)
         .background(Tone.canvas)
-        .preferredColorScheme(.dark)
+        // No `.preferredColorScheme(.dark)` here. It used to pin the sheet dark, and that is what
+        // made the editor unreadable in light mode: `Tone.canvas` follows the *stored mode* (light
+        // mode picks the light theme) while `Tone.ink` is a dynamic `NSColor` that follows the
+        // *effective appearance*. Pinning dark made the sheet's ink resolve white over a canvas the
+        // theme had already drawn light, so every label came out white on white. The sheet now
+        // inherits the appearance of the window that presents it, which is what every other surface
+        // in the app does.
         .confirmationDialog("Delete \(name.isEmpty ? "this connection" : name)?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { delete() }
         } message: {
@@ -191,7 +207,7 @@ struct ConnectionEditorSheet: View {
     private var typePicker: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("New Connection")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.ui(18, weight: .bold, rounded: true))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
@@ -204,7 +220,7 @@ struct ConnectionEditorSheet: View {
                 }
                 Text("The driver decides the default port, which fields are required, and what the "
                      + "object tree can browse.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -238,7 +254,7 @@ struct ConnectionEditorSheet: View {
     private var urlStep: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("New Connection with URI")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.ui(18, weight: .bold, rounded: true))
                 .padding(.horizontal, 20)
                 .frame(height: 84, alignment: .leading)
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
@@ -248,14 +264,14 @@ struct ConnectionEditorSheet: View {
                     .field(invalid: urlError != nil)
                     .onSubmit { applyURL() }
                 if let urlError {
-                    Text(urlError).font(.system(size: 11)).foregroundStyle(Tone.coral)
+                    Text(urlError).font(.ui(11)).foregroundStyle(Tone.coral)
                 }
                 Text("""
                      trino://user:password@host:8443/hive/analytics
                      postgresql://user:password@host:5432/mydb
                      mysql://user:password@host:3306/mydb
                      """)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.code(11))
                     .foregroundStyle(Tone.ink.opacity(0.4))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -320,16 +336,16 @@ struct ConnectionEditorSheet: View {
             ConnectionBrandTile(kind: kind, size: 56)
             VStack(alignment: .leading, spacing: 2) {
                 Text(editingID == nil ? "New Connection" : (name.isEmpty ? "Connection" : name))
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.ui(18, weight: .bold, rounded: true))
                     .lineLimit(1)
                 Text(editingID == nil ? "Not saved yet." : "Saved \(kind.label) connection.")
-                    .font(.system(size: 12))
+                    .font(.ui(12))
                     .foregroundStyle(Tone.secondary)
             }
             Spacer(minLength: 12)
             if isDirty {
                 Label("Unsaved changes", systemImage: "exclamationmark.circle")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.ui(11, weight: .medium))
                     .foregroundStyle(Tone.amber)
                     .labelStyle(.titleAndIcon)
             }
@@ -354,10 +370,19 @@ struct ConnectionEditorSheet: View {
             }
             HStack(alignment: .top, spacing: 12) {
                 if kind == .trino {
-                    LabeledField("Scheme") {
-                        Segmented(selection: $scheme, options: ["https", "http"]) { $0.uppercased() }
+                    // Three options, not two, because Trino's encryption decision has four
+                    // outcomes and the two scheme words can only spell three of them. The
+                    // fourth — "https when the coordinator offers it, http otherwise" — is
+                    // `prefer`, and it is the shared vocabulary's own word rather than a new
+                    // one: the other two drivers' SSL mode pickers already show it for this
+                    // exact outcome. See `TrinoTransport` for how it reaches the engine.
+                    LabeledField("Transport") {
+                        Segmented(selection: trinoTransport, options: TrinoTransport.allCases) { $0.label }
                     }
-                    .frame(width: 150)
+                    .frame(width: 235)
+                    .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
+                          + "first and keeps plain HTTP only for a coordinator that has no TLS at all — "
+                          + "the certificate is not checked either way.")
                 }
                 LabeledField("Port · Required") {
                     TextField(String(kind.defaultPort), value: $port, format: .number.grouping(.never))
@@ -370,6 +395,10 @@ struct ConnectionEditorSheet: View {
                 // the other scheme's standard one.
                 if old == "http", new == "https", port == 8080 { port = 8443 }
                 if old == "https", new == "http", port == 8443 { port = 8080 }
+                // `prefer` moves nothing. It tries HTTPS and falls back to clear on whatever
+                // port it was given, which is the only port that can answer the question the
+                // transport exists to leave open; rewriting the port would answer it for the
+                // coordinator instead of asking it.
             }
             LabeledField("User · Required") {
                 TextField("faisal", text: $user).field(invalid: attemptedSave && missingRequired.contains("user"))
@@ -379,7 +408,7 @@ struct ConnectionEditorSheet: View {
                 SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
                     .field()
                 Text(passwordHint)
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -418,14 +447,54 @@ struct ConnectionEditorSheet: View {
                     Segmented(selection: $sslmode, options: kind.sslModes) { $0 }
                 }
             } else {
-                ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+                // HTTPS is the only Trino transport with a verification answer to give, so it is
+                // the only one that shows the box. `prefer` never checks the certificate — the
+                // mode means "encrypt if you can", both on the attempt and on the fallback —
+                // and in clear there is nothing to check, so neither is offered a control that
+                // could not change the connection.
+                //
+                // The absence is *said* rather than left blank: a control that simply vanishes
+                // reads as a mistake, and an unchecked box reads as an answer. The stored value
+                // stays stored either way, so going back to HTTPS offers the user's last choice
+                // again.
+                switch TrinoTransport(stored: scheme) {
+                case .https:
+                    ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+                case .prefer:
+                    tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
+                            + "The certificate is not checked.")
+                        .help("`prefer` never verifies: it encrypts when it can and falls back to clear "
+                              + "only when the coordinator answers the handshake with something that is not "
+                              + "TLS. HTTPS with this box off is the transport that says so outright.")
+                case .http:
+                    tlsNote("Plain HTTP: nothing to verify. A password still forces HTTPS — "
+                            + "pick HTTPS to choose how that is verified.")
+                        .help("In clear there is no certificate to check. The engine raises this connection "
+                              + "to HTTPS anyway when a password is stored, which is why the verification "
+                              + "answer lives on the HTTPS transport rather than here.")
+                }
             }
         }
     }
 
+    /// The picker's own binding over the string the connection stores, so the third option
+    /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
+    private var trinoTransport: Binding<TrinoTransport> {
+        Binding(get: { TrinoTransport(stored: scheme) },
+                set: { scheme = $0.rawValue })
+    }
+
+    /// One spoken line where a control would be, for a transport with no verification to answer.
+    private func tlsNote(_ text: String) -> some View {
+        Text(text)
+            .font(.ui(11))
+            .foregroundStyle(Tone.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var passwordHint: String {
         switch kind {
-        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https."
+        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https. Prefer is the exception: it starts on HTTPS and falls back to clear only when the coordinator has no TLS."
         case .postgres: "Postgres accepts a password over any SSL mode, including \"prefer\"."
         case .mysql: "MySQL accepts a password over either SSL mode."
         }
@@ -433,7 +502,7 @@ struct ConnectionEditorSheet: View {
 
     @ViewBuilder private func requiredHint(_ key: String) -> some View {
         if attemptedSave && missingRequired.contains(key) {
-            Text("Required").font(.system(size: 11)).foregroundStyle(Tone.coral)
+            Text("Required").font(.ui(11)).foregroundStyle(Tone.coral)
         }
     }
 
@@ -462,7 +531,7 @@ struct ConnectionEditorSheet: View {
         HStack(spacing: 7) {
             Circle().fill(tint).frame(width: 7, height: 7).layoutPriority(1)
             Text(text)
-                .font(.system(size: 12))
+                .font(.ui(12))
                 .foregroundStyle(tint == Tone.coral ? Tone.coral : Tone.ink.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(truncation)
@@ -487,7 +556,7 @@ struct ConnectionEditorSheet: View {
             if case .running = testState {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
-                    Text("Testing…").font(.system(size: 12.5, weight: .medium))
+                    Text("Testing…").font(.ui(12.5, weight: .medium))
                 }
                 .foregroundStyle(Tone.ink)
                 .padding(.horizontal, 13)
@@ -577,9 +646,16 @@ struct ConnectionEditorSheet: View {
             if let index = next.firstIndex(where: { $0.id == id }) {
                 next[index] = connection
             } else {
-                next.append(connection)
+                // A connection created from a group's menu is filed into it on creation. Set here
+                // rather than on the form, because which folder it belongs in is the tree's
+                // business and not a field of the connection — and read once, then cleared, so
+                // creating a second connection from the header does not inherit the first's group.
+                var created = connection
+                created.group = model.newConnectionGroup
+                model.newConnectionGroup = nil
+                next.append(created)
             }
-            try ConnectionStore.save(next)
+            try ConnectionStore.save(ConnectionsDocument(groups: model.groups, connections: next))
             model.connections = next
         } catch {
             model.notice = Notice(title: "Couldn't save connection", message: error.localizedDescription)
@@ -626,7 +702,7 @@ struct ConnectionEditorSheet: View {
         )
         var catalogs = 0
         var message: String?
-        testProcess = Engine.run("test", env: env, onEvent: { event in
+        testProcess = Engine.current.run("test", env: env, onEvent: { event in
             guard testRun == run else { return }
             if event.event == "test" { catalogs = event.catalogCount ?? 0 }
             if event.event == "error" { message = event.message }
@@ -692,10 +768,10 @@ struct ConnectionTypeTile: View {
                     .shadow(color: hue.accent.opacity(hovering ? 0.6 : 0.35), radius: hovering ? 16 : 10, y: 4)
 
                 Text(kind.label)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.ui(13, weight: .semibold, rounded: true))
                     .foregroundStyle(Tone.ink)
                 Text(verbatim: "port \(kind.defaultPort)")
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.code(10.5))
                     .foregroundStyle(Tone.secondary)
             }
             .frame(maxWidth: .infinity)

@@ -40,12 +40,14 @@ enum Snapshot {
         return arguments[index + 1]
     }
 
-    /// `--theme <name>`, `--accent <name>` and `--tone <name>`: draw the shell in an appearance
-    /// the user has not chosen. All three go through `ThemeStore.pin`, so reviewing one never
-    /// leaves it behind in the user's preferences — which matters because these flags are how the
-    /// design is checked, and a check that rewrites what it is checking is not a check.
+    /// `--theme <name>`, `--accent <name>`, `--tone <name>`, `--ui-font <family>` and
+    /// `--code-font <family>`: draw the shell in an appearance the user has not chosen. All five go
+    /// through `ThemeStore.pin`, so reviewing one never leaves it behind in the user's preferences
+    /// — which matters because these flags are how the design is checked, and a check that rewrites
+    /// what it is checking is not a check.
     static func requestedAppearance() -> (theme: AppTheme?, accent: AccentChoice?, tone: SurfaceTone?,
-                                          mode: AppearanceMode?, systemIsDark: Bool?)? {
+                                          mode: AppearanceMode?, systemIsDark: Bool?,
+                                          uiFont: String?, codeFont: String?)? {
         let arguments = CommandLine.arguments
         func value(_ flag: String) -> String? {
             guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
@@ -59,8 +61,13 @@ enum Snapshot {
         // no real window, so it cannot ask AppKit; this is how `--mode system` is drawn as light on
         // a machine that is currently dark.
         let systemIsDark = value("--system-appearance").map { $0 == "dark" }
-        guard theme != nil || accent != nil || tone != nil || mode != nil || systemIsDark != nil else { return nil }
-        return (theme, accent, tone, mode, systemIsDark)
+        // Font families are taken verbatim: any installed family is valid, so there is nothing to
+        // validate against and no reason to reject one this build has not heard of.
+        let uiFont = value("--ui-font")
+        let codeFont = value("--code-font")
+        guard theme != nil || accent != nil || tone != nil || mode != nil || systemIsDark != nil
+                || uiFont != nil || codeFont != nil else { return nil }
+        return (theme, accent, tone, mode, systemIsDark, uiFont, codeFont)
     }
 
     @MainActor
@@ -75,7 +82,8 @@ enum Snapshot {
         let store = ThemeStore.shared
         if let requested {
             store.pin(theme: requested.theme, accent: requested.accent, tone: requested.tone,
-                      mode: requested.mode, systemIsDark: requested.systemIsDark)
+                      mode: requested.mode, systemIsDark: requested.systemIsDark,
+                      uiFont: requested.uiFont, codeFont: requested.codeFont)
         }
         let scheme = store.mode.colorScheme
         let app = NSApplication.shared
@@ -86,8 +94,10 @@ enum Snapshot {
         // Settings is its own scene in the running app, so it needs its own root here or it stays
         // the one screen nobody can look at without launching.
         let hosting: NSHostingView<AnyView>
-        if scene == "settings" {
-            hosting = NSHostingView(rootView: AnyView(SettingsView()
+        if scene.hasPrefix("settings") {
+            let pane: SettingsView.Pane = scene == "settings-keyboard" ? .keyboard
+                : scene == "settings-fonts" ? .fonts : .appearance
+            hosting = NSHostingView(rootView: AnyView(SettingsView(pane: pane)
                 .environment(model)
                 .preferredColorScheme(scheme)))
         } else {
@@ -96,8 +106,8 @@ enum Snapshot {
                 .frame(width: width, height: height)
                 .preferredColorScheme(scheme)))
         }
-        hosting.frame = scene == "settings"
-            ? NSRect(x: 0, y: 0, width: 520, height: 560)
+        hosting.frame = scene.hasPrefix("settings")
+            ? NSRect(x: 0, y: 0, width: 560, height: 640)
             : NSRect(x: 0, y: 0, width: width, height: height)
 
         let window = NSWindow(contentRect: hosting.frame,
@@ -278,6 +288,32 @@ enum Snapshot {
         }
 
         switch scene {
+        // Groups holding the seeded connections, so the folder rows — their mark, their count of
+        // connections and the way a connection reads inside one — are reviewable without clicking
+        // through the menu that makes them.
+        case "groups":
+            let production = ConnectionGroup(name: "Production")
+            let staging = ConnectionGroup(name: "Staging")
+            model.groups = [production, staging]
+            model.connections[0].group = production.id
+            model.connections[2].group = production.id
+            model.connections[3].group = staging.id
+            model.rebuildTree()
+            // One folder open and one shut, because both states are part of the picture.
+            for node in model.tree where node.kind == .group {
+                node.expanded = node.title == "Production"
+            }
+        // A tab that has been opened and not used: no rows, no log lines, no files. This is the
+        // state the panel's default is about, and it is what `--scene fresh-tab` is for.
+        case "fresh-tab":
+            tab.logLines = []
+            tab.preview = nil
+            tab.files = []
+            tab.stage = .idle
+            tab.panel = .result
+            // The seeded lines above are what the other scenes read; this scene is the absence of
+            // them, so the panel's content check has to run the way `newTab` runs it.
+            model.panelCollapsed = true
         case "files":
             tab.panel = .files
         case "columns":
@@ -311,6 +347,22 @@ enum Snapshot {
                 ["kasus_harian", "24606", "app_datahub", ""],
                 ["referensi_jenis_kelamin", "24607", "postgres", ""],
                 ["kasus_kesehatan_2025", "24608", "app_datahub", ""],
+            ]
+            // One row chosen, so the fixture draws the inspector and its columns. Without a
+            // selection the scene would only prove the grid renders, and the pane that reads the
+            // table's own columns is the half that has nothing else to check it.
+            objectsTab.objectSelection = 1
+            objectsTab.objectDetailTable = "penerima_manfaat"
+            objectsTab.objectDetailColumns = [
+                Event.Column(name: "id", type: "bigint"),
+                Event.Column(name: "nik", type: "character varying(16)"),
+                Event.Column(name: "nama", type: "text"),
+                Event.Column(name: "wilayah_kode", type: "character varying(10)"),
+                Event.Column(name: "tanggal_lahir", type: "date"),
+                Event.Column(name: "jenis_kelamin", type: "mood"),
+                Event.Column(name: "penghasilan_bulanan", type: "numeric(38,10)"),
+                Event.Column(name: "terdaftar_pada", type: "timestamp with time zone"),
+                Event.Column(name: "dibuat_pada", type: "timestamp without time zone"),
             ]
             model.tabs.append(objectsTab)
             model.selectedTabID = objectsTab.id
@@ -548,6 +600,17 @@ enum Snapshot {
             model.presentConnectionEditor(nil)
         case "connection-uri":
             model.presentConnectionEditor(nil)
+        case "connection-trino":
+            // Trino's form is not the Postgres one with a field renamed: it is the only driver
+            // with a transport picker, and the only one whose third transport (`prefer`) is
+            // neither a scheme nor a verification answer. Seeded on `prefer` so a review draws
+            // the state a snapshot could not otherwise reach.
+            let trino = Connection(id: UUID(), name: "Trino prefer", color: .amber, kind: .trino,
+                                   host: "localhost", port: 8080, scheme: "prefer",
+                                   user: "dev", database: "tpch", schema: "", verify: true)
+            model.connections.append(trino)
+            model.rebuildTree()
+            model.presentConnectionEditor(trino.id)
         case "connection-postgres", "connection-mysql":
             // The editor is not the same form three times over: Postgres has no catalog and
             // swaps the TLS toggle for an SSL mode, MySQL has no schema at all.
@@ -581,6 +644,13 @@ enum Snapshot {
                                       text: "312,480 rows written to hive.analytics.penerima_manfaat_2026")
         default:
             break
+        }
+        // The scenes above fill in content by hand, so the panel's own rule has to be applied after
+        // them rather than before: it is what the app does when a tab changes, and a render that
+        // skipped it would show a state the app cannot reach (a grid full of rows behind a closed
+        // panel, or a header open over nothing). `fresh-tab` sets its own state on purpose.
+        if scene != "fresh-tab" {
+            model.syncPanelToSelectedTab()
         }
         return model
     }

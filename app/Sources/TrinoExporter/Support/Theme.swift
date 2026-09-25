@@ -47,6 +47,19 @@ enum Tone {
     static let brandGlow = Color(hex: 0x4FD8FF)
     static let brandDeep = Color(hex: 0x7B61FF)
 
+    /// The icon tile's two ends, and the light along its top edge.
+    ///
+    /// The tile is dark and the mark on it is white, because the bright cyan-to-violet tile put
+    /// white at **1.67:1** against its lightest corner — under the 3:1 non-text minimum, with the
+    /// comb legible only thanks to the shadow under it. Dark ends take the same white to 10.1:1 and
+    /// 18.1:1. These are only for the icon: they are fixed values like `brandGlow`/`brandDeep`, not
+    /// something the accent can reach.
+    static let brandTileTop = Color(hex: 0x3B2AA8)
+    static let brandTileBase = Color(hex: 0x12103A)
+    /// The rim along the tile's top edge. On a dark Dock the near-black tile is 1.06:1 against its
+    /// background, and this is what gives it an edge (13.4:1).
+    static let brandRim = Color(hex: 0xA8F0FF)
+
     // MARK: The fixed vocabulary
 
     /// The app's cyan. A *categorical* colour, not the accent: it is the "column" suggestion, the
@@ -84,6 +97,37 @@ enum Tone {
 
     /// Secondary body text: the chrome's ink at 68%, which is what `Tone.secondary` has always been.
     static var secondary: Color { ink.opacity(0.68) }
+
+    /// The quiet readouts: the editor's line numbers and the line count in its corner.
+    ///
+    /// One colour for both, because they sit inches apart saying the same thing and drifted apart
+    /// the moment they were written separately: the gutter was drawn at 0.55 and the count at 0.374,
+    /// so the count looked washed out beside the number it was reporting.
+    ///
+    /// The gutter also borrowed AppKit's `secondaryLabelColor`. Measured, that resolves to white at
+    /// 0.55 on a dark appearance and black at 0.55 on a light one — the same value this writes out.
+    /// It is stated here anyway because the system's label grey is the system's to change, and a
+    /// themed app whose chrome is one palette should not have one readout resolved by somebody
+    /// else's.
+    static var readout: Color { ink.opacity(readoutOpacity) }
+
+    /// The same colour for AppKit.
+    static var readoutNS: NSColor { inkNS(readoutOpacity) }
+
+    /// `Tone.ink` at an opacity, for the AppKit drawing that cannot take a SwiftUI `Color`.
+    ///
+    /// Resolved per appearance rather than converted once: `NSColor(Color)` snapshots whichever
+    /// appearance happened to be current, so a ruler painted that way keeps its grey after the
+    /// appearance flips.
+    static func inkNS(_ opacity: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.isDark ? NSColor.white.withAlphaComponent(opacity)
+                              : NSColor.black.withAlphaComponent(opacity)
+        }
+    }
+
+    /// Written once and read by both, so the two readouts cannot drift apart again.
+    private static let readoutOpacity: CGFloat = 0.55
 }
 
 extension NSAppearance {
@@ -99,11 +143,14 @@ extension Color {
 }
 
 extension Font {
-    static let heroTitle = Font.system(size: 30, weight: .bold, design: .rounded)
-    static let cardTitle = Font.system(size: 14, weight: .semibold, design: .rounded)
-    static let body13 = Font.system(size: 13)
-    static let mono12 = Font.system(size: 12, design: .monospaced)
-    static let mono13 = Font.system(size: 13, design: .monospaced)
+    // Routed through the seam like every other text run, so a chosen family reaches the hero
+    // titles and the monospaced values too. `heroTitle`/`cardTitle` keep their rounded cut while
+    // the system font is in use and drop it once a family is chosen — see `Font.ui`.
+    static var heroTitle: Font { .ui(30, weight: .bold, rounded: true) }
+    static var cardTitle: Font { .ui(14, weight: .semibold, rounded: true) }
+    static var body13: Font { .ui(13) }
+    static var mono12: Font { .code(12) }
+    static var mono13: Font { .code(13) }
 }
 
 /// The colour pair of a module or result: the backdrop glows and every accent derive from it.
@@ -212,7 +259,7 @@ extension View {
     /// A toolbar-height recessed control (the folder chip, the output-name field).
     func toolbarField() -> some View {
         textFieldStyle(.plain)
-            .font(.system(size: 12))
+            .font(.ui(12))
             .padding(.horizontal, 9)
             .frame(height: 28)
             .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
@@ -246,7 +293,10 @@ enum Metrics {
     static let titleStrip: CGFloat = 40
     static let tabStrip: CGFloat = 36
     static let toolbar: CGFloat = 46
-    static let paneHeader: CGFloat = 32
+    // There was a `paneHeader: 32` here, for the row above the SQL editor. That row is gone — the
+    // editor draws its own clear button and line count over its text — and a spacing constant
+    // nothing measures from is worse than no constant, because the next pane would align to a
+    // height that no longer exists anywhere in the window.
     static let panelTabs: CGFloat = 30
     static let statusBar: CGFloat = 26
 
@@ -274,7 +324,7 @@ struct HubButton: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 if let symbol { Image(systemName: symbol).font(.system(size: 11, weight: .bold)) }
-                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(title).font(.ui(13, weight: .semibold))
             }
             .foregroundStyle(enabled ? .white : Tone.ink.opacity(0.42))
             .padding(.horizontal, 14)
@@ -383,7 +433,7 @@ struct PillButton: View {
                         .font(.system(size: compact ? 9 : 10, weight: .semibold))
                         .opacity(0.8)
                 }
-                Text(title).font(.system(size: compact ? 11.5 : 12.5, weight: .medium))
+                Text(title).font(.ui(compact ? 11.5 : 12.5, weight: .medium))
             }
             .foregroundStyle(tint.opacity(enabled ? 1 : 0.4))
             .padding(.horizontal, compact ? 10 : 13)
@@ -434,7 +484,7 @@ struct Segmented<T: Hashable>: View {
             ForEach(options, id: \.self) { option in
                 Button { selection = option } label: {
                     Text(label(option))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.ui(12, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
                         .background(Tone.ink.opacity(selection == option ? 0.18 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -461,7 +511,7 @@ struct LabeledField<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(label.uppercased())
-                .font(.system(size: 11, weight: .semibold))
+                .font(.ui(11, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(Tone.secondary)
             content
@@ -482,7 +532,7 @@ struct ChipToggle: View {
                 Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isOn ? Tone.accent : Tone.ink.opacity(0.35))
-                Text(label).font(.system(size: 12))
+                Text(label).font(.ui(12))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 9)
@@ -515,7 +565,7 @@ struct InlineCheckbox: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isOn ? Tone.accent : Tone.ink.opacity(hovering ? 0.55 : 0.35))
                 Text(label)
-                    .font(.system(size: 12))
+                    .font(.ui(12))
                     .foregroundStyle(isOn ? Tone.ink.opacity(0.95) : Tone.secondary)
             }
             .padding(.vertical, 5)
@@ -541,7 +591,7 @@ struct Chip: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .font(.code(11, weight: .semibold))
             .foregroundStyle(tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -603,7 +653,7 @@ struct SectionLabel: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .semibold))
+            .font(.ui(10.5, weight: .semibold))
             .tracking(0.9)
             .foregroundStyle(Tone.secondary)
     }
@@ -664,7 +714,15 @@ func hexagonPath(centre: CGPoint, radius: CGFloat) -> Path {
     return path
 }
 
-func hiveCells(in size: CGSize) -> [(path: Path, lit: Bool)] {
+/// The seven cells of the hive mark: one lit centre and the six around it.
+///
+/// `inset` is the cell's radius as a fraction of the lattice radius, and it exists because the two
+/// callers want different things from the same lattice. `HiveHero` draws the mark large and airy at
+/// 0.94; the app icon needs the cells **separated**, and at 0.94 the gap between neighbours is
+/// 0.104r — 0.57px at 64pt, which fuses the seven hexagons into one blob. Measured on the rendered
+/// icon: at 0.94 the 64pt artwork resolves to a single connected component instead of seven.
+/// Parameterised rather than changed in place so the in-app illustration is untouched.
+func hiveCells(in size: CGSize, inset: CGFloat = 0.94) -> [(path: Path, lit: Bool)] {
     let radius = min(size.width, size.height) / 5.5
     let stepX = 1.5 * radius
     let stepY = sqrt(3.0) / 2 * radius
@@ -678,7 +736,7 @@ func hiveCells(in size: CGSize) -> [(path: Path, lit: Bool)] {
     ]
     return offsets.enumerated().map { index, offset in
         (hexagonPath(centre: CGPoint(x: centre.x + offset.0, y: centre.y + offset.1),
-                     radius: radius * 0.94), index == 0)
+                     radius: radius * inset), index == 0)
     }
 }
 

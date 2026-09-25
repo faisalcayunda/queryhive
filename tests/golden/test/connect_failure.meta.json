@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "connect_failure",
+  "command": "test",
+  "event_lines": 1,
+  "exit_code": 1,
+  "notes": "A refused connection is one error event carrying the reason, and stderr keeps the traceback."
+}

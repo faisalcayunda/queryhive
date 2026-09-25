@@ -1,0 +1,4 @@
+{"event": "step", "step": "connect"}
+{"columns": [{"name": "Fragment", "type": "varchar"}, {"name": "Operation", "type": "varchar"}, {"name": "rows", "type": "bigint"}, {"name": "bytes", "type": "bigint"}], "event": "columns"}
+{"data": [["Fragment 0", "TableScan", "1000", "1500"]], "event": "rows"}
+{"elapsed_ms": "<TIME>", "event": "done", "query_id": "<QUERY_ID>", "rows": 1}

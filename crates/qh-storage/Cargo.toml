@@ -1,0 +1,22 @@
+[package]
+name = "qh-storage"
+version = "0.1.0"
+description = "The local SQLite database: connections, history, saved queries, and the migrations that make them"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-sync.workspace = true
+rusqlite.workspace = true
+# Settings from a stored options bag are read as JSON rather than modelled column by
+# column, so a new option does not need a migration. Parsed by hand from `Value` for the
+# same reason the importer does: a field that has two possible names is a `??` in the code
+# that wrote it, not an alias that fails when both are present.
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The migrator is a state machine; a fake clock is what keeps its tests honest.
+tempfile = "3"

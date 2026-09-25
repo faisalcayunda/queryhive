@@ -1,18 +1,31 @@
 #!/bin/bash
-# Builds "dist/QueryHive.app" with the bundled Python engine.
+# Builds "dist/QueryHive.app" around the Rust engine.
 # Needs only the Xcode Command Line Tools.
+#
+# The bundle is self-contained. `app/build-ffi.sh` stages the engine's static archive
+# (target/ffi/static/release/libqh_ffi.a) and this script's `swift build` links that
+# archive rather than the `cdylib`, so the Rust code is copied into the app binary and
+# the app loads no Rust library at runtime: `otool -L dist/QueryHive.app/Contents/MacOS/
+# QueryHive` lists Apple frameworks and nothing from `target/`. That is what makes the
+# DMG portable. The bundle is one Mach-O, and the signing loop below stays a loop so a
+# second one would not go unsigned.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${VERSION:-$(sed -n 's/^__version__ = "\(.*\)"/\1/p' ../exporter/__init__.py)}"
-VERSION="${VERSION:-0.0.1}"
+# One source of truth for the version: the crate the app is built against.
+# `engineVersion()` in the FFI returns this same string at runtime
+# (`env!("CARGO_PKG_VERSION")`), so a mismatch would be visible in the UI.
+VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo.toml)}"
+VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 
-if [ ! -f ./build-engine.sh ]; then
-    echo "app/build-engine.sh is missing"
+if [ ! -f ./build-ffi.sh ]; then
+    echo "app/build-ffi.sh is missing"
     exit 1
 fi
-./build-engine.sh
+# Builds the release dylib the app links and regenerates app/Generated/ from it.
+# It has to run first: `swift build` has no pre-build hook of its own.
+./build-ffi.sh
 
 # --disable-sandbox: SwiftPM wraps its own manifest compile in sandbox-exec, which fails when
 # this script is itself run from inside another sandbox ("sandbox_apply: Operation not
@@ -20,28 +33,8 @@ fi
 swift build -c release --disable-sandbox
 app="dist/QueryHive.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/engine"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$(swift build -c release --disable-sandbox --show-bin-path)/QueryHive" "$app/Contents/MacOS/"
-
-# Bundled engine: the standalone interpreter and pinned packages, built by build-engine.sh.
-cp -R .engine/python "$app/Contents/Resources/engine/python"
-cp -R .engine/site-packages "$app/Contents/Resources/engine/site-packages"
-# Console-script shims (their shebangs point at this build machine's absolute path, and the
-# app never runs them) and the empty pip lock file: neither belongs in a shipped bundle.
-rm -rf "$app/Contents/Resources/engine/site-packages/bin"
-rm -f "$app/Contents/Resources/engine/site-packages/.lock"
-cp engine/queryhive_engine.py "$app/Contents/Resources/engine/queryhive_engine.py"
-
-# The engine imports `exporter` from beside itself, so the package ships inside the bundle.
-cp -R ../exporter "$app/Contents/Resources/engine/exporter"
-# The engine only ever imports exporter.export / .source / .writers. web.py needs FastAPI,
-# pydantic and keyring, cli.py needs keyring, and static/ is the 83 KB browser UI: none of
-# them are in the pinned engine, and shipping an unimportable module is worse than not
-# shipping it.
-rm -rf "$app/Contents/Resources/engine/exporter/static"
-rm -f "$app/Contents/Resources/engine/exporter/web.py"
-rm -f "$app/Contents/Resources/engine/exporter/cli.py"
-find "$app/Contents/Resources/engine/exporter" -type d -name "__pycache__" -exec rm -rf {} +
 
 cat > "$app/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -69,9 +62,11 @@ if [ -f ../assets/icon.icns ]; then
     cp ../assets/icon.icns "$app/Contents/Resources/AppIcon.icns"
 fi
 
-# Ad-hoc sign every Mach-O inside the bundle (the bundled Python interpreter and any
-# compiled extensions in site-packages), then the app itself. Static objects/archives are
-# never executed and codesign refuses to sign them anyway, so skip them outright.
+# The bundle holds one Mach-O, the app binary, and the engine is inside it: `swift build`
+# copied the static archive's code into that binary, so there is no second file to sign.
+# The loop stays a loop because a second Mach-O would otherwise go unsigned. Static
+# objects and archives are never executed and codesign refuses to sign them anyway, so
+# the find skips them; a `.a` never reaches this bundle in the first place.
 find "$app" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in
         *.o|*.a) continue ;;

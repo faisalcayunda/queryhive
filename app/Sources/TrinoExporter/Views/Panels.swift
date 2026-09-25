@@ -8,6 +8,13 @@ struct BottomPanel: View {
     @Bindable var tab: QueryTab
     /// The most this panel may take, so a window dragged small cannot squeeze the editor away.
     var ceiling: CGFloat?
+    /// Take every point the workspace has left, rather than a fixed share of it.
+    ///
+    /// Set when the rows are meant to *be* the window (`panelExpanded`, which `openTable` turns on).
+    /// Without it the panel was capped at `panelHeight` and the enclosing `VStack` centred that
+    /// shorter block in the workspace, which left a band of nothing above the tab strip. Measured:
+    /// a 516 pt stack in a 1560 pt workspace put the tab strip at y=295.
+    var fills = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,9 +36,17 @@ struct BottomPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(height: model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity))
+        .frame(height: stackedHeight)
+        .frame(maxHeight: fills ? .infinity : nil)
         .background(Tone.recess.opacity(0.20))
         .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+    }
+
+    /// `nil` when the panel is taking the whole workspace: a fixed height would win over the
+    /// flexible frame beside it, because the fixed one is applied first.
+    private var stackedHeight: CGFloat? {
+        if fills { return nil }
+        return model.panelCollapsed ? Metrics.panelTabs : min(model.panelHeight, ceiling ?? .infinity)
     }
 
     private var header: some View {
@@ -92,10 +107,10 @@ struct PanelTabButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Text(panel.label(for: destination))
-                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .font(.ui(11, weight: selected ? .semibold : .regular))
                 if let count {
                     Text("\(count)")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.ui(10, weight: .semibold))
                         .foregroundStyle(selected ? Tone.accent : Tone.secondary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -146,7 +161,7 @@ struct LogPanel: View {
 
     private func empty(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(.ui(11))
             .foregroundStyle(Tone.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -158,7 +173,7 @@ struct LogRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Text(line.at, format: .dateTime.hour().minute().second())
-                .font(.system(size: 10.5, design: .monospaced))
+                .font(.code(10.5))
                 .foregroundStyle(Tone.ink.opacity(0.35))
                 .frame(width: 56, alignment: .leading)
             Image(systemName: line.kind.symbol)
@@ -167,7 +182,7 @@ struct LogRow: View {
                 .frame(width: 12)
                 .padding(.top, 2)
             Text(line.text)
-                .font(.system(size: 11.5, design: .monospaced))
+                .font(.code(11.5))
                 .foregroundStyle(line.kind == .info ? Tone.ink.opacity(0.82) : line.kind.tint)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -215,7 +230,7 @@ struct TablePanel: View {
                 Text(tab.isDestructive && tab.stage != .done
                      ? "Replace drops the existing table before the query runs."
                      : "Trino writes the rows itself; none of them travel through this app.")
-                    .font(.system(size: 10.5))
+                    .font(.ui(10.5))
                     .foregroundStyle(tab.isDestructive && tab.stage != .done ? Tone.coral : Tone.secondary)
                     .lineLimit(1)
                 Spacer()
@@ -234,7 +249,7 @@ struct TablePanel: View {
     private func infoRow(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(label)
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.ui(10.5, weight: .semibold))
                 .tracking(0.6)
                 .foregroundStyle(Tone.secondary)
                 .frame(width: 96, alignment: .leading)
@@ -259,11 +274,11 @@ struct FilesPanel: View {
         if tab.files.isEmpty {
             VStack(spacing: 6) {
                 Text(tab.stage == .running ? "Writing…" : "No files yet.")
-                    .font(.system(size: 11))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                 if let directory = tab.outputDirectory {
                     Text(directory.path)
-                        .font(.system(size: 10.5, design: .monospaced))
+                        .font(.code(10.5))
                         .foregroundStyle(Tone.ink.opacity(0.35))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -281,13 +296,13 @@ struct FilesPanel: View {
                                     .foregroundStyle(Tone.mint)
                                     .frame(width: 14)
                                 Text(file.name)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .font(.code(12))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                     .help(file.path)
                                 Spacer(minLength: 8)
                                 Text(byteText(file.bytes))
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.code(11))
                                     .foregroundStyle(Tone.secondary)
                                 Button {
                                     NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -308,7 +323,7 @@ struct FilesPanel: View {
                 }
                 HStack(spacing: 8) {
                     Text("\(pluralized(tab.files.count, "file")) · \(byteText(tab.totalBytes))")
-                        .font(.system(size: 10.5))
+                        .font(.ui(10.5))
                         .foregroundStyle(Tone.secondary)
                     Spacer()
                     PillButton(title: "Reveal in Finder", symbol: "magnifyingglass", compact: true) { tab.revealFiles() }

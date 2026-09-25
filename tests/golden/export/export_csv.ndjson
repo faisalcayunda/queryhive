@@ -1,0 +1,5 @@
+{"event": "step", "step": "connect"}
+{"event": "step", "step": "write"}
+{"columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "varchar"}], "event": "start", "query_id": "<QUERY_ID>"}
+{"event": "progress", "rows": 3}
+{"cancelled": false, "event": "done", "files": [{"bytes": 36, "path": "<TMP>/people.csv"}], "query_id": "<QUERY_ID>", "rows": 3, "warnings": []}

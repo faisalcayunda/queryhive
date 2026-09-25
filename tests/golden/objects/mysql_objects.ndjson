@@ -1,0 +1,1 @@
+{"data": [["people", "InnoDB", "42", "the people table"]], "event": "objects", "object_columns": ["Name", "Engine", "Rows", "Comment"]}

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "blank_sql",
+  "command": "preview",
+  "event_lines": 1,
+  "exit_code": 1,
+  "notes": "A missing statement is refused before the network is touched."
+}
