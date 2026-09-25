@@ -44,3 +44,8 @@ backup.zip
 # does is documented in PROGRESS.md, so it can be recreated rather than
 # discovered missing.
 tools/kenari_search.py
+
+# Archives of the agent sessions that produced this code, kept in docs/ because they are the
+# project's history — and kept OUT of git because 77 MB of transcript can never be taken back out
+# of history once it is in. See docs/session-archive/2026-09-25/README.md for what is in one.
+docs/session-archive/
