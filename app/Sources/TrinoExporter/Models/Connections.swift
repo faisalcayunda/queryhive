@@ -214,6 +214,14 @@ struct Connection: Identifiable, Codable, Equatable {
     /// in the object tree too, instead of hiding them. Meaningful only where a schema level exists
     /// and the engine filters it.
     var showAllSchemas: Bool
+    /// Postgres only: draw a database level under the connection and list every database this user
+    /// may connect to on the server (`pg_database`, templates and `datallowconn = false` aside),
+    /// instead of starting at the schemas of the one database the connection names.
+    ///
+    /// Off is the old tree and the common case. On is for a server where "which database is this
+    /// table in" is the question, and expanding one lists *its* schemas — a fresh connection per
+    /// listing, because Postgres cannot read another database's catalogs from this one.
+    var showAllDatabases: Bool
     /// The group this connection is filed under in the sidebar, or nil for the top level.
     ///
     /// A group **id**, not its name: renaming a group must not orphan the connections in it, and a
@@ -225,7 +233,7 @@ struct Connection: Identifiable, Codable, Equatable {
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
          user: String, database: String, schema: String, verify: Bool,
-         showAllSchemas: Bool = false, group: UUID? = nil) {
+         showAllSchemas: Bool = false, showAllDatabases: Bool = false, group: UUID? = nil) {
         self.id = id
         self.name = name
         self.color = color
@@ -239,12 +247,13 @@ struct Connection: Identifiable, Codable, Equatable {
         self.schema = schema
         self.verify = verify
         self.showAllSchemas = showAllSchemas
+        self.showAllDatabases = showAllDatabases
         self.group = group
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
-        case showAllSchemas, group
+        case showAllSchemas, showAllDatabases, group
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -275,6 +284,7 @@ struct Connection: Identifiable, Codable, Equatable {
         verify = try container.decodeIfPresent(Bool.self, forKey: .verify) ?? true
         // Absent on a connections.json written before "Show all schemas" existed: stay hidden.
         showAllSchemas = try container.decodeIfPresent(Bool.self, forKey: .showAllSchemas) ?? false
+        showAllDatabases = try container.decodeIfPresent(Bool.self, forKey: .showAllDatabases) ?? false
         // Absent on a file written before groups existed: everything sits at the top level.
         group = try container.decodeIfPresent(UUID.self, forKey: .group)
     }

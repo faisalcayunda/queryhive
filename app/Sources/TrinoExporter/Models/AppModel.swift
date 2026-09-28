@@ -196,6 +196,9 @@ final class AppModel {
         guard let tab = selectedTab else { return }
         tab.title = node.title
         tab.sql = "SELECT * FROM \(name)"
+        // The one place the app knows which table the grid is showing, because this is the one place
+        // it wrote the SQL itself. A queued cell edit can be written back only from here.
+        tab.sourceTable = name
         preview(tab)
         // Rows take the window. Opening a table is asking to *see* it, and the editor is still
         // there one click away; the previous behaviour showed the rows in a panel under a query the
@@ -245,13 +248,30 @@ final class AppModel {
         clearObjectSelection(tab)
 
         guard let scope = tab.objectScope,
-              let connection = connections.first(where: { $0.id == scope.connectionID }) else { return }
-        guard var env = try? connectionEnvironment(connection) else { return }
-        env["RETRIES"] = "2"
-        // Blank means "whatever the connection already sets", which is right for both: a Trino
-        // schema always names its catalog, and Postgres has no catalog level to name at all.
-        if !scope.catalog.isEmpty { env["DB_DATABASE"] = scope.catalog }
-        if !scope.schema.isEmpty { env["DB_SCHEMA"] = scope.schema }
+              let connection = connections.first(where: { $0.id == scope.connectionID }) else {
+            // A reason, not a quiet return, for the reason `selectObject` gives: an empty pane
+            // claims this schema has no objects, and that is a claim about the server when the
+            // truth is that nothing was ever asked. `objectLoading` is cleared with it, so a
+            // request that failed before it started cannot leave the reload it replaced, or the
+            // pane it belongs to, spinning under a spinner that has nothing left to wait for.
+            tab.objectLoading = false
+            tab.objectError = "The connection for this schema is gone."
+            return
+        }
+        let env: [String: String]
+        do {
+            var built = try connectionEnvironment(connection)
+            built["RETRIES"] = "2"
+            // Blank means "whatever the connection already sets", which is right for both: a Trino
+            // schema always names its catalog, and Postgres has no catalog level to name at all.
+            if !scope.catalog.isEmpty { built["DB_DATABASE"] = scope.catalog }
+            if !scope.schema.isEmpty { built["DB_SCHEMA"] = scope.schema }
+            env = built
+        } catch {
+            tab.objectLoading = false
+            tab.objectError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
 
         let token = UUID()
         tab.objectToken = token
@@ -878,9 +898,28 @@ final class AppModel {
     /// immediately rather than after the next expansion. Only Postgres has anything to reveal, but
     /// the toggle is stored per-connection so it survives a relaunch like every other field.
     func toggleShowAllSchemas(_ id: UUID) {
+        toggleBrowseFlag(id) { $0.showAllSchemas.toggle() }
+    }
+
+    /// Flips "show all databases" for a Postgres connection and re-lists its children.
+    ///
+    /// Same storage story as the schemas flag and the same reason: it is a property of the
+    /// connection, so it belongs in `connections.json` beside the rest of them and has to survive
+    /// the relaunch that follows. What it changes is the *shape* of the tree under the connection —
+    /// a database level, or none — which is why the rebuild is the point rather than a side effect.
+    func toggleShowAllDatabases(_ id: UUID) {
+        toggleBrowseFlag(id) { $0.showAllDatabases.toggle() }
+    }
+
+    /// Saves one per-connection browse flag and rebuilds the tree around it.
+    ///
+    /// Both toggles are this: a flag that only ever changes what a *fetch* asks for, so nothing is
+    /// re-run here — `rebuildTree` drops the cached children and the connection re-lists with the
+    /// new flag the next time it is expanded, instead of showing children fetched under the old one.
+    private func toggleBrowseFlag(_ id: UUID, _ flip: (inout Connection) -> Void) {
         guard let index = connections.firstIndex(where: { $0.id == id }) else { return }
         var next = connections
-        next[index].showAllSchemas.toggle()
+        flip(&next[index])
         do {
             try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
         } catch {
@@ -888,8 +927,6 @@ final class AppModel {
             return
         }
         connections = next
-        // Rebuild drops the cached children, so the connection re-lists — with the flag — the next
-        // time it is expanded instead of showing the schemas it fetched under the old setting.
         rebuildTree()
     }
 
@@ -1047,9 +1084,24 @@ final class AppModel {
             if let database = node.database { env["DB_DATABASE"] = database }
             env["DB_SCHEMA"] = node.schema ?? ""
         case (.postgres, .connection):
-            command = "schemas"
+            // Postgres draws its schemas here by default, because the database is chosen on the
+            // connection and the tree below it is that one database. "Show all databases" puts the
+            // level back, so the answer to "which database holds this table" is on screen: the
+            // engine's `catalogs` lists what `pg_database` says this user may connect to, and each
+            // database node then lists its own schemas over a connection to *that* database.
+            command = connection.showAllDatabases ? "catalogs" : "schemas"
             // "Show all schemas" reveals pg_catalog, information_schema and any pg_* schema the
-            // engine otherwise hides. Only Postgres filters, so the flag is set here alone.
+            // engine otherwise hides. Only Postgres filters, so the flag is set here alone — and it
+            // is also the flag the *database* list reads, where it means the same shape of thing:
+            // the templates and the databases that refuse connections, which `pg_database` holds
+            // and the tree leaves out. One switch, two levels, one word for both.
+            env["DB_ALL_SCHEMAS"] = connection.showAllSchemas ? "1" : "0"
+        case (.postgres, .database):
+            // The schemas of the database the node names, not of the one the connection names.
+            // `DB_DATABASE` is the whole of that: it is the database the driver opens, so every
+            // listing under this node is answered by a connection to this database.
+            command = "schemas"
+            env["DB_DATABASE"] = node.database ?? ""
             env["DB_ALL_SCHEMAS"] = connection.showAllSchemas ? "1" : "0"
         case (.mysql, .connection):
             // MySQL's information_schema calls a database a CATALOG_NAME, so `catalogs` is its
@@ -1067,9 +1119,11 @@ final class AppModel {
         node.loading = true
         node.error = nil
         var message: String?
-        // `catalogs` means a catalog for Trino and a database for MySQL; the command is shared
-        // because it is the same question ("what is directly under the connection?").
-        let catalogNode = connection.kind == .mysql ? TreeNode.database : TreeNode.catalog
+        // `catalogs` means a catalog for Trino and a database for the other two; the command is
+        // shared because it is the same question ("what is directly under the connection?"). A
+        // Postgres connection only reaches it through "show all databases", and what it lists is
+        // databases, so it belongs on the database side of this the same way MySQL does.
+        let catalogNode = connection.kind == .trino ? TreeNode.catalog : TreeNode.database
         Engine.current.run(command, env: env, onEvent: { event in
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
@@ -1397,6 +1451,16 @@ final class AppModel {
         preview(tab)
     }
 
+    /// How often a preview in flight hands its rows to the grid.
+    ///
+    /// Handing them over is what gives the buffer a second owner: from that moment the running
+    /// preview and the grid share it, and copy-on-write makes the *next* batch copy every row
+    /// fetched so far. A million-row preview paid that copy once per batch, and the grid paid a
+    /// rebuild of the same size on the same schedule. Five paints a second bounds both, and the
+    /// grid still fills in while the query runs. `done` paints the finished set either way, so the
+    /// last batch is never the one that got away.
+    static let previewPaintInterval: TimeInterval = 0.2
+
     /// `source` decides what is sent: the selection, the statement under the caret, or everything.
     func preview(_ tab: QueryTab, from source: QuerySource = .selection) {
         guard !tab.previewing, tab.stage != .running else { return }
@@ -1414,7 +1478,9 @@ final class AppModel {
         tab.preview = nil
         tab.showingPlan = false
         tab.previewedSQL = sql
-        // The filters and the last total described rows that are about to be replaced.
+        // The filters described rows that are about to be replaced, and clearing them is also what
+        // drops the cell selection — see `columnFilters`' own note. The last total described them
+        // too.
         tab.columnFilters = [:]
         tab.totalRows = nil
         tab.countError = nil
@@ -1428,6 +1494,9 @@ final class AppModel {
         var rows: [[String?]] = []
         var truncated = false
         var finished = false
+        // When the grid last got the rows, so `previewPaintInterval` is measured from a paint
+        // rather than from the start of the run.
+        var paintedAt = Date.distantPast
         tab.previewProcess = Engine.current.run("preview", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
@@ -1440,9 +1509,16 @@ final class AppModel {
                                             queryID: nil, elapsedMS: 0)
             case "rows":
                 rows.append(contentsOf: event.data ?? [])
-                // A partial grid while the rest arrives: the point of batching.
-                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
-                                            queryID: tab.preview?.queryID, elapsedMS: 0)
+                // A partial grid while the rest arrives: the point of batching, on a clock rather
+                // than once per batch. Every paint costs a copy of the whole buffer here and a
+                // rebuild of the whole grid there, so a million rows painted per batch is the one
+                // thing this loop cannot afford. See `previewPaintInterval`.
+                let now = Date()
+                if now.timeIntervalSince(paintedAt) >= Self.previewPaintInterval {
+                    paintedAt = now
+                    tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+                                                queryID: tab.preview?.queryID, elapsedMS: 0)
+                }
             case "done":
                 truncated = event.truncated ?? false
                 finished = true
@@ -1561,8 +1637,7 @@ final class AppModel {
         tab.countToken = run
         tab.countProcess = Engine.current.run("count", env: env, onEvent: { event in
             guard tab.countToken == run else { return }
-            if event.event == "error" { tab.countError = event.message }
-            if let count = event.count { tab.totalRows = count }
+            self.applyCountEvent(event, to: tab)
         }, onExit: { status, log in
             guard tab.countToken == run else { return }
             tab.countProcess = nil
@@ -1573,6 +1648,21 @@ final class AppModel {
                     ?? "The count failed."
             }
         })
+    }
+
+    /// What one event from a `count` run means for the tab.
+    ///
+    /// A method of its own so the mapping can be tested without an engine: `Engine.current` is a
+    /// `static let`, so the run itself cannot be scripted. It is worth the seam, because this is
+    /// exactly where the footer's total went missing — the number arrives in `rows` on the `count`
+    /// event, and the reading here asked for `count`, a key neither engine writes, so `totalRows`
+    /// stayed nil and the footer kept offering the button as if nothing had been asked.
+    ///
+    /// Gated on the event name rather than on the field alone: `rows` is also the integer on
+    /// `progress` and `done`, so an ungated read would take a preview's row count for the total.
+    func applyCountEvent(_ event: Event, to tab: QueryTab) {
+        if event.event == "error" { tab.countError = event.message }
+        if event.event == "count", let rows = event.rows { tab.totalRows = rows }
     }
 
     /// The environment for a preview: the connection plus the statement and the row cap. Deliberately

@@ -172,12 +172,17 @@ struct TreeRow: View {
     /// one line to the layout instead of a row per schema it has never fetched.
     @ViewBuilder private var children: some View {
         if node.loading {
-            messageRow(symbol: nil, text: "Loading…", tint: Tone.secondary)
+            messageRow(text: "Loading…", tint: Tone.secondary, spinning: true)
         } else if let error = node.error {
             messageRow(symbol: "exclamationmark.triangle.fill", text: error, tint: Tone.coral)
         } else if showChildren, let children = node.children {
             if children.isEmpty {
-                messageRow(symbol: nil, text: "Empty", tint: Tone.ink.opacity(0.3))
+                // A glyph, not a spinner. The spinner is what "Loading…" wears, and this row used
+                // to wear it too — a schema with no tables under it announced itself with a
+                // progress indicator that never stopped, which reads as a load that has hung
+                // rather than as an answer. The tray is the same mark the empty result grid and
+                // the empty object pane use for "there is nothing here", so the three agree.
+                messageRow(symbol: "tray", text: "Empty", tint: Tone.ink.opacity(0.3))
             } else {
                 // Lazy, so a wide catalog builds only the rows on screen. The recursion is a
                 // method call on the child, not a nested `TreeRow`, which is what keeps the type
@@ -245,12 +250,19 @@ struct TreeRow: View {
         .help(helpText)
     }
 
-    private func messageRow(symbol: String?, text: String, tint: Color) -> some View {
+    /// A line under a row: the wait, the reason it failed, or the answer that there is nothing.
+    ///
+    /// `spinning` is asked for rather than inferred from a missing `symbol`. It used to be inferred,
+    /// and the inference was wrong the moment an empty row wanted no glyph: every such row drew a
+    /// progress indicator, so "Empty" arrived spinning and a schema with no tables looked like a
+    /// load that had hung.
+    private func messageRow(symbol: String? = nil, text: String, tint: Color,
+                            spinning: Bool = false) -> some View {
         HStack(spacing: 5) {
-            if let symbol {
-                Image(systemName: symbol).font(.system(size: 9)).foregroundStyle(tint)
-            } else {
+            if spinning {
                 ProgressView().controlSize(.mini)
+            } else if let symbol {
+                Image(systemName: symbol).font(.system(size: 9)).foregroundStyle(tint)
             }
             Text(text).font(.ui(10.5)).foregroundStyle(tint).lineLimit(2)
             Spacer(minLength: 2)
@@ -283,6 +295,20 @@ struct TreeRow: View {
                             Label("Show System Schemas", systemImage: "checkmark")
                         } else {
                             Text("Show System Schemas")
+                        }
+                    }
+                    // Just as Postgres-only as the switch above, and for a neighbour reason: the
+                    // other two drivers already draw their databases — MySQL's tree *is* its
+                    // databases and Trino's is its catalogs — so there the box would add a level
+                    // that is already there. Here it adds the one Postgres hides, which is why the
+                    // database level exists only when this is on.
+                    Button {
+                        model.toggleShowAllDatabases(id)
+                    } label: {
+                        if connection.showAllDatabases {
+                            Label("Show All Databases", systemImage: "checkmark")
+                        } else {
+                            Text("Show All Databases")
                         }
                     }
                 }
@@ -418,7 +444,16 @@ struct TreeRow: View {
     private func doubleClick() {
         switch node.kind {
         case .table: model.openTable(node)
-        case .schema, .database: model.openObjects(node)
+        case .schema: model.openObjects(node)
+        // A MySQL database *is* the level whose objects can be listed, so double-clicking one opens
+        // them. A Postgres database is not: its objects live under a schema, and asking the engine
+        // for them from here would ask a question Postgres refuses (`DB_SCHEMA ... is required`)
+        // rather than doing what the click looks like it should — showing what is inside. So it
+        // opens like a Trino catalog does, and the schemas are the next level down.
+        case .database where node.connectionKind == .postgres:
+            model.selectedNodeID = node.id
+            model.toggleExpansion(node)
+        case .database: model.openObjects(node)
         default:
             model.selectedNodeID = node.id
             model.toggleExpansion(node)
@@ -446,7 +481,11 @@ struct TreeRow: View {
         case .catalog:
             "Catalog \(node.title) — expand to list schemas"
         case .database:
-            "Database \(node.title) — expand to list tables"
+            // Which is under it depends on the driver: MySQL's database holds tables, and a
+            // Postgres one — only ever drawn by "show all databases" — holds schemas.
+            node.connectionKind == .postgres
+                ? "Database \(node.title) — expand to list its schemas"
+                : "Database \(node.title) — expand to list tables"
         case .schema:
             "Schema \(node.title) — expand to list tables"
         case .table:

@@ -73,6 +73,22 @@ final class ConnectionGroupTests: XCTestCase {
         XCTAssertEqual(decoded.connections.count, 1)
         XCTAssertNil(decoded.connections[0].group)
         XCTAssertFalse(decoded.connections[0].showAllSchemas)
+        XCTAssertFalse(decoded.connections[0].showAllDatabases)
+    }
+
+    func testShowAllDatabasesSurvivesTheRoundTrip() throws {
+        // The flag is what decides whether a Postgres connection draws a database level, so a file
+        // that dropped it would put the tree back to schema-first on the next launch — silently, and
+        // only for the user who had turned it on.
+        let connection = Connection(id: UUID(), name: "warehouse", color: .violet, kind: .postgres,
+                                    host: "pg.internal", port: 5432, sslmode: "prefer",
+                                    user: "analyst", database: "warehouse", schema: "public",
+                                    verify: true, showAllDatabases: true)
+        let written = try JSONEncoder().encode(ConnectionsDocument(connections: [connection]))
+        let read = try JSONDecoder().decode(ConnectionsDocument.self, from: written)
+
+        XCTAssertTrue(read.connections[0].showAllDatabases)
+        XCTAssertFalse(read.connections[0].showAllSchemas, "the two flags are separate settings")
     }
 
     func testAnEnvelopeWithNoGroupsKeyStillLoads() throws {

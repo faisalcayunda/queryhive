@@ -366,12 +366,86 @@ enum Snapshot {
             ]
             model.tabs.append(objectsTab)
             model.selectedTabID = objectsTab.id
+        case "objects-trino":
+            // The Trino listing, and the reason it needs a scene of its own: two columns whose first
+            // holds a long name. The four-column Postgres fixture hides the thing this one exists to
+            // show — that the name column has to take the room the pane actually has, or every name
+            // truncates beside an empty half-window.
+            let objectsTab = QueryTab(title: "snapshot")
+            objectsTab.connectionID = primary.id
+            objectsTab.objectScope = ObjectScope(connectionID: primary.id,
+                                                 catalog: "prod_datalake_pii_rw",
+                                                 schema: "pem.pem_kelompok_pm.snapshot")
+            objectsTab.objectColumns = ["Name", "Type"]
+            objectsTab.objectRows = [
+                ["daftar_sppg_per_kelompok_pm_a_2_20260915", "BASE TABLE"],
+                ["dashboard_monitoring_pppg_20260911", "BASE TABLE"],
+                ["sps2_belum_optimal_pppg_20260915", "BASE TABLE"],
+                ["sudah_dicabut_dari_lhs_20260915", "BASE TABLE"],
+                ["t_spgg_suspect_20260915_1621", "BASE TABLE"],
+                ["t_spgg_suspect_20260917_17_15", "BASE TABLE"],
+                ["t_spgg_suspect_20260921_1434", "BASE TABLE"],
+                ["t_spgg_suspect_20260923_1431", "BASE TABLE"],
+                ["t_spgg_suspect_20260925_1000", "BASE TABLE"],
+            ]
+            model.tabs.append(objectsTab)
+            model.selectedTabID = objectsTab.id
+        case "objects-empty", "objects-loading":
+            // A schema the coordinator answered with nothing in it. The pane has had an empty
+            // state for a while; what it had no scene for is this one, so nothing looked at it.
+            let emptyTab = QueryTab(title: "bronze")
+            emptyTab.connectionID = primary.id
+            emptyTab.objectScope = ObjectScope(connectionID: primary.id,
+                                               catalog: "hive", schema: "bronze")
+            emptyTab.objectColumns = ["Name", "Type"]
+            emptyTab.objectRows = []
+            emptyTab.objectLoading = scene == "objects-loading"
+            model.tabs.append(emptyTab)
+            model.selectedTabID = emptyTab.id
+        case "tree-empty-schema":
+            // A schema with no tables under it, open. The row below it is the empty state, and the
+            // mark it draws is what decides whether that reads as empty or as still loading.
+            if let catalog = root.children?.first(where: { $0.title == "hive" }),
+               let schema = catalog.children?.first(where: { $0.title == "bronze" }) {
+                schema.children = []
+                schema.loading = false
+                schema.expanded = true
+                catalog.expanded = true
+            }
+        case "tree-databases":
+            // A Postgres connection with "show all databases" on. What the flag changes is the shape
+            // of what hangs under the connection: the schemas that were one level down now sit under
+            // a database, with a sibling for every other database this user may open. So the scene is
+            // the tree — the menu entry and the editor's checkbox that flip it are drawn by their own
+            // scenes, and neither of those shows what the setting is *for*.
+            if let index = model.connections.firstIndex(where: { $0.kind == .postgres }) {
+                model.connections[index].showAllDatabases = true
+            }
+            model.rebuildTree()
+            if let warehouse = model.tree.first(where: { $0.connectionKind == .postgres }) {
+                warehouse.expanded = true
+                warehouse.children = ["postgres", "reporting", "warehouse"].map {
+                    TreeNode.database($0, parent: warehouse)
+                }
+                if let database = warehouse.children?.first(where: { $0.title == "warehouse" }) {
+                    database.expanded = true
+                    database.children = ["public", "staging"].map {
+                        TreeNode.schema($0, parent: database)
+                    }
+                    if let staging = database.children?.first(where: { $0.title == "staging" }) {
+                        staging.expanded = true
+                        staging.children = ["kpm_staging", "wilayah_staging"].map {
+                            TreeNode.table($0, parent: staging)
+                        }
+                    }
+                }
+            }
         case "connection-tested":
             // The footer's success state, which is otherwise unreachable without a server.
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
-        case "grid":
+        case "grid", "grid-selection", "grid-edits":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -409,6 +483,67 @@ enum Snapshot {
             // The statement that produced what is on screen, so "Count all" has something.
             tab.previewedSQL = tab.sql
             tab.stage = .done
+            tab.panel = .result
+            // The drag-selected block, drawn only for the scene that exists to show it: the tint
+            // over the cells and the footer's own readout are the half of drag-to-select that no
+            // unit test can see.
+            if scene == "grid-selection" {
+                tab.cellSelection = CellRange(from: (row: 1, column: 0), to: (row: 4, column: 1))
+            }
+            // The staged cell edits: the amber wash and its dot, and the commit pair in the footer.
+            // Drawn from the same values the model would hold after a real edit, so the scene shows
+            // the queue's own shape rather than a mock of it.
+            if scene == "grid-edits" {
+                tab.sourceTable = "\"hive\".\"analytics\".\"penerima_manfaat\""
+                tab.cellEdits.edit("KPM Cibadak Baru", at: CellKey(row: 1, column: 1),
+                                   original: "KPM Cibadak")
+                tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
+                tab.cellSelection = CellRange(from: (row: 1, column: 0), to: (row: 2, column: 1))
+            }
+        case "grid-empty", "grid-loading", "grid-filtered-out":
+            // A run whose columns are on screen and whose rows are not. Three states look exactly
+            // alike in a blank grid — waiting for the first batch, a statement that matched nothing,
+            // and a filter that hid everything it did match — and each scene is one of them. The
+            // header is the same in all three; what stands under it is the whole point.
+            tab.destination = .file
+            tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat WHERE tahun = 2026"
+            tab.rowLimit = 1000
+            // The shape from the user's own Hive schema, because that is the result that produced
+            // this scene: a table whose rows were empty and whose header was all there was to see.
+            tab.columns = [
+                Event.Column(name: "code", type: "varchar(64)"),
+                Event.Column(name: "fullname", type: "varchar(255)"),
+                Event.Column(name: "code_beneficiary", type: "varchar(255)"),
+                Event.Column(name: "date_of_birth", type: "date"),
+                Event.Column(name: "gender", type: "varchar(16)"),
+                Event.Column(name: "is_active", type: "boolean"),
+                Event.Column(name: "institution_code", type: "varchar(64)"),
+                Event.Column(name: "subcategory_code", type: "varchar(64)"),
+            ]
+            if scene == "grid-filtered-out" {
+                // Rows that a filter then hides. The filter is opened on `gender` and given a value
+                // none of them carries, which is the state that needs the explanation and the way
+                // out; the other two scenes have nothing to hide and no filter to clear.
+                tab.preview = PreviewResult(
+                    columns: tab.columns, rows: [
+                        ["KPM-0001", "KPM Sukamaju", "3201012001", "1987-04-11", "P", "true", "INS-01", "SUB-07"],
+                        ["KPM-0002", "KPM Cibadak", "3201012002", "1991-09-02", "L", "false", "INS-01", "SUB-03"],
+                        ["KPM-0003", "KPM Mekarsari", "3201012003", "1979-12-30", "P", "true", "INS-02", "SUB-07"],
+                    ],
+                    truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 383)
+                tab.columnFilters[4] = .values(["X"])
+            } else {
+                // Columns and no rows at all. The loading scene keeps `previewing` on, which is the
+                // moment the engine has sent the header and not the first batch — the state the
+                // footer used to call "0 rows" while it was still counting.
+                let loading = scene == "grid-loading"
+                tab.preview = PreviewResult(
+                    columns: tab.columns, rows: [], truncated: false, queryID: nil,
+                    elapsedMS: loading ? 0 : 383)
+                tab.previewing = loading
+                tab.stage = loading ? .running : .done
+            }
+            tab.previewedSQL = tab.sql
             tab.panel = .result
         case "explain":
             // The plan lands in the grid, where the rows would go — it is a result set too.

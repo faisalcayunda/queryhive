@@ -497,7 +497,37 @@ final class QueryTab: Identifiable {
 
     /// Filters by column index: a result may repeat a name and the grid draws by position.
     /// Cleared whenever new rows arrive, because the ones they described are gone.
-    var columnFilters: [Int: ColumnFilter] = [:]
+    ///
+    /// A filter change also drops the cell selection and the queued edits: all three are indices
+    /// into the rows on screen, so hiding a row moves every index below it and a block — or an edit
+    /// — left over from before the filter would point at rows the user never meant.
+    var columnFilters: [Int: ColumnFilter] = [:] {
+        didSet {
+            cellSelection = nil
+            cellEdits.discard()
+        }
+    }
+
+    /// The block of cells the pointer has dragged out in the grid, if any. Indices are positions
+    /// in the rows the grid is drawing (the filtered ones), which is what the pointer pointed at.
+    /// Cleared whenever new rows arrive, for the same reason the filters are: the numbers describe
+    /// rows that no longer exist.
+    var cellSelection: CellRange?
+
+    /// The cells the user has changed but not yet written.
+    ///
+    /// The same positional hazard as the selection, and cleared in the same places: a queued edit
+    /// names a row and a column on screen, so a new run or a filter has to drop it rather than let
+    /// it point at a row it was never about.
+    var cellEdits = CellEdits()
+
+    /// The table a queued edit would be written to, when the app genuinely knows it.
+    ///
+    /// Set only by the path that wrote the SQL itself — opening a table from the tree, which runs
+    /// exactly `SELECT * FROM <name>` (`AppModel.openTable`). A hand-written query leaves this nil
+    /// and the grid cannot offer to commit: writing to a table the app guessed at from a `FROM`
+    /// clause is worse than not writing at all.
+    var sourceTable: String?
 
     /// The SQL one source resolves to. Every path out of the editor goes through this, so
     /// "the selected query" means the same thing to Run and to Export.

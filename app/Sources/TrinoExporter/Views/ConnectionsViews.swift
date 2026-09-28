@@ -134,6 +134,9 @@ struct ConnectionEditorSheet: View {
     /// Postgres only: list system schemas too. Meaningful nowhere else, so the field is shown
     /// only for that driver, mirroring the tree's own context-menu toggle.
     @State private var showAllSchemas = false
+    /// Postgres only, and the same deal one level up: draw a database level under the connection
+    /// instead of starting at the schemas of the database named above.
+    @State private var showAllDatabases = false
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
     @State private var testProcess: (any EngineRun)?
@@ -418,6 +421,23 @@ struct ConnectionEditorSheet: View {
                         .field(invalid: attemptedSave && missingRequired.contains("database"))
                     requiredHint("database")
                 }
+                // Postgres only, and beside the field it modifies: the database named above is where
+                // the tree starts, and this puts a level holding every database this user may open
+                // in front of it.
+                //
+                // "All Databases" rather than the menu's "Show All Databases": this row carries two
+                // checkboxes and the longer label pushed the field beside it narrow enough to wrap
+                // "DATABASE · REQUIRED" onto two lines, which reads as a layout that broke rather
+                // than as two switches.
+                //
+                // `fixedSize`, because this is the only row with two checkboxes on it and the
+                // flexible fields would otherwise squeeze both labels.
+                if kind == .postgres {
+                    InlineCheckbox(label: "All Databases", isOn: $showAllDatabases)
+                        .fixedSize()
+                        .padding(.bottom, 5)
+                        .help("List every database on the server in the object tree, not just the one above.")
+                }
                 if kind.hasSchemaLevel {
                     LabeledField("Schema") { TextField("public", text: $schema).field() }
                 }
@@ -425,7 +445,8 @@ struct ConnectionEditorSheet: View {
                 // that field, and reading it as anything else was the previous layout's mistake.
                 // Postgres only — it is the one driver that hides anything.
                 if kind == .postgres {
-                    InlineCheckbox(label: "Show All", isOn: $showAllSchemas)
+                    InlineCheckbox(label: "Show System Schemas", isOn: $showAllSchemas)
+                        .fixedSize()
                         .padding(.bottom, 5)
                         .help("List pg_catalog, information_schema and pg_* schemas in the object tree too.")
                 } else if kind == .mysql {
@@ -604,6 +625,7 @@ struct ConnectionEditorSheet: View {
             sslmode = ConnectionKind.postgres.defaultSSLMode
             user = ""; database = ""; schema = ""; verifyTLS = true
             showAllSchemas = false
+            showAllDatabases = false
             return
         }
         name = connection.name
@@ -618,6 +640,7 @@ struct ConnectionEditorSheet: View {
         schema = connection.schema
         verifyTLS = connection.verify
         showAllSchemas = connection.showAllSchemas
+        showAllDatabases = connection.showAllDatabases
     }
 
     private func save() {
@@ -636,7 +659,8 @@ struct ConnectionEditorSheet: View {
                                      database: database.trimmingCharacters(in: .whitespaces),
                                      schema: schema.trimmingCharacters(in: .whitespaces),
                                      verify: verifyTLS,
-                                     showAllSchemas: showAllSchemas)
+                                     showAllSchemas: showAllSchemas,
+                                     showAllDatabases: showAllDatabases)
         // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
         do {
             if !credential.isEmpty {

@@ -14,6 +14,32 @@ struct ResultGrid: View {
         Binding(get: { model.filterPopoverColumn }, set: { model.filterPopoverColumn = $0 })
     }
 
+    /// The height of every row, fixed rather than sized to its content.
+    ///
+    /// A drag that crosses rows is turned into a row index by dividing the pointer's travel by this
+    /// number, so it has to be the number the rows are actually drawn at — a content-sized row would
+    /// make the mapping drift by a row somewhere down a long result. A uniform row height is also
+    /// what a data grid wants: rows that breathe by a fraction of a point read as misaligned.
+    private let rowHeight: CGFloat = 25
+    /// The horizontal padding a cell carries on each side, so a column is drawn at its measured
+    /// width plus twice this. The drag's column mapping has to use the same number the cells are
+    /// built with, or the selection lands a column off at the far end of a wide result.
+    private let cellPadding: CGFloat = 8
+
+    /// Where the drag that is in flight started. `nil` between drags, which is what tells the next
+    /// `onChanged` that it is the first of a new selection rather than a continuation.
+    @State private var dragAnchor: (row: Int, column: Int)?
+
+    /// The cell the editor is open over, and what has been typed into it. The text is a separate
+    /// piece of state so that abandoning the edit — Escape, or a click elsewhere — leaves the queue
+    /// untouched.
+    @State private var editingCell: CellKey?
+    @State private var editingText = ""
+    @FocusState private var editorFocused: Bool
+
+    /// Whether the review of the queued changes is open.
+    @State private var reviewingChanges = false
+
     /// Per-column pixel width, computed once per result rather than per cell: at 1000 rows the
     /// per-cell version is O(rows × columns) work on every render pass.
     /// Natural widths, before the viewport has a say.
@@ -47,7 +73,7 @@ struct ResultGrid: View {
         return natural.map { $0 + slack * ($0 / total) }
     }
 
-    private var gutterWidth: CGFloat { 44 + 16 }
+    private var gutterWidth: CGFloat { 44 + cellPadding * 2 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -69,9 +95,24 @@ struct ResultGrid: View {
         }
     }
 
+    /// The sentence for a run in flight, or `nil` when nothing is running. A preview and an explain
+    /// are both runs, and both fill this grid.
+    private var loadingLabel: String? {
+        GridPlaceholder.inFlight(previewing: tab.previewing, explaining: tab.explaining)
+    }
+
+    /// What the body of the grid has to say for itself, or `nil` while it has rows to draw.
+    private func placeholder(_ preview: PreviewResult) -> GridPlaceholder? {
+        GridPlaceholder.whenEmpty(shown: filteredRows.count, fetched: preview.rows.count,
+                                  loading: loadingLabel)
+    }
+
     @ViewBuilder private var content: some View {
-        if tab.previewing, tab.preview == nil {
-            status("Running…", symbol: nil)
+        if let label = loadingLabel, tab.preview == nil {
+            // Nothing to draw yet. The columns arrive with the engine's first event and the header
+            // arrives with them, so until then there is no table to stand a spinner inside of and
+            // the spinner is the whole panel.
+            status(label, symbol: nil)
         } else if let error = tab.previewError {
             status(error, symbol: "exclamationmark.triangle.fill", tint: Tone.coral)
         } else if let preview = tab.preview, !preview.columns.isEmpty {
@@ -98,27 +139,150 @@ struct ResultGrid: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// The panel under the header when there is nothing to put under it.
+    ///
+    /// It keeps the shape `status` already had — a glyph over a sentence — because it is saying the
+    /// same kind of thing the untouched grid says before a query runs, and a second visual language
+    /// for "there is nothing here" would be one too many. What is new is that the three ways a body
+    /// can be empty are now three different sentences, and that the one the user can act on carries
+    /// the action: a body emptied by filters is one click from having its rows back.
+    @ViewBuilder private func placeholderBody(_ placeholder: GridPlaceholder) -> some View {
+        VStack(spacing: 8) {
+            switch placeholder {
+            case .loading(let label):
+                ProgressView().controlSize(.small)
+                Text(label).font(.ui(11.5)).foregroundStyle(Tone.secondary)
+            case .noRows:
+                Image(systemName: "tray")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Tone.secondary)
+                Text(tab.showingPlan
+                     ? "No plan. The engine explained the statement and sent nothing back."
+                     : "No rows. The statement ran to the end and matched nothing.")
+                    .font(.ui(11.5))
+                    .foregroundStyle(Tone.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            case .filteredOut(let hidden):
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Tone.secondary)
+                Text("No rows match the filters. \(pluralized(hidden, "fetched row")) hidden by "
+                     + "\(filtersLabel).")
+                    .font(.ui(11.5))
+                    .foregroundStyle(Tone.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                // The same `Clear` the filter popover offers, put where the user is looking. It is
+                // one control over the whole dictionary rather than one per column because the
+                // question the empty body asks is "what is hiding my rows", not "this column".
+                PillButton(title: "Clear Filters", symbol: "xmark.circle", role: .quiet) {
+                    tab.columnFilters = [:]
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// "3 filters" / "1 filter", for the sentence above.
+    private var filtersLabel: String {
+        "\(tab.columnFilters.count) filter\(tab.columnFilters.count == 1 ? "" : "s")"
+    }
+
     private func grid(_ preview: PreviewResult) -> some View {
         // The reader has to be outside the scroller: inside it, `geometry` would report the
         // content's width, which is the thing being decided.
         GeometryReader { geometry in
             let widths = widths(fitting: geometry.size.width)
-            ScrollView([.horizontal, .vertical]) {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        ForEach(Array(filteredRows.enumerated()), id: \.offset) { index, row in
-                            rowView(row, index: index, columns: preview.columns, widths: widths)
-                        }
-                    } header: {
-                        headerRow(preview.columns, widths: widths)
-                    }
+            if let placeholder = placeholder(preview) {
+                // No rows to scroll through, so the two halves are separate views rather than one
+                // scroller. The header still scrolls sideways, which is what keeps a wide result's
+                // columns reachable in a narrow panel, but with no rows under it there is nothing it
+                // has to stay in step with. The body is then laid out across the *panel*, not across
+                // the header: one scroller around both centred the sentence on the header's width,
+                // so in a narrow window with eight columns it was drawn off the right edge.
+                VStack(spacing: 0) {
+                    ScrollView(.horizontal) { headerRow(preview.columns, widths: widths) }
+                    placeholderBody(placeholder)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                // maxHeight as well as minWidth: a short result was centred in the scroller and
-                // floated in the middle of the panel instead of sitting under its header.
-                .frame(minWidth: geometry.size.width, maxHeight: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                ScrollView([.horizontal, .vertical]) {
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                        Section {
+                            ForEach(Array(filteredRows.enumerated()), id: \.offset) { index, row in
+                                rowView(row, index: index, columns: preview.columns, widths: widths)
+                            }
+                        } header: {
+                            headerRow(preview.columns, widths: widths)
+                        }
+                    }
+                    // maxHeight as well as minWidth: a short result was centred in the scroller and
+                    // floated in the middle of the panel instead of sitting under its header.
+                    .frame(minWidth: geometry.size.width, maxHeight: .infinity, alignment: .topLeading)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // ⌘C copies the selected block; the context menu is the same action for a pointer that has
+        // not found the key, and the footer's own button is the third door to it. Three, because
+        // copying a table out is the reason the grid exists and it should not need discovering.
+        //
+        // The two paths differ in how the text leaves: this one hands the system an item provider,
+        // which is what a copy command is for, while the menu and the button write the pasteboard
+        // directly. Same text either way.
+        .onCopyCommand {
+            guard let text = selectionText(withHeaders: false) else { return [] }
+            return [NSItemProvider(object: text as NSString)]
+        }
+        .contextMenu { selectionMenu }
+        .sheet(isPresented: $reviewingChanges) {
+            ChangeReview(statements: pendingStatements, table: tab.sourceTable,
+                         onClose: { reviewingChanges = false })
+        }
+    }
+
+    /// The selected block as the tab-separated text a spreadsheet reads back as a table, or `nil`
+    /// when nothing is selected.
+    ///
+    /// `filteredRows`, not the fetched rows: the user pointed at what is on screen, so what they
+    /// copy is what they saw. A filter that hid a row must not put it back in the paste.
+    private func selectionText(withHeaders: Bool) -> String? {
+        guard let preview = tab.preview, let selection = tab.cellSelection else { return nil }
+        return GridClipboard.text(rows: filteredRows, headers: preview.columns.map(\.name),
+                                  selection: selection, withHeaders: withHeaders)
+    }
+
+    /// Puts the selected block on the clipboard. The path the context menu and the footer button
+    /// take, both of which are reachable without the keyboard focus ⌘C wants.
+    private func copySelection(withHeaders: Bool) {
+        guard let text = selectionText(withHeaders: withHeaders) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @ViewBuilder private var selectionMenu: some View {
+        Button("Copy") { copySelection(withHeaders: false) }
+            .disabled(tab.cellSelection == nil)
+        Button("Copy with Headers") { copySelection(withHeaders: true) }
+            .disabled(tab.cellSelection == nil)
+        Divider()
+        Button("Edit Cell…") { beginEditingSelection() }
+            .disabled(tab.cellSelection == nil)
+        Button("Paste") { pasteIntoSelection() }
+            .disabled(tab.cellSelection == nil)
+        Divider()
+        Button("Review \(changeLabel)…") { reviewingChanges = true }
+            .disabled(tab.cellEdits.isEmpty)
+        Button("Discard \(changeLabel)") { tab.cellEdits.discard() }
+            .disabled(tab.cellEdits.isEmpty)
+    }
+
+    /// "3 Changes", for the menu items and the footer. One place, so the two cannot disagree about
+    /// how many there are or how to spell it.
+    private var changeLabel: String {
+        "\(tab.cellEdits.count) Change\(tab.cellEdits.count == 1 ? "" : "s")"
     }
 
     private func headerRow(_ columns: [Event.Column], widths: [CGFloat]) -> some View {
@@ -134,7 +298,7 @@ struct ResultGrid: View {
                 }
                 .frame(width: widths.indices.contains(index) ? widths[index] : 120,
                        alignment: isNumeric(column.type) ? .trailing : .leading)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, cellPadding)
                 .padding(.vertical, 6)
                 .overlay(alignment: .topTrailing) { filterButton(index) }
                 .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
@@ -146,7 +310,13 @@ struct ResultGrid: View {
         // to resolve against. The tint is applied to `recess` so the band still reads as a header
         // rather than as another row -- `recess` is black on dark and white on light, so the same
         // expression deepens the dark appearance and lightens the light one.
-        .background(Tone.recess.opacity(0.85))
+        //
+        // The opacity is 0.30, the value the rest of the chrome uses for a recess (see `Tone`'s own
+        // note on it). It was 0.85, and at that strength the band stopped reading as part of the
+        // surface: on the dark theme it went to near-black, a slab of a different colour laid over
+        // the panel rather than a shade *of* it. The family the app already settled on is the fix —
+        // the band is a recess, and every other recess in the window is 0.24–0.34.
+        .background(Tone.recess.opacity(0.30))
         .overlay(Rectangle().fill(Tone.ink.opacity(0.12)).frame(height: 1), alignment: .bottom)
     }
 
@@ -154,15 +324,146 @@ struct ResultGrid: View {
         HStack(spacing: 0) {
             gutter("\(index + 1)")
             ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, column in
-                cell(columnIndex < row.count ? row[columnIndex] : nil)
+                let key = CellKey(row: index, column: columnIndex)
+                let staged = tab.cellEdits.value(at: key) != nil
+                cellView(key: key, original: columnIndex < row.count ? row[columnIndex] : nil)
                     .frame(width: widths.indices.contains(columnIndex) ? widths[columnIndex] : 120,
                            alignment: isNumeric(column.type) ? .trailing : .leading)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, cellPadding)
                     .padding(.vertical, 4)
+                    // Under the cell rather than behind the text: the highlight has to cover the
+                    // padding too, or a selected block reads as a run of text highlights with the
+                    // column separators cutting through it.
+                    .background(cellBackground(row: index, column: columnIndex, staged: staged))
+                    // A dot as well as the wash: a cell can be both selected and changed, and one
+                    // tint cannot say which of the two it is.
+                    .overlay(alignment: .topTrailing) {
+                        if staged {
+                            Circle().fill(Tone.amber).frame(width: 4, height: 4).padding(3)
+                        }
+                    }
                     .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
+        .frame(height: rowHeight)
         .background(index % 2 == 1 ? Tone.ink.opacity(0.03) : Color.clear)
+        .contentShape(Rectangle())
+        .gesture(selectionDrag(row: index, widths: widths))
+    }
+
+    /// The wash behind one cell. A staged change wins over the selection, because what the user has
+    /// changed is the thing they most need to see.
+    private func cellBackground(row: Int, column: Int, staged: Bool) -> Color {
+        if staged { return Tone.amber.opacity(0.20) }
+        if tab.cellSelection?.contains(row: row, column: column) == true {
+            return Tone.accent.opacity(0.20)
+        }
+        return .clear
+    }
+
+    /// One cell: the editor while it is being edited, the staged text when it has one, and the value
+    /// the server sent otherwise.
+    @ViewBuilder
+    private func cellView(key: CellKey, original: String?) -> some View {
+        if editingCell == key {
+            TextField("", text: $editingText)
+                .textFieldStyle(.plain)
+                .font(.mono12)
+                .foregroundStyle(Tone.ink)
+                .focused($editorFocused)
+                .onSubmit { commitEdit(at: key) }
+                .onExitCommand { cancelEdit() }
+                .onAppear { editorFocused = true }
+        } else {
+            cell(tab.cellEdits.value(at: key) ?? original)
+                .contentShape(Rectangle())
+                // Double-click, the gesture every table editor uses. The context menu carries the
+                // same action, because a drag gesture sits on the row and which of the two claims a
+                // click is not something a snapshot can prove.
+                .onTapGesture(count: 2) { beginEdit(at: key) }
+        }
+    }
+
+    /// Open the editor over one cell, seeded with what the cell currently shows.
+    private func beginEdit(at key: CellKey) {
+        editingCell = key
+        editingText = tab.cellEdits.value(at: key) ?? originalText(at: key) ?? ""
+    }
+
+    /// Take the editor's text into the queue.
+    ///
+    /// Over the whole selection when one covers more than the edited cell: "select these cells and
+    /// set them all to this" is one gesture, not N, and it is the bulk edit the selection was drawn
+    /// for.
+    private func commitEdit(at key: CellKey) {
+        if let selection = tab.cellSelection, selection.cellCount > 1 {
+            tab.cellEdits.fill(editingText, over: selection, rows: filteredRows)
+        } else {
+            tab.cellEdits.edit(editingText, at: key, original: originalText(at: key))
+        }
+        cancelEdit()
+    }
+
+    private func cancelEdit() {
+        editingCell = nil
+        editingText = ""
+    }
+
+    /// The value the server sent for a cell, before any staged edit.
+    private func originalText(at key: CellKey) -> String? {
+        guard filteredRows.indices.contains(key.row) else { return nil }
+        let row = filteredRows[key.row]
+        return row.indices.contains(key.column) ? row[key.column] : nil
+    }
+
+    /// Open the editor from the menu, over the selection's top-left cell.
+    private func beginEditingSelection() {
+        guard let selection = tab.cellSelection else { return }
+        beginEdit(at: CellKey(row: selection.top, column: selection.left))
+    }
+
+    /// Put the clipboard's block into the selection, anchored at its top-left corner the way a
+    /// spreadsheet takes a paste.
+    private func pasteIntoSelection() {
+        guard let selection = tab.cellSelection, let preview = tab.preview,
+              let text = NSPasteboard.general.string(forType: .string) else { return }
+        tab.cellEdits.paste(text, at: CellKey(row: selection.top, column: selection.left),
+                            rows: filteredRows, columnCount: preview.columns.count)
+    }
+
+    /// The statements the queued edits would run, or none when the app cannot say which table to
+    /// write to — a hand-written query, whose `sourceTable` is nil.
+    private var pendingStatements: [String] {
+        guard let preview = tab.preview, let table = tab.sourceTable,
+              let connection = model.connection(for: tab) else { return [] }
+        return UpdateStatements.generate(edits: tab.cellEdits, rows: filteredRows,
+                                         columns: preview.columns, table: table,
+                                         kind: connection.kind)
+    }
+
+    /// The drag that selects a block of cells.
+    ///
+    /// `minimumDistance: 0` so a plain click selects the one cell under the pointer: a selection
+    /// that only appears after a two-cell drag is a selection nobody finds.
+    private func selectionDrag(row: Int, widths: [CGFloat]) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard let preview = tab.preview, !preview.columns.isEmpty, !filteredRows.isEmpty
+                else { return }
+                let target = geometry.cell(at: value.location, inRow: row, widths: widths,
+                                           lastRow: filteredRows.count - 1,
+                                           lastColumn: preview.columns.count - 1)
+                if dragAnchor == nil { dragAnchor = target }
+                guard let anchor = dragAnchor else { return }
+                tab.cellSelection = CellRange(from: anchor, to: target)
+            }
+            .onEnded { _ in dragAnchor = nil }
+    }
+
+    /// The arithmetic that turns a drag into a cell, as a value the tests can reach. Built from the
+    /// same three numbers the rows and columns are drawn with, so the two cannot drift.
+    private var geometry: GridGeometry {
+        GridGeometry(gutterWidth: gutterWidth, cellPadding: cellPadding, rowHeight: rowHeight)
     }
 
     /// The row-number column, shared by the header and every row so they cannot drift apart.
@@ -171,7 +472,7 @@ struct ResultGrid: View {
             .font(.code(10.5))
             .foregroundStyle(Tone.ink.opacity(0.35))
             .frame(width: 44, alignment: .trailing)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, cellPadding)
             .padding(.vertical, 6)
             .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
     }
@@ -198,6 +499,14 @@ struct ResultGrid: View {
     /// What the footer claims. Never "N rows" for a limited result without saying so, and once the
     /// server has been asked, the two numbers appear together.
     private func summaryText(_ preview: PreviewResult) -> String {
+        // A run in flight has no count yet, and "0 rows" is exactly what this footer says for a
+        // finished, empty result — the one reading it must not give while a result is still
+        // arriving. What has landed so far is worth saying, so it is said once there is something.
+        if let label = loadingLabel {
+            return preview.rows.isEmpty
+                ? label
+                : "\(label) · \(pluralized(preview.rows.count, "row")) so far"
+        }
         // A plan is not a row count. The grid draws it because a plan *is* a result set, but the
         // footer must not report rows for it, and the total/limit controls below are meaningless.
         if tab.showingPlan {
@@ -234,11 +543,16 @@ struct ResultGrid: View {
                     .frame(maxWidth: 260, alignment: .leading)
                     .help(error)
             } else if tab.totalRows == nil {
-                PillButton(title: "Count all", symbol: "number", role: .quiet, compact: true) {
+                // A glyph rather than a labelled pill: the footer is a dense readout, the sentence
+                // beside it already says what the numbers are, and the help carries the one thing
+                // the glyph cannot — that this runs a second query over the whole result.
+                IconButton(symbol: "number",
+                           help: "Count all rows: ask the server how many rows this statement "
+                               + "really returns. Runs a second query over the whole result, so "
+                               + "it can be slow.",
+                           diameter: 22) {
                     model.countRows(tab)
                 }
-                .help("Ask the server how many rows this statement really returns. "
-                      + "Runs a second query over the whole result, so it can be slow.")
             }
         }
     }
@@ -337,8 +651,33 @@ struct ResultGrid: View {
                     .font(.ui(11))
                     .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty ? Tone.amber : Tone.secondary)
                 countControl
+                // The commit pair, beside the count button: the grid's two ways of asking the server
+                // something about what is on screen — how many rows, and "make these changes real".
+                // Both appear only when they have something to act on.
+                if !tab.cellEdits.isEmpty {
+                    Text("· \(changeLabel.lowercased())")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.amber)
+                    IconButton(symbol: "checkmark.circle",
+                               help: "Review and commit the \(changeLabel.lowercased())",
+                               diameter: 22) { reviewingChanges = true }
+                    IconButton(symbol: "arrow.uturn.backward",
+                               help: "Discard the \(changeLabel.lowercased())",
+                               diameter: 22) { tab.cellEdits.discard() }
+                }
                 if preview.elapsedMS > 0 {
                     Text("· \(preview.elapsedMS) ms").font(.ui(11)).foregroundStyle(Tone.secondary)
+                }
+                // The selection's own readout, so the block the pointer dragged out is named rather
+                // than only tinted — and the button beside it is the copy that always works, with or
+                // without the keyboard focus ⌘C wants.
+                if let selection = tab.cellSelection {
+                    Text("· \(selection.rowCount) × \(selection.columnCount) selected")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.accent)
+                    IconButton(symbol: "doc.on.doc",
+                               help: "Copy the selected cells as a table (⌘C)",
+                               diameter: 22) { copySelection(withHeaders: false) }
                 }
             } else {
                 Text("No result yet").font(.ui(11)).foregroundStyle(Tone.secondary)
@@ -385,6 +724,75 @@ struct ResultGrid: View {
         } message: {
             Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
         }
+    }
+}
+
+/// What the queued cell edits would run, before they run.
+///
+/// The statements are shown in full, and that is the point of the sheet rather than a nicety. The
+/// identity rule these carry is "every column at the value it was fetched with" — this app has no
+/// primary key to lean on — so a predicate that matches more than the row it was built from is
+/// visible here or nowhere. A commit that wrote without showing this would be asking the user to
+/// trust a `WHERE` they never saw.
+///
+/// Running the statements is deliberately not wired here yet: it needs a write command in the engine
+/// (the FFI's command list is a contract, so that is its own change). Until then the statements are
+/// the user's to read and take away, which is the safe half of the feature rather than a stub.
+private struct ChangeReview: View {
+    let statements: [String]
+    let table: String?
+    let onClose: () -> Void
+
+    private var title: String {
+        "\(statements.count) change\(statements.count == 1 ? "" : "s")"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.ui(13, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+            Text(table.map { "Against \($0). Each row is matched by every column at the value it "
+                              + "was fetched with, so two identical rows would both be changed." }
+                 ?? "This tab does not know which table it is showing, so there is nothing to write "
+                    + "back to. Open the table from the tree to edit its rows.")
+                .font(.ui(11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(statements.enumerated()), id: \.offset) { _, statement in
+                        Text(statement)
+                            .font(.code(11))
+                            .foregroundStyle(Tone.ink)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(10)
+            }
+            .frame(maxHeight: 300)
+            .background(Tone.recess.opacity(0.30), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            HStack(spacing: 8) {
+                PillButton(title: "Copy SQL", symbol: "doc.on.doc") { copyAll() }
+                    .disabled(statements.isEmpty)
+                Spacer()
+                PillButton(title: "Close", role: .quiet, action: onClose)
+            }
+        }
+        .padding(18)
+        .frame(width: 640)
+    }
+
+    /// The statements as one script, each terminated. The terminator is what makes it pasteable into
+    /// a client that expects one; without it the last statement looks truncated.
+    private func copyAll() {
+        let script = statements.map { $0.hasSuffix(";") ? $0 : $0 + ";" }.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(script, forType: .string)
     }
 }
 

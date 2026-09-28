@@ -135,8 +135,9 @@ final class EventDecodingTests: XCTestCase {
 
     func testTheCountCommandAnswersInRows() throws {
         // Worth pinning because it is the one event whose payload key is not the event's own name:
-        // `{"event": "count", "rows": 4321}`. `Event` also declares a `count` property for a shape
-        // neither engine writes, and a test that asserted *that* would be asserting fiction.
+        // `{"event": "count", "rows": 4321}`. It is also the decode half of a real defect — the
+        // footer read a `count` property no engine ever writes, so the total silently stayed nil.
+        // That property is gone; the key is `rows`, and `AppModel.applyCountEvent` is what reads it.
         let (decoded, _) = try recorded()
         let counts = events("count", in: decoded)
 
