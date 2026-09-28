@@ -135,6 +135,22 @@ final class ObjectScreenTests: XCTestCase {
         XCTAssertNil(tab.objectDetailTable)
     }
 
+    func testAReloadWithNoConnectionSaysWhyRatherThanLeavingThePaneSpinning() {
+        // The same hole as the row above, one level up. The pane's empty state says "No objects
+        // here.", which is a statement about the schema; a guard that returned quietly turned it
+        // into a statement about the app. The loading flag is cleared with the reason, because this
+        // call supersedes the one that set it: a request that never asked anything must not leave
+        // the spinner of the request it replaced on screen.
+        let model = AppModel()
+        let tab = tab(columns: ["Name"], rows: [])
+        tab.objectLoading = true
+
+        model.loadObjects(tab)
+
+        XCTAssertNotNil(tab.objectError)
+        XCTAssertFalse(tab.objectLoading, "a failed lookup must not leave the pane spinning")
+    }
+
     func testAReloadClearsTheSelectionBeforeTheFetchRatherThanAfterIt() {
         // The race this pins: the rows are painted by the `objects` event, which arrives *before*
         // the run exits. Clearing on exit therefore wiped a click that landed in between -- the row

@@ -29,6 +29,9 @@ struct QueryHiveApp: App {
     /// what makes SwiftUI inherit macOS's appearance — and keep inheriting it live, so a system
     /// switch repaints the app without any observer of ours.
     @State private var appearance = ThemeStore.shared
+    /// Owned by the scene, not by a view: the controller schedules its own checks from the moment
+    /// it exists, so it must outlive any window that happens to be closed.
+    @StateObject private var updater = Updater()
 
     var body: some Scene {
         Window("QueryHive", id: "main") {
@@ -51,6 +54,13 @@ struct QueryHiveApp: App {
                 .preferredColorScheme(appearance.mode.colorScheme)
         }
         .commands {
+            // Where macOS users look for it, and where every other app puts it: directly under
+            // About. Everything else about updating is Sparkle's — this is the only entry point
+            // the app owns, and the disabled state is the only thing the app has to say about it.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Query") { model.newTab() }
                     .keyboardShortcut(model.shortcut(for: .newQuery))
@@ -138,6 +148,10 @@ struct Event: Decodable {
     let event: String
     var step: String?
     var message: String?
+    /// `progress` / `done`: the rows the run has sent or wrote. `count`: the total the server
+    /// reports for the statement. One key, read per event name — `tests/golden/count/count.ndjson`
+    /// is the frozen `{"event": "count", "rows": 4321}`, and neither engine ever writes a `count`
+    /// key on it, so a property named `count` would decode a shape that does not exist.
     var rows: Int?
     var columns: [Column]?
     var files: [ExportedFile]?
@@ -161,9 +175,6 @@ struct Event: Decodable {
     // `done`, and one key cannot be two types.
     var data: [[String?]]?
     var truncated: Bool?
-    /// The `count` command's answer. Its own event name, so it can never be confused with
-    /// `done.rows`, which is the number a preview sent rather than the number that exists.
-    var count: Int?
     var elapsedMs: Int?
     var host: String?
     var user: String?

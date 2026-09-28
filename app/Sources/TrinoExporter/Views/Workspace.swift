@@ -560,9 +560,20 @@ struct StreamingOptions: View {
 struct ObjectsPane: View {
     @Environment(AppModel.self) private var model
     let tab: QueryTab
-    /// Wide enough for a schema-qualified name without truncating it to nothing, narrow enough
-    /// that four columns still fit the window the editor normally occupies.
-    private let columnWidth: CGFloat = 170
+    /// The narrowest a column is allowed to be, whatever its contents.
+    private let minimumColumnWidth: CGFloat = 90
+    /// How wide the first column may grow. Past this the pane simply has more space than a table
+    /// name needs, and a name column half the window wide reads as a mistake rather than as room.
+    private let maximumFirstColumnWidth: CGFloat = 520
+    /// The air between one column and the next. A column is a fixed width and a long name fills
+    /// it, so with no gap a truncated name ends flush against the next column's text and the two
+    /// read as one string — `kpknl_manaje…kuntabilitasBASE TABLE`. The gap is what keeps a
+    /// truncated cell visibly truncated. Shared by the header and the rows so the two stay
+    /// aligned.
+    private let columnGap: CGFloat = 20
+    /// The horizontal inset a row carries, so a cell's text starts this far inside its column. The
+    /// header carries the same inset, or every heading sits one inset to the left of its own values.
+    private let rowInset: CGFloat = 4
     /// The inspector's width. Fixed rather than resizable: the pane beside it scrolls on both
     /// axes, so a wider inspector costs the grid columns rather than a layout, and one number is
     /// one thing to get right.
@@ -630,11 +641,13 @@ struct ObjectsPane: View {
             // collapses to the content's own height and the alignment has nothing to align against.
             // Handing the content the viewport's own size as a minimum leaves no slack to centre.
             GeometryReader { viewport in
+                let widths = widths(fitting: viewport.size.width)
                 ScrollView([.horizontal, .vertical]) {
                     VStack(alignment: .leading, spacing: 0) {
-                        headerRow
+                        headerRow(widths)
                         ForEach(Array(tab.objectRows.enumerated()), id: \.offset) { index, row in
-                            ObjectRow(tab: tab, index: index, row: row, columnWidth: columnWidth)
+                            ObjectRow(tab: tab, index: index, row: row,
+                                      widths: widths, columnGap: columnGap, inset: rowInset)
                         }
                     }
                     .padding(.horizontal, Metrics.gutter)
@@ -646,16 +659,48 @@ struct ObjectsPane: View {
         }
     }
 
-    private var headerRow: some View {
+    /// Per-column widths for the pane they are drawn in.
+    ///
+    /// The columns used to be a fixed 170 pt whatever the pane was, and that is how a listing of
+    /// `t_spgg_suspect_20260925_1000` came out as `t_spgg_suspe…0260915` with three quarters of the
+    /// pane sitting empty beside it. The name column is the one that truncates, and it was the one
+    /// column not being given the room that was actually there.
+    ///
+    /// So the first column takes whatever is left over once the others have their natural width.
+    /// The others keep theirs rather than sharing the slack: a type column stretched to half the
+    /// window to hold `BASE TABLE` is width that says nothing.
+    private func widths(fitting available: CGFloat) -> [CGFloat] {
+        let natural = tab.objectColumns.enumerated().map { index, header in
+            // Only the head of the listing decides the width: measuring every row would make a long
+            // listing pay for its own layout, and one long tail name would stretch the column to the
+            // cap anyway.
+            let longest = tab.objectRows.prefix(200).map { row -> Int in
+                guard index < row.count, let value = row[index] else { return 0 }
+                return value.count
+            }.max() ?? 0
+            return min(max(CGFloat(max(header.count, longest)) * 6.8 + 20, minimumColumnWidth), 420)
+        }
+        guard let first = natural.first else { return natural }
+        let gaps = CGFloat(max(0, natural.count - 1)) * columnGap
+        let used = natural.reduce(0, +) + gaps
+        guard used < available else { return natural }
+        var widened = natural
+        widened[0] = min(first + (available - used), maximumFirstColumnWidth)
+        return widened
+    }
+
+    private func headerRow(_ widths: [CGFloat]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(tab.objectColumns, id: \.self) { name in
+            HStack(spacing: columnGap) {
+                ForEach(Array(tab.objectColumns.enumerated()), id: \.offset) { index, name in
                     Text(name)
                         .font(.ui(11, weight: .semibold))
                         .foregroundStyle(Tone.secondary)
-                        .frame(width: columnWidth, alignment: .leading)
+                        .frame(width: widths.indices.contains(index) ? widths[index] : minimumColumnWidth,
+                               alignment: .leading)
                 }
             }
+            .padding(.horizontal, rowInset)
             .padding(.vertical, 6)
             Rectangle().fill(Tone.ink.opacity(0.09)).frame(height: 1)
         }
@@ -684,13 +729,15 @@ private struct ObjectRow: View {
     let tab: QueryTab
     let index: Int
     let row: [String?]
-    let columnWidth: CGFloat
+    let widths: [CGFloat]
+    let columnGap: CGFloat
+    let inset: CGFloat
     @State private var hovering = false
 
     private var selected: Bool { tab.objectSelection == index }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: columnGap) {
             // Driven by the headers, not by the row: a driver that answered a short row would
             // otherwise shift every value one column to the left, under the wrong header, which is
             // worse than a blank cell.
@@ -700,11 +747,12 @@ private struct ObjectRow: View {
                     .foregroundStyle(Tone.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(width: columnWidth, alignment: .leading)
+                    .frame(width: widths.indices.contains(column) ? widths[column] : 90,
+                           alignment: .leading)
             }
         }
         .padding(.vertical, 3)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, inset)
         // Full width, so the highlight reads as a *row* rather than as a band behind two cells.
         // Without this the `background` is only as wide as the HStack's own content, which is the
         // sum of the fixed column widths: a two-column Trino listing highlighted about 340 pt of a

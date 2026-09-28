@@ -59,10 +59,19 @@ let package = Package(
     products: [
         .executable(name: "QueryHive", targets: ["QueryHive"])
     ],
+    // The one dependency that is not this repository: Sparkle, for updates that install
+    // themselves. It is a `binaryTarget` inside Sparkle's own manifest, which means SwiftPM
+    // downloads a prebuilt Sparkle.framework from its GitHub release rather than compiling it —
+    // and that means a build machine with no network cannot build this app until the archive is
+    // vendored. `app/build.sh` is what puts the framework into the bundle; linking it alone
+    // produces an app that dies at launch with a library that is nowhere to be found.
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0")
+    ],
     targets: [
         .executableTarget(
             name: "QueryHive",
-            dependencies: ["QueryHiveFFI"],
+            dependencies: ["QueryHiveFFI", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/TrinoExporter",
             linkerSettings: [
                 .unsafeFlags(
@@ -77,6 +86,14 @@ let package = Package(
                             // `-L` that holds only an archive is a choice this manifest makes
                             // and a future reader deserves to see it was made on purpose.
                             "-Xlinker", "-rpath", "-Xlinker", ffiLibraryDirectory,
+                            // Sparkle is the opposite: a real dynamic framework, linked by
+                            // SwiftPM from wherever it unpacked the binary, and found at run
+                            // time by this rpath. Without it the app links and then dies on
+                            // launch with "Library not loaded: @rpath/Sparkle.framework/…",
+                            // because `build.sh` puts the framework in the bundle's Frameworks
+                            // directory and nothing would tell the loader to look there.
+                            "-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks",
+                            "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                         ]
                 )
             ]

@@ -23,11 +23,11 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qh_core::EngineError;
 use qh_driver::{ConnectionConfig, Driver, DriverKind, ExecuteOptions, TlsMode};
-use qh_driver_trino::{client_for, RootCertStore, TrinoDriver};
+use qh_driver_trino::{client_for, RootCertStore, TrinoDriver, CONNECT_TIMEOUT};
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -550,5 +550,57 @@ async fn prefer_does_not_downgrade_a_handshake_that_failed() {
         coordinator.connections(),
         1,
         "a server that speaks TLS and fails the handshake must not be downgraded"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The connect phase is bounded
+// ---------------------------------------------------------------------------
+
+/// A peer that accepts the connection and then says nothing must not hang the
+/// client: the connect phase — the handshake included — is bounded.
+///
+/// This is the shape of the failure a wrong or filtered port produces, and it is the
+/// one that used to leave the app's "Test" spinner turning for minutes: the port
+/// drops the SYN rather than refusing it, so nothing but the operating system's own
+/// TCP timeout ended the wait, and the retry policy multiplied that by the number of
+/// attempts. A local listener that accepts and never speaks TLS is the same wait made
+/// deterministic — no external host, no firewall, no timing luck — and it is the
+/// handshake half of the connect phase, which is the part a plain TCP check would
+/// miss.
+#[tokio::test]
+async fn a_peer_that_never_answers_the_handshake_fails_within_the_connect_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+    let address = listener.local_addr().expect("the bound address");
+    // Accept and hold: TCP is up, so everything that follows is the handshake's wait.
+    let held = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("a connection");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(stream);
+    });
+
+    let client = client_for(TlsMode::RequireNoVerify, None).expect("a client");
+    let started = Instant::now();
+    // The outer bound is the test's own safety net: it is a few seconds longer than
+    // the connect timeout, so a client that honours it returns first and one that
+    // does not is caught here rather than hanging the suite.
+    let outcome = tokio::time::timeout(
+        CONNECT_TIMEOUT + Duration::from_secs(5),
+        client.get(format!("https://{address}/v1/info")).send(),
+    )
+    .await;
+    held.abort();
+
+    let result = outcome.unwrap_or_else(|_| {
+        panic!(
+            "the client hung for {:?}: the connect phase is not bounded",
+            started.elapsed()
+        )
+    });
+    result.expect_err("a peer that never speaks TLS must not answer");
+    assert!(
+        started.elapsed() < CONNECT_TIMEOUT + Duration::from_secs(5),
+        "the failure took {:?}, past the connect timeout",
+        started.elapsed()
     );
 }

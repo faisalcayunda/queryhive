@@ -205,6 +205,18 @@ func qualifiedName(database: String?, schema: String?, table: String,
     }
 }
 
+/// One identifier — a column name — quoted the way a driver quotes it.
+///
+/// `qualifiedName` is the same rule for a whole table; this is its one-part case, for the statements
+/// this app builds itself rather than ones the user wrote. Sharing the rule is the point: a column
+/// the grid edits and the same column in a hand-written statement have to be spelled the same way.
+func quotedIdent(_ name: String, for kind: ConnectionKind) -> String {
+    switch kind {
+    case .trino, .postgres: "\"\(name)\""
+    case .mysql: "`\(name)`"
+    }
+}
+
 /// The statement the object screen's inspector runs to learn one table's columns.
 ///
 /// A `SELECT *` under a one-row cap, rather than a metadata query per driver: all three servers

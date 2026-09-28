@@ -98,12 +98,43 @@ use serde_json::Value as Json;
 // [`client_for`] without having to depend on `rustls` at the same version.
 pub use rustls::RootCertStore;
 
-/// How long to wait between polls of a page URI that is still queued.
+/// The pause the first empty page earns, before the backoff starts doubling.
 ///
-/// Trino's own clients poll; there is no long-poll. Half a second keeps a
-/// hundred-millisecond query from being noticed as slow while not hammering a
-/// coordinator that is genuinely still planning.
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Trino's own clients poll; there is no long-poll. A queued page costs the
+/// coordinator a read of the query's own state, and Trino's own clients ask again
+/// as soon as the answer arrives, so the pause exists to keep this client from
+/// spinning rather than to spare the coordinator.
+///
+/// It is the pause that sets how long a page which has just become ready waits to
+/// be noticed, and an empty page does not mean the query is slow: a client that
+/// asks faster than workers fill the output buffer sees empty pages throughout a
+/// healthy query. A flat half second therefore capped every such query at two
+/// pages a second, which on a thousand-row page is two thousand rows a second
+/// however fast the cluster was reading.
+const POLL_INTERVAL_MIN: Duration = Duration::from_millis(10);
+
+/// The pause the backoff stops growing at.
+///
+/// A query that has produced nothing for a while is polled at most five times a
+/// second, and a page that becomes ready at any point in that wait is picked up
+/// within a fifth of a second rather than within half a second.
+const POLL_INTERVAL_MAX: Duration = Duration::from_millis(200);
+
+/// How long the connect phase may take before it is given up on.
+///
+/// The connect phase is DNS, the TCP handshake, and — on the TLS modes — the TLS
+/// handshake, and without a bound a coordinator whose port is wrong or filtered does
+/// not fail: the SYN is dropped rather than refused, so the only thing that ends the
+/// wait is the operating system's own TCP timeout, and the retry policy multiplies it
+/// by the number of attempts. Measured against this project's own coordinator, a
+/// wrong port left the app's "Test" spinner turning for minutes with nothing to show
+/// for it. Ten seconds is long enough for a slow internal handshake and short enough
+/// that a typo is a failure the user sees rather than a wait they cannot explain.
+///
+/// This is a *connect* bound and deliberately not an overall request timeout: a
+/// statement's page poll is a short exchange even when the query behind it runs for
+/// minutes, and a whole-request timeout would cut off a legitimately slow query.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What this client tells the coordinator it can decode.
 ///
@@ -226,7 +257,9 @@ pub fn client_for(
     tls: TlsMode,
     roots: Option<RootCertStore>,
 ) -> Result<reqwest::Client, EngineError> {
-    let builder = reqwest::Client::builder();
+    // The connect bound is set on every mode, because a port that does not answer is
+    // not a TLS question: it drops the SYN before any scheme is chosen.
+    let builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
     let built = match tls {
         TlsMode::Disable => builder.build(),
         // `verify: false` in the app's own vocabulary for `RequireNoVerify`, and the
@@ -832,6 +865,9 @@ impl Session for TrinoSession {
             row_limit: options.row_limit,
             emitted: 0,
             max_batch_rows: options.max_batch_rows,
+            // The statement's own answer is the first page, and it is already in
+            // `pending`, so the pause is only spent once a poll comes back empty.
+            poll_pause: POLL_INTERVAL_MIN,
         }))
     }
 
@@ -955,6 +991,10 @@ struct TrinoCursor {
     row_limit: Option<usize>,
     emitted: usize,
     max_batch_rows: Option<usize>,
+    /// The pause the next empty page will get. Starts at [`POLL_INTERVAL_MIN`],
+    /// doubles while pages keep arriving without rows, and drops back the moment
+    /// one carries rows.
+    poll_pause: Duration,
 }
 
 impl TrinoCursor {
@@ -1136,8 +1176,14 @@ impl Cursor for TrinoCursor {
                 // Still queued or running with no rows yet. Every poll returns a
                 // *new* page URI, so waiting on the URI changing would never wait
                 // and a slow query would be polled in a tight loop; the pause is
-                // what makes this a poll rather than a spin.
-                tokio::time::sleep(POLL_INTERVAL).await;
+                // what makes this a poll rather than a spin. It grows while the
+                // pages stay empty and is reset by the first one that is not, so a
+                // query that is producing is not held to the rate of a query that
+                // is still planning.
+                tokio::time::sleep(self.poll_pause).await;
+                self.poll_pause = (self.poll_pause * 2).min(POLL_INTERVAL_MAX);
+            } else {
+                self.poll_pause = POLL_INTERVAL_MIN;
             }
         }
     }

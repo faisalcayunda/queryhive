@@ -19,6 +19,19 @@ VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo
 VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 
+# Where the app looks for releases, and the key every update is checked against. Both are
+# overridable so a release candidate can be pointed at a folder on this machine instead of at
+# GitHub — that is the only way to test an update without publishing one.
+#
+# `appcast.xml` is the one asset name that matters: GitHub's `releases/latest/download/<asset>`
+# redirects to the newest release's copy of it, so this URL never has to change.
+FEED_URL="${FEED_URL:-https://github.com/faisalcayunda/queryhive/releases/latest/download/appcast.xml}"
+PUBLIC_KEY="${PUBLIC_KEY:-$(cat sparkle-public-key.txt 2>/dev/null || true)}"
+if [ -z "$PUBLIC_KEY" ]; then
+    echo "app/sparkle-public-key.txt is missing — run Sparkle's generate_keys and save its public half there"
+    exit 1
+fi
+
 if [ ! -f ./build-ffi.sh ]; then
     echo "app/build-ffi.sh is missing"
     exit 1
@@ -35,6 +48,19 @@ app="dist/QueryHive.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$(swift build -c release --disable-sandbox --show-bin-path)/QueryHive" "$app/Contents/MacOS/"
+
+# Sparkle is the bundle's one dynamic framework, and the only thing here that did not come from
+# this repository. `ditto` rather than `cp -R`: a framework is mostly symlinks (`Sparkle`,
+# `Versions/Current`, `Resources`), and copying them as files would leave a layout that codesign
+# and dyld both refuse. SwiftPM has already unpacked the framework beside the build product, which
+# is where this reads it from — the same copy the debug build and the test bundle load.
+SPARKLE_FRAMEWORK="$(swift build -c release --disable-sandbox --show-bin-path)/Sparkle.framework"
+if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+    echo "Sparkle.framework is not among the build products — run 'swift package resolve' first"
+    exit 1
+fi
+mkdir -p "$app/Contents/Frameworks"
+ditto "$SPARKLE_FRAMEWORK" "$app/Contents/Frameworks/Sparkle.framework"
 
 cat > "$app/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,18 +84,33 @@ EOF
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD" "$app/Contents/Info.plist"
 
+# Sparkle's two, and the only two it needs to find and trust an update. Note which number decides
+# "newer": Sparkle compares `CFBundleVersion`, not the version people read. That is why `BUILD`
+# above is a timestamp and not a marketing version — two releases of 0.1.0 are still ordered, and
+# a rebuild in the same minute is not (it would look like no update at all).
+plutil -replace SUFeedURL -string "$FEED_URL" "$app/Contents/Info.plist"
+plutil -replace SUPublicEDKey -string "$PUBLIC_KEY" "$app/Contents/Info.plist"
+
 if [ -f ../assets/icon.icns ]; then
     cp ../assets/icon.icns "$app/Contents/Resources/AppIcon.icns"
 fi
 
-# The bundle holds one Mach-O, the app binary, and the engine is inside it: `swift build`
-# copied the static archive's code into that binary, so there is no second file to sign.
-# The loop stays a loop because a second Mach-O would otherwise go unsigned. Static
-# objects and archives are never executed and codesign refuses to sign them anyway, so
-# the find skips them; a `.a` never reaches this bundle in the first place.
+# Two Mach-Os live here now, the app binary and Sparkle's framework; the engine is still *inside*
+# the app binary, because `swift build` copied the static archive's code into it, so nothing from
+# `target/` is loaded at runtime. The loop stays a loop because a third Mach-O would otherwise go
+# unsigned. Static objects and archives are never executed and codesign refuses to sign them
+# anyway, so the find skips them; a `.a` never reaches this bundle in the first place.
 find "$app" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in
         *.o|*.a) continue ;;
+        # Sparkle's own helpers keep the signatures Sparkle shipped them with, and they are
+        # already ad-hoc — the same as this bundle — so there is nothing to make them match.
+        # Re-signing them here would take away what Sparkle's distribution keeps: the Downloader
+        # XPC service carries an entitlement this loop does not preserve, and a nested `.app` or
+        # `.xpc` has to be signed as a bundle from the inside out rather than file by file.
+        # Sparkle's documentation says both of those, and the app is not sandboxed, so its
+        # services are not on the update path anyway.
+        "$app/Contents/Frameworks/"*) continue ;;
     esac
     if file -b "$f" | grep -q "Mach-O"; then
         codesign --force --sign - "$f"
