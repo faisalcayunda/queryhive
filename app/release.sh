@@ -192,11 +192,41 @@ RELEASE_URL="$(gh release create "$TAG" "$ASSET" "$RELEASE_DIR/appcast.xml" \
 # ---------------------------------------------------------------- verify
 # The feed is the part that fails silently: a release without the appcast asset still looks
 # published, and the only symptom is an app that never offers an update. So ask the URL the app
-# has in its Info.plist, and check it serves *this* build.
+# has in its Info.plist, and check that it serves *this* build.
+#
+# Asking once is not enough. GitHub serves release downloads through a CDN, and immediately after
+# a release appears the redirect can still be a cached miss — measured while cutting this very
+# release, the exact URL answered 404 for minutes while the API already reported the release as
+# latest. So it is retried, with the app's own URL first because that is the one that has to work;
+# only if every attempt fails does it try the same URL with a query string, which is what tells a
+# stale cache entry apart from a release that is genuinely missing its appcast.
 PACKAGED="$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" dist/QueryHive.app/Contents/Info.plist)"
-SERVED="$(curl -fsSL "$PACKAGED" | sed -n 's#.*<sparkle:version>\(.*\)</sparkle:version>.*#\1#p' | head -1)"
+served_build() {
+  curl -fsSL "$1" 2>/dev/null \
+    | sed -n 's#.*<sparkle:version>\(.*\)</sparkle:version>.*#\1#p' | head -1 || true
+}
+
+SERVED=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  SERVED="$(served_build "$PACKAGED")"
+  if [ "$SERVED" = "$BUILD" ]; then break; fi
+  echo "    feed attempt $attempt/10: served '${SERVED:-nothing}', waiting for $BUILD"
+  sleep 6
+done
+
 if [ "$SERVED" != "$BUILD" ]; then
-  echo "the feed at $PACKAGED serves build '$SERVED', not $BUILD" >&2
+  if [ "$(served_build "$PACKAGED?cachebust=$BUILD")" = "$BUILD" ]; then
+    # The release is right; one CDN entry is behind. Nothing to redo and nothing to fix by hand,
+    # so this is a warning rather than a failure — and it says so, because the alternative is
+    # somebody re-uploading assets that were never wrong.
+    echo
+    echo "released $TAG"
+    echo "  $RELEASE_URL"
+    echo "  note: the CDN still holds an older answer for the exact feed URL — it expires on its own"
+    echo "  (the same URL with a cache-busting query already serves build $BUILD)"
+    exit 0
+  fi
+  echo "the feed at $PACKAGED serves build '${SERVED:-nothing}', not $BUILD" >&2
   echo "the release exists; the app will not see it until the appcast asset is in place" >&2
   exit 1
 fi
