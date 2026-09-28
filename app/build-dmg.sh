@@ -68,16 +68,30 @@ MISSING
     exit 1
   fi
   echo "    signing as: $IDENTITY"
-  # Every Mach-O inside the bundle, then the bundle. Today that is the app binary alone -- the
-  # engine is static, so its code is inside that binary rather than beside it; the loop is here
-  # so that a second Mach-O would not silently go unsigned.
+  # Every Mach-O inside the bundle, then the bundle. The engine is static, so its code is inside
+  # the app binary rather than beside it; the loop is here so that a second Mach-O would not
+  # silently go unsigned. Sparkle's helpers are the exception and keep their own signatures: the
+  # Downloader XPC service carries an entitlement this loop does not preserve, and a nested `.app`
+  # or `.xpc` is signed as a bundle from the inside out rather than file by file. The framework
+  # itself *is* re-signed below, with this identity and without the app's entitlements, because
+  # hardened runtime plus library validation would otherwise refuse to load a framework signed by
+  # somebody else. That order — helpers left alone, framework signed with the app's identity — is
+  # what Sparkle's own documentation prescribes, and it is untested here: this machine has no
+  # Developer ID certificate (see the message above), so the only path exercised is ad-hoc.
   find "$BUNDLE" -type f -print0 | while IFS= read -r -d '' f; do
     case "$f" in *.o|*.a) continue ;; esac
+    case "$f" in "$BUNDLE/Contents/Frameworks/"*) continue ;; esac
     if file -b "$f" | grep -q "Mach-O"; then
       codesign --force --options runtime --timestamp \
         --entitlements QueryHive.entitlements --sign "$IDENTITY" "$f"
     fi
   done
+  if [ -d "$BUNDLE/Contents/Frameworks" ]; then
+    find "$BUNDLE/Contents/Frameworks" -maxdepth 1 -name "*.framework" -print0 \
+      | while IFS= read -r -d '' framework; do
+        codesign --force --options runtime --timestamp --sign "$IDENTITY" "$framework"
+      done
+  fi
   codesign --force --options runtime --timestamp \
     --entitlements QueryHive.entitlements --sign "$IDENTITY" "$BUNDLE"
 else

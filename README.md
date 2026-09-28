@@ -159,6 +159,37 @@ exceptions the FFI boundary needs (ADR-0014), but it has not been exercised agai
 Developer ID yet, so the first notarized build must be launched and its engine used before it is
 published.
 
+### Cut a release
+
+```bash
+./app/release.sh              # package, show what publishing would run, ask, then publish
+./app/release.sh --dry-run    # package and stop before tagging; nothing leaves the machine
+./app/release.sh --yes        # no prompt, for an unattended run
+RELEASE_NOTES=notes.md ./app/release.sh
+```
+
+One command does what otherwise takes four: `build-dmg.sh`, then `generate_appcast` — which signs
+the archive with the EdDSA key in this machine's keychain and writes the feed — then the tag and the
+push, then a GitHub release carrying **two** assets: the DMG and `appcast.xml`.
+
+Both assets matter. The app has
+`https://github.com/faisalcayunda/queryhive/releases/latest/download/appcast.xml` baked into its
+`Info.plist`, so the feed has to be an asset of whichever release GitHub calls *latest*. Publish the
+DMG alone and you have published an app nobody can update, with nothing on screen to say so. The
+script asks that URL what it serves once the release is up, and fails if the answer is not the build
+it just made.
+
+It refuses to start on a dirty tree, off `main`, when the tag already exists, or when the build
+number it produced is not newer than what the live feed offers — the last of those because Sparkle
+compares build numbers, not versions, and a release that is not newer is one nobody is told about.
+`--dry-run` relaxes only the dirty-tree check (it publishes nothing) and stops before the tag.
+
+**The signing key.** `generate_appcast` signs with the private half of an EdDSA key held in the
+keychain of whichever machine cuts the release; the public half is
+`app/sparkle-public-key.txt`, compiled into every bundle. Back the private half up —
+`app/.build/artifacts/sparkle/Sparkle/bin/generate_keys -x <file>` — because a lost key cannot be
+replaced for apps already installed: every future update to those copies would fail its check.
+
 **Requirements.** Apple Silicon (arm64) and macOS 14 or later, plus a Rust toolchain to build from
 source. Every Apple Silicon Mac can run macOS 14, so architecture is not a limit; an Intel Mac
 cannot run it at all.
@@ -330,6 +361,7 @@ app/
   build-ffi.sh                builds libqh_ffi --release and regenerates Generated/
   build.sh                    builds app/dist/QueryHive.app around that library
   build-dmg.sh                wraps that .app in a DMG, with optional Developer ID + notarization
+  release.sh                  that DMG plus a signed appcast: tagged, pushed, published, feed checked
   QueryHive.entitlements      the entitlements the hardened runtime needs (ADR-0014)
   make-icon.sh                regenerates assets/icon.icns from the app's own drawing code
   make-driver-logos.sh        regenerates Support/DriverLogos.swift from assets/drivers/*.svg
