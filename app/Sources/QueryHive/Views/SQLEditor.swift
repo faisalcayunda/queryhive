@@ -1,5 +1,24 @@
 import AppKit
+import Observation
 import SwiftUI
+
+/// The line count the editor's gutter already knows, handed to SwiftUI.
+///
+/// The corner readout used to split the whole query into lines on every body evaluation, which is a
+/// pass over the text per model change. The ruler keeps a line index for its own drawing, so the
+/// readout reads that instead; the coordinator writes here when the count moves.
+@Observable
+final class EditorLineCount {
+    /// What the editor's gutter reports; nil until it has.
+    var value: Int?
+    /// The text the pane was built for. Until the editor reports, the count comes from this, once per
+    /// read — and holding it costs a reference, where counting in `init` cost a pass per re-render.
+    let seed: String
+
+    init(text: String = "") { seed = text }
+
+    var count: Int { value ?? (1 + seed.utf8.reduce(0) { $1 == 0x0A ? $0 + 1 : $0 }) }
+}
 
 /// The SQL editor.
 ///
@@ -29,14 +48,39 @@ struct SQLEditor: NSViewRepresentable {
     /// Called with a statement's first offset when its run marker is clicked in the gutter. The
     /// host decides what running means; the editor only knows where the statement starts.
     let onRunStatement: ((Int) -> Void)?
+    /// Where the editor reports how many lines the text has. Optional, so a host that does not show
+    /// the count does not have to make one.
+    var lineCount: EditorLineCount? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    /// Write whatever the editors have typed but not yet handed to the model.
+    ///
+    /// The model is written at most every 150 ms while typing, so a Run, a Save or a session save
+    /// that reads `tab.sql` in between would read text that is a keystroke or two old. The editor
+    /// already flushes on any click, any command-key and any menu; a caller that reads the text
+    /// without a user event in front of it — a scripted run, a timer — calls this first.
+    @MainActor
+    static func flushPendingEdits() {
+        for coordinator in Coordinator.live.allObjects { coordinator.flushToModel() }
+    }
 
     func makeNSView(context: Context) -> NSView {
         let container = FlippedContainerView()
         container.autoresizesSubviews = true
 
-        let textView = SQLTextView()
+        // TextKit 1, chosen here rather than reached by accident. `NSTextView()` builds a TextKit 2
+        // view and drops to TextKit 1 the first time anything reads `layoutManager`, which the editor
+        // does in a dozen places; the mode then depended on which of them ran first. Building the
+        // stack by hand makes it TextKit 1 from creation, and non-contiguous layout is what lets a
+        // large document lay out only what is on screen instead of everything above the edit.
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        layoutManager.allowsNonContiguousLayout = true
+        storage.addLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        layoutManager.addTextContainer(textContainer)
+        let textView = SQLTextView(frame: .zero, textContainer: textContainer)
         PerfSignposts.watchTextKit(textView)
         textView.isRichText = false
         textView.isEditable = true
@@ -68,6 +112,10 @@ struct SQLEditor: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.string = text
         textView.delegate = context.coordinator
+        // The coordinator hears every character edit from the storage itself: that is what keeps the
+        // gutter's line index, the cached statement ranges and the folds in step with the text one
+        // edit at a time, instead of each being recomputed from the whole string.
+        storage.delegate = context.coordinator
         // The caret and selection the tab is already holding. A tab keeps them for Run Current
         // Statement, so an editor built for a tab the user was in the middle of should start where
         // they left off rather than at the top of the file.
@@ -108,7 +156,11 @@ struct SQLEditor: NSViewRepresentable {
         context.coordinator.container = container
         context.coordinator.ruler = ruler
         context.coordinator.scrollView = scrollView
-        ruler.update(for: textView.string)
+        context.coordinator.observe(scrollView)
+        // The gutter is sized before the layout switches apply. Changing its width after the scroll
+        // view has tiled shifts the content by the difference, which a scrolling (no-wrap) editor
+        // shows as a horizontal offset it never had.
+        ruler.rebuildIndex()
         // The layout switches, before anything is drawn: the gutter's visibility, the wrapping, the
         // tab stops and the invisible characters are all properties of the text view.
         context.coordinator.applyLayout()
@@ -118,6 +170,9 @@ struct SQLEditor: NSViewRepresentable {
         }
         ruler.onRun = { [weak coordinator = context.coordinator] offset in
             coordinator?.runStatement(at: offset)
+        }
+        ruler.refreshMarks = { [weak coordinator = context.coordinator] in
+            coordinator?.refreshMarksIfStale()
         }
         textView.interceptKey = { [weak coordinator = context.coordinator] event in
             coordinator?.handle(event) ?? false
@@ -137,34 +192,33 @@ struct SQLEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        let coordinator = context.coordinator
         // The coordinator reads bindings and callbacks through `parent`, so it has to be refreshed
         // on every update or it keeps calling into a stale view value.
-        context.coordinator.parent = self
+        coordinator.parent = self
         // Before the early return below: the gutter's font follows the code-font setting, and a
         // setting change does not alter the text, so it would otherwise never reach the ruler.
-        context.coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)
+        coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)
         // The same reason: a switch flipped in Settings changes nothing about the text, so the
         // editor has to be told to re-read the layout rather than waiting for an edit.
-        context.coordinator.applyLayout()
-        guard let textView = context.coordinator.textView else { return }
-        guard textView.string != text else { return }
-        let previous = textView.string
-        let caret = textView.selectedRange().location
-        textView.string = text
-        let length = (text as NSString).length
-        // Text appended from outside the editor — double-clicking a table in the tree — should
-        // leave the caret at the end of what was just written, not back where it used to be.
-        let appended = length > previous.count && text.hasPrefix(previous)
-        textView.setSelectedRange(NSRange(location: appended ? length : min(caret, length), length: 0))
-        // Text that arrived from outside the editor — opening a table, loading a file — has never
-        // been through `textDidChange` and would otherwise stay uncoloured.
-        context.coordinator.recolour()
+        coordinator.applyLayout()
+        // Not `textView.string != text`: that compared two whole documents on every update. The
+        // editor remembers the value the model holds, and the model's string is the very one it
+        // wrote, so the common case is one identity check.
+        coordinator.adoptModelText(text)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.flushToModel()
     }
 
     // MARK: Coordinator
 
     @MainActor
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
+        /// Every live editor, so `SQLEditor.flushPendingEdits()` can reach them.
+        static let live = NSHashTable<Coordinator>.weakObjects()
+
         var parent: SQLEditor
         weak var textView: SQLTextView?
         weak var container: FlippedContainerView?
@@ -176,25 +230,92 @@ struct SQLEditor: NSViewRepresentable {
         /// not on every SwiftUI update. Re-setting the tab stops rewrites every attribute in the
         /// text storage, which is not something to do on every keystroke.
         private var appliedLayout: EditorLayout?
-        /// The statement ranges of the current text, for the caret's own highlight. Recomputed when
-        /// the text changes, never when the caret moves.
+        /// The statement ranges of the current text, for the caret's own highlight, the gutter's run
+        /// marks and the statement a keystroke repaints. Replaced by each analysis, and moved through
+        /// every edit in between, so they are approximately right the moment after a keystroke and
+        /// exactly right once the analysis lands.
         private var statementBounds: [NSRange] = []
 
         private var debounce: DispatchWorkItem?
         private var suppressAutoTrigger = false
-        private var isColouring = false
         /// True while the uppercase pass is replacing text, so the `textDidChange` that replacement
         /// raises does not start another one.
         private var isUppercasing = false
 
-        /// The string the last fold-shift was measured against. Folding is keyed by header offset,
-        /// so an edit has to be told which text it came from to know how far the offsets moved.
-        private var lastString = ""
-        /// The foldable regions the current text holds, recomputed whenever it changes.
+        // MARK: Revisions and the model
+
+        /// Bumped by every edit to the characters. Everything computed off the main thread carries
+        /// the revision it was computed for and is dropped if the text has moved on.
+        private var revision = 0
+        /// The revision the model was last written for.
+        private var publishedRevision = 0
+        /// What the model holds, as far as this editor knows: the string it last wrote, or the one it
+        /// last took from the model. `updateNSView` compares the model's text against this instead of
+        /// against the whole document; it is the same string object, so the comparison is an identity
+        /// check.
+        private(set) var publishedText: String {
+            didSet { publishedBlank = Self.isBlank(publishedText as NSString) }
+        }
+        /// Whether the model's text is empty or only whitespace. The placeholder, the Clear button and
+        /// the menus that need a query all read the model, so that flip is written at once.
+        private var publishedBlank: Bool
+
+        /// Whitespace only, by the same definition `QueryTab.hasSQL` uses.
+        private static func isBlank(_ text: NSString) -> Bool {
+            var index = 0
+            while index < text.length {
+                let c = text.character(at: index)
+                if c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D { index += 1; continue }
+                if c < 0x80 { return false }
+                guard let scalar = Unicode.Scalar(c), CharacterSet.whitespacesAndNewlines.contains(scalar) else { return false }
+                index += 1
+            }
+            return true
+        }
+        private var syncItem: DispatchWorkItem?
+        private static let syncInterval: TimeInterval = 0.15
+        private static let syncCeiling: TimeInterval = 5
+        private var unpublishedSince: CFAbsoluteTime?
+        /// The caret moved while text was owed, so the caret is owed too: it goes to the model with
+        /// the text, since a Run reads both.
+        private var selectionOwed = false
+        private let observers = ObserverBag()
+
+        /// Set while the editor itself replaces the whole text, so that replacement is not tracked as
+        /// an edit: it is followed by a full rebuild of everything the tracking would have kept.
+        private var isReplacingText = false
+
+        // MARK: Colour
+
+        /// Ranges whose attributes are owed: an edit made them stale and they have not been painted.
+        /// Kept in the coordinates of the current text.
+        private var dirty: [NSRange] = []
+        /// Whether the document is small enough to be coloured at all.
+        private var wasColourable = true
+        /// A statement longer than this is not scanned whole for one keystroke; the line is.
+        private static let paintLimit = 30_000
+
+        // MARK: Analysis
+
+        private var analysisItem: DispatchWorkItem?
+        private var analysisRevision = -1
+        private var analysisInFlight = false
+        private var analysisAgain = false
+        private static let analysisQueue = DispatchQueue(label: "QueryHive.editor.analysis", qos: .utility)
+        /// A load up to this size is analysed on the spot, so a tab opens with its gutter marks
+        /// already there; anything bigger is analysed off the main thread.
+        private static let synchronousAnalysisLimit = 60_000
+        private static let analysisDelay: TimeInterval = 0.12
+
+        // MARK: Folds
+
+        /// The foldable regions the current text holds, from the last analysis and moved through the
+        /// edits since.
         private var foldRegions: [FoldRegion] = []
-        /// Header offsets the user has folded. Offsets, not line numbers: a line number belongs to
-        /// a text, and the text is the thing that keeps changing.
-        private var foldedHeaders: Set<Int> = []
+        /// What the user has folded: the header's offset, and the body that is hidden. Offsets, not
+        /// line numbers — a line number belongs to a text, and the text is the thing that keeps
+        /// changing — and moved through every edit, so a fold stays on the lines it was made on.
+        private var folded: [Int: NSRange] = [:]
 
         private var findVisible = false
         private var findMatches: [NSRange] = []
@@ -202,6 +323,200 @@ struct SQLEditor: NSViewRepresentable {
 
         init(_ parent: SQLEditor) {
             self.parent = parent
+            self.publishedText = parent.text
+            self.publishedBlank = Self.isBlank(parent.text as NSString)
+            super.init()
+            Self.live.add(self)
+            AppModel.flushEditors = { SQLEditor.flushPendingEdits() }
+            installFlushTriggers()
+        }
+
+        /// The document's characters as an `NSString`, without copying them. `textView.string` hands
+        /// back a bridged `String`, and bridging a mutable string copies it — on a megabyte of SQL
+        /// that is the whole cost of a keystroke. The storage's own string is live; it is only ever
+        /// read here.
+        private var nsText: NSString {
+            (textView?.textStorage?.mutableString ?? NSMutableString()) as NSString
+        }
+
+        // MARK: Model sync
+
+        var hasUnpublishedEdits: Bool { publishedRevision != revision }
+
+        /// Write the model when typing pauses for 150 ms, and never more often than that. Every edit
+        /// pushes the write back, so a burst of typing costs the model — and every SwiftUI view that
+        /// reads the text — one update instead of one per key; on a large document that update is
+        /// hundreds of milliseconds of string comparisons, which is the whole cost of a keystroke.
+        /// A burst that never pauses is cut off after `syncCeiling`, so the model is never further
+        /// behind than that even without a click or a shortcut to force it.
+        private func scheduleSync() {
+            let now = CFAbsoluteTimeGetCurrent()
+            let owedSince = unpublishedSince ?? now
+            unpublishedSince = owedSince
+            syncItem?.cancel()
+            let wait = min(Self.syncInterval, max(0, owedSince + Self.syncCeiling - now))
+            let item = DispatchWorkItem { [weak self] in self?.flushToModel() }
+            syncItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: item)
+            // While text is owed, the next click or command-key writes it first: that is what puts
+            // the model in step before a Run button, a Save shortcut or a tab switch reads it.
+            guard observers.monitor == nil else { return }
+            observers.monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+            ) { [weak self] event in
+                MainActor.assumeIsolated {
+                    let shortcut = event.type == .keyDown
+                        && !event.modifierFlags.intersection([.command, .control]).isEmpty
+                    if event.type != .keyDown || shortcut { self?.flushToModel() }
+                }
+                return event
+            }
+        }
+
+        /// Hand the model what has been typed, now.
+        func flushToModel() {
+            syncItem?.cancel()
+            syncItem = nil
+            if let monitor = observers.monitor {
+                NSEvent.removeMonitor(monitor)
+                observers.monitor = nil
+            }
+            unpublishedSince = nil
+            guard let textView, hasUnpublishedEdits || selectionOwed else { return }
+            if hasUnpublishedEdits {
+                let text = textView.string
+                publishedRevision = revision
+                publishedText = text
+                parent.text = text
+            }
+            if selectionOwed {
+                selectionOwed = false
+                publishSelection(textView)
+            }
+        }
+
+        private func publishSelection(_ textView: NSTextView) {
+            parent.caret = textView.selectedRange().location
+            parent.selection = textView.selectedRange()
+        }
+
+        private func installFlushTriggers() {
+            let center = NotificationCenter.default
+            let names: [Notification.Name] = [
+                NSMenu.didBeginTrackingNotification,
+                NSApplication.willResignActiveNotification,
+                NSApplication.willTerminateNotification,
+                NSWindow.willCloseNotification,
+            ]
+            for name in names {
+                observers.tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.flushToModel() }
+                })
+            }
+        }
+
+        /// The model's text changed, or did not. Called on every SwiftUI update.
+        func adoptModelText(_ text: String) {
+            // The common case, and the cheap one: the model holds what this editor last wrote. Edits
+            // the editor has not written yet make it ahead of the model, not behind it.
+            guard text != publishedText, let textView else { return }
+            // Who wins when the model changes underneath text the editor has not written yet: the local
+            // typing. An outside write that lands in the 150 ms after a keystroke is the rarer thing and
+            // the one that can be redone; the typing cannot, and writing it back from here would be a
+            // model write during a view update. The pending flush then overwrites the outside text.
+            // A load into an editor the user has not touched since the last write is applied.
+            guard !hasUnpublishedEdits else { return }
+            syncItem?.cancel()
+            syncItem = nil
+            let previous = textView.string
+            let caret = textView.selectedRange().location
+            // Folds are keyed by header offset, so a change from outside has to say how far the text
+            // moved. The diff walks both strings, which is fine here and would not be per keystroke.
+            let shifted = folded.isEmpty ? [:] : foldedThrough(from: previous, to: text)
+            isReplacingText = true
+            textView.string = text
+            isReplacingText = false
+            publishedText = text
+            publishedRevision = revision
+            let length = (text as NSString).length
+            // Text appended from outside the editor — double-clicking a table in the tree — should
+            // leave the caret at the end of what was just written, not back where it used to be.
+            let appended = length > (previous as NSString).length && text.hasPrefix(previous)
+            textView.setSelectedRange(NSRange(location: appended ? length : min(caret, length), length: 0))
+            folded = shifted
+            // Text that arrived from outside the editor — opening a table, loading a file — has never
+            // been through `textDidChange` and would otherwise stay uncoloured.
+            recolour()
+        }
+
+        private func foldedThrough(from old: String, to new: String) -> [Int: NSRange] {
+            let headers = SQLFolding.shift(Set(folded.keys), from: old as NSString, to: new as NSString)
+            // Only the header offsets survive the diff; the bodies come back with the next analysis,
+            // which `recolour` runs straight away.
+            return Dictionary(uniqueKeysWithValues: headers.map { ($0, NSRange(location: $0, length: 0)) })
+        }
+
+        // MARK: Storage edits
+
+        /// Every edit to the characters passes through here, once, before anything reads the text.
+        func textStorage(_ storage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+                         range editedRange: NSRange, changeInLength delta: Int) {
+            guard editedMask.contains(.editedCharacters) else { return }
+            revision += 1
+            guard !isReplacingText else { return }
+            let edit = TextEdit(location: editedRange.location,
+                                oldLength: editedRange.length - delta, newLength: editedRange.length)
+            let linesBefore = ruler?.knownLineCount
+            ruler?.textEdited(range: editedRange, delta: delta)
+            edit.apply(to: &statementBounds)
+            moveFolds(through: edit)
+            if storage.length <= SQLSyntax.ceiling {
+                for i in dirty.indices { dirty[i] = edit.grow(dirty[i]) }
+                addDirty(editedStatement(for: edit, in: storage.mutableString as NSString))
+            }
+            publishLineCount()
+            if let linesBefore, linesBefore != ruler?.lineCount {
+                // A line was added or removed: everything drawn against a line number below this
+                // point moved, and the analysis that would say so is a debounce away.
+                updateRunMarks()
+                updateFoldMarks()
+            }
+        }
+
+        private func moveFolds(through edit: TextEdit) {
+            if !folded.isEmpty {
+                var moved: [Int: NSRange] = [:]
+                for (header, body) in folded {
+                    if edit.oldEnd <= header {
+                        moved[header + edit.delta] = NSRange(location: body.location + edit.delta, length: body.length)
+                    } else if edit.location >= NSMaxRange(body) {
+                        moved[header] = body
+                    } else if edit.location >= header, edit.oldEnd <= body.location {
+                        moved[header] = NSRange(location: body.location + edit.delta, length: body.length)
+                    }
+                    // Otherwise the edit landed in the body, or straddled it: that fold opens, the same
+                    // way a fold whose offset sat inside a changed span always has.
+                }
+                folded = moved
+                hideFolded(invalidating: false)
+            }
+            guard !foldRegions.isEmpty else { return }
+            foldRegions = foldRegions.compactMap { region in
+                var header = region.header, start = region.bodyStart, end = region.bodyEnd
+                if edit.oldEnd <= header {
+                    header += edit.delta; start += edit.delta; end += edit.delta
+                } else if edit.location >= end {
+                    // Untouched.
+                } else if edit.location >= header, edit.oldEnd <= start {
+                    start += edit.delta; end += edit.delta
+                } else {
+                    return nil
+                }
+                guard let ruler else { return region }
+                return FoldRegion(kind: region.kind, headerLine: ruler.line(containing: header),
+                                  lastLine: ruler.line(containing: max(start, end - 1)),
+                                  header: header, bodyStart: start, bodyEnd: end, summary: region.summary)
+            }
         }
 
         // MARK: Layout switches
@@ -213,9 +528,10 @@ struct SQLEditor: NSViewRepresentable {
         /// the syntax pass repaint the word it changed.
         @discardableResult
         private func uppercaseFinishedKeyword(_ textView: NSTextView) -> Bool {
-            guard !isUppercasing,
-                  let replacement = KeywordCase.replacement(in: textView.string as NSString,
-                                                            caret: textView.selectedRange().location)
+            let text = nsText
+            let caret = textView.selectedRange().location
+            guard !isUppercasing, Self.mightFinishKeyword(in: text, caret: caret),
+                  let replacement = keywordReplacement(in: text, caret: caret)
             else { return false }
             isUppercasing = true
             defer { isUppercasing = false }
@@ -230,6 +546,44 @@ struct SQLEditor: NSViewRepresentable {
             textView.setSelectedRange(NSRange(location: selected.location + delta,
                                               length: selected.length))
             return true
+        }
+
+        /// `KeywordCase.replacement` on the text from the caret's statement to the caret, not on the
+        /// document. It scans what it is given to decide whether the word is code, and a statement
+        /// starts in code, so what comes after the statement's start is all it can need; scanning the
+        /// whole document for every finished keyword cost more than the keystroke did.
+        private func keywordReplacement(in text: NSString, caret: Int) -> KeywordCase.Replacement? {
+            var low = 0, high = statementBounds.count
+            while low < high {
+                let mid = (low + high) / 2
+                if statementBounds[mid].location <= caret { low = mid + 1 } else { high = mid }
+            }
+            let start = low > 0 ? statementBounds[low - 1].location : 0
+            guard start > 0, start < caret else { return KeywordCase.replacement(in: text, caret: caret) }
+            let window = text.substring(with: NSRange(location: start, length: caret - start)) as NSString
+            guard let found = KeywordCase.replacement(in: window, caret: caret - start) else { return nil }
+            return KeywordCase.Replacement(range: NSRange(location: found.range.location + start,
+                                                          length: found.range.length), text: found.text)
+        }
+
+        /// The cheap half of `KeywordCase.replacement`, which scans the whole document for "is this
+        /// code" before it looks at the word. Almost every space typed follows a word that is not a
+        /// keyword, so asking the word first spares the scan; it says yes only where
+        /// `replacement` could, so the outcome is the same.
+        private static func mightFinishKeyword(in text: NSString, caret: Int) -> Bool {
+            guard caret > 1, caret <= text.length,
+                  let typed = UnicodeScalar(text.character(at: caret - 1)),
+                  KeywordCase.delimiters.contains(Character(typed)) else { return false }
+            var start = caret - 1
+            while start > 0, isKeywordCharacter(text.character(at: start - 1)) { start -= 1 }
+            guard start < caret - 1 else { return false }
+            let word = text.substring(with: NSRange(location: start, length: caret - 1 - start))
+            return word != word.uppercased() && SQLSyntax.keywords.contains(word.lowercased())
+        }
+
+        private static func isKeywordCharacter(_ character: unichar) -> Bool {
+            guard let scalar = UnicodeScalar(character) else { return false }
+            return CharacterSet.alphanumerics.contains(scalar) || scalar == "_" || scalar == "$"
         }
 
         /// Put the editor's switches into the text view, and only the ones that moved.
@@ -250,9 +604,8 @@ struct SQLEditor: NSViewRepresentable {
             applyWrap(layout)
             textView.layoutManager?.showsInvisibleCharacters = layout.showInvisibles
             if previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
-            if previous?.codeFolding != layout.codeFolding {
-                refreshFolds(previous: textView.string)
-            }
+            // The first pass has no regions to refresh: `recolour` follows it and does the analysis.
+            if let previous, previous.codeFolding != layout.codeFolding { analyse(immediately: true) }
             updateRunMarks()
             updateHighlight(textView)
         }
@@ -265,10 +618,9 @@ struct SQLEditor: NSViewRepresentable {
                 ruler.runMarks = []
                 return
             }
-            let lineStarts = SQLFolding.lineStarts(in: (textView?.string ?? "") as NSString)
-            ruler.runMarks = statementBounds.compactMap { range in
-                let line = SQLFolding.line(containing: range.location, lineStarts: lineStarts)
-                return LineNumberRulerView.RunMark(headerLine: line, headerOffset: range.location)
+            ruler.runMarks = statementBounds.map { range in
+                LineNumberRulerView.RunMark(headerLine: ruler.line(containing: range.location),
+                                            headerOffset: range.location)
             }
         }
 
@@ -278,7 +630,7 @@ struct SQLEditor: NSViewRepresentable {
         /// asked to run, so the gutter and the Run menu take the same path through the model.
         func runStatement(at offset: Int) {
             guard let textView else { return }
-            let length = (textView.string as NSString).length
+            let length = nsText.length
             guard offset >= 0, offset <= length else { return }
             let selection = NSRange(location: offset, length: 0)
             textView.setSelectedRange(selection)
@@ -311,9 +663,9 @@ struct SQLEditor: NSViewRepresentable {
             style.defaultTabInterval = space * CGFloat(layout.tabWidth)
             style.tabStops = []
             textView.defaultParagraphStyle = style
-            let whole = NSRange(location: 0, length: (textView.string as NSString).length)
+            let whole = NSRange(location: 0, length: nsText.length)
             textView.textStorage?.addAttribute(.paragraphStyle, value: style, range: whole)
-            colour(textView)
+            paintWhole(textView)
         }
 
         /// The bands behind the text: the caret's statement first, then its line over it.
@@ -323,7 +675,7 @@ struct SQLEditor: NSViewRepresentable {
                 textView.highlightRanges = []
                 return
             }
-            let text = textView.string as NSString
+            let text = nsText
             let caret = min(textView.selectedRange().location, text.length)
             var ranges: [NSRange] = []
             if layout.highlightCurrentStatement, text.length > 0,
@@ -350,12 +702,20 @@ struct SQLEditor: NSViewRepresentable {
                 // rest of this work. Doing it here as well would scan the document twice per word.
                 return
             }
-            parent.text = textView.string
-            // Folds are recomputed before the syntax pass, because the syntax pass is what applies
-            // them: the other order would paint the previous text's folds onto this one.
-            refreshFolds(previous: lastString)
-            lastString = textView.string
-            colour(textView)
+            scheduleSync()
+            // The placeholder reads emptiness and the menus read blankness; either flip is written now.
+            if Self.isBlank(nsText) != publishedBlank || (nsText.length == 0) != publishedText.isEmpty { flushToModel() }
+            let colourable = (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling
+            if colourable != wasColourable {
+                // Across the ceiling the whole document changes: colour it, or strip the colour.
+                paintWhole(textView)
+            } else if colourable {
+                paintDirty()
+            }
+            // The gutter changes with a line added or removed, which `textEdited` already redraws for,
+            // and with wrapping, where a typed character can push a line onto another fragment.
+            if parent.layout.wordWrap { ruler?.needsDisplay = true }
+            analyse(immediately: false)
             if findVisible { findQueryChanged(findBar?.query ?? "") }
             if suppressAutoTrigger {
                 // The change we just made was accepting a suggestion; re-opening the list over
@@ -370,28 +730,278 @@ struct SQLEditor: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
 
-        /// Attributes only — the string is never touched, so this cannot loop back through
-        /// `textDidChange`, and the binding keeps whatever the user typed.
+        /// Everything derived from the text, rebuilt from scratch: for text that arrived from outside
+        /// the editor, and for the first paint. Attributes only — the string is never touched, so
+        /// this cannot loop back through `textDidChange`, and the binding keeps whatever the user
+        /// typed.
         func recolour() {
             guard let textView else { return }
-            refreshFolds(previous: lastString)
-            lastString = textView.string
-            colour(textView)
+            ruler?.rebuildIndex()
+            publishLineCount()
+            statementBounds = []
+            paintWhole(textView)
+            analyse(immediately: true)
         }
 
-        private func colour(_ textView: NSTextView) {
-            guard !isColouring else { return }
-            isColouring = true
+        /// Colour the whole document. The one place that is allowed to: it is a load, or a setting
+        /// that changes every run, never a keystroke.
+        private func paintWhole(_ textView: NSTextView) {
+            dirty = []
+            wasColourable = (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling
             SQLSyntax.apply(to: textView)
-            // The syntax pass resets every attribute, so the folds have to be re-applied after it
-            // rather than once at fold time: otherwise the first keystroke anywhere would unfold
-            // every collapsed region by repainting over it.
-            SQLFoldStyler.apply(folded, to: textView)
-            isColouring = false
-            // The gutter is numbered from the text, so it has to be told when the text changed.
-            // `NSRulerView` handles scrolling on its own; it cannot know about typing.
-            ruler?.update(for: textView.string)
+            ruler?.needsDisplay = true
+        }
+
+        // MARK: Painting a statement
+
+        /// The statement an edit belongs to, from the cached bounds, or its lines when there is none.
+        private func editedStatement(for edit: TextEdit, in text: NSString) -> NSRange {
+            let touched = NSRange(location: edit.location, length: edit.newLength)
+            var low = 0, high = statementBounds.count
+            while low < high {
+                let mid = (low + high) / 2
+                if NSMaxRange(statementBounds[mid]) <= touched.location { low = mid + 1 } else { high = mid }
+            }
+            if low < statementBounds.count, statementBounds[low].location <= NSMaxRange(touched) {
+                var range = statementBounds[low]
+                var next = low
+                while next + 1 < statementBounds.count, statementBounds[next + 1].location < NSMaxRange(touched) {
+                    next += 1
+                }
+                range = NSUnionRange(range, statementBounds[next])
+                if range.length <= Self.paintLimit { return range }
+            }
+            return text.lineRange(for: NSIntersectionRange(touched, NSRange(location: 0, length: text.length)))
+        }
+
+        private func addDirty(_ range: NSRange) {
+            guard range.length > 0 else { return }
+            dirty.append(range)
+            dirty.sort { $0.location < $1.location }
+            var merged: [NSRange] = []
+            for next in dirty {
+                if let last = merged.last, next.location <= NSMaxRange(last) {
+                    merged[merged.count - 1] = NSUnionRange(last, next)
+                } else {
+                    merged.append(next)
+                }
+            }
+            dirty = merged
+        }
+
+        /// The characters on screen, and a screen either side of them: the margin is what keeps a
+        /// scroll from showing one frame of stale colour before this catches up.
+        private func visibleCharacters(_ textView: NSTextView) -> NSRange {
+            let whole = NSRange(location: 0, length: nsText.length)
+            guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return whole }
+            let origin = textView.textContainerOrigin
+            var rect = textView.visibleRect
+            rect = rect.insetBy(dx: 0, dy: -rect.height).offsetBy(dx: -origin.x, dy: -origin.y)
+            let glyphs = layoutManager.glyphRange(forBoundingRect: rect, in: container)
+            return NSIntersectionRange(layoutManager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil), whole)
+        }
+
+        /// Paint what an edit made stale, where the user can see it. What is off screen stays owed and
+        /// is painted when it scrolls into view.
+        private func paintDirty() {
+            guard let textView, !dirty.isEmpty, !textView.hasMarkedText() else { return }
+            guard (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling else {
+                dirty = []
+                return
+            }
+            let visible = visibleCharacters(textView)
+            var owed: [NSRange] = []
+            for dirtyRange in dirty {
+                let range = widenedForQuotes(dirtyRange)
+                let paint = NSIntersectionRange(range, visible)
+                guard paint.length > 0 else {
+                    owed.append(range)
+                    continue
+                }
+                SQLSyntax.apply(to: textView, lexing: range, painting: paint)
+                if paint.location > range.location {
+                    owed.append(NSRange(location: range.location, length: paint.location - range.location))
+                }
+                if NSMaxRange(paint) < NSMaxRange(range) {
+                    owed.append(NSRange(location: NSMaxRange(paint), length: NSMaxRange(range) - NSMaxRange(paint)))
+                }
+            }
+            dirty = owed
+        }
+
+        /// The statement splitter does not treat `"` or a backtick as quotes, and the colouring does, so a
+        /// statement holding `"a;b"` is cut in two where the colours read one string. A range with an
+        /// odd number of either is widened, statement by statement, first forward and then backward,
+        /// until it closes. The count is carried along rather than redone, the statements are found by
+        /// binary search, and the widening stops at `paintLimit`: a quote that never closes colours
+        /// what it can and leaves the rest alone, where following it to the end of the document made
+        /// typing a lone quote in a large document freeze.
+        private func widenedForQuotes(_ range: NSRange) -> NSRange {
+            let text = nsText
+            let start = Self.quoteParity(text, range)
+            guard start != 0 else { return range }
+            let bounds = statementBounds
+            let length = text.length
+
+            var low = range.location, high = NSMaxRange(range), parity = start
+            var index = Self.firstIndex(in: bounds) { NSMaxRange($0) > high }
+            while parity != 0, high < length, high - low < Self.paintLimit, index < bounds.count {
+                let next = NSMaxRange(bounds[index])
+                parity ^= Self.quoteParity(text, NSRange(location: high, length: next - high))
+                high = next
+                index += 1
+            }
+            if parity == 0 { return NSRange(location: low, length: high - low) }
+
+            low = range.location
+            high = NSMaxRange(range)
+            parity = start
+            index = Self.firstIndex(in: bounds) { $0.location >= low } - 1
+            while parity != 0, low > 0, high - low < Self.paintLimit, index >= 0 {
+                let previous = min(bounds[index].location, low)
+                parity ^= Self.quoteParity(text, NSRange(location: previous, length: low - previous))
+                low = previous
+                index -= 1
+            }
+            return parity == 0 ? NSRange(location: low, length: high - low) : range
+        }
+
+        /// Bit 0: an odd number of `"`. Bit 1: an odd number of backticks.
+        private static func quoteParity(_ text: NSString, _ range: NSRange) -> Int {
+            guard range.length > 0 else { return 0 }
+            var units = [unichar](repeating: 0, count: range.length)
+            text.getCharacters(&units, range: range)
+            var parity = 0
+            for unit in units {
+                if unit == 0x22 { parity ^= 1 } else if unit == 0x60 { parity ^= 2 }
+            }
+            return parity
+        }
+
+        /// The first index whose element satisfies `test`, for a list where that is monotonic.
+        private static func firstIndex(in ranges: [NSRange], where test: (NSRange) -> Bool) -> Int {
+            var low = 0, high = ranges.count
+            while low < high {
+                let mid = (low + high) / 2
+                if test(ranges[mid]) { high = mid } else { low = mid + 1 }
+            }
+            return low
+        }
+
+        func observe(_ scrollView: NSScrollView) {
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            observers.tokens.append(NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.paintDirty() }
+            })
+        }
+
+        // MARK: Analysis
+
+        private struct Analysis: Sendable {
+            let revision: Int
+            let statements: [NSRange]
+            let regions: [FoldRegion]
+        }
+
+        /// Recompute the statement ranges, the fold regions and, through them, the run marks. After a
+        /// short pause when typing, off the main thread; immediately, and on the spot when the
+        /// document is small, for a load.
+        private func analyse(immediately: Bool) {
+            analysisItem?.cancel()
+            let length = nsText.length
+            if immediately, length <= Self.synchronousAnalysisLimit, let textView {
+                apply(Self.compute(textView.string, revision: revision, folding: parent.layout.codeFolding))
+                return
+            }
+            let item = DispatchWorkItem { [weak self] in self?.startAnalysis() }
+            analysisItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + (immediately ? 0 : Self.analysisDelay), execute: item)
+        }
+
+        private func startAnalysis() {
+            guard let textView else { return }
+            guard !analysisInFlight else {
+                analysisAgain = true
+                return
+            }
+            analysisInFlight = true
+            let revision = self.revision
+            let text = textView.string
+            let folding = parent.layout.codeFolding
+            Self.analysisQueue.async {
+                let result = Self.compute(text, revision: revision, folding: folding)
+                DispatchQueue.main.async { [weak self] in self?.finishAnalysis(result) }
+            }
+        }
+
+        private func finishAnalysis(_ result: Analysis) {
+            analysisInFlight = false
+            // A result for text that has since changed is worth nothing: the edit that changed it
+            // scheduled its own analysis.
+            if result.revision == revision { apply(result) }
+            if analysisAgain || result.revision != revision {
+                analysisAgain = false
+                analyse(immediately: false)
+            }
+        }
+
+        nonisolated private static func compute(_ text: String, revision: Int, folding: Bool) -> Analysis {
+            let statements = SQLFolding.statementRanges(in: text)
+            let regions = folding ? SQLFolding.regions(in: text, statements: statements) : []
+            return Analysis(revision: revision, statements: statements, regions: regions)
+        }
+
+        /// A command that needs the regions as they are now — fold, unfold, a click on a marker — does
+        /// not wait for the pause: it computes them, once, and the analysis that was on its way is
+        /// then redundant.
+        private func ensureFreshAnalysis() {
+            guard analysisRevision != revision else { return }
+            analysisItem?.cancel()
+            if let textView {
+                apply(Self.compute(textView.string, revision: revision, folding: parent.layout.codeFolding))
+            }
+        }
+
+        /// The gutter asks before it resolves a click, so a marker's offset is never the offset of a
+        /// text that has since moved.
+        func refreshMarksIfStale() {
+            ensureFreshAnalysis()
+        }
+
+        private func apply(_ result: Analysis) {
+            guard let textView else { return }
+            analysisRevision = result.revision
+            let before = Set(statementBounds)
+            statementBounds = result.statements
+            // A statement whose bounds moved may read differently: a quote typed mid-statement merges
+            // it with the next. Only those are owed a repaint, and only if there was an earlier answer
+            // to differ from.
+            if !before.isEmpty, (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling {
+                for range in result.statements where !before.contains(range) { addDirty(range) }
+                paintDirty()
+            }
+            if parent.layout.codeFolding {
+                foldRegions = result.regions
+                let byHeader = Dictionary(foldRegions.map { ($0.header, $0) }, uniquingKeysWith: { first, _ in first })
+                // Only a header that is still a foldable region's header keeps its fold: a region that
+                // stopped being multi-line — its body deleted, say — must not stay collapsed.
+                folded = folded.reduce(into: [:]) { kept, entry in
+                    if let region = byHeader[entry.key] { kept[entry.key] = region.body }
+                }
+                unfoldRegions(containing: textView.selectedRange().location)
+            } else {
+                // Folding off means no regions and no markers. The offsets are dropped with them: a
+                // fold that was collapsed when the switch went off would otherwise come back somewhere
+                // else when it went on again, because the text may have changed in between.
+                foldRegions = []
+                folded = [:]
+            }
+            hideFolded()
             updateFoldMarks()
+            updateRunMarks()
+            updateHighlight(textView)
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -401,25 +1011,29 @@ struct SQLEditor: NSViewRepresentable {
         func textDidEndEditing(_ notification: Notification) {
             parent.focused = false
             parent.completion.dismiss()
+            flushToModel()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
-            // Run needs both: which statement the caret is in, and what is highlighted.
-            parent.caret = textView.selectedRange().location
-            parent.selection = textView.selectedRange()
+            // Run needs both: which statement the caret is in, and what is highlighted. While text is
+            // owed the caret is owed with it: typing moves it on every key, and each write is a
+            // SwiftUI update for whatever reads it.
+            if hasUnpublishedEdits {
+                selectionOwed = true
+            } else {
+                publishSelection(textView)
+            }
             // The bands follow the caret, which is the whole point of them.
             updateHighlight(textView)
             // A caret moving into a collapsed body would be invisible, and the next keystroke would
             // land somewhere the user cannot see. Opening the fold is the honest answer.
-            if !foldedHeaders.isEmpty {
+            if !folded.isEmpty {
                 let caret = textView.selectedRange().location
-                let inside = foldRegions.contains { region in
-                    region.body.length > 0 && NSLocationInRange(caret, region.body)
-                }
-                if inside {
+                if folded.values.contains(where: { NSLocationInRange(caret, $0) }) {
                     unfoldRegions(containing: caret)
-                    colour(textView)
+                    hideFolded()
+                    updateFoldMarks()
                 }
             }
             // The emptied document is the one case the caret can settle on its own: there is no word
@@ -427,7 +1041,16 @@ struct SQLEditor: NSViewRepresentable {
             // way the caret moves is handled where it happens — a click closes the list through
             // `SQLTextView.onClick`, and a keystroke rebuilds it against the new caret in `refresh`.
             guard parent.completion.active else { return }
-            if (textView.string as NSString).length == 0 { parent.completion.dismiss() }
+            if nsText.length == 0 { parent.completion.dismiss() }
+        }
+
+        /// Tell SwiftUI how many lines there are, when that changed. Deferred a turn: this is also
+        /// called from `makeNSView` and `updateNSView`, where writing state is not allowed.
+        private func publishLineCount() {
+            guard let box = parent.lineCount, let ruler else { return }
+            let lines = ruler.lineCount
+            guard box.value != lines else { return }
+            DispatchQueue.main.async { if box.value != lines { box.value = lines } }
         }
 
         // MARK: Key handling
@@ -662,78 +1285,55 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: Folding
 
-        /// The regions the user has folded right now.
-        private var folded: [FoldRegion] {
-            foldRegions.filter { foldedHeaders.contains($0.header) }
-        }
-
-        private func refreshFolds(previous: String) {
-            guard let textView else { return }
-            let text = textView.string
-            // Both the caret's band and the gutter's run markers read these, so they are computed
-            // when either wants them, and never on a caret move.
-            let wantsStatements = parent.layout.highlightCurrentStatement
-                || parent.layout.runButtonPerStatement
-            statementBounds = wantsStatements ? SQLFolding.statementRanges(in: text) : []
-            defer { updateRunMarks() }
-            // Folding off means no regions and no markers. The offsets are dropped with them: a
-            // fold that was collapsed when the switch went off would otherwise come back somewhere
-            // else when it went on again, because the text may have changed in between.
-            guard parent.layout.codeFolding else {
-                foldRegions = []
-                foldedHeaders = []
-                updateFoldMarks()
-                return
-            }
-            foldedHeaders = SQLFolding.shift(foldedHeaders,
-                                             from: previous as NSString, to: text as NSString)
-            foldRegions = SQLFolding.regions(in: text)
-            // Only a header that is still a foldable region's header keeps its fold: a region that
-            // stopped being multi-line — its body deleted, say — must not stay collapsed.
-            foldedHeaders.formIntersection(Set(foldRegions.map(\.header)))
-            unfoldRegions(containing: textView.selectedRange().location)
-        }
-
         private func unfoldRegions(containing offset: Int) {
-            let doomed = foldRegions.filter { region in
-                region.body.length > 0 && NSLocationInRange(offset, region.body)
-            }.map(\.header)
-            guard !doomed.isEmpty else { return }
-            foldedHeaders.subtract(doomed)
+            folded = folded.filter { !NSLocationInRange(offset, $0.value) }
+        }
+
+        /// Give the layout manager the bodies that are folded now. Only the ranges that changed since
+        /// last time are invalidated; a fold or an unfold touches its own lines and nothing else.
+        private func hideFolded(invalidating: Bool = true) {
+            guard let textView else { return }
+            SQLFoldStyler.hide(folded.values.filter { $0.length > 0 }, in: textView, invalidating: invalidating)
         }
 
         func toggleFold(headerOffset: Int) {
+            ensureFreshAnalysis()
             guard let textView,
                   let region = foldRegions.first(where: { $0.header == headerOffset }) else { return }
-            if foldedHeaders.contains(headerOffset) {
-                foldedHeaders.remove(headerOffset)
+            if folded[headerOffset] != nil {
+                folded[headerOffset] = nil
             } else {
-                foldedHeaders.insert(headerOffset)
+                folded[headerOffset] = region.body
                 // Put the caret on the visible header rather than leaving it inside a body that is
                 // about to disappear.
                 textView.setSelectedRange(NSRange(location: region.header, length: 0))
             }
-            colour(textView)
+            hideFolded()
+            updateFoldMarks()
         }
 
         private func foldAtCaret() {
+            ensureFreshAnalysis()
             guard let textView else { return }
             let caret = textView.selectedRange().location
             let candidates = foldRegions.filter { caret >= $0.header && caret < $0.bodyEnd }
             // Innermost: when a statement fold and a CTE fold overlap, the one whose header is
             // nearest the caret wins, so folding inside a `WITH` folds the part being looked at.
             guard let region = candidates.max(by: { $0.header < $1.header }) else { return }
-            foldedHeaders.insert(region.header)
-            colour(textView)
+            folded[region.header] = region.body
+            hideFolded()
+            updateFoldMarks()
         }
 
         private func unfoldAtCaret() {
+            ensureFreshAnalysis()
             guard let textView else { return }
             let caret = textView.selectedRange().location
-            let candidates = folded.filter { caret >= $0.header && caret < $0.bodyEnd }
+            let candidates = foldRegions.filter { folded[$0.header] != nil && caret >= $0.header && caret < $0.bodyEnd }
             guard let region = candidates.max(by: { $0.header < $1.header }) else { return }
-            foldedHeaders.remove(region.header)
-            colour(textView)
+            folded[region.header] = nil
+            hideFolded()
+            updateFoldMarks()
         }
 
         private func updateFoldMarks() {
@@ -741,7 +1341,7 @@ struct SQLEditor: NSViewRepresentable {
             ruler.foldMarks = foldRegions.map { region in
                 LineNumberRulerView.FoldMark(headerLine: region.headerLine,
                                              headerOffset: region.header,
-                                             folded: foldedHeaders.contains(region.header),
+                                             folded: folded[region.header] != nil,
                                              summary: region.summary)
             }
         }
@@ -786,7 +1386,7 @@ struct SQLEditor: NSViewRepresentable {
         }
 
         private func wordContext(in textView: NSTextView) -> WordContext? {
-            let text = textView.string as NSString
+            let text = nsText
             let caret = textView.selectedRange().location
             guard caret <= text.length else { return nil }
             // No SQL suggestions inside a string literal: the user is writing data, not code.
@@ -797,7 +1397,7 @@ struct SQLEditor: NSViewRepresentable {
         }
 
         private func wordRange(in textView: NSTextView) -> NSRange {
-            let text = textView.string as NSString
+            let text = nsText
             let caret = textView.selectedRange().location
             var start = caret
             while start > 0, Self.isWordCharacter(text.character(at: start - 1)) { start -= 1 }
@@ -822,11 +1422,16 @@ struct SQLEditor: NSViewRepresentable {
 
         /// An odd number of unescaped quotes before the caret means the caret is inside one.
         private func insideStringLiteral(_ text: NSString, upTo caret: Int) -> Bool {
+            guard caret > 0 else { return false }
+            // One bulk copy and a plain loop: reading up to the caret a unit at a time through an
+            // `NSString` is a call per character, and this runs on every pause in typing.
+            var units = [unichar](repeating: 0, count: caret)
+            text.getCharacters(&units, range: NSRange(location: 0, length: caret))
             var open = false
             var index = 0
             while index < caret {
-                if text.character(at: index) == 0x27 {       // '
-                    if index + 1 < caret, text.character(at: index + 1) == 0x27 {
+                if units[index] == 0x27 {                    // '
+                    if index + 1 < caret, units[index + 1] == 0x27 {
                         index += 2                            // '' is an escaped quote
                         continue
                     }
@@ -905,43 +1510,190 @@ enum EditorShortcut {
     }
 }
 
-/// The AppKit half of code folding: it applies and removes the collapsed-line attributes.
+/// The AppKit half of code folding: it hides and shows the collapsed lines.
 ///
-/// Folding is an **attribute** change, never a character change. The text the editor holds — and
-/// the model behind the binding — is exactly what the user typed, which is what makes editing
-/// around a fold safe and what this lane's brief asks to keep honest. The body is hidden by giving
-/// each hidden line a near-zero paragraph height and a clear foreground; `SQLSyntax.apply` resets
-/// every attribute on each pass, so a fold can never outlive the text it was made for.
+/// Folding is a **layout** change, never a character change and no longer an attribute change. The
+/// text the editor holds — and the model behind the binding — is exactly what the user typed, which
+/// is what makes editing around a fold safe. The body is hidden by the layout manager's delegate:
+/// the glyphs of a folded line are generated as `.null`, so they have no width and draw nothing, and
+/// each folded line's fragment is squashed to `collapsedLineHeight`. Nothing is written into the text
+/// storage, so a fold cannot be undone by a repaint and cannot outlive the text it was made for, and
+/// a fold or an unfold invalidates the lines it covers instead of the whole document.
 enum SQLFoldStyler {
     /// The height a folded line is squashed to.
     ///
-    /// Not literally zero: a paragraph style whose maximum line height is 0 is read as "no maximum"
-    /// and keeps full height — measured, the first prototype saved 0pt — so the smallest positive
-    /// value is used instead. At this height the glyphs overlap the line below, which is why the
-    /// foreground is cleared too.
+    /// Not literally zero: a fragment that is zero tall is skipped by some of what walks the layout —
+    /// measured, the first prototype saved 0pt — so the smallest positive value is used instead.
     static let collapsedLineHeight: CGFloat = 0.1
 
+    /// Hide exactly these regions' bodies, and show whatever was hidden before.
     static func apply(_ regions: [FoldRegion], to textView: NSTextView) {
-        guard let storage = textView.textStorage else { return }
-        let whole = NSRange(location: 0, length: storage.length)
-        let collapsed = NSMutableParagraphStyle()
-        collapsed.minimumLineHeight = collapsedLineHeight
-        collapsed.maximumLineHeight = collapsedLineHeight
+        hide(regions.map(\.body).filter { $0.length > 0 }, in: textView)
+    }
 
-        storage.beginEditing()
-        // Detached first, so a region that is no longer folded gets its height back even when this
-        // runs without a syntax pass in front of it.
-        storage.addAttribute(.paragraphStyle, value: NSParagraphStyle.default, range: whole)
-        for region in regions {
-            let body = region.body
-            guard body.length > 0, NSMaxRange(body) <= whole.length else { continue }
-            storage.addAttribute(.paragraphStyle, value: collapsed, range: body)
-            storage.addAttribute(.foregroundColor, value: NSColor.clear, range: body)
+    /// `invalidating: false` moves the hidden ranges without touching the layout: for an edit, where
+    /// the layout manager has already invalidated what changed and the glyphs it kept carry their
+    /// hidden property with them.
+    static func hide(_ bodies: [NSRange], in textView: NSTextView, invalidating: Bool = true) {
+        guard let layoutManager = textView.layoutManager else { return }
+        FoldHider.installed(on: layoutManager).replace(bodies, in: layoutManager,
+                                                       redisplaying: invalidating ? textView : nil)
+    }
+}
+
+/// The layout manager's delegate for folding. One per layout manager, kept alive by it.
+final class FoldHider: NSObject, NSLayoutManagerDelegate {
+    private(set) var hidden: [NSRange] = []
+    private static var associationKey = 0
+
+    static func installed(on layoutManager: NSLayoutManager) -> FoldHider {
+        if let existing = objc_getAssociatedObject(layoutManager, &associationKey) as? FoldHider {
+            if layoutManager.delegate !== existing { layoutManager.delegate = existing }
+            return existing
         }
-        storage.endEditing()
-        // Explicit, because hiding has to actually happen: an attribute edit usually invalidates
-        // layout on its own, but if it ever did not, the fold would be remembered and invisible.
-        textView.layoutManager?.invalidateLayout(forCharacterRange: whole, actualCharacterRange: nil)
+        let hider = FoldHider()
+        objc_setAssociatedObject(layoutManager, &associationKey, hider, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        layoutManager.delegate = hider
+        return hider
+    }
+
+    func replace(_ bodies: [NSRange], in layoutManager: NSLayoutManager, redisplaying textView: NSTextView?) {
+        let updated = Self.normalised(bodies)
+        guard updated != hidden else { return }
+        let changed = Self.minus(hidden, updated) + Self.minus(updated, hidden)
+        hidden = updated
+        guard let textView, let storage = layoutManager.textStorage else { return }
+        let text = storage.mutableString as NSString
+        for range in changed {
+            let clamped = NSIntersectionRange(range, NSRange(location: 0, length: text.length))
+            guard clamped.length > 0 else { continue }
+            // From the line before: the hidden glyphs of the first folded line are laid out into the
+            // header's own fragment, so the header is part of what changed.
+            let start = text.lineRange(for: NSRange(location: max(0, clamped.location - 1), length: 0)).location
+            let span = NSRange(location: start, length: NSMaxRange(clamped) - start)
+            layoutManager.invalidateGlyphs(forCharacterRange: span, changeInLength: 0, actualCharacterRange: nil)
+            layoutManager.invalidateLayout(forCharacterRange: span, actualCharacterRange: nil)
+        }
+        textView.needsDisplay = true
+    }
+
+    private func isHidden(_ index: Int) -> Bool {
+        hidden.contains { NSLocationInRange(index, $0) }
+    }
+
+    /// Sorted, non-empty and non-overlapping: a CTE inside a folded statement is one hidden range.
+    private static func normalised(_ ranges: [NSRange]) -> [NSRange] {
+        var merged: [NSRange] = []
+        for range in ranges.filter({ $0.length > 0 }).sorted(by: { $0.location < $1.location }) {
+            if let last = merged.last, range.location <= NSMaxRange(last) {
+                merged[merged.count - 1] = NSUnionRange(last, range)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    private static func minus(_ from: [NSRange], _ cuts: [NSRange]) -> [NSRange] {
+        var out: [NSRange] = []
+        for range in from {
+            var pieces = [range]
+            for cut in cuts {
+                pieces = pieces.flatMap { piece -> [NSRange] in
+                    let overlap = NSIntersectionRange(piece, cut)
+                    guard overlap.length > 0 else { return [piece] }
+                    return [NSRange(location: piece.location, length: overlap.location - piece.location),
+                            NSRange(location: NSMaxRange(overlap), length: NSMaxRange(piece) - NSMaxRange(overlap))]
+                        .filter { $0.length > 0 }
+                }
+            }
+            out += pieces
+        }
+        return out
+    }
+
+    // MARK: NSLayoutManagerDelegate
+
+    /// A folded character becomes a null glyph. Newlines are left alone: a null newline would not
+    /// end its line, and the line ending is what gives each folded line a fragment of its own to
+    /// squash. Everything else the layout manager decided is passed through unchanged.
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
+                       characterIndexes: UnsafePointer<Int>, font: NSFont,
+                       forGlyphRange glyphRange: NSRange) -> Int {
+        guard !hidden.isEmpty else { return 0 }
+        var updated = Array(UnsafeBufferPointer(start: props, count: glyphRange.length))
+        var changed = false
+        for i in 0..<glyphRange.length where updated[i] != .controlCharacter && isHidden(characterIndexes[i]) {
+            updated[i] = .null
+            changed = true
+        }
+        guard changed else { return 0 }
+        updated.withUnsafeBufferPointer {
+            layoutManager.setGlyphs(glyphs, properties: $0.baseAddress!, characterIndexes: characterIndexes,
+                                    font: font, forGlyphRange: glyphRange)
+        }
+        return glyphRange.length
+    }
+
+    /// A fragment that starts in a folded line is the same height as it ever was: squashed.
+    func layoutManager(_ layoutManager: NSLayoutManager,
+                       shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+                       lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+                       baselineOffset: UnsafeMutablePointer<CGFloat>, in textContainer: NSTextContainer,
+                       forGlyphRange glyphRange: NSRange) -> Bool {
+        guard !hidden.isEmpty, isHidden(layoutManager.characterIndexForGlyph(at: glyphRange.location)) else {
+            return false
+        }
+        lineFragmentRect.pointee.size.height = SQLFoldStyler.collapsedLineHeight
+        lineFragmentUsedRect.pointee.size.height = SQLFoldStyler.collapsedLineHeight
+        baselineOffset.pointee = 0
+        return true
+    }
+}
+
+/// One change to the characters: where, what it replaced, and what it left.
+struct TextEdit {
+    let location: Int
+    let oldLength: Int
+    let newLength: Int
+
+    var oldEnd: Int { location + oldLength }
+    var delta: Int { newLength - oldLength }
+
+    /// A range that follows the text: an edit before it moves it, an edit inside it stretches it, an
+    /// edit after it leaves it alone.
+    func grow(_ range: NSRange) -> NSRange {
+        if NSMaxRange(range) <= location { return range }
+        if range.location >= oldEnd { return NSRange(location: range.location + delta, length: range.length) }
+        let start = min(range.location, location)
+        let end = max(NSMaxRange(range), oldEnd) + delta
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    /// The same for a sorted list: the ones before the edit are not visited.
+    func apply(to ranges: inout [NSRange]) {
+        var low = 0, high = ranges.count
+        while low < high {
+            let mid = (low + high) / 2
+            if NSMaxRange(ranges[mid]) <= location { low = mid + 1 } else { high = mid }
+        }
+        var index = low
+        while index < ranges.count {
+            ranges[index] = grow(ranges[index])
+            index += 1
+        }
+    }
+}
+
+/// Notification tokens and the event monitor a coordinator holds, removed when it goes.
+private final class ObserverBag {
+    var tokens: [NSObjectProtocol] = []
+    var monitor: Any?
+
+    deinit {
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+        if let monitor { NSEvent.removeMonitor(monitor) }
     }
 }
 
@@ -959,13 +1711,52 @@ final class SQLTextView: NSTextView {
     /// colours and the caret readable through them.
     var highlightRanges: [NSRange] = [] {
         didSet {
-            if highlightRanges != oldValue { needsDisplay = true }
+            guard highlightRanges != oldValue else { return }
+            invalidateBands()
         }
     }
+
+    /// Where the bands were last laid out, in this view's coordinates.
+    private var paintedBands: [NSRect] = []
 
     /// The colour those bands are painted in. From the palette rather than a constant, so a light
     /// canvas does not get a light band on it.
     var highlightColour: NSColor = .clear
+
+    /// Repaint the bands that moved, not the view. A band changes with nearly every keystroke — the
+    /// statement's range grows by a character — and asking for the whole view to be redrawn made each
+    /// key re-rasterize every visible glyph, which was most of what a keystroke cost. The old
+    /// geometry is kept rather than recomputed, because the ranges it came from describe a text that
+    /// has since changed.
+    private func invalidateBands() {
+        if layoutManager == nil { needsDisplay = true }
+        let updated = bandRects(for: highlightRanges)
+        guard updated != paintedBands else { return }
+        for rect in paintedBands + updated { setNeedsDisplay(rect) }
+        paintedBands = updated
+    }
+
+    /// The band a highlighted range is painted as: one rectangle from its first line to its last, in
+    /// this view's coordinates. Asking the layout manager for every line's rectangle laid out all of a
+    /// long statement to draw what is one continuous wash.
+    private func bandRects(for ranges: [NSRange]) -> [NSRect] {
+        guard let layoutManager, let textContainer else { return [] }
+        let length = textStorage?.length ?? 0
+        var rects: [NSRect] = []
+        for range in ranges {
+            let clamped = NSIntersectionRange(range, NSRange(location: 0, length: length))
+            guard clamped.length > 0 else { continue }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: clamped, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            let first = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let last = layoutManager.lineFragmentUsedRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+            let band = NSRect(x: 0, y: first.minY, width: max(first.maxX, last.maxX),
+                              height: last.maxY - first.minY)
+            _ = textContainer
+            rects.append(HighlightBand.rect(for: band, boundsWidth: bounds.width, inset: textContainerInset))
+        }
+        return rects
+    }
 
     /// A click in the text is a caret move, so the suggestion list closes before the caret lands
     /// rather than staying anchored to the word it was built for.
@@ -982,22 +1773,10 @@ final class SQLTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        guard !highlightRanges.isEmpty, let layoutManager, let textContainer else { return }
-        let length = (string as NSString).length
+        guard !highlightRanges.isEmpty else { return }
         highlightColour.setFill()
-        for range in highlightRanges {
-            let clamped = NSIntersectionRange(range, NSRange(location: 0, length: length))
-            guard clamped.length > 0 else { continue }
-            let glyphs = layoutManager.glyphRange(forCharacterRange: clamped,
-                                                  actualCharacterRange: nil)
-            layoutManager.enumerateEnclosingRects(
-                forGlyphRange: glyphs,
-                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                in: textContainer
-            ) { band, _ in
-                NSBezierPath(rect: HighlightBand.rect(for: band, boundsWidth: self.bounds.width,
-                                                      inset: self.textContainerInset)).fill()
-            }
+        for band in bandRects(for: highlightRanges) where band.intersects(rect) {
+            NSBezierPath(rect: band).fill()
         }
     }
 }
@@ -1086,6 +1865,65 @@ enum WordScope {
     static func isQuote(_ character: unichar) -> Bool { character == 0x22 || character == 0x60 }
 }
 
+/// Where each line of a text starts, kept in step with the text one edit at a time.
+///
+/// The gutter needs "which line is this offset on" for every visible line and "how many lines are
+/// there" for its width. Both used to be answered by walking the whole document, which is a pass
+/// over the text per keystroke; this holds the answer and moves it through each edit instead, in
+/// time proportional to the lines after the edit rather than the characters in the document.
+struct LineIndex {
+    /// UTF-16 offset of each line's first character; `starts[0]` is 0, and a text ending in a
+    /// newline has a final, empty line.
+    private(set) var starts: [Int]
+    /// The length of the text this describes, which is how a stale index is noticed.
+    private(set) var length: Int
+
+    init(text: NSString) {
+        starts = SQLFolding.lineStarts(in: text)
+        length = text.length
+    }
+
+    var count: Int { starts.count }
+
+    func line(containing offset: Int) -> Int {
+        SQLFolding.line(containing: offset, lineStarts: starts)
+    }
+
+    /// `range` is where the edit left its text, and `delta` how much longer the text got.
+    mutating func edit(range: NSRange, delta: Int, in text: NSString) {
+        // A line starts after each newline, so the starts that belonged to the replaced text are the
+        // ones in (location, oldEnd]; everything after that only moves.
+        let oldEnd = range.location + range.length - delta
+        let low = firstStart(after: range.location)
+        let high = max(low, firstStart(after: oldEnd))
+        var added: [Int] = []
+        if range.length > 0 {
+            var units = [unichar](repeating: 0, count: range.length)
+            text.getCharacters(&units, range: range)
+            for i in 0..<range.length where units[i] == 0x0A { added.append(range.location + i + 1) }
+        }
+        starts.replaceSubrange(low..<high, with: added)
+        if delta != 0 {
+            var i = low + added.count
+            while i < starts.count {
+                starts[i] += delta
+                i += 1
+            }
+        }
+        length += delta
+    }
+
+    /// The index of the first start greater than `offset`.
+    private func firstStart(after offset: Int) -> Int {
+        var low = 0, high = starts.count
+        while low < high {
+            let mid = (low + high) / 2
+            if starts[mid] <= offset { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+}
+
 /// The line-number gutter down the left of the editor.
 ///
 /// An `NSRulerView` rather than a SwiftUI column beside the editor. The ruler is part of the scroll
@@ -1102,12 +1940,71 @@ final class LineNumberRulerView: NSRulerView {
     /// The font the numbers are drawn in. Set from the same family as the code, so a font chosen in
     /// Settings reaches the gutter instead of leaving it in the system's monospaced face.
     var numberFont: NSFont = .monospacedSystemFont(ofSize: 10.5, weight: .regular) {
-        didSet { needsDisplay = true }
+        didSet {
+            labelSizes = [:]
+            needsDisplay = true
+        }
     }
 
-    /// Lines in the text, kept by the coordinator on every change. Used only for the gutter's width,
-    /// so it is not recomputed per draw.
-    private var lineCount = 1
+    /// The width of a line number in the current font, by its digit count. Measuring a string is
+    /// most of what drawing a number costs, and every number of one length measures the same.
+    private var labelSizes: [Int: NSSize] = [:]
+
+    /// The line index, built on first use and moved through each edit after that.
+    private var index: LineIndex?
+
+    /// The storage's own string: reading it does not copy the document the way `textView.string` does.
+    private var text: NSString {
+        (textView?.textStorage?.mutableString ?? NSMutableString()) as NSString
+    }
+
+    /// The index, rebuilt if the text has changed length behind its back — a text view that was
+    /// filled without telling the gutter, as the tests do.
+    private func currentIndex() -> LineIndex {
+        let text = self.text
+        if let index, index.length == text.length { return index }
+        let rebuilt = LineIndex(text: text)
+        index = rebuilt
+        return rebuilt
+    }
+
+    /// Lines in the text. What the corner readout shows and what the gutter's width is sized from.
+    var lineCount: Int { currentIndex().count }
+
+    /// The count as of the last edit the index was told about, without checking it against the text.
+    /// For the moment inside `didProcessEditing`, when the text is already new and the index is not.
+    var knownLineCount: Int? { index?.count }
+
+    /// The 0-based line an offset falls on.
+    func line(containing offset: Int) -> Int { currentIndex().line(containing: offset) }
+
+    /// The text was replaced or first loaded: index it from scratch.
+    func rebuildIndex() {
+        index = LineIndex(text: text)
+        updateWidth()
+        needsDisplay = true
+    }
+
+    /// One edit, from the text storage: move the index through it. `range` is where the new text
+    /// sits and `delta` how much the text grew.
+    func textEdited(range: NSRange, delta: Int) {
+        let text = self.text
+        guard var current = index, current.length + delta == text.length else {
+            index = LineIndex(text: text)
+            updateWidth()
+            return
+        }
+        let before = current.count
+        current.edit(range: range, delta: delta, in: text)
+        index = current
+        if current.count != before {
+            updateWidth()
+            needsDisplay = true
+        }
+    }
+
+    /// Called just before a click is resolved to a marker, so the marks it reads are current.
+    var refreshMarks: (() -> Void)?
 
     /// One foldable header the gutter can draw a marker for. The coordinator supplies these; the
     /// ruler only decides whether the header is visible.
@@ -1167,17 +2064,14 @@ final class LineNumberRulerView: NSRulerView {
 
     /// The text changed: recount for the width, and repaint.
     func update(for text: String) {
-        let lines = text.isEmpty ? 1 : text.reduce(into: 1) { count, character in
-            if character == "\n" { count += 1 }
-        }
-        lineCount = lines
+        index = LineIndex(text: text as NSString)
         updateWidth()
         needsDisplay = true
     }
 
     /// The width the current line count and the run column ask for.
     private func updateWidth() {
-        let wanted = Self.gutterWidth(forLines: lineCount, showsRunMarks: showsRunMarks)
+        let wanted = Self.gutterWidth(forLines: index?.count ?? 1, showsRunMarks: showsRunMarks)
         if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
     }
 
@@ -1270,11 +2164,11 @@ final class LineNumberRulerView: NSRulerView {
         for entry in numberedLines(in: scrollView.contentView.bounds) {
             let midY = origin.y + inset.height + entry.minY + entry.height / 2
             let line = entry.number - 1
-            let hasRun = runMarks.contains { $0.headerLine == line }
+            let hasRun = Self.mark(in: runMarks, at: line, key: \.headerLine) != nil
             // The run marker, at the gutter's leading edge. The fold marker moves over when both are
             // on this line, because a statement's first line is often also a fold header.
             if hasRun { drawRunMarker(midY: midY) }
-            if let mark = foldMarks.first(where: { $0.headerLine == line }) {
+            if let mark = Self.mark(in: foldMarks, at: line, key: \.headerLine) {
                 // Always in the fold column when the run column is reserved, whether or not this
                 // line has a run marker: a marker drawn inside the run column would be read as a
                 // click on the other control and could not be hit at all.
@@ -1283,12 +2177,30 @@ final class LineNumberRulerView: NSRulerView {
             }
 
             let label = "\(entry.number)" as NSString
-            let size = label.size(withAttributes: attributes)
-            label.draw(at: NSPoint(x: ruleThickness - size.width - 8,
-                                   y: origin.y + inset.height + entry.minY
-                                      + (entry.height - size.height) / 2),
-                       withAttributes: attributes)
+            let size: NSSize
+            if let known = labelSizes[label.length] {
+                size = known
+            } else {
+                size = label.size(withAttributes: attributes)
+                labelSizes[label.length] = size
+            }
+            let point = NSPoint(x: ruleThickness - size.width - 8,
+                                y: origin.y + inset.height + entry.minY + (entry.height - size.height) / 2)
+            guard NSRect(origin: point, size: size).intersects(rect) else { continue }
+            label.draw(at: point, withAttributes: attributes)
         }
+    }
+
+    /// The mark on a line. The coordinator hands the marks over in text order, so this is a binary
+    /// search: with a mark per statement, a scan per visible line per draw is thousands of
+    /// comparisons on every keystroke.
+    private static func mark<Mark>(in marks: [Mark], at line: Int, key: KeyPath<Mark, Int>) -> Mark? {
+        var low = 0, high = marks.count
+        while low < high {
+            let mid = (low + high) / 2
+            if marks[mid][keyPath: key] < line { low = mid + 1 } else { high = mid }
+        }
+        return low < marks.count && marks[low][keyPath: key] == line ? marks[low] : nil
     }
 
     /// A right-pointing triangle: the mark that this statement can be run from here.
@@ -1332,6 +2244,7 @@ final class LineNumberRulerView: NSRulerView {
     /// everything after it; a click anywhere on a line's own column counts, because the markers are
     /// small and a user aiming at one should not have to hit it exactly.
     override func mouseDown(with event: NSEvent) {
+        refreshMarks?()
         let point = convert(event.locationInWindow, from: nil)
         if let offset = runHeader(at: point) {
             onRun?(offset)
@@ -1347,30 +2260,30 @@ final class LineNumberRulerView: NSRulerView {
     /// The statement a click in the run column names, or nil.
     private func runHeader(at point: NSPoint) -> Int? {
         guard showsRunMarks, point.x < Self.runColumn, let line = line(at: point) else { return nil }
-        return runMarks.first { $0.headerLine == line }?.headerOffset
+        return Self.mark(in: runMarks, at: line, key: \.headerLine)?.headerOffset
     }
 
     private func foldHeader(at point: NSPoint) -> Int? {
         // With the run column reserved, the leading strip belongs to the run marker.
         if showsRunMarks, point.x < Self.runColumn { return nil }
         guard let line = line(at: point) else { return nil }
-        return foldMarks.first { $0.headerLine == line }?.headerOffset
+        return Self.mark(in: foldMarks, at: line, key: \.headerLine)?.headerOffset
     }
 
     /// The 0-based line under a point in the ruler.
     private func line(at point: NSPoint) -> Int? {
+        let string = text
         guard let textView,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer,
-              (textView.string as NSString).length > 0
+              string.length > 0
         else { return nil }
         let origin = convert(NSPoint.zero, from: textView)
         let containerPoint = NSPoint(x: 0, y: point.y - origin.y - textView.textContainerInset.height)
-        let string = textView.string as NSString
-        let index = min(max(0, layoutManager.characterIndex(for: containerPoint, in: container,
-                                                            fractionOfDistanceBetweenInsertionPoints: nil)),
-                         string.length - 1)
-        return SQLFolding.line(containing: index, lineStarts: SQLFolding.lineStarts(in: string))
+        let character = min(max(0, layoutManager.characterIndex(for: containerPoint, in: container,
+                                                                fractionOfDistanceBetweenInsertionPoints: nil)),
+                            string.length - 1)
+        return line(containing: character)
     }
 
     /// One number to draw: which line it is, and where its line fragment sits in the text
@@ -1394,7 +2307,7 @@ final class LineNumberRulerView: NSRulerView {
               let container = textView.textContainer
         else { return [] }
 
-        let string = textView.string as NSString
+        let string = text
 
         // An empty editor still has a line 1, where the caret is. Left to `enumerateLineFragments`
         // it would produce nothing, and the gutter would go blank the moment the last character was
@@ -1410,7 +2323,7 @@ final class LineNumberRulerView: NSRulerView {
         // Counting starts from the top of the text, not from the top of the view, so scrolling
         // does not renumber the query. The count then advances with the fragments in order, which
         // enumerates them front to back.
-        var line = 1 + newlines(in: string, before: firstCharacter)
+        var line = 1 + currentIndex().line(containing: firstCharacter)
         var cursor = firstCharacter
         var seen = -1
         var out: [NumberedLine] = []
@@ -1440,24 +2353,5 @@ final class LineNumberRulerView: NSRulerView {
                                     height: height))
         }
         return out
-    }
-
-    /// How many newlines the text holds before `index`.
-    ///
-    /// Searched with `range(of:)` rather than by reading character by character: the call is a scan
-    /// in C, and this runs when the view is scrolled, where the text above can be long.
-    private func newlines(in string: NSString, before index: Int) -> Int {
-        let limit = min(index, string.length)
-        guard limit > 0 else { return 0 }
-        var count = 0
-        var cursor = 0
-        while cursor < limit {
-            let found = string.range(of: "\n", options: [],
-                                     range: NSRange(location: cursor, length: limit - cursor))
-            guard found.location != NSNotFound else { break }
-            count += 1
-            cursor = found.location + 1
-        }
-        return count
     }
 }

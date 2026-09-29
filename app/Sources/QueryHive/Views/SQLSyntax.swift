@@ -33,7 +33,7 @@ enum SQLSyntax {
 
     /// Past this the editor stops colouring rather than stalling on every keystroke. Nothing this
     /// app opens is that big; a pasted dump might be.
-    private static let ceiling = 200_000
+    static let ceiling = 200_000
 
     /// The attribute runs for a statement, with the fonts already merged in.
     ///
@@ -76,10 +76,20 @@ enum SQLSyntax {
         return out
     }
 
-    static func apply(to textView: NSTextView) {
+    /// Paint the text view: the whole document, or one range of it.
+    ///
+    /// `lexing` is the text the scan reads, `painting` the part of it that gets attributes. They are
+    /// two ranges because a statement has to be scanned whole to be read right, while only the part
+    /// on screen is worth touching. Both default to the whole document, which is what a load and a
+    /// settings change want; a keystroke passes the edited statement and its visible part, so it no
+    /// longer rewrites every attribute of a document it did not change.
+    static func apply(to textView: NSTextView, lexing: NSRange? = nil, painting: NSRange? = nil) {
         guard let storage = textView.textStorage else { return }
-        let sql = storage.string
-        let whole = NSRange(location: 0, length: (sql as NSString).length)
+        // The storage's own string: a bridged `String` would copy the whole document on every call.
+        let text = storage.mutableString as NSString
+        let whole = NSRange(location: 0, length: text.length)
+        let scan = lexing.map { NSIntersectionRange($0, whole) } ?? whole
+        let paint = NSIntersectionRange(painting ?? scan, scan)
 
         // Both fonts resolved once per pass, from the current setting. The comment's italic is the
         // one token that differs, and it is the only reason there are two.
@@ -88,16 +98,57 @@ enum SQLSyntax {
         let base = Self.base.merging([.font: upright]) { _, new in new }
 
         storage.beginEditing()
-        // Reset first: a word that stopped being a keyword must stop looking like one.
-        storage.setAttributes(base, range: whole)
-        for (range, attributes) in attributes(for: sql, baseFont: upright, commentFont: italic)
-        where NSMaxRange(range) <= whole.length {
-            storage.addAttributes(attributes, range: range)
+        if lexing == nil {
+            // Reset first: a word that stopped being a keyword must stop looking like one.
+            storage.setAttributes(base, range: paint)
+            if paint.length > 0 {
+                let sql = text.substring(with: scan)
+                for (range, attributes) in attributes(for: sql, baseFont: upright, commentFont: italic) {
+                    let clipped = NSIntersectionRange(
+                        NSRange(location: range.location + scan.location, length: range.length), paint)
+                    if clipped.length > 0 { storage.addAttributes(attributes, range: clipped) }
+                }
+            }
+        } else if paint.length > 0 {
+            // One statement, after a keystroke: what it should look like is known, and nearly all of
+            // it already does. Writing only what differs keeps a keystroke from invalidating and
+            // re-fixing every run in the statement, which is what a rewrite cost.
+            let sql = text.substring(with: scan)
+            var cursor = paint.location
+            func settle(_ range: NSRange, _ wanted: [NSAttributedString.Key: Any]) {
+                let clipped = NSIntersectionRange(range, paint)
+                guard clipped.length > 0 else { return }
+                if !Self.storage(storage, matches: wanted, in: clipped) { storage.setAttributes(wanted, range: clipped) }
+            }
+            for (range, attributes) in attributes(for: sql, baseFont: upright, commentFont: italic) {
+                let shifted = NSRange(location: range.location + scan.location, length: range.length)
+                if shifted.location > cursor { settle(NSRange(location: cursor, length: shifted.location - cursor), base) }
+                settle(shifted, base.merging(attributes) { _, new in new })
+                cursor = max(cursor, NSMaxRange(shifted))
+            }
+            if cursor < NSMaxRange(paint) { settle(NSRange(location: cursor, length: NSMaxRange(paint) - cursor), base) }
         }
         storage.endEditing()
         // The scan is not cheap and the attributes shift nothing, so put the caret back exactly
         // where it was rather than letting the layout pass move it.
         textView.typingAttributes = base
+    }
+
+    /// Whether every character of `range` already carries exactly `wanted`.
+    private static func storage(_ storage: NSTextStorage, matches wanted: [NSAttributedString.Key: Any],
+                                in range: NSRange) -> Bool {
+        var same = true
+        storage.enumerateAttributes(in: range, options: []) { found, _, stop in
+            guard found.count == wanted.count else { same = false; stop.pointee = true; return }
+            for (key, value) in wanted {
+                guard let other = found[key], (other as AnyObject).isEqual(value) else {
+                    same = false
+                    stop.pointee = true
+                    return
+                }
+            }
+        }
+        return same
     }
 
     // MARK: Classification
@@ -136,13 +187,20 @@ enum SQLSyntax {
     /// settings change has to reach the editor without a relaunch, and a cached dictionary cannot
     /// notice one.
     private static func colour(_ dark: UInt32, _ light: UInt32) -> [NSAttributedString.Key: Any] {
+        // Both halves resolved once. The provider runs every time AppKit draws or fixes a run, and
+        // building a colour through SwiftUI each time was a measurable part of a keystroke.
+        let darkColour = NSColor(Color(hex: dark))
+        let lightColour = NSColor(Color(hex: light))
         let adaptive = NSColor(name: nil) { appearance in
-            NSColor(Color(hex: appearance.isDark ? dark : light))
+            appearance.isDark ? darkColour : lightColour
         }
         return [.foregroundColor: adaptive]
     }
 
-    static let base = colour(0xE8EAF2, 0x1C1F26)
+    /// Every character carries the default paragraph style explicitly. The fold styler used to stamp
+    /// it over the whole document after each pass; folding no longer touches attributes, so the base
+    /// says it once and a typed character inherits it through the typing attributes.
+    static let base = colour(0xE8EAF2, 0x1C1F26).merging([.paragraphStyle: NSParagraphStyle.default]) { _, new in new }
     static let keyword = colour(0x8B7BFF, 0x5B3FD6)
     static let function = colour(0x4FD8FF, 0x0B6E8F)
     static let string = colour(0x3EE6A8, 0x0A7A52)
@@ -158,7 +216,7 @@ enum SQLSyntax {
     /// often has no italic cut for the manager to convert to, and it returns nil. When the chosen
     /// family has no italic either, the descriptor returns nil and the upright font is kept — a
     /// comment that is not slanted is a smaller loss than a comment that does not draw.
-    private static func font(italic: Bool) -> NSFont {
+    static func font(italic: Bool) -> NSFont {
         let plain = FontChoice.codeNSFont(size: 12.5, weight: .regular)
         guard italic else { return plain }
         return NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: 12.5) ?? plain

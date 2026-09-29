@@ -32,7 +32,7 @@ import SwiftUI
 ///   turn that laid out and drew the change. Main-thread work, not vsync wait.
 /// - `launch_ms`: kernel process-start to the first window update after launch, plus one turn.
 enum BenchMode {
-    static let synthetic = ["scroll-30x1m", "scroll-500x10k", "open-500x10k", "type-10k", "type-2m",
+    static let synthetic = ["scroll-30x1m", "scroll-500x10k", "open-500x10k", "type-10k", "type-2m", "type-coloured-195k",
                             "tabs-100", "launch-warm", "launch-cold"]
     static let database = ["ttfr-s1-1k", "ttfr-s1-10k", "rows-wide-500k", "mem-500k", "cancel-pg-sleep"]
     /// The names development-plan.md uses, mapped to the ones the report grades.
@@ -207,6 +207,10 @@ enum BenchMode {
         case "open-500x10k": await open(scenario, rows: 10_000, columns: 500, repeats: repeats)
         case "type-10k": await type(scenario, lines: 10_000, minimumCharacters: 0, repeats: repeats)
         case "type-2m": await type(scenario, lines: 0, minimumCharacters: 2_000_000, repeats: repeats)
+        // Under `SQLSyntax.ceiling`, so the document is fully coloured and a keystroke repaints; the
+        // typed text is SQL with keywords, and every 20th key is followed by a pause longer than the
+        // editor's debounces, so the analysis and the model write run between keystrokes.
+        case "type-coloured-195k": await type(scenario, lines: 0, minimumCharacters: 194_000, repeats: repeats, coloured: true)
         case "tabs-100": await tabs(scenario, repeats: repeats)
         case "launch-warm": await launchWarm(repeats: repeats)
         case "launch-cold": emitStatus(scenario, "tidak diukur (butuh sudo)", "a cold start needs `purge`, which needs sudo")
@@ -535,7 +539,8 @@ enum BenchMode {
     }
 
     @MainActor
-    private static func type(_ scenario: String, lines: Int, minimumCharacters: Int, repeats: Int) async {
+    private static func type(_ scenario: String, lines: Int, minimumCharacters: Int, repeats: Int,
+                             coloured: Bool = false) async {
         let model = AppModel()
         guard let tab = model.selectedTab else { return emitStatus(scenario, "[belum diukur]", "no tab") }
         let document = sqlDocument(lines: lines, minimumCharacters: minimumCharacters)
@@ -557,7 +562,9 @@ enum BenchMode {
         textView.scrollRangeToVisible(NSRange(location: middle, length: 0))
         await sleep(1.0)
 
-        let text = Array("x_foo bar_1 baz ")
+        // Coloured typing is realistic SQL: short lines and one statement per `;`, so each repeat
+        // measures the same shape instead of one line that grows by 200 characters a repeat.
+        let text = Array(coloured ? "select id, name\nfrom t\nwhere x = 1 and y in (2);\n" : "x_foo bar_1 baz ")
         for _ in 0..<repeats {
             var insert = [Double](), didChange = [Double](), keystroke = [Double]()
             for i in 0..<200 {
@@ -569,6 +576,7 @@ enum BenchMode {
                 insert.append((CFAbsoluteTimeGetCurrent() - started) * 1000)
                 // One typing interval, which lets the turn that draws the change finish.
                 await sleep(0.03)
+                if coloured, i % 20 == 19 { await sleep(0.2) }
                 if let ms = PerfSignposts.lastDidChangeMS { didChange.append(ms) }
                 if let ms = PerfSignposts.lastKeystrokeMS { keystroke.append(ms) }
             }

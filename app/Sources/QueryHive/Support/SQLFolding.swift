@@ -54,10 +54,16 @@ enum SQLFolding {
     /// final empty line — which is where the caret is, and which the gutter also numbers.
     static func lineStarts(in text: NSString) -> [Int] {
         var starts = [0]
-        var index = 0
-        while index < text.length {
-            if text.character(at: index) == 0x0A { starts.append(index + 1) }
-            index += 1
+        // Read in chunks: `character(at:)` one unit at a time is a call per character, which is
+        // milliseconds on a two-megabyte document, and this runs whenever the gutter rebuilds.
+        let chunk = 16_384
+        var buffer = [unichar](repeating: 0, count: chunk)
+        var offset = 0
+        while offset < text.length {
+            let count = min(chunk, text.length - offset)
+            text.getCharacters(&buffer, range: NSRange(location: offset, length: count))
+            for i in 0..<count where buffer[i] == 0x0A { starts.append(offset + i + 1) }
+            offset += count
         }
         return starts
     }
@@ -87,6 +93,12 @@ enum SQLFolding {
     /// cannot disagree about where a statement is. CTE bodies are found separately, because the
     /// statement scanner answers "which statement", not "which parentheses".
     static func regions(in sql: String) -> [FoldRegion] {
+        regions(in: sql, statements: nil)
+    }
+
+    /// The same, for a caller that already has the statement ranges — the editor computes both off
+    /// the main thread, and scanning twice would double the one expensive step.
+    static func regions(in sql: String, statements known: [NSRange]?) -> [FoldRegion] {
         let text = sql as NSString
         // Over the limit the editor gets no regions at all, so no fold marks and no cost. The
         // alternative — folding part of a document — would be a fold whose body is cut short.
@@ -96,7 +108,7 @@ enum SQLFolding {
 
         // One call, shared by the statements and the CTEs below. It is the expensive part, and
         // asking twice was the previous shape.
-        let statements = statementRanges(in: sql)
+        let statements = known ?? statementRanges(in: sql)
 
         for range in statements {
             // The scanner's range starts where the previous `;` left off, so it can carry the

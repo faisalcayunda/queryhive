@@ -315,6 +315,14 @@ struct EditorPane: View {
     /// `@FocusState` cannot see inside an `NSViewRepresentable`; the editor reports focus itself
     /// through `textDidBeginEditing` / `textDidEndEditing`.
     @State private var focused = false
+    /// What the editor's gutter says the line count is: the editor writes it, so counting the lines
+    /// here would be a second pass over the text for every change to it.
+    @State private var lines: EditorLineCount
+
+    init(tab: QueryTab) {
+        self.tab = tab
+        _lines = State(initialValue: EditorLineCount(text: tab.sql))
+    }
 
     /// The number of lines the query has, for the corner readout.
     ///
@@ -322,9 +330,7 @@ struct EditorPane: View {
     /// empty editor displayed "0 lines" in the corner beside a "1" in the gutter — two answers to
     /// one question, and the wrong one was the corner's: the caret is on line 1. Every editor with
     /// an empty file says the same.
-    private var lineCount: Int {
-        max(1, tab.sql.split(whereSeparator: \.isNewline).count)
-    }
+    private var lineCount: Int { lines.count }
 
     var body: some View {
         // No header row above the editor any more. It carried a "Query · N lines" label, a
@@ -349,7 +355,8 @@ struct EditorPane: View {
                       tab.selection = NSRange(location: offset, length: 0)
                       tab.caret = offset
                       model.run(tab, from: .statement)
-                  })
+                  },
+                  lineCount: lines)
             .editorBox(focused: focused)
             // NSTextView has no placeholder of its own, so it is drawn over the text
             // container's own inset (8 wide, 9 tall) plus its line fragment padding.

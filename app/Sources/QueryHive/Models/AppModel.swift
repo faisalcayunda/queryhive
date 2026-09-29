@@ -8,6 +8,19 @@ import UniformTypeIdentifiers
 /// queries be in flight at once.
 @Observable
 final class AppModel {
+    /// Hands the model whatever the editors have typed but not yet written to `tab.sql`. The editor
+    /// writes the model on a pause in typing, so everything that reads the text — a run, an explain,
+    /// a save, the session — calls this first. The editor installs it; the model does not know about
+    /// view code.
+    @MainActor static var flushEditors: @MainActor () -> Void = {}
+
+    /// Called at the top of everything that reads a tab's SQL. The model is not main-actor isolated,
+    /// so this asserts what those callers already are: on the main thread. Off it, this traps rather
+    /// than reading text the editor has not written.
+    private static func flushEditorsNow() {
+        MainActor.assumeIsolated { flushEditors() }
+    }
+
     static let sqlContentTypes = ["sql", "txt"].compactMap { UTType(filenameExtension: $0) }
 
     // MARK: Connections
@@ -811,6 +824,8 @@ final class AppModel {
             guard status == 0, let restored, !restored.isEmpty else { return }
             // Only a workspace nobody has used: one tab, no SQL, no run, not a listing. Otherwise
             // the user is already working and their tab is the one that wins.
+            // An editor may still hold typing the model has not been given.
+            Self.flushEditorsNow()
             guard self.tabs.count == 1, let only = self.tabs.first,
                   !only.hasSQL, only.stage == .idle, only.preview == nil,
                   only.objectScope == nil else { return }
@@ -861,6 +876,7 @@ final class AppModel {
     /// The settings a session save runs with, or `nil` when there is nothing to save yet.
     private func sessionSaveEnvironment() -> [String: String]? {
         guard persistsSession, sessionReady else { return nil }
+        Self.flushEditorsNow()
         let snapshot = tabs.map(SessionTab.init)
         guard let data = try? JSONEncoder().encode(snapshot),
               let json = String(data: data, encoding: .utf8) else { return nil }
@@ -1907,6 +1923,7 @@ final class AppModel {
 
     /// `source` decides what is sent: the selection, the statement under the caret, or everything.
     func preview(_ tab: QueryTab, from source: QuerySource = .selection) {
+        Self.flushEditorsNow()
         guard !tab.previewing, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
         let sql = tab.sql(for: source)
@@ -2726,6 +2743,7 @@ final class AppModel {
     /// because a caller that is not this app has no sheet to refuse it in.
     @discardableResult
     func saveQuery(_ tab: QueryTab, named name: String, from source: QuerySource = .all) -> Bool {
+        Self.flushEditorsNow()
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let sql = tab.sql(for: source)
         guard !trimmed.isEmpty,
@@ -2782,6 +2800,7 @@ final class AppModel {
     /// (`database(for:)` / `schema(for:)`) and the same source resolution, because a plan for a
     /// different context than the one the query would run in is worse than no plan.
     func explain(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false) {
+        Self.flushEditorsNow()
         guard !tab.previewing, !tab.explaining, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
         let sql = tab.sql(for: source)
@@ -2949,6 +2968,7 @@ final class AppModel {
     /// standing in for the other.
     func run(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false,
              substituting: String? = nil) {
+        Self.flushEditorsNow()
         guard tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
         // A statement with `:name` in it gets its values first, because everything after this reads
