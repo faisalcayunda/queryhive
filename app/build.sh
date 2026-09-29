@@ -49,6 +49,18 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$(swift build -c release --disable-sandbox --show-bin-path)/QueryHive" "$app/Contents/MacOS/"
 
+# The MCP server, beside the app binary. A separate process on purpose (Fase 2): it
+# shares nothing with the app but the database file and the Keychain, so a client that
+# kills it cannot touch the app, and the app never spawns it — the user's MCP client
+# does, pointing at this path. `build-ffi.sh` above already built it, because that is a
+# plain `cargo build -p qh-ffi --release` and the binary is one of the package's targets.
+MCP_BIN="../target/release/queryhive-mcp"
+if [ ! -x "$MCP_BIN" ]; then
+    echo "queryhive-mcp was not built — app/build-ffi.sh should have produced $MCP_BIN"
+    exit 1
+fi
+cp "$MCP_BIN" "$app/Contents/MacOS/queryhive-mcp"
+
 # Sparkle is the bundle's one dynamic framework, and the only thing here that did not come from
 # this repository. `ditto` rather than `cp -R`: a framework is mostly symlinks (`Sparkle`,
 # `Versions/Current`, `Resources`), and copying them as files would leave a layout that codesign

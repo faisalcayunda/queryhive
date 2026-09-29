@@ -89,6 +89,9 @@ pub mod config;
 pub mod env;
 pub mod events;
 pub mod local;
+/// The MCP server's protocol, tools, scope rules and handshake (Fase 2). A separate
+/// binary in this crate speaks it; the app links the same library and never calls it.
+pub mod mcp;
 pub mod progress;
 pub mod retry;
 pub mod sql_ident;

@@ -16,6 +16,13 @@ rusqlite.workspace = true
 # that wrote it, not an alias that fails when both are present.
 serde_json.workspace = true
 thiserror.workspace = true
+# The MCP token store: `sha2` hashes the token, `hex` spells the digest the way the
+# `token_hash` column stores it, and `rand` draws the token itself from the OS CSPRNG.
+# All three were already in the graph as transitive dependencies; Fase 2 made them
+# direct so that the store does not depend on somebody else's feature selection.
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.9"
 
 [dev-dependencies]
 # The migrator is a state machine; a fake clock is what keeps its tests honest.

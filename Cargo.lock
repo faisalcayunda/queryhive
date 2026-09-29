@@ -2418,9 +2418,12 @@ dependencies = [
 name = "qh-storage"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "qh-sync",
+ "rand 0.9.5",
  "rusqlite",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
 ]

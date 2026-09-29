@@ -31,6 +31,13 @@ Two shapes in the list are worth knowing rather than re-reading every row:
   permissive and both are met by shipping the notice, which is what `LICENSE` and the
   release SBOM are for.
 
+**Fase 2, 29 Sep 2026.** `qh-storage` gained three direct dependencies for the MCP token
+store: `sha2` (the token's digest), `hex` (the spelling the `token_hash` column stores),
+and `rand` (the token itself, from the OS CSPRNG). All three were already in the graph as
+transitive dependencies, so no new crate and no new licence entered the build; the table
+below is unchanged. They were made direct so the store does not inherit somebody else's
+feature selection, and `rand` is pinned at `0.9` to match the version already resolved.
+
 | Crate | Version | Licence | Source |
 |---|---|---|---|
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

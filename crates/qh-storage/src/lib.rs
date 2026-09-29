@@ -32,12 +32,14 @@
 mod connections;
 mod history;
 pub mod import;
+mod mcp_token;
 pub mod migrate;
 mod session;
 
 pub use connections::{ConnectionGroup, ConnectionKind, ConnectionRecord};
 pub use history::{Outcome, QueryHistoryRecord, SavedQueryRecord};
 pub use import::{ImportPlan, ImportReport, ImportedSource, SkippedRow};
+pub use mcp_token::{hash_token, McpTokenRecord, TokenState};
 pub use migrate::{AppliedMigration, Migration, MIGRATIONS};
 pub use session::{SessionRecord, SESSION_ID};
 
@@ -96,6 +98,15 @@ pub enum StorageError {
 
     #[error("the row holds {text:?} where an identity belongs: {reason}")]
     BadId { text: String, reason: String },
+
+    /// An `mcp_token` text column that is not the JSON array of strings it must be.
+    ///
+    /// Its own variant because the message has to name the column: an operator who has
+    /// to repair a token row by hand needs to know whether it is `scopes_json` or
+    /// `connections_json` that will not parse, and "the database refused the statement"
+    /// would send them looking in the wrong place.
+    #[error("the mcp_token row holds {column} that is not a JSON array of strings: {reason}")]
+    BadMcpTokenJson { column: String, reason: String },
 
     #[error("HOME is not set, so there is nowhere to keep the database")]
     NoHomeDirectory,
@@ -411,6 +422,22 @@ mod tests {
         assert_eq!(
             columns("schema_migration"),
             vec!["version", "applied_at", "name"]
+        );
+        assert_eq!(
+            columns("mcp_token"),
+            vec![
+                "id",
+                "name",
+                "token_hash",
+                "scopes_json",
+                "connections_json",
+                "expires_at",
+                "revoked_at",
+                "last_used_at",
+                "updated_at",
+                "deleted_at",
+                "version",
+            ]
         );
     }
 

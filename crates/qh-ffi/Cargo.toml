@@ -40,6 +40,13 @@ path = "src/bin/uniffi-bindgen.rs"
 name = "queryhive-engine"
 path = "src/main.rs"
 
+# The MCP server (Fase 2): MCP over stdio, and the three token subcommands. A separate
+# process from the app on purpose — a client that kills it cannot touch the app, and the
+# app never spawns it. It ships beside the app binary in `QueryHive.app/Contents/MacOS/`.
+[[bin]]
+name = "queryhive-mcp"
+path = "src/bin/mcp.rs"
+
 [dependencies]
 qh-core.workspace = true
 # The local store and the password store, for the three commands that do not open a

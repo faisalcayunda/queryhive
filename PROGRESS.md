@@ -39,6 +39,12 @@
 > satu di luar cakupan D-4 dan keputusannya masih terbuka; 14 kasus MySQL/Trino belum dijalankan).
 > Restore tab dibuktikan pada bundel sungguhan lewat AppleScript quit, bukan hanya lewat render
 > offscreen. Seluruh pekerjaan Fase 0 + Fase 1 **sudah di-commit**.
+>
+> **Status 29 Sep 2026 (lanjutan):** Fase 2 (MCP server read-only) mendarat di ruang kerja yang sama
+> dan **belum di-commit**. Gate: `cargo test --workspace` **636 lulus / 0 gagal**, `swift test`
+> **169 / 0 gagal**, `cargo deny check licenses` `licenses ok`, `./app/build.sh` menaruh
+> `queryhive-mcp` di bundle. Penerimaan hidup pada Trino 483 lulus; klien MCP-nya digulung sendiri,
+> bukan pihak ketiga. Detailnya di §"MCP server read-only" di bawah.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -1798,6 +1804,64 @@ Verifikasi berat 29 Sep 2026 (sesudah session): `cargo fmt --all --check` ✅,
 `licenses ok` ✅, `swift build && swift test` → **169 tes / 0 gagal** ✅, `./app/build.sh` →
 `Built dist/QueryHive.app` ✅. Fase 0 dan Fase 1 ditutup, dan seluruh pekerjaan itu di-commit
 bersama dokumen ini.
+
+### MCP server read-only, dan Fase 2 mendarat dengan klien yang digulung sendiri (29 Sep 2026)
+
+**Fase 2 dibangun sebagai binari ketiga di paket yang sama.** `crates/qh-ffi/src/bin/mcp.rs` adalah
+`queryhive-mcp`, dan `crates/qh-ffi/src/mcp.rs` memuat protokol JSON-RPC 2.0 per baris, registry
+sembilan tool read-only, aturan scope, dan handshake. Semua tool memetakan ke perintah yang sudah ada
+lewat `qh_ffi::run`; `Settings`-nya dibangun di Rust dari `ConnectionRecord`, dengan pemetaan
+`DB_KIND`/`DB_SCHEME`/`DB_SSLMODE`/`DB_INSECURE` yang menyalin `AppModel.connectionEnvironment` dan
+diuji sebagai fungsi murni. `to_table` tidak ada di registry dan ditolak dengan menyebut mode
+`replace`-nya **sebelum** registry dilihat, supaya alasannya benar walau registry berubah.
+
+**Satu aturan yang tidak boleh dilanggar: stdout hanya memuat pesan protokol.** Log, kegagalan start,
+dan peringatan semuanya ke stderr. Kegagalan token (hilang, tidak dikenal, kedaluwarsa, dicabut)
+adalah satu baris di stderr tanpa tokennya, lalu keluar bukan-nol.
+
+**Token disimpan sebagai hash, bukan teks.** Migrasi `0005_mcp_token.sql` menambah tabel `mcp_token`
+dengan `token_hash` unik; `sha2` menghitung digest, `hex` menuliskannya, dan `rand` menarik token
+256-bit dari CSPRNG. Scope adalah dua daftar: nama tool dan allowlist id koneksi. Allowlist kosong
+berarti **tidak ada koneksi**, karena default daftar izin harus menolak — kalau tidak, lupa memberi
+`--connection` justru menghasilkan token terluas. Argumen `connection` diperiksa terhadap allowlist
+sebelum database dibaca, jadi pesan galat tidak bisa dipakai membedakan id yang ada dari yang
+dikarang. Keputusan lengkapnya di `docs/decisions/0015-mcp-token-scope.md`.
+
+**Permukaan FFI tidak disentuh, jadi invariant #11 tidak terpakai.** `./app/build-ffi.sh` dijalankan
+dan `app/Generated/` **tidak berubah**; tidak ada satu varian `EngineCommand` pun yang ditambah.
+
+**Penerimaan hidup dijalankan penuh pada Trino 483, dan premis sesi sebelumnya basi lagi.** Catatan
+lama menulis hanya image PostgreSQL yang ada; `podman images` hari ini memuat `trinodb/trino:latest`
+dan `mysql:8.4`, dan ketiga kontainer dev sudah hidup. Alurnya lewat bundel: `connections.json`
+berisi koneksi Trino `tpch.tiny` tanpa password diimpor ke database sementara, token diterbitkan lewat
+`queryhive-mcp issue`, lalu server dijalankan dari
+`app/dist/QueryHive.app/Contents/MacOS/queryhive-mcp`. `initialize` menjawab `2025-06-18`;
+`tools/list` menampilkan sembilan tool tanpa `to_table`; `connections_list` mengembalikan satu baris
+allowlist tanpa user/options; `preview SELECT nationkey, name FROM nation LIMIT 3` mengembalikan
+`ALGERIA`/`ARGENTINA`/`BRAZIL`; `count` menjawab `25`; `columns nation` menjawab empat kolom dengan
+`rows:0` (karena `LIMIT 0` ditaruh di statement, bukan di setting yang di-floor ke satu);
+`export_to_file` menulis CSV 25 baris; dan `to_table` ditolak dengan `isError:true`. Handshake
+terhapus saat keluar, dan tokennya tidak muncul di stderr, `list`, maupun `stdout`.
+
+**Membunuh MCP tidak berdampak pada app, diuji dengan app sungguhan.** App dijalankan dari bundel
+dengan `open -n`, server MCP dijalankan dari bundel yang sama, lalu MCP di-`kill -9`; app masih hidup.
+Database pengguna disalin sebelum pengukuran dan dikembalikan sesudahnya. Ini sejalan dengan
+bentuknya: dua proses terpisah yang hanya berbagi berkas SQLite dan Keychain, dan app tidak pernah
+men-spawn MCP.
+
+**Yang belum, dan tidak diklaim.** Klien MCP-nya digulung sendiri (tujuh baris `write!`/`read_line`
+di `tests/mcp_stdio.rs`), karena tidak ada crate klien MCP di ruang kerja; yang terbukti adalah
+transpor dan framing, bukan bahwa klien pihak ketiga tertentu menerima deskripsi tool-nya. Jalur
+password Keychain belum teruji hidup karena koneksi Trino dev tidak memakai password. Dan
+`./app/build-dmg.sh` belum dijalankan — yang diverifikasi adalah `./app/build.sh` menaruh binernya
+di `QueryHive.app/Contents/MacOS/`, yang juga ikut ditandatangani loop yang sudah ada.
+
+Verifikasi berat 29 Sep 2026 (sesudah MCP): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**636 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+`swift build && swift test` → **169 tes / 0 gagal** ✅, `./app/build.sh` →
+`Built dist/QueryHive.app` dengan `queryhive-mcp` di `Contents/MacOS/` ✅. **Nol commit** — pohon
+sengaja ditinggalkan kotor untuk ditinjau orkestrator.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 

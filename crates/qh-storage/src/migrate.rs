@@ -46,6 +46,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "saved_query_favourite",
         sql: include_str!("../migrations/0004_saved_query_favourite.sql"),
     },
+    Migration {
+        version: 5,
+        name: "mcp_token",
+        sql: include_str!("../migrations/0005_mcp_token.sql"),
+    },
 ];
 
 /// A migration that has run, as the history table remembers it.
