@@ -461,6 +461,14 @@ struct TreeRow: View {
                 NSPasteboard.general.setString(node.title, forType: .string)
             }
             Divider()
+            Button("Import Data into Table…") { model.presentImport(into: node) }
+            Divider()
+            // Destructive, and deliberately not key-bound. Whether a question is asked is the
+            // connection's Safe Mode: `confirm` asks, `full` runs, and `no_ddl`/`read_only` refuse
+            // at the engine. `requestTableOperation` carries that contract.
+            Button("Truncate Table…") { model.requestTableOperation(.truncate, node: node) }
+            Button("Drop Table…") { model.requestTableOperation(.drop, node: node) }
+            Divider()
             Button("Refresh") { model.refresh(node) }
         }
     }

@@ -132,9 +132,10 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
 /// carries `SAFE_MODE_CONFIRMED=1`, a boolean only a caller that asked its user could have
 /// set. Touch ID, a dialog and the password fallback are the app's business — the CLI and
 /// the MCP server have no window to raise, so the engine cannot express them and does not
-/// pretend to. This window does not yet set that flag on its runs; until it does, selecting
-/// `confirm` makes the engine refuse writes from the app, which is the honest behaviour of a
-/// level whose confirmation the app cannot give.
+/// pretend to. The app asks through `RunConfirmation` and adds the flag to the one approved
+/// run (`AppModel`), for the run paths the engine guards with a confirmation; the bulk paths
+/// (`import_data`, `apply_changes`) are refused by the engine at this level on purpose, because
+/// one approval cannot cover a whole plan (ADR-0026).
 ///
 /// The engine is what enforces this — the CLI and the MCP server run the same guard — so
 /// this enum is only how the level is chosen and stored. It reaches the engine as

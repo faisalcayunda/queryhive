@@ -76,6 +76,8 @@ struct QueryHiveApp: App {
                 Button("Load SQL File…") { model.selectedTab?.loadSQLFromFile() }
                     .keyboardShortcut(model.shortcut(for: .openFile))
                     .disabled(model.selectedTab == nil)
+                Button("Import Data from File…") { model.presentImport() }
+                    .disabled(model.connections.isEmpty)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
             }
             // Every binding here comes from the current scheme, so switching scheme in Settings
@@ -195,6 +197,19 @@ struct Event: Decodable {
     /// `apply_changes` reply: how many statements ran and committed. The plan is
     /// rolled back otherwise, so this number is the whole plan or none of it.
     var applied: Int?
+
+    // `import_data`: the row-file family. `rows` above is the count written; these are the rest of
+    // its report. `errors` is the bad-row list (line-prefixed), `stopped_at` the line the import
+    // gave up on, `disposition`/`transaction` the transaction policy's own words, and `rejected`
+    // the rows that carried no value into any mapped column.
+    var rejected: Int?
+    var errors: [String]?
+    var errorsTruncated: Bool?
+    var stoppedAt: Int?
+    var transaction: Bool?
+    var disposition: String?
+    var streams: Bool?
+    var format: String?
     /// `history_entry`: whether the write landed on a row that was already there. False means the
     /// id in the reply is the one the caller would have chosen.
     var merged: Bool?

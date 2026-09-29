@@ -25,6 +25,22 @@ struct RootView: View {
             ConnectionEditorSheet(target: target)
                 .environment(model)
         }
+        // The engine's `confirm` Safe Mode level, asked where the engine cannot: one approval per
+        // run, never remembered. The closure the model holds is what starts the approved run.
+        .sheet(item: $model.pendingConfirmation) { pending in
+            RunConfirmationSheet(
+                request: pending.request,
+                onApprove: {
+                    model.pendingConfirmation = nil
+                    pending.approve()
+                },
+                onCancel: { model.pendingConfirmation = nil })
+        }
+        // The import mapping sheet, for a file the user picked.
+        .sheet(item: $model.importDraft) { draft in
+            ImportSheet(draft: draft)
+                .environment(model)
+        }
         .confirmationDialog("Delete \(model.pendingDeletionName)?",
                             isPresented: Binding(
                                 get: { model.pendingDeletion != nil },
