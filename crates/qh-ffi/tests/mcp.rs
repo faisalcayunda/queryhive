@@ -77,6 +77,9 @@ fn initialize_reports_the_tool_capability_and_the_server_name() {
     let result = &response["result"];
     assert_eq!(result["protocolVersion"], json!(mcp::PROTOCOL_VERSION));
     assert_eq!(result["capabilities"]["tools"], json!({}));
+    // Resources and prompts are declared, because this change implements both.
+    assert_eq!(result["capabilities"]["resources"], json!({}));
+    assert_eq!(result["capabilities"]["prompts"], json!({}));
     assert_eq!(result["serverInfo"]["name"], json!(mcp::SERVER_NAME));
     assert_eq!(
         result["serverInfo"]["version"],
@@ -85,7 +88,19 @@ fn initialize_reports_the_tool_capability_and_the_server_name() {
 }
 
 #[test]
-fn initialize_falls_back_when_the_client_asks_for_a_revision_nobody_has() {
+fn initialize_echoes_a_known_revision_that_is_not_the_default() {
+    let server = Server::new(full_token(), Vec::new());
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05"}}),
+    );
+    assert_eq!(response["result"]["protocolVersion"], json!("2024-11-05"));
+}
+
+#[test]
+fn initialize_refuses_a_revision_it_does_not_speak_and_lists_the_ones_it_does() {
     let server = Server::new(full_token(), Vec::new());
     let response = request(
         &server,
@@ -94,9 +109,19 @@ fn initialize_falls_back_when_the_client_asks_for_a_revision_nobody_has() {
                 "params": {"protocolVersion": "1999-01-01"}}),
     );
     assert_eq!(
-        response["result"]["protocolVersion"],
-        json!(mcp::PROTOCOL_VERSION)
+        response["error"]["code"],
+        json!(mcp::UNSUPPORTED_PROTOCOL_VERSION)
     );
+    assert_eq!(response["error"]["code"], json!(-32022));
+    let supported: Vec<&str> = response["error"]["data"]["supported"]
+        .as_array()
+        .expect("a supported list")
+        .iter()
+        .map(|version| version.as_str().expect("a version"))
+        .collect();
+    assert_eq!(supported, mcp::SUPPORTED_VERSIONS.to_vec());
+    // A refusal is not a result that happens to carry an error alongside it.
+    assert!(response["result"].is_null(), "{response}");
 }
 
 // --------------------------------------------------------------------------- //
@@ -223,7 +248,7 @@ fn a_missing_tool_argument_is_a_readable_tool_error() {
 // --------------------------------------------------------------------------- //
 
 /// A database with one allowed connection and one that must not be returned.
-fn seeded_allowlisted_db() -> (tempfile::TempDir, String, String) {
+fn seeded_allowlisted_db() -> (tempfile::TempDir, String, String, String) {
     let dir = tempfile::tempdir().expect("a temp directory");
     let path = dir.path().join("queryhive.sqlite3");
     let mut storage = Storage::open(&path).expect("open");
@@ -241,13 +266,19 @@ fn seeded_allowlisted_db() -> (tempfile::TempDir, String, String) {
 
     let denied = ConnectionRecord::new("Denied", ConnectionKind::Postgres, 1_700_000_000_001);
     storage.save_connection(&denied).expect("save denied");
+    let denied_id = denied.meta.id.to_string();
 
-    (dir, path.to_string_lossy().into_owned(), allowed_id)
+    (
+        dir,
+        path.to_string_lossy().into_owned(),
+        allowed_id,
+        denied_id,
+    )
 }
 
 #[test]
 fn connections_list_returns_only_the_allowlist_and_no_credentials() {
-    let (_dir, db_path, allowed_id) = seeded_allowlisted_db();
+    let (_dir, db_path, allowed_id, _denied_id) = seeded_allowlisted_db();
     let mut token = full_token();
     token.connections = vec![allowed_id.clone()];
     let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
@@ -285,7 +316,7 @@ fn connections_list_returns_only_the_allowlist_and_no_credentials() {
 
 #[test]
 fn an_empty_allowlist_reaches_no_connection() {
-    let (_dir, db_path, _allowed_id) = seeded_allowlisted_db();
+    let (_dir, db_path, _allowed_id, _denied_id) = seeded_allowlisted_db();
     let server = Server::new(full_token(), vec![("DB_PATH".to_owned(), db_path)]);
     let result = call(&server, &runtime(), "connections_list", json!({}));
     let events = call_events(&result);
@@ -297,7 +328,7 @@ fn an_empty_allowlist_reaches_no_connection() {
 
 #[test]
 fn a_connection_outside_the_allowlist_is_refused_without_saying_it_exists() {
-    let (_dir, db_path, allowed_id) = seeded_allowlisted_db();
+    let (_dir, db_path, allowed_id, _denied_id) = seeded_allowlisted_db();
     let mut token = full_token();
     // The allowlist names a connection that is not in the database at all, so the
     // argument below is a real row the token may not touch.
@@ -341,7 +372,7 @@ fn mcp_runs_caller_sql_read_only_so_a_drop_is_refused_before_connecting() {
     // server pins every call to `read_only` whatever the connection's own mode says.
     // The refusal names the mode, which is what proves the setting was injected: without
     // it the run would have tried to reach `trino.internal` and failed there instead.
-    let (_dir, db_path, allowed_id) = seeded_allowlisted_db();
+    let (_dir, db_path, allowed_id, _denied_id) = seeded_allowlisted_db();
     let mut token = full_token();
     token.connections = vec![allowed_id.clone()];
     let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
@@ -359,6 +390,271 @@ fn mcp_runs_caller_sql_read_only_so_a_drop_is_refused_before_connecting() {
         text.contains("read-only"),
         "MCP must run caller SQL read-only: {text}"
     );
+}
+
+// --------------------------------------------------------------------------- //
+// resources
+// --------------------------------------------------------------------------- //
+
+/// The `uri` of every resource a `resources/list` reply carries.
+fn resource_uris(response: &Json) -> Vec<String> {
+    response["result"]["resources"]
+        .as_array()
+        .expect("a resources array")
+        .iter()
+        .map(|resource| resource["uri"].as_str().expect("a uri").to_owned())
+        .collect()
+}
+
+#[test]
+fn resources_list_is_filtered_by_scope_and_the_allowlist() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+
+    // A full token sees the aggregate, the allowed connection, and its object resources.
+    let mut token = full_token();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path.clone())]);
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+    );
+    let uris = resource_uris(&response);
+    assert!(
+        uris.contains(&"queryhive://connections".to_owned()),
+        "{uris:?}"
+    );
+    assert!(
+        uris.contains(&format!("queryhive://connections/{allowed_id}")),
+        "{uris:?}"
+    );
+    assert!(
+        uris.contains(&format!("queryhive://connections/{allowed_id}/objects")),
+        "{uris:?}"
+    );
+    assert!(
+        uris.contains(&format!("queryhive://connections/{allowed_id}/tables")),
+        "{uris:?}"
+    );
+    // Nothing mentions the denied connection, by id or by name.
+    assert!(!uris.iter().any(|uri| uri.contains(&denied_id)), "{uris:?}");
+    let text = serde_json::to_string(&response).expect("json");
+    assert!(!text.contains("Denied"), "{text}");
+
+    // A token that may not call `objects`/`tables` gets the connection resources only.
+    let mut fields_only = full_token();
+    fields_only.scopes = vec!["connections_list".to_owned()];
+    fields_only.connections = vec![allowed_id.clone()];
+    let server = Server::new(fields_only, vec![("DB_PATH".to_owned(), db_path.clone())]);
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+    );
+    let uris = resource_uris(&response);
+    assert!(
+        uris.contains(&format!("queryhive://connections/{allowed_id}")),
+        "{uris:?}"
+    );
+    assert!(
+        !uris.iter().any(|uri| uri.ends_with("/objects")),
+        "{uris:?}"
+    );
+    assert!(!uris.iter().any(|uri| uri.ends_with("/tables")), "{uris:?}");
+
+    // A token with no connection-scoped tool gets nothing, whatever is in the store.
+    let mut none = full_token();
+    none.scopes = vec!["db_drivers".to_owned()];
+    none.connections = vec![allowed_id.clone()];
+    let server = Server::new(none, vec![("DB_PATH".to_owned(), db_path)]);
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+    );
+    assert!(resource_uris(&response).is_empty());
+}
+
+#[test]
+fn resources_read_refuses_out_of_allowlist_without_saying_it_exists() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+
+    // A real connection the token may not reach, and an id that never existed. Both get
+    // the same not-found, and neither message says which case it was.
+    let denied_uri = format!("queryhive://connections/{denied_id}");
+    let absent_uri = "queryhive://connections/99999999-9999-7999-8999-999999999999".to_owned();
+    let denied = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                "params": {"uri": denied_uri}}),
+    );
+    let absent = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                "params": {"uri": absent_uri}}),
+    );
+    for response in [&denied, &absent] {
+        assert_eq!(response["error"]["code"], json!(mcp::RESOURCE_NOT_FOUND));
+        assert_eq!(response["error"]["code"], json!(-32002));
+        assert!(response["result"].is_null(), "{response}");
+    }
+    let denied_message = denied["error"]["message"].as_str().expect("a message");
+    assert!(
+        denied_message.contains("resource not found"),
+        "{denied_message}"
+    );
+    assert!(!denied_message.contains("not allowed"), "{denied_message}");
+    assert!(
+        !denied_message.contains("was not found"),
+        "{denied_message}"
+    );
+    assert!(!denied_message.contains("Denied"), "{denied_message}");
+
+    // The object resource of a denied connection is refused too, even though this token
+    // has the `objects` scope: the allowlist is the second gate.
+    let objects = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                "params": {"uri": format!("queryhive://connections/{denied_id}/objects")}}),
+    );
+    assert_eq!(objects["error"]["code"], json!(mcp::RESOURCE_NOT_FOUND));
+
+    // A resource the token may reach reads, and carries no credential field.
+    let allowed = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                "params": {"uri": format!("queryhive://connections/{allowed_id}")}}),
+    );
+    assert!(allowed["error"].is_null(), "{allowed}");
+    let text = allowed["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(text.contains("Allowed"), "{text}");
+    assert!(text.contains(&allowed_id), "{text}");
+    for forbidden in [
+        "secret-user",
+        "secret_ref",
+        "options",
+        "password",
+        "user_name",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+    }
+}
+
+#[test]
+fn resources_read_of_the_aggregate_lists_only_the_allowlist() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+                "params": {"uri": "queryhive://connections"}}),
+    );
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    let rows: Vec<Json> = serde_json::from_str(text).expect("a JSON array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], json!(allowed_id));
+    assert!(!text.contains(&denied_id));
+    assert!(!text.contains("Denied"), "{text}");
+}
+
+// --------------------------------------------------------------------------- //
+// prompts
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn prompts_list_answers_and_is_filtered_by_scope() {
+    let server = Server::new(full_token(), Vec::new());
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}),
+    );
+    let prompts = response["result"]["prompts"]
+        .as_array()
+        .expect("a prompts array");
+    let names: Vec<&str> = prompts
+        .iter()
+        .map(|prompt| prompt["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["explain_query", "summarize_tables"]);
+    for prompt in prompts {
+        assert!(!prompt["description"]
+            .as_str()
+            .expect("a description")
+            .is_empty());
+        assert!(!prompt["arguments"]
+            .as_array()
+            .expect("arguments")
+            .is_empty());
+    }
+
+    // A token scoped to one tool is offered only the prompt for that tool.
+    let mut token = full_token();
+    token.scopes = vec!["explain".to_owned()];
+    let server = Server::new(token, Vec::new());
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}),
+    );
+    let names: Vec<&str> = response["result"]["prompts"]
+        .as_array()
+        .expect("a prompts array")
+        .iter()
+        .map(|prompt| prompt["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["explain_query"]);
+}
+
+#[test]
+fn prompts_get_renders_the_template_from_its_arguments() {
+    let server = Server::new(full_token(), Vec::new());
+    let response = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/get",
+                "params": {"name": "explain_query",
+                           "arguments": {"connection": "abc", "sql": "select 1"}}}),
+    );
+    assert_eq!(response["result"]["messages"][0]["role"], json!("user"));
+    let text = response["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(text.contains("abc"), "{text}");
+    assert!(text.contains("select 1"), "{text}");
+
+    // A missing required argument is a params error, not a rendered prompt.
+    let missing = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/get",
+                "params": {"name": "explain_query", "arguments": {"connection": "abc"}}}),
+    );
+    assert_eq!(missing["error"]["code"], json!(-32602));
+    assert!(missing["result"].is_null(), "{missing}");
+
+    // An unknown prompt is refused.
+    let unknown = request(
+        &server,
+        &runtime(),
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/get",
+                "params": {"name": "nope"}}),
+    );
+    assert_eq!(unknown["error"]["code"], json!(-32602));
 }
 
 // --------------------------------------------------------------------------- //
