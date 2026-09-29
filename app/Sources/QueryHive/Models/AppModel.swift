@@ -255,7 +255,7 @@ final class AppModel {
             "SAVED_ID": query.id,
             "FAVOURITE": query.favourite ? "0" : "1",
         ]
-        _ = Engine.current.run("saved_queries", env: env, onEvent: { event in
+        _ = Engine.current.run("saved_queries", env: Self.localEnvironment(env), onEvent: { event in
             if event.event == "error" { self.savedError = event.message }
         }, onExit: { _, _ in
             // Re-read rather than flipping the flag in place: the engine owns the revision, and both
@@ -771,7 +771,7 @@ final class AppModel {
     private func restoreSession() {
         var restored: [SessionTab]?
         var active: String?
-        Engine.current.run("session", env: localEnvironment(["SESSION_ACTION": "load"]),
+        Engine.current.run("session", env: Self.localEnvironment(["SESSION_ACTION": "load"]),
                            onEvent: { event in
             guard event.event == "session", event.saved == true else { return }
             restored = event.tabs
@@ -825,7 +825,7 @@ final class AppModel {
         let snapshot = tabs.map(SessionTab.init)
         guard let data = try? JSONEncoder().encode(snapshot),
               let json = String(data: data, encoding: .utf8) else { return nil }
-        var env = localEnvironment(["SESSION_ACTION": "save", "TABS_JSON": json])
+        var env = Self.localEnvironment(["SESSION_ACTION": "save", "TABS_JSON": json])
         if let id = selectedTabID { env["ACTIVE_TAB_ID"] = id.uuidString }
         return env
     }
@@ -840,7 +840,7 @@ final class AppModel {
     /// Named for the database rather than for the session because the account and profile commands
     /// need the same redirection: a snapshot must not create an account row in the database the user
     /// actually uses.
-    private func localEnvironment(_ base: [String: String]) -> [String: String] {
+    static func localEnvironment(_ base: [String: String]) -> [String: String] {
         guard let root = ConnectionStore.root else { return base }
         var env = base
         env["DB_PATH"] = root.appendingPathComponent("queryhive.sqlite3").path
@@ -2383,7 +2383,7 @@ final class AppModel {
         if let elapsedMS = elapsedMS { env["ELAPSED_MS"] = String(elapsedMS) }
         if let rowCount = rowCount { env["ROW_COUNT"] = String(rowCount) }
         if let error = error { env["ERROR_TEXT"] = error }
-        _ = Engine.current.run("history_add", env: env, onEvent: { _ in }, onExit: { _, _ in })
+        _ = Engine.current.run("history_add", env: Self.localEnvironment(env), onEvent: { _ in }, onExit: { _, _ in })
     }
 
     /// How many history rows one read asks for, and whether a Run is recorded at all.
@@ -2465,7 +2465,7 @@ final class AppModel {
         if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             env["HISTORY_SEARCH"] = search
         }
-        _ = Engine.current.run("history", env: env, onEvent: { event in
+        _ = Engine.current.run("history", env: Self.localEnvironment(env), onEvent: { event in
             switch event.event {
             case "history": entries = event.entries ?? []
             case "error": failure = event.message
@@ -2489,7 +2489,7 @@ final class AppModel {
     func loadSavedQueries() {
         var queries: [Event.SavedQuery]?
         var failure: String?
-        _ = Engine.current.run("saved_queries", env: ["SAVED_ACTION": "list"],
+        _ = Engine.current.run("saved_queries", env: Self.localEnvironment(["SAVED_ACTION": "list"]),
                                onEvent: { event in
             switch event.event {
             case "saved_queries": queries = event.queries ?? []
@@ -2515,7 +2515,7 @@ final class AppModel {
     /// is a write the first time, so running them together is a collision for no gain. The engine's
     /// busy timeout would wait it out; not racing is better.
     func loadAccount() {
-        _ = Engine.current.run("account", env: localEnvironment(["ACCOUNT_ACTION": "load"]),
+        _ = Engine.current.run("account", env: Self.localEnvironment(["ACCOUNT_ACTION": "load"]),
                                onEvent: { event in
             switch event.event {
             case "account": self.account = event.account
@@ -2529,7 +2529,7 @@ final class AppModel {
 
     /// Reads the profiles this account owns.
     func loadProfiles() {
-        _ = Engine.current.run("profiles", env: localEnvironment(["PROFILE_ACTION": "list"]),
+        _ = Engine.current.run("profiles", env: Self.localEnvironment(["PROFILE_ACTION": "list"]),
                                onEvent: { event in
             switch event.event {
             case "profiles": self.profiles = event.profiles ?? []
@@ -2577,7 +2577,7 @@ final class AppModel {
         ]
         if let email = identity.email { env["EMAIL"] = email }
         if let name = identity.displayName { env["DISPLAY_NAME"] = name }
-        _ = Engine.current.run("account", env: localEnvironment(env), onEvent: { event in
+        _ = Engine.current.run("account", env: Self.localEnvironment(env), onEvent: { event in
             switch event.event {
             case "account": self.account = event.account
             case "error": self.accountNotice = event.message
@@ -2588,7 +2588,7 @@ final class AppModel {
 
     /// Sign out. The row keeps the subject and the email: signing out is a fact, not an erasure.
     func signOut() {
-        _ = Engine.current.run("account", env: localEnvironment(["ACCOUNT_ACTION": "sign_out"]),
+        _ = Engine.current.run("account", env: Self.localEnvironment(["ACCOUNT_ACTION": "sign_out"]),
                                onEvent: { event in
             switch event.event {
             case "account": self.account = event.account
@@ -2600,7 +2600,7 @@ final class AppModel {
 
     /// Remove one profile, then re-read the list.
     func deleteProfile(_ id: String) {
-        _ = Engine.current.run("profile_delete", env: localEnvironment(["PROFILE_ID": id]),
+        _ = Engine.current.run("profile_delete", env: Self.localEnvironment(["PROFILE_ID": id]),
                                onEvent: { event in
             if event.event == "error" { self.accountNotice = event.message }
         }, onExit: { _, _ in
@@ -2624,7 +2624,7 @@ final class AppModel {
         // The connection is what the query was written against, and it is worth keeping: the same
         // statement is a different statement against another database.
         if let id = tab.connectionID { env["CONNECTION_ID"] = id.uuidString.lowercased() }
-        _ = Engine.current.run("saved_queries", env: env, onEvent: { event in
+        _ = Engine.current.run("saved_queries", env: Self.localEnvironment(env), onEvent: { event in
             if event.event == "error" { self.savedError = event.message }
         }, onExit: { _, _ in
             self.loadSavedQueries()
