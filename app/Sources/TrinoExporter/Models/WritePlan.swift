@@ -21,6 +21,11 @@ struct WriteStatement: Equatable {
     /// metadata, so every statement it builds is keyless and the engine applies
     /// the two-way rule (`actual != expected`).
     let keyed: Bool
+    /// Columns the predicate could not compare safely (empty for the common case
+    /// and for every `INSERT`). Non-empty means the match is weaker than the whole
+    /// row, so it can affect more rows than expected — the engine's count check is
+    /// what turns that into a rollback instead of a silent over-write.
+    let unmatchedColumns: [String]
 }
 
 /// The queued changes and the statements they become, built **once**.
@@ -35,6 +40,16 @@ struct WritePlan: Equatable {
     /// and the sheet says why.
     let table: String?
     let statements: [WriteStatement]
+    /// Rows the plan could not write, named with why. Empty is the ordinary case;
+    /// non-empty means the plan would do less than the queue shows, and it says so
+    /// instead of dropping the change quietly.
+    let warnings: [String]
+
+    init(table: String?, statements: [WriteStatement], warnings: [String] = []) {
+        self.table = table
+        self.statements = statements
+        self.warnings = warnings
+    }
 
     var isEmpty: Bool { statements.isEmpty }
 
@@ -61,44 +76,61 @@ struct WritePlan: Equatable {
     /// adds a row that takes it only works in that order, which is why the study
     /// records a sequence stamp on every change rather than trusting an array's
     /// order.
+    ///
+    /// The identity rule — every column that can be compared safely, at the value
+    /// it was fetched with — lives in `MatchPolicy` and `UpdateStatements.match`.
+    /// A row whose every column is excluded from the predicate yields no statement
+    /// and a warning, never a bare `DELETE`/`UPDATE` that would match the table.
+    /// Added rows are grouped and bounded by `WriteBatchBudget`.
     static func build(edits: CellEdits, rows: [[String?]], columns: [Event.Column],
-                      table: String?, kind: ConnectionKind) -> WritePlan {
+                      table: String?, kind: ConnectionKind,
+                      budget: WriteBatchBudget? = nil) -> WritePlan {
         guard let table, !columns.isEmpty else {
             return WritePlan(table: table, statements: [])
         }
+        let budget = budget ?? WriteBatchBudget.forKind(kind)
         var statements: [WriteStatement] = []
+        var warnings: [String] = []
 
         for row in edits.deletedRows.sorted() {
             guard rows.indices.contains(row) else { continue }
-            let predicate = UpdateStatements.predicate(for: rows[row], columns: columns, kind: kind)
-            let sql = predicate.isEmpty
-                ? "DELETE FROM \(table)"
-                : "DELETE FROM \(table) WHERE \(predicate)"
-            // Keyless: the predicate is every column at its fetched value, so a
-            // duplicate row would be deleted too, and the engine must see that.
-            statements.append(WriteStatement(kind: .delete, sql: sql, expectedRows: 1, keyed: false))
+            let match = UpdateStatements.match(for: rows[row], columns: columns, kind: kind)
+            guard !match.isEmpty else {
+                warnings.append(refusal(action: "deleted", row: row, excluded: match.excluded))
+                continue
+            }
+            var sql = "DELETE FROM \(table) WHERE \(match.sql)"
+            if let note = match.note { sql += " \(note)" }
+            // Keyless: the predicate is the comparable columns at their fetched
+            // values, so a duplicate row would be deleted too, and the engine must
+            // see that.
+            statements.append(WriteStatement(kind: .delete, sql: sql, expectedRows: 1, keyed: false,
+                                             unmatchedColumns: match.excluded))
         }
 
-        for sql in UpdateStatements.generate(edits: edits, rows: rows, columns: columns,
-                                             table: table, kind: kind) {
-            statements.append(WriteStatement(kind: .update, sql: sql, expectedRows: 1, keyed: false))
+        for update in UpdateStatements.generate(edits: edits, rows: rows, columns: columns,
+                                                table: table, kind: kind) {
+            guard let sql = update.sql else {
+                warnings.append(refusal(action: "updated", row: update.row,
+                                        excluded: update.excluded))
+                continue
+            }
+            statements.append(WriteStatement(kind: .update, sql: sql, expectedRows: 1, keyed: false,
+                                             unmatchedColumns: update.excluded))
         }
 
-        for insert in edits.inserted.sorted(by: { $0.sequence < $1.sequence }) {
-            let names = columns.map { quotedIdent($0.name, for: kind) }.joined(separator: ", ")
-            let values = columns.enumerated().map { index, column -> String in
-                // A column the user left blank is NULL, the same reading the grid
-                // gives an empty cell.
-                guard let text = insert.values[index] else { return "NULL" }
-                return UpdateStatements.literal(text, type: column.type)
-            }.joined(separator: ", ")
-            statements.append(WriteStatement(
-                kind: .insert,
-                sql: "INSERT INTO \(table) (\(names)) VALUES (\(values))",
-                expectedRows: 1,
-                keyed: false))
-        }
+        let inserts = InsertStatements.build(edits: edits, columns: columns, table: table,
+                                             kind: kind, budget: budget)
+        statements.append(contentsOf: inserts.statements)
+        warnings.append(contentsOf: inserts.warnings)
 
-        return WritePlan(table: table, statements: statements)
+        return WritePlan(table: table, statements: statements, warnings: warnings)
+    }
+
+    /// The wording for a row the match policy could not identify, shared by the
+    /// delete and update paths so the two cannot drift.
+    private static func refusal(action: String, row: Int, excluded: [String]) -> String {
+        "row \(row + 1) was not \(action): no column can be matched safely "
+            + "(\(excluded.joined(separator: "; ")))"
     }
 }
