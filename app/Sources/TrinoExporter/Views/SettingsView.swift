@@ -2,78 +2,98 @@ import SwiftUI
 
 /// The Settings window, reached with ⌘,.
 ///
-/// Two panes, switched at the top: **Appearance**, which is the palette, and **Keyboard**, which
-/// is the shortcut scheme. They are the two things this app asks the user to decide rather than
-/// merely fill in, and neither belongs in a query tab.
+/// A bar of five panes across the top — **General**, **Appearance**, **Editor**, **Data**,
+/// **Keyboard** — each an SF Symbol above its label, switched by clicking one. The pane below it
+/// scrolls; the bar does not.
 ///
-/// The panes are drawn with this app's own controls rather than `TabView`. A system tab bar would
-/// sit on the window's own material in the system's own colours, which is the one surface in the
-/// app that would then not be wearing the palette the user just chose two inches below it.
+/// The vocabulary and the shape of the bar are TablePro's: an icon above each label on a rounded
+/// highlight, centred, scrolling once the items outgrow the window, with a hairline between the bar
+/// and the pane. TablePro draws that bar as a native `NSToolbar` (an `NSTabViewController` with
+/// `tabStyle = .toolbar`, one `NSToolbarItem` per pane), which is why its icon sits above its
+/// label; this app draws its own bar instead of wearing a system tab bar, so the one surface that
+/// would otherwise not be wearing the palette the user just chose two inches below stays in the
+/// palette. The shape is taken; the code is this tree's own.
+///
+/// Only panes this app can fill are here. TablePro's AI, Integrations, Plugins, Sync and License
+/// panes have no QueryHive content: the adoption plan refuses AI, plugins, sync and licensing
+/// (§9), and MCP's token management is CLI-only today. A pane that exists but is empty, or that
+/// pretends to configure something the app cannot do, is worse than not having it.
 ///
 /// ## Structure
 ///
 /// The pane is **grouped rows inside titled cards**, not a flat list. Apple's HIG for settings on
 /// macOS asks for a stable pane switcher that always marks the active pane, settings organised in
-/// groups, and as few controls on screen at once as the job allows. The previous layout was one
-/// `VStack` of seven equally weighted sections separated by nothing but a divider: Preset, Theme,
-/// Accent and Tone all read as siblings even though Preset *is* a theme, an accent and a tone
-/// chosen together. Grouping them puts the relationship on screen — pick a preset, or open the
-/// Appearance card and set the three parts yourself.
+/// groups, and as few controls on screen at once as the job allows. Grouping puts the relationship
+/// on screen — pick a preset, or open the Appearance card and set the three parts yourself.
 struct SettingsView: View {
     @State private var pane: Pane
 
-    /// The pane is settable at init only so a snapshot render can photograph the Keyboard pane
-    /// without a person clicking over to it. In the running app nothing passes this.
-    init(pane: Pane = .appearance) {
+    /// The Sparkle controller the app scene owns, handed in so the General pane can offer **Check
+    /// for Updates…**. It is `nil` in a snapshot: constructing an `Updater` starts Sparkle, which is
+    /// a side effect a render must not have, so the pane draws the same control disabled instead.
+    private let updater: Updater?
+
+    /// The pane is settable at init so a snapshot render can photograph one without a person
+    /// clicking over to it, and so the app can open on a chosen pane. In the running app nothing
+    /// passes a pane, so Settings opens on General.
+    init(pane: Pane = .general, updater: Updater? = nil) {
         _pane = State(initialValue: pane)
+        self.updater = updater
     }
 
+    /// One pane per settings area, with the titles and symbols this app has content for.
+    ///
+    /// `general` is first because it is where the app's own settings live, and because the bar
+    /// opens there. The raw values are also the snapshot scene suffixes (`settings-appearance`, …).
     enum Pane: String, CaseIterable, Hashable {
-        case appearance, fonts, keyboard, data
+        case general, appearance, editor, data, keyboard
 
         var title: String {
             switch self {
+            case .general: "General"
             case .appearance: "Appearance"
-            case .fonts: "Fonts"
-            case .keyboard: "Keyboard"
+            case .editor: "Editor"
             case .data: "Data"
+            case .keyboard: "Keyboard"
             }
         }
 
-        /// A symbol per pane, so the switcher reads as navigation rather than as a segmented
-        /// filter. Both are SF Symbols the platform already uses for these ideas.
+        /// The SF Symbol the bar draws above the label. The names are TablePro's own for these five
+        /// ideas — `gearshape`, `paintbrush`, `doc.text`, `tablecells`, `keyboard` — so the bar
+        /// reads the same way in both apps.
         var symbol: String {
             switch self {
-            case .appearance: "paintpalette"
-            case .fonts: "textformat"
+            case .general: "gearshape"
+            case .appearance: "paintbrush"
+            case .editor: "doc.text"
+            case .data: "tablecells"
             case .keyboard: "keyboard"
-            case .data: "clock.arrow.circlepath"
             }
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             // Outside the scroll view on purpose: the pane switch stays put while a pane scrolls,
             // so it cannot end up off-screen behind the content it switches.
             paneBar
+
+            // The hairline TablePro's toolbar draws under itself: the bar and the pane are two
+            // surfaces, and the line is what says so without introducing a second material.
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
 
             // The pane scrolls and the window does not grow with it.
             //
             // This window had no height of its own, so it sized itself to its content — which was
             // fine while the Appearance pane was short and stopped being fine when the Mode section
             // added a picker, two paragraphs and a divider. The window grew taller than the screen,
-            // macOS pinned its top to the top edge, and Backdrop Glow and Reset — the last two
-            // things in the pane — were left below the bottom with no way to reach them. Sizing to
-            // content cannot stay out of that state, because every section added later pushes the
-            // bottom further off, so the height is pinned here and the overflow scrolls.
+            // macOS pinned its top to the top edge, and the last controls in the pane were left
+            // below the bottom with no way to reach them. Sizing to content cannot stay out of that
+            // state, because every section added later pushes the bottom further off, so the height
+            // is pinned here and the overflow scrolls.
             ScrollView {
-                switch pane {
-                case .appearance: AppearanceSettings()
-                case .fonts: FontSettings()
-                case .keyboard: KeyboardSettings()
-                case .data: DataSettings()
-                }
+                paneContent
+                    .padding(20)
             }
             // No rubber-banding when the pane already fits, which would otherwise let a short pane
             // bounce against edges that have nothing beyond them.
@@ -81,49 +101,79 @@ struct SettingsView: View {
         }
         // 560, not 480: three preset tiles share this row and each one carries a
         // "theme · accent · tone" line. At 480 that line truncated to "Midnight ·…", which is
-        // worse than not showing it.
+        // worse than not showing it. The five-item bar fits this width with room to spare — five
+        // 92pt items and their spacing come to 488pt against the 536pt inside the 12pt gutters — so
+        // the window did not have to grow for it.
         //
         // 640 tall: enough for the longest pane to show its first sections without scrolling on a
         // laptop display, and small enough to fit above the Dock with the menu bar on the shortest
         // screen this app supports.
-        .padding(20)
         .frame(width: 560, height: 640)
         .background(Tone.canvas)
     }
 
-    /// The pane switcher, drawn as a bar of equal-width buttons rather than a small segmented
-    /// control pinned to the left.
-    ///
-    /// Two reasons it is its own control. HIG asks a settings window for a switcher that stays
-    /// visible and *always marks the active pane*, and it asks for the switcher to read as
-    /// navigation between areas — which is what the symbol plus the recessed track says, and what
-    /// a 240pt segmented control floating above a 520pt pane did not.
-    private var paneBar: some View {
-        HStack(spacing: 3) {
-            ForEach(Pane.allCases, id: \.self) { option in
-                let active = pane == option
-                Button { pane = option } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: option.symbol)
-                            .font(.system(size: 11.5, weight: .medium))
-                        Text(option.title)
-                            .font(.ui(12, weight: active ? .semibold : .regular))
-                    }
-                    .foregroundStyle(active ? Tone.ink : Tone.secondary)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 28)
-                    .background(Tone.ink.opacity(active ? 0.14 : 0),
-                                in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(active ? [.isSelected] : [])
-            }
+    @ViewBuilder
+    private var paneContent: some View {
+        switch pane {
+        case .general: GeneralSettings(updater: updater)
+        case .appearance: AppearanceSettings()
+        case .editor: EditorSettings()
+        case .data: DataSettings()
+        case .keyboard: KeyboardSettings()
         }
-        .padding(3)
-        .background(Tone.recess.opacity(0.32), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .strokeBorder(Tone.ink.opacity(0.08)))
+    }
+
+    /// The pane switcher: TablePro's shape, this app's drawing.
+    ///
+    /// One item per pane, its SF Symbol above its label, the selected one on a rounded highlight.
+    /// The row is centred while it fits and scrolls once it does not, so a sixth pane would not
+    /// push the last one off the edge the way the old equal-width track did.
+    private var paneBar: some View {
+        GeometryReader { geometry in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Pane.allCases, id: \.self) { option in
+                        paneItem(option)
+                    }
+                }
+                .padding(.horizontal, 12)
+                // At least the bar's own width, so the row sits in the middle while it fits; wider
+                // once it does not, which is what turns the ScrollView into scrolling.
+                .frame(minWidth: geometry.size.width, alignment: .center)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .frame(height: 62)
+    }
+
+    /// One item of the bar: icon over label, on the highlight when it is the active pane.
+    ///
+    /// A `Button`, not a tap gesture, so it stays in the key-view loop and answers to the keyboard
+    /// the way the previous segmented bar did. The active trait is what tells a screen reader which
+    /// pane is showing, the same way `isSelected` does on the theme tiles below.
+    private func paneItem(_ option: Pane) -> some View {
+        let active = pane == option
+        return Button {
+            pane = option
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: option.symbol)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(height: 17)
+                Text(option.title)
+                    .font(.ui(10.5, weight: active ? .semibold : .regular))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(active ? Tone.ink : Tone.secondary)
+            .frame(width: 92, height: 52)
+            .background(Tone.ink.opacity(active ? 0.14 : 0),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(option.title)
+        .accessibilityLabel(option.title)
+        .accessibilityAddTraits(active ? [.isSelected] : [])
     }
 }
 
@@ -197,6 +247,119 @@ private struct RowDivider: View {
     }
 }
 
+// MARK: General
+
+/// The app's own settings: the software update, and the one button that puts every appearance
+/// choice back where it started.
+///
+/// The reset lives here rather than beside the palette it resets because it is not a palette
+/// control: `ThemeStore.reset()` also returns both fonts to the system face, so it is the app's
+/// "start over" button and belongs with the other whole-app setting. TablePro's General pane keeps
+/// its reset in the same place.
+struct GeneralSettings: View {
+    /// The app scene's Sparkle controller, or `nil` in a snapshot. See `SoftwareUpdateRow`.
+    let updater: Updater?
+
+    @Bindable private var store = ThemeStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Software update",
+                         detail: "QueryHive updates through Sparkle: it reads an appcast over HTTPS, "
+                             + "checks the archive against the signing key in the bundle, then swaps the app and "
+                             + "relaunches. This button runs the same check the QueryHive menu offers.") {
+                SoftwareUpdateRow(updater: updater)
+            }
+
+            SettingsCard(title: "Reset settings",
+                         detail: "Puts the appearance and both fonts back where they started: System "
+                             + "appearance, the Classic preset — Midnight in the dark, Daylight in the light — "
+                             + "the Ice accent, Glow at 100%, and the system interface and code fonts.") {
+                HStack {
+                    Spacer(minLength: 0)
+                    PillButton(title: "Reset", symbol: "arrow.uturn.backward", role: .quiet) {
+                        store.reset()
+                    }
+                    .disabled(isAtDefaults)
+                }
+            }
+        }
+    }
+
+    /// Whether every value the reset touches is already at its default, so the button can say
+    /// "there is nothing to undo" rather than offering a click that changes nothing.
+    ///
+    /// Both stored themes are checked, not just the one in effect: the reset writes both halves, so
+    /// a dark theme already at Midnight with a light theme that is not is still a reset waiting to
+    /// happen. The previous check looked only at the theme in effect and ignored the fonts the same
+    /// reset also moves.
+    private var isAtDefaults: Bool {
+        store.mode == .system
+            && store.darkTheme == .midnight && store.lightTheme == .daylight
+            && store.accent == .ice && store.tone == .glow && store.glow == 1.0
+            && store.uiFontFamily == FontChoice.system && store.codeFontFamily == FontChoice.system
+    }
+}
+
+/// The update card's one row: the version this build is, and the button that asks for a newer one.
+///
+/// Two shapes because the controller is optional. With one, the row observes it — `canCheckForUpdates`
+/// flips while a check runs, and the button has to follow, or a second click during a check would be
+/// accepted and Sparkle would have to ignore it. Without one (a snapshot) the row draws the same
+/// controls disabled, which is the honest state for "there is no updater in this process".
+private struct SoftwareUpdateRow: View {
+    let updater: Updater?
+
+    var body: some View {
+        if let updater {
+            LiveSoftwareUpdateRow(updater: updater)
+        } else {
+            SoftwareUpdateControls(version: Self.version, canCheck: false, check: {})
+        }
+    }
+
+    /// The bundle's version, or `nil` when this is a bare executable with no `Info.plist` — which is
+    /// what a `--snapshot` run is. The row then says nothing about a version rather than showing a
+    /// placeholder it cannot back up.
+    static var version: String? {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard let short, !short.isEmpty else { return nil }
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        guard let build, !build.isEmpty else { return short }
+        return "\(short) (\(build))"
+    }
+}
+
+private struct LiveSoftwareUpdateRow: View {
+    @ObservedObject var updater: Updater
+
+    var body: some View {
+        SoftwareUpdateControls(version: SoftwareUpdateRow.version,
+                               canCheck: updater.canCheckForUpdates,
+                               check: updater.checkForUpdates)
+    }
+}
+
+private struct SoftwareUpdateControls: View {
+    let version: String?
+    let canCheck: Bool
+    let check: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let version {
+                Text("QueryHive \(version)")
+                    .font(.code(11))
+                    .foregroundStyle(Tone.secondary)
+            }
+            Spacer(minLength: 12)
+            PillButton(title: "Check for Updates…", symbol: "arrow.triangle.2.circlepath",
+                       role: .secondary, action: check)
+                .disabled(!canCheck)
+        }
+    }
+}
+
 // MARK: Appearance
 
 /// The palette: which canvas, which accent, and how hard the backdrop glows.
@@ -238,33 +401,11 @@ struct AppearanceSettings: View {
                         .disabled(!store.tone.isLuminous)
                 }
             }
-
-            resetFooter
         }
     }
 
     private var glowLabel: String {
         "\(Int((store.glow * 100).rounded()))%"
-    }
-
-    /// Reset sits apart from the cards, under its own hairline: it is not a setting, it is the
-    /// way back from all of them, and drawing it as a fourth card would give it the same weight as
-    /// the choices it undoes.
-    private var resetFooter: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("Reset returns to System appearance and the Classic preset: midnight in the dark, "
-                 + "daylight in the light, ice, glow, 100%.")
-                .font(.ui(11))
-                .foregroundStyle(Tone.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            PillButton(title: "Reset", symbol: "arrow.uturn.backward", role: .quiet) {
-                store.reset()
-            }
-            .disabled(store.theme == .midnight && store.accent == .ice
-                      && store.tone == .glow && store.glow == 1.0)
-        }
-        .padding(.top, 2)
     }
 
     /// How an accent looks under a given tone, for a swatch or a tile preview.
@@ -440,16 +581,18 @@ struct AppearanceSettings: View {
     }
 }
 
-// MARK: Fonts
+// MARK: Editor
 
-/// Which family the chrome and the code draw in.
+/// The Editor pane, which today is the editor's typography: which family the chrome and the code
+/// draw in.
 ///
 /// Two choices rather than one, because they are two jobs. The chrome wants whatever the user reads
 /// labels in; the code wants a fixed-pitch face, and every client this app is measured against
 /// (DataGrip, Navicat) separates the two. The lists are read from the families actually installed
 /// on this machine — see `FontChoice` — so a picker never offers a font that would silently fall
-/// back to the system one.
-struct FontSettings: View {
+/// back to the system one. TablePro's Editor pane is where SQL-editor preferences live; when this
+/// app grows any, this is where they go.
+struct EditorSettings: View {
     @Bindable private var store = ThemeStore.shared
 
     var body: some View {
