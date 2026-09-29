@@ -80,6 +80,79 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 | Pembatalan < 500 ms | — | — | — | [belum diukur] |
 | Nol leak lintas FFI | — | — | — | [belum diukur] |
 
+## Sumbu 1: TTFR sampai baris pertama tergambar
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `ttfr-s2-500k` — S2 cap 500.000 | p95 ≤ 50 ms (progresif); vs TablePro ≤ 0,1× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `ttfr-s3-rtt30` — S3 RTT 30 ms (toxiproxy) | hangat ≤ 1 RTT + 20 ms (50 ms); vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `ttfr-s4-first-run` — S4 Run pertama setelah app dibuka | vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 2: Baris/s ke grid
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `rows-lineitem-1m` — Trino `tpch.sf1.lineitem`, cap 1M | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 3: Memori puncak
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `mem-5m` — 5M baris | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 4: Frame saat scroll
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 5: Latensi ketikan
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `type-10k` — berkas 10k baris, mengetik di tengah | main thread p99 ≤ 4 ms; vs TablePro photon p95 ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `type-2m` — berkas 2M karakter, mengetik di tengah | main thread p99 ≤ 8 ms; vs TablePro photon p95 ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 6: Latensi cancel
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `cancel-pg-sleep` — `pg_sleep(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `cancel-mysql-sleep` — `SLEEP(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `cancel-stream-wide` — stream `wide_500k` di tengah | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `cancel-trino-heavy` — agregasi berat Trino | p95 ≤ 300 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sumbu 7: Cold start
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `launch-warm` — launch sampai frame interaktif, hangat | ≤ 400 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `launch-cold` — launch sampai frame interaktif, dingin (setelah `purge`) | ≤ 1 dtk; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+
+## Sekunder: sort dan search
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `sort-numeric-500k` — sort numerik in-memory, 500k | ≤ 100 ms, off-main | [belum diukur] | — | [belum diukur] |
+| `sort-text-500k` — sort teks in-memory, 500k | ≤ 300 ms, off-main | [belum diukur] | — | [belum diukur] |
+
+## Sekunder: introspeksi 5.000 tabel
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `introspect-5000` — introspeksi 5.000 tabel | < 1 dtk | [belum diukur] | — | [belum diukur] |
+
+## Sekunder: leak lintas FFI
+
+| Skenario | Target | QueryHive | TablePro | Verdict |
+|---|---|---|---|---|
+| `ffi-leak` — 100× buka/tutup tab, `leaks` | nol leak | [belum diukur] | — | [belum diukur] |
+
 ## Ongkos `panic = "unwind"` pada ukuran artefak
 
 ADR-0009 memilih `panic = "unwind"` supaya panic dari data server tidak menjatuhkan aplikasi, dan

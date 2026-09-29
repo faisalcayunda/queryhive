@@ -83,6 +83,17 @@ Two timing numbers per run, and they are not the same thing:
 Peak RSS is per child process, read from `/usr/bin/time -l`. A run also records
 the machine's load average, because a number taken while four other builds are
 running describes the machine, not the engine.
+
+One schema for every axis
+-------------------------
+The records of the other axes (`deploy/dev/bench_app.py`) share this file and
+this report. Each record carries `bench` (fetch, app, ffi, blackbox; a record
+without it is a fetch record), `axis`, `scenario`, `app`, `app_rev`,
+`competitor_rev`, `hw_model`, `p_cores`, `e_cores`, `display_hz` and
+`server_image`. `--report-only` renders the fetch section as before and one
+section per axis: target, QueryHive, TablePro, verdict. A number that nobody
+measured reads `[belum diukur]`; a TablePro number that cannot be had reads
+`tidak diukur (izin OS)`, `tidak diukur (butuh sudo)` or `tidak mendukung`.
 """
 
 from __future__ import annotations
@@ -153,6 +164,7 @@ ENGINE_KEYS = (
 
 COLUMN_COUNT = 30
 WIDE_ROWS = 500_000
+DEFAULT_SQL = "SELECT * FROM wide_500k"
 
 
 def parse_peak_rss(text: str) -> int | None:
@@ -319,6 +331,20 @@ def measure(kind: str, sql: str, limit: int, label: str,
     }
     record["build"] = profile
     record["binary"] = str(path.relative_to(ROOT))
+    # The shared schema: this harness measures the engine CLI, which is the fetch
+    # family and the row-throughput axis.
+    is_default = sql == DEFAULT_SQL and limit == WIDE_ROWS
+    record.update({
+        "bench": FETCH_BENCH,
+        # The named scenario only for the default workload; any override is a
+        # different workload and must not be read as the wide_500k number.
+        "axis": 2 if is_default else None,
+        "scenario": f"fetch-{kind}-wide-500k" if is_default else f"fetch-{kind}-custom",
+        "app": "queryhive",
+        "app_rev": app_revision(),
+        "competitor_rev": None,
+    })
+    record.update(host_facts())
     return record
 
 
@@ -396,8 +422,410 @@ def newest_group(groups: dict[tuple, list[dict]], engine: str, kind: str):
     return matches[-1] if matches else None
 
 
+# ---------------------------------------------------------------------------
+# One record schema for every axis (performance-plan section 2 and 4.0.6)
+# ---------------------------------------------------------------------------
+#
+# Every line of bench-results.jsonl is one record. The fetch harness above writes
+# `bench = "fetch"` records; `bench_app.py` writes the others. A record written
+# before the schema existed has no `bench` key and is read as "fetch": nothing in
+# the file is ever rewritten.
+#
+#   bench            family: fetch | app | ffi | blackbox
+#   axis             1..7, or a secondary name (sort-search, introspection, ffi-leak)
+#   scenario         a name from AXIS_ROWS below, or a free name for a probe
+#   app              queryhive | tablepro
+#   app_rev          git revision of the app under test
+#   competitor_rev   pinned TablePro revision (tablepro records)
+#   hw_model, p_cores, e_cores, display_hz
+#   server_image     {container: image digest}, when podman could tell
+#   metrics          {name: {"median", "p95", "min", "max", "n"}}   (bench_app.py)
+#   status           one of STATUSES, instead of metrics, when nothing was measured
+
+FETCH_BENCH = "fetch"
+APP_BENCHES = ("app", "ffi", "blackbox")
+APPS = ("queryhive", "tablepro")
+UNMEASURED = "[belum diukur]"
+STATUSES = (
+    UNMEASURED,
+    "tidak diukur (izin OS)",
+    "tidak diukur (butuh sudo)",
+    "tidak mendukung",
+)
+
+# Axis key -> section title. Numbers are the axes of performance-plan section 2.
+AXES = {
+    1: "TTFR sampai baris pertama tergambar",
+    2: "Baris/s ke grid",
+    3: "Memori puncak",
+    4: "Frame saat scroll",
+    5: "Latensi ketikan",
+    6: "Latensi cancel",
+    7: "Cold start",
+    "sort-search": "Sekunder: sort dan search",
+    "introspection": "Sekunder: introspeksi 5.000 tabel",
+    "ffi-leak": "Sekunder: leak lintas FFI",
+}
+
+# One row per scenario. `checks` are the absolute targets as
+# (metric, stat, op, threshold); `rel` is the target against TablePro as
+# (metric, stat, op, ratio) on QueryHive / TablePro, or None when the plan gives
+# no TablePro number. Metric names carry their unit as a suffix: _ms, _bytes,
+# _rows_per_s, _ms_per_s, _count.
+AXIS_ROWS = (
+    (1, "ttfr-s1-1k", "S1 hangat, cap 1.000",
+     (("ttfr_ms", "median", "<=", 25), ("ttfr_ms", "p95", "<=", 40)),
+     "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
+    (1, "ttfr-s1-10k", "S1 hangat, cap 10.000",
+     (("ttfr_ms", "median", "<=", 25), ("ttfr_ms", "p95", "<=", 40)),
+     "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
+    (1, "ttfr-s2-500k", "S2 cap 500.000",
+     (("ttfr_ms", "p95", "<=", 50),),
+     "p95 ≤ 50 ms (progresif)", ("ttfr_ms", "median", "<=", 0.1), "≤ 0,1×"),
+    (1, "ttfr-s3-rtt30", "S3 RTT 30 ms (toxiproxy)",
+     (("ttfr_ms", "median", "<=", 50),),
+     "hangat ≤ 1 RTT + 20 ms (50 ms)", ("ttfr_ms", "median", "<=", 1.0), "≤ 1,0×"),
+    (1, "ttfr-s4-first-run", "S4 Run pertama setelah app dibuka",
+     (), "—", ("ttfr_ms", "median", "<=", 1.0), "≤ 1,0×"),
+    (2, "rows-wide-500k", "`wide_500k` tanpa cap",
+     (("rows_per_s", "median", ">=", 575_000),),
+     "≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah",
+     ("rows_per_s", "median", ">=", 1.5), "≥ 1,5×"),
+    (2, "rows-lineitem-1m", "Trino `tpch.sf1.lineitem`, cap 1M",
+     (("rows_per_s", "median", ">=", 575_000),),
+     "≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah",
+     ("rows_per_s", "median", ">=", 1.5), "≥ 1,5×"),
+    (3, "mem-500k", "500k × 30",
+     (("footprint_delta_bytes", "median", "<=", None),),
+     "≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
+    (3, "mem-5m", "5M baris",
+     (("footprint_delta_bytes", "median", "<=", None),),
+     "≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
+    (4, "scroll-30x1m", "30 kolom × 1M baris, fling vertikal",
+     (("hitch_ms_per_s", "median", "<=", 1), ("frame_p99_ms", "median", "<=", 8.3)),
+     "hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms", ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
+    (4, "scroll-500x10k", "500 kolom × 10k baris, horizontal + vertikal",
+     (("hitch_ms_per_s", "median", "<=", 1), ("frame_p99_ms", "median", "<=", 8.3),
+      ("render_ms", "median", "<=", 30)),
+     "hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms",
+     ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
+    (5, "type-10k", "berkas 10k baris, mengetik di tengah",
+     (("keystroke_main_p99_ms", "median", "<=", 4),),
+     "main thread p99 ≤ 4 ms", ("input_to_photon_ms", "p95", "<=", 1.0), "photon p95 ≤ 1,0×"),
+    (5, "type-2m", "berkas 2M karakter, mengetik di tengah",
+     (("keystroke_main_p99_ms", "median", "<=", 8),),
+     "main thread p99 ≤ 8 ms", ("input_to_photon_ms", "p95", "<=", 1.0), "photon p95 ≤ 1,0×"),
+    (6, "cancel-pg-sleep", "`pg_sleep(30)`",
+     (("cancel_ms", "p95", "<=", 100),), "p95 ≤ 100 ms", ("cancel_ms", "p95", "<=", 1.0), "≤ 1,0×"),
+    (6, "cancel-mysql-sleep", "`SLEEP(30)`",
+     (("cancel_ms", "p95", "<=", 100),), "p95 ≤ 100 ms", ("cancel_ms", "p95", "<=", 1.0), "≤ 1,0×"),
+    (6, "cancel-stream-wide", "stream `wide_500k` di tengah",
+     (("cancel_ms", "p95", "<=", 100),), "p95 ≤ 100 ms", ("cancel_ms", "p95", "<=", 1.0), "≤ 1,0×"),
+    (6, "cancel-trino-heavy", "agregasi berat Trino",
+     (("cancel_ms", "p95", "<=", 300),), "p95 ≤ 300 ms", ("cancel_ms", "p95", "<=", 1.0), "≤ 1,0×"),
+    (7, "launch-warm", "launch sampai frame interaktif, hangat",
+     (("launch_ms", "median", "<=", 400),), "≤ 400 ms", ("launch_ms", "median", "<=", 1.0), "≤ 1,0×"),
+    (7, "launch-cold", "launch sampai frame interaktif, dingin (setelah `purge`)",
+     (("launch_ms", "median", "<=", 1000),), "≤ 1 dtk", ("launch_ms", "median", "<=", 1.0), "≤ 1,0×"),
+    ("sort-search", "sort-numeric-500k", "sort numerik in-memory, 500k",
+     (("sort_ms", "median", "<=", 100),), "≤ 100 ms, off-main", None, "—"),
+    ("sort-search", "sort-text-500k", "sort teks in-memory, 500k",
+     (("sort_ms", "median", "<=", 300),), "≤ 300 ms, off-main", None, "—"),
+    ("introspection", "introspect-5000", "introspeksi 5.000 tabel",
+     (("duration_ms", "median", "<=", 1000),), "< 1 dtk", None, "—"),
+    ("ffi-leak", "ffi-leak", "100× buka/tutup tab, `leaks`",
+     (("leak_count", "median", "<=", 0),), "nol leak", None, "—"),
+)
+
+# The "Perbandingan dengan target section 6" rows that were "[belum diukur]": the
+# label as the report prints it, the scenario that answers it, and its target.
+SECTION6_ROWS = (
+    ("Scroll grid 60 fps", "scroll-30x1m", "frame_p99_ms", "median", "<=", 16.7,
+     "p99 frame ≤ 16,7 ms (60 fps)"),
+    ("Cold start < 1 dtk", "launch-cold", "launch_ms", "median", "<=", 1000, "< 1 dtk"),
+    ("Introspeksi 5.000 tabel < 1 dtk", "introspect-5000", "duration_ms", "median", "<=", 1000,
+     "< 1 dtk"),
+    ("Pembatalan < 500 ms", "cancel-pg-sleep", "cancel_ms", "p95", "<=", 500, "p95 < 500 ms"),
+    ("Nol leak lintas FFI", "ffi-leak", "leak_count", "median", "<=", 0, "nol leak"),
+)
+
+
+def percentile(values, fraction: float) -> float | None:
+    """Linear-interpolation percentile (numpy's default), `fraction` in 0..1."""
+    numbers = sorted(v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool))
+    if not numbers:
+        return None
+    position = fraction * (len(numbers) - 1)
+    low = int(position)
+    high = min(low + 1, len(numbers) - 1)
+    return numbers[low] + (numbers[high] - numbers[low]) * (position - low)
+
+
+def summarize(values) -> dict | None:
+    """The stored shape of one metric: median, p95, min, max and n."""
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not numbers:
+        return None
+    return {
+        "median": percentile(numbers, 0.5),
+        "p95": percentile(numbers, 0.95),
+        "min": min(numbers),
+        "max": max(numbers),
+        "n": len(numbers),
+    }
+
+
+def _sysctl(name: str) -> str | None:
+    try:
+        done = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def _sysctl_int(name: str) -> int | None:
+    text = _sysctl(name)
+    return int(text) if text and text.isdigit() else None
+
+
+def server_images() -> dict | None:
+    """`{container: image digest}` for the dev containers podman knows about."""
+    try:
+        done = subprocess.run(
+            ["podman", "inspect", "qh-postgres", "qh-mysql", "qh-trino",
+             "--format", "{{.Name}} {{.ImageName}} {{.ImageDigest}}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    images = {}
+    for line in done.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            images[parts[0]] = f"{parts[1]}@{parts[2]}"
+    return images or None
+
+
+def app_revision() -> str | None:
+    """Short git revision of this tree, `-dirty` when it has uncommitted changes."""
+    try:
+        rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT),
+                             capture_output=True, text=True, timeout=10)
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if rev.returncode != 0 or not rev.stdout.strip():
+        return None
+    return rev.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
+
+
+def host_facts(display_hz: int | None = None) -> dict:
+    """The machine facts every record carries; None where the machine will not say."""
+    return {
+        "hw_model": _sysctl("hw.model"),
+        "p_cores": _sysctl_int("hw.perflevel0.physicalcpu"),
+        "e_cores": _sysctl_int("hw.perflevel1.physicalcpu"),
+        "display_hz": display_hz,
+        "server_image": server_images(),
+    }
+
+
+def fetch_records(results: list[dict]) -> list[dict]:
+    """The records the fetch section is built from; old ones have no `bench`."""
+    return [r for r in results if r.get("bench", FETCH_BENCH) == FETCH_BENCH]
+
+
+def latest_app_record(results: list[dict], scenario: str, app: str) -> dict | None:
+    """Newest non-fetch record for one scenario and app, in the order appended."""
+    match = None
+    for row in results:
+        if (row.get("bench", FETCH_BENCH) in APP_BENCHES
+                and row.get("scenario") == scenario and row.get("app", "queryhive") == app):
+            match = row
+    return match
+
+
+def fmt_metric(name: str, value: float) -> str:
+    """A number with the unit its metric name carries."""
+    if name.endswith("_bytes"):
+        return f"{value / (1024 * 1024):,.1f} MB"
+    if name.endswith("rows_per_s"):
+        return f"{value:,.0f} baris/s"
+    if name.endswith("_ms_per_s"):
+        return f"{value:,.2f} ms/s"
+    if name.endswith("_ms"):
+        return f"{value:,.1f} ms"
+    if name.endswith("_count"):
+        return f"{value:,.0f}"
+    return f"{value:,.2f}"
+
+
+def metric_stat(record: dict | None, metric: str, stat: str) -> float | None:
+    if not record:
+        return None
+    entry = (record.get("metrics") or {}).get(metric)
+    value = entry.get(stat) if isinstance(entry, dict) else None
+    return value if isinstance(value, (int, float)) else None
+
+
+def _holds(op: str, value: float, threshold: float) -> bool:
+    return value <= threshold if op == "<=" else value >= threshold
+
+
+def side_cell(record: dict | None, checks) -> str:
+    """One app's cell: its headline numbers, or the status it was recorded with."""
+    if record is None:
+        return UNMEASURED
+    shown = []
+    for metric, stat, _op, _threshold in checks:
+        value = metric_stat(record, metric, stat)
+        if value is not None:
+            n = record["metrics"][metric].get("n")
+            shown.append(f"{metric} {stat} {fmt_metric(metric, value)}"
+                         + (f" (n={n})" if n else ""))
+    if shown:
+        return "; ".join(shown)
+    status = record.get("status")
+    return status if status in STATUSES else UNMEASURED
+
+
+def _threshold(record: dict, metric: str, op: str, threshold, axis) -> float | None:
+    """The absolute threshold, where it depends on something the record carries."""
+    if axis == 2:
+        # Plan section 2: the target is 575k rows/s, or 80% of the same-day COPY
+        # ceiling when that ceiling is lower, i.e. when ceiling < 575k / 0.8.
+        ceiling = metric_stat(record, "ceiling_rows_per_s", "median")
+        if ceiling is not None and ceiling < threshold / 0.8:
+            return 0.8 * ceiling
+        return threshold
+    if metric == "footprint_delta_bytes" and threshold is None:
+        budget = metric_stat(record, "budget_bytes", "median")
+        return budget + 64 * 1024 * 1024 if budget is not None else None
+    return threshold
+
+
+def shown_checks(row) -> tuple:
+    """What a scenario's cells display: its absolute checks, and the metric the
+    TablePro comparison uses when that is not one of them, so a verdict never
+    rests on a number neither cell shows."""
+    _axis, _scenario, _label, checks, _target, rel, _rel_text = row
+    shown = tuple(checks)
+    if rel and not any(c[0] == rel[0] and c[1] == rel[1] for c in shown):
+        shown += (rel,)
+    return shown
+
+
+def axis_verdict(row, qh: dict | None, tp: dict | None) -> str:
+    axis, _scenario, _label, checks, _target, rel, _rel_text = row
+    if not any(metric_stat(qh, c[0], c[1]) is not None for c in shown_checks(row)):
+        return UNMEASURED
+    parts = []
+    if checks:
+        problems, missing, ungraded = [], [], False
+        for metric, stat, op, threshold in checks:
+            value = metric_stat(qh, metric, stat)
+            if value is None:
+                missing.append(metric)
+                continue
+            limit = _threshold(qh, metric, op, threshold, axis)
+            if limit is None:
+                ungraded = True
+            elif not _holds(op, value, limit):
+                side = "di atas batas ≤" if op == "<=" else "di bawah batas ≥"
+                problems.append(f"{metric} {stat} {fmt_metric(metric, value)} "
+                                f"{side} {fmt_metric(metric, limit)}")
+        if problems:
+            parts.append("Belum memenuhi — " + "; ".join(problems))
+            if missing:
+                parts.append(f"sisanya {', '.join(missing)} {UNMEASURED}")
+        elif missing:
+            # Never "Memenuhi" while a check is unmeasured.
+            parts.append(f"Sebagian terukur — {', '.join(missing)} {UNMEASURED}")
+        elif ungraded:
+            parts.append("Terukur — anggaran store belum dicatat (`budget_bytes`)")
+        else:
+            parts.append("Memenuhi target absolut")
+    if rel:
+        metric, stat, op, ratio = rel
+        mine, theirs = metric_stat(qh, metric, stat), metric_stat(tp, metric, stat)
+        if mine is not None and theirs:
+            got = mine / theirs
+            parts.append(f"vs TablePro {got:,.2f}× "
+                         f"({'lolos' if _holds(op, got, ratio) else 'gagal'} {op} {ratio:g}×)")
+        else:
+            parts.append("vs TablePro " + (UNMEASURED if tp is None else "tanpa pembanding"))
+    return "; ".join(parts)
+
+
+def axis_sections(results: list[dict]) -> list[str]:
+    """One section per axis: target, QueryHive, TablePro, verdict."""
+    lines: list[str] = []
+    for axis, title in AXES.items():
+        heading = f"## Sumbu {axis}: {title}" if isinstance(axis, int) else f"## {title}"
+        lines += [heading, ""]
+        lines += ["| Skenario | Target | QueryHive | TablePro | Verdict |", "|---|---|---|---|---|"]
+        for row in (r for r in AXIS_ROWS if r[0] == axis):
+            _axis, scenario, label, _checks, target, rel, rel_text = row
+            qh = latest_app_record(results, scenario, "queryhive")
+            tp = latest_app_record(results, scenario, "tablepro")
+            full_target = "; ".join(
+                part for part in (target if target != "—" else "",
+                                  f"vs TablePro {rel_text}" if rel else "") if part) or "—"
+            cells = shown_checks(row)
+            tp_cell = side_cell(tp, cells) if rel else "—"
+            lines.append(
+                f"| `{scenario}` — {label} | {full_target} | {side_cell(qh, cells)} "
+                f"| {tp_cell} | {axis_verdict(row, qh, tp)} |"
+            )
+        lines.append("")
+    return lines
+
+
+def section6_cells(results: list[dict], label: str):
+    """(target, value, status) for a section 6 row, or None when nothing is recorded."""
+    for name, scenario, metric, stat, op, threshold, text in SECTION6_ROWS:
+        if name != label:
+            continue
+        value = metric_stat(latest_app_record(results, scenario, "queryhive"), metric, stat)
+        if value is None:
+            return None
+        ok = _holds(op, value, threshold)
+        return text, fmt_metric(metric, value), ("Memenuhi" if ok else "Belum memenuhi") \
+            + f" — {fmt_metric(metric, value)}"
+    return None
+
+
+# Prose that is measured once by hand-run builds, not by this harness. Kept here so a
+# regenerated report keeps it instead of dropping it.
+PANIC_UNWIND_SECTION = '''\
+## Ongkos `panic = "unwind"` pada ukuran artefak
+
+ADR-0009 memilih `panic = "unwind"` supaya panic dari data server tidak menjatuhkan aplikasi, dan
+konsekuensinya dijanjikan dicatat sebagai angka. Ini angkanya, diukur 24 Sep 2026 dengan
+membangun `qh-ffi` dua kali dan mengganti satu baris di `Cargo.toml` (`[profile.release]`).
+Profil lain identik: `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`.
+
+| Artefak | `panic = "unwind"` | `panic = "abort"` | Selisih |
+|---|---|---|---|
+| `libqh_ffi.a` (arsip yang ditautkan app) | 131,52 MiB | 121,59 MiB | **9,93 MiB** |
+| `libqh_ffi.dylib` (dibaca generator) | 9,54 MiB | 8,15 MiB | **1,39 MiB** |
+| `QueryHive` (binary app yang dikirim) | 16,32 MiB | 14,63 MiB | **1,69 MiB** |
+
+Yang menentukan bagi pengguna adalah baris terakhir: **unwinding table berbiaya 1,69 MiB**, sekitar
+10% dari binary app. Baris arsipnya jauh lebih besar dan sama sekali tidak relevan untuk distribusi,
+sebab app tidak pernah mengirim arsip itu — kode yang dipakai disalin ke binary app, dan sisanya
+dibuang. Angka 9,93 MiB itu adalah selisih blob mentah, bukan ukuran yang sampai ke siapa pun.
+
+Catatan cara mengukurnya: tiga angka di atas diambil dari build yang sama sekali berbeda (bukan
+inkremental) untuk kedua nilai, karena `panic` mengubah seluruh graf. Setelah pengukuran, `Cargo.toml`
+dikembalikan ke `unwind` dan `app/build.sh` dijalankan ulang, jadi binary di `app/dist/` cocok
+dengan profil yang berlaku.
+'''
+
+
 def write_report(results: list[dict]) -> None:
-    groups = group_runs(results)
+    groups = group_runs(fetch_records(results))
 
     lines = [
         "# Benchmarks",
@@ -571,8 +999,16 @@ def write_report(results: list[dict]) -> None:
     )
     for metric in ("Scroll grid 60 fps", "Cold start < 1 dtk", "Introspeksi 5.000 tabel < 1 dtk",
                    "Pembatalan < 500 ms", "Nol leak lintas FFI"):
-        lines.append(f"| {metric} | — | — | — | [belum diukur] |")
+        filled = section6_cells(results, metric)
+        if filled is None:
+            lines.append(f"| {metric} | — | — | — | [belum diukur] |")
+        else:
+            target, value, status = filled
+            lines.append(f"| {metric} | {target} | — | {value} | {status} |")
     lines.append("")
+
+    lines += axis_sections(results)
+    lines += PANIC_UNWIND_SECTION.split("\n")
 
     lines += ["## Temuan", ""]
     findings: list[str] = []
@@ -613,7 +1049,7 @@ def write_report(results: list[dict]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kind", choices=sorted(CONNECTIONS), default="postgres")
-    parser.add_argument("--sql", default="SELECT * FROM wide_500k")
+    parser.add_argument("--sql", default=DEFAULT_SQL)
     parser.add_argument("--limit", type=int, default=WIDE_ROWS)
     parser.add_argument("--label", default="rust-release")
     parser.add_argument("--binary", default=None,
