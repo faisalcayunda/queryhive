@@ -462,6 +462,14 @@ final class QueryTab: Identifiable {
     /// it is a property of looking, not of the query, so it is not part of the statement.
     var rowLimit = 1000
 
+    /// The `:name` values this tab last ran with, kept **in memory only**.
+    ///
+    /// Per tab, because a name means different things in different statements: `:id` is a user in
+    /// one and an order in the next, and a value remembered across them is a wrong answer waiting.
+    /// Not written to the session either: tabs come back at launch, so a stored value would be a
+    /// stale value plus a run that never asked.
+    var parameterValues: [String: ParameterEntry] = [:]
+
     /// Where the caret is, in UTF-16 units, as `NSTextView` reports it. Published by the editor
     /// so "Run Current Statement" knows which one the user is looking at.
     var caret = 0

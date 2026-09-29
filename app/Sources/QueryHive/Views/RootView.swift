@@ -41,6 +41,12 @@ struct RootView: View {
             ImportSheet(draft: draft)
                 .environment(model)
         }
+        // The `:name` values, asked once per run. A sheet rather than an overlay because it is a
+        // question with an answer, and the answer is the statement that runs.
+        .sheet(item: $model.parameterPrompt) { prompt in
+            ParameterSheet(prompt: prompt)
+                .environment(model)
+        }
         .confirmationDialog("Delete \(model.pendingDeletionName)?",
                             isPresented: Binding(
                                 get: { model.pendingDeletion != nil },

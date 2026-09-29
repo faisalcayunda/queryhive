@@ -701,6 +701,28 @@ final class AppModel {
         }
     }
 
+    /// The values a `:name` statement is waiting for, while the prompt is up.
+    var parameterPrompt: ParameterPrompt?
+
+    /// Run the statement the prompt was holding, with the values written in.
+    func confirmParameters(_ entries: [String: ParameterEntry]) {
+        guard let prompt = parameterPrompt else { return }
+        parameterPrompt = nil
+        guard let tab = tabs.first(where: { $0.id == prompt.tabID }) else { return }
+        switch ParameterRender.statement(prompt.template, entries: entries, driver: prompt.kind) {
+        case .success(let sql):
+            // Kept for this tab alone, so a second run of the same statement is one return press.
+            tab.parameterValues = entries
+            run(tab, from: prompt.source, substituting: sql)
+        case .failure(let error):
+            notice = Notice(title: "Couldn't run with those values", message: error.message)
+        }
+    }
+
+    func cancelParameters() {
+        parameterPrompt = nil
+    }
+
     /// Whether the workspace comes back the way it was left.
     ///
     /// On by default, which is what this app has always done. Off, a launch starts at one empty tab
@@ -2807,10 +2829,20 @@ final class AppModel {
 
     /// Writes the result out. Separate from `preview` so the toolbar can offer both without one
     /// standing in for the other.
-    func run(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false) {
+    func run(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false,
+             substituting: String? = nil) {
         guard tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
-        let sql = tab.sql(for: source)
+        // A statement with `:name` in it gets its values first, because everything after this reads
+        // the text that runs: the classifier, the confirmation sheet and the history all see the
+        // substituted statement rather than the template.
+        if substituting == nil, EditorPreferences.shared.queryParameters,
+           let prompt = ParameterPrompt.request(tab: tab, source: source, sql: tab.sql(for: source),
+                                                kind: connection.kind) {
+            parameterPrompt = prompt
+            return
+        }
+        let sql = substituting ?? tab.sql(for: source)
         let command = tab.destination == .table ? "to_table" : "export"
         // A write run on a `confirm` connection asks first. A table destination's own statements
         // are the generated DROP/CREATE/INSERT rather than the caller's SELECT, so those are what
@@ -2821,7 +2853,7 @@ final class AppModel {
                 command: command,
                 safeMode: connection.safeMode) {
             awaitConfirmation(request) { [weak self] in
-                self?.run(tab, from: source, confirmed: true)
+                self?.run(tab, from: source, confirmed: true, substituting: substituting)
             }
             return
         }

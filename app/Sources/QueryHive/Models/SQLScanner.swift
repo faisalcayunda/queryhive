@@ -55,8 +55,13 @@ struct SQLScanner {
         }
 
         var index = 0
+        // Bracket depth, so `arr[lo:hi]` is a slice and not a parameter named `hi`.
+        var depth = 0
         while index < length {
             let unit = units[index]
+
+            if unit == openBracket { depth += 1; index += 1; continue }
+            if unit == closeBracket { depth = max(0, depth - 1); index += 1; continue }
 
             // A line comment: to the end of the line.
             if unit == dash, index + 1 < length, units[index + 1] == dash {
@@ -106,7 +111,7 @@ struct SQLScanner {
 
             // `:name`, in code and not after another colon: `a::text` is a cast, and `:=` is an
             // assignment, and neither is a parameter.
-            if unit == colon, index + 1 < length,
+            if unit == colon, depth == 0, index + 1 < length,
                !(index > 0 && units[index - 1] == colon),
                isNameStart(units[index + 1]) {
                 var end = index + 2
@@ -159,4 +164,6 @@ struct SQLScanner {
     private static let star = unichar(42)
     private static let colon = unichar(58)
     private static let underscore = unichar(95)
+    private static let openBracket = unichar(91)
+    private static let closeBracket = unichar(93)
 }

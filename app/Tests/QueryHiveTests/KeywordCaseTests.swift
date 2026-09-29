@@ -91,6 +91,15 @@ final class SQLScannerTests: XCTestCase {
         XCTAssertEqual(scan.parameterNames, ["id", "other"])
     }
 
+    func testASliceIsNotAParameter() {
+        // A PostgreSQL slice is `arr[lo:hi]`, and `hi` is a bound, not a parameter.
+        XCTAssertTrue(SQLScanner.scan("select arr[1:2] from t").parameters.isEmpty)
+        XCTAssertTrue(SQLScanner.scan("select arr[lo:hi] from t").parameters.isEmpty)
+        // A parameter after a closed bracket is still one.
+        XCTAssertEqual(SQLScanner.scan("select arr[1:2] from t where id = :id").parameterNames,
+                       ["id"])
+    }
+
     func testIsCodeKnowsWhereAStringEnds() {
         let sql = "select 'abc', id from t"
         let scan = SQLScanner.scan(sql)

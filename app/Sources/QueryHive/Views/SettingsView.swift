@@ -937,6 +937,8 @@ struct EditorSettings: View {
                 RowDivider()
                 editorToggle("Run button beside each statement", isOn: $prefs.runButtonPerStatement)
                 RowDivider()
+                editorToggle("Query parameters (:name)", isOn: $prefs.queryParameters)
+                RowDivider()
                 HStack(spacing: 8) {
                     Text("Tab width")
                         .font(.ui(11.5))

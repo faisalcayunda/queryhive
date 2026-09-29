@@ -113,6 +113,12 @@ enum Snapshot {
             hosting = NSHostingView(rootView: AnyView(SettingsView(pane: pane)
                 .environment(model)
                 .preferredColorScheme(scheme)))
+        } else if scene == "parameters" {
+            // The `:name` prompt, rendered directly: a sheet is a window of its own and offscreen
+            // capture cannot reach one, which is the same move the grid's JSON reader makes.
+            hosting = NSHostingView(rootView: AnyView(ParameterSheet(prompt: Snapshot.parameterPrompt)
+                .environment(model)
+                .preferredColorScheme(scheme)))
         } else if scene == "grid-json" {
             // The structured-cell reader is a popover in the app, and a popover is a window of its
             // own that offscreen capture cannot reach. Rendering it directly is the same move the
@@ -240,6 +246,18 @@ enum Snapshot {
     /// A scene that exercises every surface: two connections, an expanded catalog with schemas
     /// and tables, and a finished query with columns, files and a log.
     @MainActor
+    /// The prompt the `parameters` scene draws: one value of each kind that is worth looking at.
+    static let parameterPrompt = ParameterPrompt(
+        tabID: UUID(),
+        source: .statement,
+        template: "SELECT * FROM hive.analytics.penerima_manfaat\n"
+            + "WHERE tahun = :tahun AND aktif = :aktif AND nama LIKE :wilayah",
+        names: ["tahun", "aktif", "wilayah"],
+        kind: .trino,
+        initial: ["tahun": ParameterEntry(kind: .number, text: "2026"),
+                  "aktif": ParameterEntry(kind: .boolean, text: "true"),
+                  "wilayah": ParameterEntry(kind: .text, text: "%Sukamaju%")])
+
     private static func seeded(scene: String) -> AppModel {
         let model = AppModel()
         let primary = Connection(id: UUID(), name: "Trino production", color: .blue, kind: .trino,

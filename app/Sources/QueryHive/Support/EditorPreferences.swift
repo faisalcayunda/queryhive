@@ -23,6 +23,7 @@ final class EditorPreferences {
     private static let showInvisiblesKey = "editorShowInvisibles"
     private static let autoUppercaseKey = "editorAutoUppercaseKeywords"
     private static let runButtonKey = "editorRunButtonPerStatement"
+    private static let queryParametersKey = "editorQueryParameters"
     private static let tabWidthKey = "editorTabWidth"
 
     /// The store these switches are read from and written to.
@@ -40,6 +41,7 @@ final class EditorPreferences {
     private var storedShowInvisibles: Bool
     private var storedAutoUppercase: Bool
     private var storedRunButton: Bool
+    private var storedQueryParameters: Bool
     private var storedTabWidth: Int
 
     init(defaults: UserDefaults = .standard) {
@@ -52,6 +54,7 @@ final class EditorPreferences {
         storedShowInvisibles = Self.on(defaults, Self.showInvisiblesKey, default: false)
         storedAutoUppercase = Self.on(defaults, Self.autoUppercaseKey, default: false)
         storedRunButton = Self.on(defaults, Self.runButtonKey, default: true)
+        storedQueryParameters = Self.on(defaults, Self.queryParametersKey, default: true)
         let tabWidth = defaults.integer(forKey: Self.tabWidthKey)
         storedTabWidth = tabWidth > 0 ? tabWidth : 4
     }
@@ -117,6 +120,13 @@ final class EditorPreferences {
         set { storedRunButton = newValue; persist() }
     }
 
+    /// Whether a `:name` statement asks for its values before it runs. On by default: a statement
+    /// with no `:name` in it behaves exactly as it did, so the only change is for one that has.
+    var queryParameters: Bool {
+        get { storedQueryParameters }
+        set { storedQueryParameters = newValue; persist() }
+    }
+
     /// How wide a tab is, in spaces. Clamped, because the value comes from a control and a zero
     /// would put every tab stop on top of the last.
     var tabWidth: Int {
@@ -133,6 +143,7 @@ final class EditorPreferences {
         defaults.set(storedShowInvisibles, forKey: Self.showInvisiblesKey)
         defaults.set(storedAutoUppercase, forKey: Self.autoUppercaseKey)
         defaults.set(storedRunButton, forKey: Self.runButtonKey)
+        defaults.set(storedQueryParameters, forKey: Self.queryParametersKey)
         defaults.set(storedTabWidth, forKey: Self.tabWidthKey)
     }
 }
