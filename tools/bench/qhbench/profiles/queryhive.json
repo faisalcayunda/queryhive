@@ -1,0 +1,17 @@
+{
+  "app": "queryhive",
+  "verified": false,
+  "bundleId": "id.data-ecosystem.queryhive",
+  "appName": "QueryHive",
+  "processName": "QueryHive",
+  "run": { "key": "r", "modifiers": ["cmd"] },
+  "stop": { "key": ".", "modifiers": ["cmd"] },
+  "selectAll": { "key": "a", "modifiers": ["cmd"] },
+  "editor": { "roles": ["AXTextArea"], "pick": "largest" },
+  "grid": {
+    "roles": ["AXTable", "AXOutline"],
+    "pick": "largest",
+    "fallbackWindowFraction": [0.0, 0.45, 1.0, 0.55]
+  },
+  "notes": "Not confirmed against a live window. Run is cmd+R and Stop is cmd+. only under the queryhive keymap scheme (Models/Shortcuts.swift); under the DBeaver scheme Run is cmd+Return and Stop is unbound, so set the keymap to queryhive before measuring. The editor is an NSTextView (AXTextArea). The grid role is not confirmed against a live accessibility tree, hence the window-fraction fallback."
+}

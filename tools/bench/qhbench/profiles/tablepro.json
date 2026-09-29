@@ -1,0 +1,17 @@
+{
+  "app": "tablepro",
+  "verified": false,
+  "bundleId": "com.TablePro",
+  "appName": "TablePro",
+  "processName": "TablePro",
+  "run": { "key": "return", "modifiers": ["cmd"] },
+  "stop": { "key": ".", "modifiers": ["cmd"] },
+  "selectAll": { "key": "a", "modifiers": ["cmd"] },
+  "editor": { "roles": ["AXTextArea"], "pick": "largest" },
+  "grid": {
+    "roles": ["AXTable", "AXOutline"],
+    "pick": "largest",
+    "fallbackWindowFraction": [0.0, 0.5, 1.0, 0.5]
+  },
+  "notes": "UNVERIFIED, inferred from reading TablePro source, never run against a live build. Run (executeQuery) is cmd+Return and Stop (cancelQuery) is cmd+. per the default table in Models/UI/KeyboardShortcutModels.swift. Bundle id inferred from the com.TablePro logger subsystem; confirm with `osascript -e 'id of app \"TablePro\"'`. Roles are guesses. The user may have rebound shortcuts in Settings."
+}
