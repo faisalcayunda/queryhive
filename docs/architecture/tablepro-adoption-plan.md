@@ -10,7 +10,9 @@
 > mendarat pada tanggal yang sama dan diukur di §5. Fase 4 juga mendarat pada tanggal itu dan diukur
 > di §6, dengan satu penyimpangan yang dinyatakan (dua dari empat item tidak punya scene
 > `--snapshot`). Fase 5 mendarat 29 Sep 2026 dan diukur di §7, sebagian: mesin untuk ketiga itemnya
-> ada dan diuji, tetapi lembar mapping impor dan gestur insert/delete di grid belum dibangun.
+> ada dan diuji, tetapi lembar mapping impor dan gestur insert/delete di grid belum dibangun. §12
+> (pengerasan) dikerjakan pada tanggal yang sama dan statusnya ada di sana; §13 (menutup gap terhadap
+> TablePro) mendarat gelombang 1, dengan gelombang 2 dan 3 dicatat di bagian itu.
 
 ## 0. Prinsip dan aturan gate
 
@@ -855,4 +857,35 @@ Tiga hal di mana QueryHive sudah lebih benar, dan studi itu mengatakannya: Safe 
 dengan part splitting dan retry; dan allowlist kosong berarti tidak ada koneksi (fail closed). Timeout
 statement di trait driver juga sudah sejajar. Semuanya tidak perlu "diperbaiki" agar mirip TablePro —
 justru sebaliknya.
+
+## 13. Menutup gap terhadap TablePro
+
+Bukan fase, dan bukan bagian dari §12: §12 adalah lubang di kode yang sudah dikirim, ini adalah
+**kedalaman yang TablePro punya dan kita belum**. Dikerjakan bergelombang; gelombang pertama mendarat
+29 Sep 2026 lewat empat worktree paralel.
+
+**Gelombang 1, selesai.** Keempatnya di-merge dan gate-nya hijau (`cargo test` 737/0, `swift test`
+299/0):
+
+| Irisan | Hasil | Keputusan |
+|---|---|---|
+| Kedalaman change tracking | `MatchPolicy` (kolom yang tak bisa dibandingkan dikecualikan, teks dibandingkan lewat render server), kosakata partial-commit, `WriteBatchBudget` (baris/byte/parameter), kolom `DEFAULT` + spell all-default per engine | ADR-0021 |
+| Impor keluarga statement | `import_data` mendispatch sumber; berkas `.sql` lewat kebijakan yang sama; pemecah dari `qh-sql`; FK off/on dipulihkan di ketiga jalur keluar, default **on** | ADR-0022 |
+| MCP resources, prompts, versi | `resources/list`+`read` (scope+allowlist yang sama dengan tool), `prompts/list`+`get`, dan `initialize` menolak versi tak dikenal dengan `-32022` + `data.supported` | ADR-0023 |
+| Kedalaman viewer + find | mode Tree (cap 5.000 node) dan Hex (cap 10 KB), format tampilan per kolom (Raw/Text/UUID/Unix/JSON) yang kini benar-benar dipakai grid, mode regex di find | — |
+
+**Yang belum, dan urutannya.** Gelombang 2: sembunyikan/pindah/ganti nama kolom grid, pencarian
+cross-column yang naik ke server, filter sebagai preset; Safe Mode enam tingkat + floor + execution
+log; truncate/drop tabel lewat konfirmasi; sort server untuk hasil berhalaman (12.1.5); **parameter
+binding** — sengaja tidak dikerjakan karena Trino tidak punya parameter di protokol HTTP-nya, jadi ini
+keputusan trait driver tersendiri; dan undo coalescing. Lalu UI impor (peta kolom) dan pairing PKCE.
+
+**Gelombang 3 — butuh keputusan produk, bukan sekadar kerja.** Structure editor, routines/UDT, backup &
+restore PostgreSQL, copy object antar engine, Open Quickly, external API. Sebagian tetangganya sudah
+ditolak §9 dan tidak akan dibangun tanpa membatalkan keputusan itu.
+
+**Catatan bahasa.** ADR-0021, 0022 dan 0023 ditulis dalam bahasa Inggris karena brief agen yang
+menghasilkannya memintanya begitu; ADR lain di direktori itu berbahasa Indonesia. Isinya lengkap dan
+strukturnya mengikuti 0020 — yang belum hanya bahasanya, dan itu dicatat di sini alih-alih dibiarkan
+terbaca sebagai konsisten.
 

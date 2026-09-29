@@ -2011,6 +2011,55 @@ diputuskan di atas.
 Verifikasi: `cargo test --workspace` **704 lulus / 0 gagal**, `swift build` selesai, `swift test`
 **234 tes / 0 gagal**.
 
+### Menutup gap terhadap TablePro: empat worktree paralel (29 Sep 2026)
+
+Setelah pertanyaan "gap apa lagi dibanding TablePro", yang keluar adalah daftar sembilan workstream —
+dan itu bukan satu irisan. Gelombang pertama mengerjakan empat yang berkasnya lepas, masing-masing di
+git worktree sendiri, lalu di-merge satu per satu. Semua diberi `target/ffi/static/release/libqh_ffi.a`
+yang disalin sehingga tidak perlu cargo, dan semuanya dilarang menyentuh plan/PROGRESS supaya
+merge-nya bersih — dokumen ini ditulis sesudahnya.
+
+**Kedalaman change tracking (ADR-0021).** `MatchPolicy` memutuskan per kolom: cocok, cocok lewat
+render server (`::text`, `CAST AS varchar`, MySQL `CONCAT`), atau **dikecualikan** — dan pengecualian
+disebut di SQL yang ditinjau, karena predikat yang diam-diam membuang kolom berarti WHERE yang lebih
+lebar dari yang disetujui pengguna. Sebelumnya tabel ber-`bytea`/`geometry`/array tidak bisa di-UPDATE
+sama sekali karena predikatnya tidak pernah cocok. Kegagalan kini punya kosakata: `written` (tanpa
+transaksi, atau rollback-nya sendiri gagal — menjalankan save lagi berarti menulis dua kali) versus
+`pendingInSessionTransaction`. Rencana dibatasi baris/byte/parameter, batch ditutup **sebelum** baris
+yang akan melewatinya, dan kolom `DEFAULT` punya spell all-default per engine — bug yang studi itu
+catat, di mana baris all-default menghilang dari batch sementara sisanya commit dan melaporkan sukses.
+
+**Impor keluarga statement (ADR-0022).** `import_data` mendispatch sumber; berkas `.sql` lewat
+kebijakan yang sama (tiga mode kesalahan, aturan transaksi, nomor baris, cap 1.000 error). Pemecahnya
+`qh-sql`, bukan yang kedua. `GO` bukan pemisah. FK off/on dipulihkan dari satu `finish()` di jalur
+error, commit, dan rollback; default-nya **on** karena satu-satunya sakelar PostgreSQL menuntut
+superuser dan mematikan semua trigger.
+
+**MCP resources, prompts, dan versi (ADR-0023).** Resources memakai kode scope+allowlist yang sama
+dengan tool; penolakan (tidak ada / di luar scope / di luar allowlist) semuanya `-32002` yang sama,
+jadi tidak membocorkan keberadaan koneksi. Versi protokol tak dikenal kini ditolak dengan `-32022` +
+`data.supported`, menutup celah yang dicatat `docs/mcp-stability.md`.
+
+**Kedalaman viewer dan find.** Reader sel dapat mode Tree (cap 5.000 node, key order server) dan Hex
+(cap 10 KB), format tampilan per kolom (Raw/Text/UUID/Unix timestamp/JSON) yang kini **benar-benar
+dipakai grid** — lane-nya tidak boleh menyentuh `ResultGrid.swift`, jadi penyambungannya dikerjakan
+orkestrator setelah merge — dan find dapat mode regex di samping mode literal, dengan pola tidak
+valid sebagai keadaan yang ditampilkan bar, bukan crash.
+
+**Yang belum.** Gelombang 2: kolom grid (sembunyi/pindah/ganti nama), pencarian cross-column ke
+server, preset filter, Safe Mode enam tingkat + floor + execution log, truncate/drop lewat konfirmasi,
+sort server, **parameter binding** (keputusan trait driver; Trino tidak punya parameter), undo
+coalescing, UI peta kolom impor, pairing PKCE. Gelombang 3 (structure editor, routines/UDT, backup,
+copy object, Open Quickly, external API) butuh keputusan produk dulu.
+
+**Catatan yang harus dibaca.** ADR-0021, 0022 dan 0023 berbahasa Inggris karena brief agennya meminta
+begitu, sementara ADR lain berbahasa Indonesia; itu kesalahan brief saya, dicatat di plan §13, dan
+belum diperbaiki.
+
+Verifikasi berat 29 Sep 2026 (sesudah gelombang 1): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**737 lulus / 0 gagal** ✅, `swift build && swift test` → **299 tes / 0 gagal** ✅.
+
 ## Perkakas lokal (sengaja tidak masuk repo)
 
 `tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
