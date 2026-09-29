@@ -16,6 +16,9 @@ Dalam satu versi mayor, permukaan MCP bersifat **aditif saja**:
 | Field baru pada keluaran tool | Field keluaran yang dihapus atau berubah tipe |
 | Kode galat baru | Kode galat lama yang berubah makna |
 | Deskripsi tool yang diperjelas | Deskripsi yang berubah sehingga tool yang sama berarti lain |
+| Resource baru di `resources/list` | Resource yang ada dihapus atau URI-nya berubah makna |
+| Prompt baru di `prompts/list` | Prompt yang ada dihapus atau diganti nama |
+| Argumen prompt baru yang opsional | Argumen prompt lama yang menjadi wajib |
 
 Yang **tidak** masuk kontrak, dan karena itu boleh berubah kapan saja tanpa dianggap melanggar:
 framing transpor (JSON-RPC satu baris per baris), berkas handshake, skema tabel `mcp_token`,
@@ -25,11 +28,12 @@ pegang.
 ## Versi protokol
 
 `initialize` mengembalikan `protocolVersion`: versi klien yang diminta bila server mengenalinya,
-kalau tidak versi yang server dukung. **Celah yang dinyatakan:** server belum **menolak** versi yang
-tidak dikenal dengan daftar versi yang didukung (TablePro mengembalikan kode `-32022` dengan
-`data.supported`). Yang terjadi sekarang adalah negosiasi turun ke versi server, yang lebih ramah
-tetapi menyembunyikan ketidakcocokan. Menutupnya adalah pekerjaan kecil dan dicatat di sini sebagai
-belum.
+kalau tidak server **menolak** dengan kode `-32022` yang membawa daftar versi yang didukung di
+`error.data.supported`. Klien yang tidak menyebut versi sama sekali dijawab dengan versi server.
+Versi yang didukung sekarang: `2025-06-18`, `2025-03-26`, `2024-11-05`.
+
+Menolak lebih baik daripada turun diam-diam ke versi server: negosiasi turun menyembunyikan
+ketidakcocokan, dan klien tidak punya cara mengetahui versi mana yang boleh ia minta.
 
 ## Keputusan atas sisa pengerasan §12.3
 

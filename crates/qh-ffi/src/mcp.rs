@@ -33,6 +33,23 @@
 //! connection ids exist. An empty connection list means **no connections**, not all of
 //! them: the only safe default for a security list is the one that grants nothing.
 //!
+//! # Resources and prompts carry the same two checks, not a second copy
+//!
+//! The resource set is read-only and small: the saved connections a token may reach, and
+//! one object-tree resource per connection. A resource appears only when the token's
+//! scope reaches the tool it stands for and, for a connection's own resources, only when
+//! the allowlist names that connection. Reading a resource the token may not reach is
+//! refused with the same `-32002` a resource that does not exist gets, so the error cannot
+//! be used to probe for connection ids. Prompts are pure templates rendered from their
+//! own arguments — no model lives in this server — and a prompt is offered only when the
+//! token may call the tool it tells a client to call.
+//!
+//! # Version negotiation refuses what it does not speak
+//!
+//! A client that names a revision this server has is echoed it; a client that names one
+//! it does not gets `-32022` with the supported list in `data.supported`, rather than a
+//! silent fall back that hides the mismatch.
+//!
 //! # Credentials never leave this module
 //!
 //! A password is read from the Keychain, put straight into the per-call [`Settings`],
@@ -65,6 +82,18 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// asks for; falling back to [`PROTOCOL_VERSION`] when it is not is the honest answer,
 /// because the alternative is claiming to speak something nobody built.
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The JSON-RPC error code the specification reserves for a protocol revision the server
+/// does not speak. The supported list travels in `error.data.supported`.
+pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+
+/// The JSON-RPC error code for a resource the caller may not see. It is deliberately the
+/// same whether the resource is absent or merely outside the token, so the error cannot
+/// be used to discover connection ids.
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
+
+/// The base URI of the resources this server exposes.
+pub const CONNECTIONS_RESOURCE: &str = "queryhive://connections";
 
 /// The name this server reports in `initialize`.
 pub const SERVER_NAME: &str = "queryhive-mcp";
@@ -272,6 +301,42 @@ pub fn read_only_tool_names() -> Vec<String> {
 pub fn is_read_only_tool(name: &str) -> bool {
     TOOLS.iter().any(|tool| tool.name == name)
 }
+
+/// One prompt: a name, what it is for, the tool whose scope gates it, and its arguments.
+///
+/// A prompt here is a **template**, not a conversation: rendering substitutes the
+/// caller's arguments into fixed text and nothing else. There is no model in this process
+/// to call, so a prompt that needed one would be a lie.
+pub struct PromptSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// The tool this prompt tells a client to call. The prompt is offered only to a token
+    /// whose scope reaches that tool, so a client is never pointed at a call it cannot make.
+    pub scope: &'static str,
+    /// `(name, description, required)` for every argument, in the order they are declared.
+    pub arguments: &'static [(&'static str, &'static str, bool)],
+}
+
+/// The prompts this server offers, in the order `prompts/list` returns them.
+pub const PROMPTS: [PromptSpec; 2] = [
+    PromptSpec {
+        name: "explain_query",
+        description: "Ask for a plain-language explanation of a query's execution plan, \
+                      fetched with the `explain` tool.",
+        scope: "explain",
+        arguments: &[
+            ("connection", "A connection id from connections_list.", true),
+            ("sql", "The SELECT whose plan should be explained.", true),
+        ],
+    },
+    PromptSpec {
+        name: "summarize_tables",
+        description: "Ask for a short description of the tables on one connection, using \
+                      the `tables` tool.",
+        scope: "tables",
+        arguments: &[("connection", "A connection id from connections_list.", true)],
+    },
+];
 
 fn no_args() -> Json {
     json!({"type": "object", "properties": {}, "additionalProperties": false})
@@ -604,7 +669,7 @@ impl Server {
 
         match method {
             "initialize" => Handled {
-                response: Some(success(id, self.initialize(request.get("params")))),
+                response: Some(self.initialize_response(id, request.get("params"))),
                 touch: false,
             },
             // Declared as a notification and treated as one even if a client puts an `id`
@@ -643,6 +708,53 @@ impl Server {
                     touch: false,
                 },
             },
+            "resources/list" => Handled {
+                response: Some(match self.list_resources(engine, runtime) {
+                    Ok(result) => success(id, result),
+                    Err(message) => error_response(id, -32603, &message),
+                }),
+                touch: false,
+            },
+            "resources/read" => match self.resource_read_params(request.get("params")) {
+                Ok(uri) => Handled {
+                    response: Some(match self.read_resource(&uri, engine, runtime) {
+                        Ok(result) => success(id, result),
+                        // One message for "not allowed" and for "not there", so a client
+                        // cannot use the refusal to discover connection ids.
+                        Err(ResourceReadError::NotFound) => error_response(
+                            id,
+                            RESOURCE_NOT_FOUND,
+                            &format!("resource not found: {uri}"),
+                        ),
+                        Err(ResourceReadError::Failed(message)) => {
+                            error_response(id, -32603, &message)
+                        }
+                    }),
+                    // A read is an access to the token's data, so it counts as a use.
+                    touch: true,
+                },
+                Err(message) => Handled {
+                    response: Some(error_response(id, -32602, &message)),
+                    touch: false,
+                },
+            },
+            "prompts/list" => Handled {
+                response: Some(success(id, json!({"prompts": self.list_prompts()}))),
+                touch: false,
+            },
+            "prompts/get" => match self.prompt_get_params(request.get("params")) {
+                Ok((name, arguments)) => Handled {
+                    response: Some(match self.get_prompt(&name, &arguments) {
+                        Ok(result) => success(id, result),
+                        Err(message) => error_response(id, -32602, &message),
+                    }),
+                    touch: false,
+                },
+                Err(message) => Handled {
+                    response: Some(error_response(id, -32602, &message)),
+                    touch: false,
+                },
+            },
             other => Handled {
                 response: Some(error_response(
                     id,
@@ -654,17 +766,38 @@ impl Server {
         }
     }
 
-    /// The `initialize` result, echoing the client's revision when this server knows it.
-    fn initialize(&self, params: Option<&Json>) -> Json {
+    /// The reply to `initialize`: a result for a revision this server knows, and an error
+    /// carrying the supported list for one it does not.
+    ///
+    /// Echoing a known revision is what the specification asks for. Refusing an unknown
+    /// one instead of quietly answering with the server's own is the change TablePro's
+    /// `-32022` names: a fall back hides the mismatch, and the client has no way to learn
+    /// which revisions it could have asked for.
+    fn initialize_response(&self, id: Json, params: Option<&Json>) -> Json {
         let requested = params
             .and_then(|params| params.get("protocolVersion"))
             .and_then(Json::as_str);
-        let version = requested
-            .filter(|requested| SUPPORTED_VERSIONS.contains(requested))
-            .unwrap_or(PROTOCOL_VERSION);
+        match requested {
+            // No revision named at all: answer with the server's own rather than refuse a
+            // client that merely omitted the field.
+            None => success(id, self.initialize_result(PROTOCOL_VERSION)),
+            Some(version) if SUPPORTED_VERSIONS.contains(&version) => {
+                success(id, self.initialize_result(version))
+            }
+            Some(version) => error_response_data(
+                id,
+                UNSUPPORTED_PROTOCOL_VERSION,
+                &format!("unsupported protocol version '{version}'"),
+                json!({"supported": SUPPORTED_VERSIONS}),
+            ),
+        }
+    }
+
+    /// The `initialize` result: the negotiated revision and the capabilities on offer.
+    fn initialize_result(&self, version: &str) -> Json {
         json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
             "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")}
         })
     }
@@ -695,6 +828,35 @@ impl Server {
         };
         let Some(name) = params.get("name").and_then(Json::as_str) else {
             return Err("invalid params: tools/call needs a string 'name'".to_owned());
+        };
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return Err("invalid params: 'arguments' must be an object".to_owned());
+        }
+        Ok((name.to_owned(), arguments))
+    }
+
+    /// The `uri` a `resources/read` params object must carry.
+    fn resource_read_params(&self, params: Option<&Json>) -> Result<String, String> {
+        let Some(params) = params.and_then(Json::as_object) else {
+            return Err("invalid params: resources/read needs an object".to_owned());
+        };
+        let Some(uri) = params.get("uri").and_then(Json::as_str) else {
+            return Err("invalid params: resources/read needs a string 'uri'".to_owned());
+        };
+        Ok(uri.to_owned())
+    }
+
+    /// The `(name, arguments)` a `prompts/get` params object must carry.
+    fn prompt_get_params(&self, params: Option<&Json>) -> Result<(String, Json), String> {
+        let Some(params) = params.and_then(Json::as_object) else {
+            return Err("invalid params: prompts/get needs an object".to_owned());
+        };
+        let Some(name) = params.get("name").and_then(Json::as_str) else {
+            return Err("invalid params: prompts/get needs a string 'name'".to_owned());
         };
         let arguments = params
             .get("arguments")
@@ -821,6 +983,21 @@ impl Server {
         engine: &dyn Engine,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<Vec<Json>, String> {
+        let listed = self.visible_connections(engine, runtime)?;
+        Ok(vec![json!({"event": "connections", "connections": listed})])
+    }
+
+    /// The allowlisted connection rows, reduced to what a client may see.
+    ///
+    /// One copy of the hand-picked field list, shared by the `connections_list` tool and
+    /// the connection resources, so a credential cannot be added to one path and missed
+    /// on the other. The allowlist is applied here rather than in SQL: the rule has one
+    /// reading whatever ordered the rows.
+    fn visible_connections(
+        &self,
+        engine: &dyn Engine,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Vec<Json>, String> {
         let events = self.run_tool(Command::Connections, self.base.clone(), engine, runtime)?;
         let listed = events
             .iter()
@@ -829,27 +1006,197 @@ impl Server {
             .and_then(Json::as_array)
             .map(|rows| {
                 rows.iter()
-                    // The allowlist is applied here and not in SQL, so the rule has one
-                    // reading whatever ordered the rows.
                     .filter(|row| {
                         row.get("id")
                             .and_then(Json::as_str)
                             .is_some_and(|id| self.token.allows_connection(id))
                     })
-                    .map(|row| {
-                        json!({
-                            "id": row.get("id").cloned().unwrap_or(Json::Null),
-                            "name": row.get("name").cloned().unwrap_or(Json::Null),
-                            "kind": row.get("kind").cloned().unwrap_or(Json::Null),
-                            "host": row.get("host").cloned().unwrap_or(Json::Null),
-                            "port": row.get("port").cloned().unwrap_or(Json::Null),
-                            "database": row.get("database").cloned().unwrap_or(Json::Null),
-                        })
-                    })
+                    .map(connection_row)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        Ok(vec![json!({"event": "connections", "connections": listed})])
+        Ok(listed)
+    }
+
+    /// `resources/list`: the read-only resources this token may reach.
+    ///
+    /// A resource is offered only when the token's scope reaches the tool it stands for.
+    /// The per-connection resources come from the same filtered rows the
+    /// `connections_list` tool returns, so a connection outside the allowlist is not
+    /// merely hidden by the filter — it is never built.
+    fn list_resources(
+        &self,
+        engine: &dyn Engine,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Json, String> {
+        let mut resources = Vec::new();
+        let shows_connections = self.token.allows("connections_list");
+        let shows_objects = self.token.allows("objects");
+        let shows_tables = self.token.allows("tables");
+        if shows_connections {
+            resources.push(json!({
+                "uri": CONNECTIONS_RESOURCE,
+                "name": "Saved connections",
+                "description": "The saved connections this token may reach, as id, name, \
+                                 kind, host, port and database. Never a user name, a \
+                                 password, an options bag or a Keychain reference.",
+                "mimeType": "application/json",
+            }));
+        }
+        if shows_connections || shows_objects || shows_tables {
+            for row in self.visible_connections(engine, runtime)? {
+                if shows_connections {
+                    resources.push(connection_resource(&row));
+                }
+                if shows_objects {
+                    resources.push(connection_sub_resource(
+                        &row,
+                        "objects",
+                        "The first level of this connection's object tree, as the `objects` \
+                         tool answers it.",
+                    ));
+                }
+                if shows_tables {
+                    resources.push(connection_sub_resource(
+                        &row,
+                        "tables",
+                        "The tables of this connection, as the `tables` tool answers them.",
+                    ));
+                }
+            }
+        }
+        Ok(json!({"resources": resources}))
+    }
+
+    /// `resources/read`: the text of one resource, or a refusal that says nothing about
+    /// whether the resource exists.
+    fn read_resource(
+        &self,
+        uri: &str,
+        engine: &dyn Engine,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Json, ResourceReadError> {
+        match parse_resource_uri(uri) {
+            Some(ResourceUri::Connections) => {
+                if !self.token.allows("connections_list") {
+                    return Err(ResourceReadError::NotFound);
+                }
+                let rows = self
+                    .visible_connections(engine, runtime)
+                    .map_err(ResourceReadError::Failed)?;
+                Ok(resource_contents(uri, &Json::Array(rows)))
+            }
+            Some(ResourceUri::Connection(id)) => {
+                if !self.token.allows("connections_list") || !self.token.allows_connection(id) {
+                    return Err(ResourceReadError::NotFound);
+                }
+                // Rebuilt from the filtered rows rather than read straight from the store,
+                // so the shape a resource read returns cannot drift from the tool's.
+                let found = self
+                    .visible_connections(engine, runtime)
+                    .map_err(ResourceReadError::Failed)?
+                    .into_iter()
+                    .find(|row| row.get("id").and_then(Json::as_str) == Some(id));
+                match found {
+                    Some(row) => Ok(resource_contents(uri, &row)),
+                    None => Err(ResourceReadError::NotFound),
+                }
+            }
+            Some(ResourceUri::ConnectionObjects(id)) => {
+                self.read_connection_tool(uri, id, "objects", Command::Objects, engine, runtime)
+            }
+            Some(ResourceUri::ConnectionTables(id)) => {
+                self.read_connection_tool(uri, id, "tables", Command::Tables, engine, runtime)
+            }
+            None => Err(ResourceReadError::NotFound),
+        }
+    }
+
+    /// Read a connection-scoped resource by running the tool it stands for.
+    ///
+    /// The scope and the allowlist are checked before any store read, exactly as the tool
+    /// path checks them, and a connection outside the allowlist is refused as not found
+    /// rather than told apart from one that never existed.
+    fn read_connection_tool(
+        &self,
+        uri: &str,
+        id: &str,
+        tool: &str,
+        command: Command,
+        engine: &dyn Engine,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Json, ResourceReadError> {
+        if !self.token.allows(tool) || !self.token.allows_connection(id) {
+            return Err(ResourceReadError::NotFound);
+        }
+        let settings = self
+            .connection_settings(id, None, None, &[])
+            .map_err(ResourceReadError::Failed)?;
+        let events = self
+            .run_tool(command, settings, engine, runtime)
+            .map_err(ResourceReadError::Failed)?;
+        Ok(resource_contents(uri, &Json::Array(events)))
+    }
+
+    /// `prompts/list`: the template prompts this token may use.
+    fn list_prompts(&self) -> Vec<Json> {
+        PROMPTS
+            .iter()
+            .filter(|prompt| self.token.allows(prompt.scope))
+            .map(|prompt| {
+                json!({
+                    "name": prompt.name,
+                    "description": prompt.description,
+                    "arguments": prompt
+                        .arguments
+                        .iter()
+                        .map(|(name, description, required)| json!({
+                            "name": name,
+                            "description": description,
+                            "required": required,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
+    /// `prompts/get`: a prompt rendered from its arguments, or a refusal.
+    ///
+    /// The rendering is `format!` over fixed text: nothing here calls a model, and
+    /// nothing here reads a connection.
+    fn get_prompt(&self, name: &str, arguments: &Json) -> Result<Json, String> {
+        let Some(prompt) = PROMPTS.iter().find(|prompt| prompt.name == name) else {
+            return Err(format!("unknown prompt '{name}'"));
+        };
+        if !self.token.allows(prompt.scope) {
+            return Err(format!("unknown prompt '{name}'"));
+        }
+        for (argument, _, required) in prompt.arguments {
+            if *required && required_str(arguments, argument).is_err() {
+                return Err(format!("the argument '{argument}' is required"));
+            }
+        }
+        let text = match prompt.name {
+            "explain_query" => format!(
+                "Explain the execution plan of this query on connection '{}'. Call the \
+                 `explain` tool with that connection and statement first, then describe the \
+                 plan in plain language for someone who did not write the query.\n\n\
+                 ```sql\n{}\n```",
+                required_str(arguments, "connection")?,
+                required_str(arguments, "sql")?,
+            ),
+            "summarize_tables" => format!(
+                "List the tables available on connection '{}' with the `tables` tool, then \
+                 summarize what each is likely to hold for a new teammate.",
+                required_str(arguments, "connection")?,
+            ),
+            other => return Err(format!("unknown prompt '{other}'")),
+        };
+        Ok(json!({
+            "description": prompt.description,
+            "messages": [{"role": "user", "content": {"type": "text", "text": text}}],
+        }))
     }
 
     /// The settings an `objects`/`tables` call needs: a connection and nothing else.
@@ -1016,6 +1363,112 @@ fn optional_str<'a>(arguments: &'a Json, key: &str) -> Option<&'a str> {
 }
 
 // --------------------------------------------------------------------------- //
+// resources
+// --------------------------------------------------------------------------- //
+
+/// One connection as a resource may expose it: the same hand-picked subset
+/// `connections_list` returns, never a user name, an options bag or a `secret_ref`.
+fn connection_row(row: &Json) -> Json {
+    json!({
+        "id": row.get("id").cloned().unwrap_or(Json::Null),
+        "name": row.get("name").cloned().unwrap_or(Json::Null),
+        "kind": row.get("kind").cloned().unwrap_or(Json::Null),
+        "host": row.get("host").cloned().unwrap_or(Json::Null),
+        "port": row.get("port").cloned().unwrap_or(Json::Null),
+        "database": row.get("database").cloned().unwrap_or(Json::Null),
+    })
+}
+
+/// The `id`/`name` a row is described by, with the id as the fallback name.
+fn row_identity(row: &Json) -> (&str, &str) {
+    let id = row.get("id").and_then(Json::as_str).unwrap_or_default();
+    let name = row.get("name").and_then(Json::as_str).unwrap_or(id);
+    (id, name)
+}
+
+/// The resource for one saved connection.
+fn connection_resource(row: &Json) -> Json {
+    let (id, name) = row_identity(row);
+    json!({
+        "uri": format!("{CONNECTIONS_RESOURCE}/{id}"),
+        "name": name,
+        "description": format!(
+            "The saved connection '{name}', as id, name, kind, host, port and database."
+        ),
+        "mimeType": "application/json",
+    })
+}
+
+/// The `objects`/`tables` resource for one saved connection.
+fn connection_sub_resource(row: &Json, kind: &str, description: &str) -> Json {
+    let (id, name) = row_identity(row);
+    json!({
+        "uri": format!("{CONNECTIONS_RESOURCE}/{id}/{kind}"),
+        "name": format!("{name} — {kind}"),
+        "description": description,
+        "mimeType": "application/json",
+    })
+}
+
+/// A `resources/read` result: the value as one JSON text block.
+fn resource_contents(uri: &str, value: &Json) -> Json {
+    json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": serde_json::to_string(value).expect("resource values are serialisable"),
+        }]
+    })
+}
+
+/// A resource URI this server owns, or `None` for anything else.
+enum ResourceUri<'a> {
+    /// `queryhive://connections`
+    Connections,
+    /// `queryhive://connections/{id}`
+    Connection(&'a str),
+    /// `queryhive://connections/{id}/objects`
+    ConnectionObjects(&'a str),
+    /// `queryhive://connections/{id}/tables`
+    ConnectionTables(&'a str),
+}
+
+/// Parse a resource URI, answering only for URIs in this server's own shape.
+///
+/// A URI outside the shape is `None`, which the reader turns into the same not-found a
+/// resource outside the token gets: the shape of the answer says nothing about whether
+/// the thing named exists.
+fn parse_resource_uri(uri: &str) -> Option<ResourceUri<'_>> {
+    let rest = uri.strip_prefix(CONNECTIONS_RESOURCE)?;
+    if rest.is_empty() {
+        return Some(ResourceUri::Connections);
+    }
+    let rest = rest.strip_prefix('/')?;
+    if rest.is_empty() || rest.ends_with('/') {
+        return None;
+    }
+    if let Some(id) = rest.strip_suffix("/objects") {
+        return (!id.is_empty() && !id.contains('/')).then_some(ResourceUri::ConnectionObjects(id));
+    }
+    if let Some(id) = rest.strip_suffix("/tables") {
+        return (!id.is_empty() && !id.contains('/')).then_some(ResourceUri::ConnectionTables(id));
+    }
+    if rest.contains('/') {
+        return None;
+    }
+    Some(ResourceUri::Connection(rest))
+}
+
+/// Why `resources/read` could not answer.
+enum ResourceReadError {
+    /// Not a resource this token may see: absent, outside the allowlist, or outside the
+    /// token's scope. Deliberately one case, so the refusal cannot be used to probe.
+    NotFound,
+    /// A resource the token may reach, but the read failed. The message is the engine's.
+    Failed(String),
+}
+
+// --------------------------------------------------------------------------- //
 // JSON-RPC helpers
 // --------------------------------------------------------------------------- //
 
@@ -1024,7 +1477,16 @@ fn success(id: Json, result: Json) -> Json {
 }
 
 fn error_response(id: Json, code: i64, message: &str) -> Json {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+    error_response_data(id, code, message, Json::Null)
+}
+
+/// An error reply that may carry structured `data`; a null `data` is omitted.
+fn error_response_data(id: Json, code: i64, message: &str, data: Json) -> Json {
+    let mut error = json!({"code": code, "message": message});
+    if !data.is_null() {
+        error["data"] = data;
+    }
+    json!({"jsonrpc": "2.0", "id": id, "error": error})
 }
 
 /// A `tools/call` result: the engine's events as one text block, or a failure message.

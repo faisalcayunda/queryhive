@@ -60,7 +60,7 @@ fn issue_token(db_path: &str, connection_id: &str) -> (String, String) {
             "--name",
             "e2e",
             "--scope",
-            "db_drivers,connections_list",
+            "db_drivers,connections_list,explain",
             "--connection",
             connection_id,
         ])
@@ -132,6 +132,13 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
                "params": {"name": "preview", "arguments": {"connection": connection_id, "sql": "select 1"}}}),
         json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                "params": {"name": "no-such-tool", "arguments": {}}}),
+        // A revision nobody speaks is refused with the supported list, not echoed.
+        json!({"jsonrpc": "2.0", "id": 8, "method": "initialize",
+               "params": {"protocolVersion": "1999-01-01"}}),
+        json!({"jsonrpc": "2.0", "id": 9, "method": "resources/list"}),
+        json!({"jsonrpc": "2.0", "id": 10, "method": "resources/read",
+               "params": {"uri": format!("queryhive://connections/{connection_id}")}}),
+        json!({"jsonrpc": "2.0", "id": 11, "method": "prompts/list"}),
     ];
 
     {
@@ -142,11 +149,11 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         stdin.flush().expect("flush");
     }
 
-    // Seven replies: the notification is silent, the other seven requests each answer.
+    // Eleven replies: the notification is silent, the other eleven requests each answer.
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
     let mut replies: Vec<Json> = Vec::new();
-    for _ in 0..7 {
+    for _ in 0..11 {
         let mut line = String::new();
         let read = reader.read_line(&mut line).expect("read");
         assert!(read > 0, "the server closed stdout early");
@@ -189,6 +196,57 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         .as_str()
         .expect("text")
         .contains("unknown tool"));
+
+    // An unknown protocol revision is refused with the supported list, not echoed.
+    assert_eq!(replies[7]["id"], json!(8));
+    assert_eq!(replies[7]["error"]["code"], json!(-32022));
+    assert!(
+        replies[7]["error"]["data"]["supported"]
+            .as_array()
+            .is_some_and(|versions| !versions.is_empty()),
+        "{:?}",
+        replies[7]
+    );
+
+    // resources/list offers the aggregate and the allowlisted connection, and nothing
+    // for a connection this token may not reach.
+    assert_eq!(replies[8]["id"], json!(9));
+    let uris: Vec<&str> = replies[8]["result"]["resources"]
+        .as_array()
+        .expect("a resources array")
+        .iter()
+        .map(|resource| resource["uri"].as_str().expect("a uri"))
+        .collect();
+    assert!(uris.contains(&"queryhive://connections"), "{uris:?}");
+    let connection_uri = format!("queryhive://connections/{connection_id}");
+    assert!(uris.contains(&connection_uri.as_str()), "{uris:?}");
+
+    // resources/read of that connection answers, with no credential field.
+    assert_eq!(replies[9]["id"], json!(10));
+    let resource_text = replies[9]["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(resource_text.contains("E2E"), "{resource_text}");
+    assert!(
+        !resource_text.contains("e2e-user"),
+        "a credential field leaked: {resource_text}"
+    );
+    assert!(
+        !resource_text.contains("secret_ref"),
+        "a credential field leaked: {resource_text}"
+    );
+
+    // prompts/list answers; `explain` is in this token's scope.
+    assert_eq!(replies[10]["id"], json!(11));
+    let prompts = replies[10]["result"]["prompts"]
+        .as_array()
+        .expect("a prompts array");
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt["name"] == json!("explain_query")),
+        "{prompts:?}"
+    );
 
     // Closing stdin is a clean end of the stream: exit 0, handshake gone.
     drop(reader);
