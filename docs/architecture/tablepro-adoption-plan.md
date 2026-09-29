@@ -712,8 +712,19 @@ dan `swift test` **229 tes / 0 gagal**; `./app/build.sh` mencetak `Built dist/Qu
 ## 8. Fase 6: kandidat besar, belum dijadwalkan
 
 Tidak dikerjakan sebelum ada keputusan produk: structure editor, routines dan user-defined types,
-backup dan restore untuk PostgreSQL, Open Quickly, external API di luar MCP, dan plugin ABI runtime.
-Masing-masing sudah punya bagiannya di matriks celah analisis, dengan alasan kenapa ditunda.
+backup dan restore untuk PostgreSQL, Open Quickly, external API di luar MCP, **AI assistant**, dan
+plugin ABI runtime. Masing-masing sudah punya bagiannya di matriks celah analisis, dengan alasan
+kenapa ditunda.
+
+**AI assistant, dan kenapa ia ada di sini dan bukan di §9.** Matriks analisis menandainya "Tunda, dan
+putuskan dulu soal on-prem" — bukan ditolak. Yang menahan bukan kodenya melainkan satu keputusan
+kebijakan: mengirim skema, nama tabel, dan query ke LLM cloud berarti data pengguna meninggalkan
+mesin, dan pengguna alat ini bekerja dengan data pemerintah. Jadi pertanyaannya lebih dulu "model
+lokal atau cloud dengan batas yang disepakati", bukan "fitur mana dulu". Ukurannya juga beda kelas
+dari fase mana pun di dokumen ini: chat bertool-calling, inline suggestion, review/explain/optimize/
+fix-error, agent mode, dan 14 provider — itu proyek, bukan irisan. Karena itu ia tidak akan dibangun
+tanpa keputusan itu, dan pane AI di Settings baru masuk akal sesudahnya: pane itu mengatur provider,
+dan provider belum ada.
 
 ## 9. Yang tidak dikerjakan
 
