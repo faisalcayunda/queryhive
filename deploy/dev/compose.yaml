@@ -26,7 +26,7 @@ services:
       POSTGRES_PASSWORD: qh-dev-only
       POSTGRES_DB: qh
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     volumes:
       - qh-postgres-data:/var/lib/postgresql/data
       # Loaded once, on an empty data directory, by the image's own entrypoint.
@@ -46,7 +46,7 @@ services:
       MYSQL_USER: qh
       MYSQL_PASSWORD: qh-dev-only
     ports:
-      - "53306:3306"
+      - "127.0.0.1:53306:3306"
     volumes:
       - qh-mysql-data:/var/lib/mysql
       - ./seed-mysql.sql:/docker-entrypoint-initdb.d/10-seed.sql:ro
@@ -57,10 +57,9 @@ services:
       retries: 45
 
   # Trino is not started by up.sh by default: a single-node coordinator wants
-  # roughly 2 GiB of its own, and the podman VM on this machine has 2 GiB total,
-  # so it would fail slowly rather than usefully. Raise the VM's memory first
-  # (`podman machine stop && podman machine set --memory 8192 && podman machine
-  # start`), then this service works unchanged.
+  # roughly 2 GiB of its own. Give the podman VM enough memory first (6 GiB here;
+  # `podman machine stop && podman machine set --memory 6144 && podman machine
+  # start`); the container is capped at 3 GiB, as in up.sh.
   #
   # The tag is deliberately unpinned: the version to support has to come from the
   # upstream release list, and pinning a number nobody has verified would be
@@ -68,9 +67,40 @@ services:
   trino:
     image: trinodb/trino:latest
     container_name: qh-trino
+    mem_limit: 3g
     ports:
-      - "58080:8080"
+      - "127.0.0.1:58080:8080"
     profiles: ["trino"]
+
+  # PostgreSQL behind 15 ms of latency each way (30 ms RTT) on 55435, for the
+  # RTT benchmarks. Compose cannot call toxiproxy's HTTP API, so the proxy and
+  # its toxics are created by the one-shot `toxiproxy-setup` service below.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    container_name: qh-toxiproxy
+    ports:
+      - "127.0.0.1:8474:8474"
+      - "127.0.0.1:55435:55435"
+    depends_on:
+      - postgres
+    profiles: ["toxiproxy"]
+
+  toxiproxy-setup:
+    image: docker.io/curlimages/curl:8.10.1
+    depends_on:
+      - toxiproxy
+    profiles: ["toxiproxy"]
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        until curl -fsS http://toxiproxy:8474/version >/dev/null; do sleep 1; done
+        # 409 means the proxy or toxic already exists: fine on a re-run.
+        post() { curl -sS -o /dev/null -w '%{http_code}' -X POST "$$@" | grep -qE '^(2..|409)$'; }
+        post http://toxiproxy:8474/proxies -d '{"name":"postgres","listen":"0.0.0.0:55435","upstream":"postgres:5432"}'
+        for s in downstream upstream; do
+          post http://toxiproxy:8474/proxies/postgres/toxics -d '{"name":"latency_'$$s'","type":"latency","stream":"'$$s'","attributes":{"latency":15}}'
+        done
 
 volumes:
   qh-postgres-data:

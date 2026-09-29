@@ -38,7 +38,7 @@ podman run -d --name "$NAME" \
   -e MYSQL_DATABASE="$DB_NAME" \
   -e MYSQL_USER="$DB_USER" \
   -e MYSQL_PASSWORD="$DB_PASSWORD" \
-  -p "$PORT:3306" \
+  -p "127.0.0.1:$PORT:3306" \
   "mysql:$TAG" >/dev/null || exit 1
 
 ready=0

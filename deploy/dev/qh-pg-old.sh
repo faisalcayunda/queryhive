@@ -35,7 +35,7 @@ podman run -d --name "$NAME" \
   -e POSTGRES_USER="$DB_USER" \
   -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   -e POSTGRES_DB="$DB_NAME" \
-  -p "$PORT:5432" \
+  -p "127.0.0.1:$PORT:5432" \
   "postgres:$TAG" >/dev/null || exit 1
 
 # An actual query, not `pg_isready`: the image's entrypoint starts a temporary

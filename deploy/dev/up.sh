@@ -4,6 +4,7 @@
 #
 #   deploy/dev/up.sh              # start everything, load fixtures
 #   deploy/dev/up.sh postgres     # one engine
+#   deploy/dev/up.sh toxiproxy    # PostgreSQL behind 15 ms latency each way (30 ms RTT)
 #   deploy/dev/up.sh --down       # stop and remove
 #
 # Podman rather than Docker: it is what is installed on this machine. The
@@ -12,13 +13,23 @@
 # `podman compose` or `docker compose`.
 #
 # Ports are deliberately off the defaults (55432, 53306, 58080) so a database
-# already listening locally is not shadowed or accidentally used.
+# already listening locally is not shadowed or accidentally used. Every publish
+# binds 127.0.0.1 only. Nothing listens on a public interface.
+#
+# toxiproxy (qh-toxiproxy, MIT): 127.0.0.1:55435 forwards to the PostgreSQL
+# container's published port with 15 ms latency in each direction, so a query
+# round trip costs about 30 ms more than on 55432. Its HTTP API (unauthenticated,
+# so also loopback-only) is on 8474.
+# Start postgres first; `toxiproxy` is not part of `all`.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POSTGRES_PORT=55432
 MYSQL_PORT=53306
 TRINO_PORT=58080
+TOXIPROXY_PORT=55435
+TOXIPROXY_API_PORT=8474
+TOXIPROXY_LATENCY_MS=15
 # Throwaway credentials for a local fixture container, not a secret: the
 # databases hold only generated data and nothing listens on a public interface.
 DB_USER=qh
@@ -58,7 +69,7 @@ start_postgres() {
     -e POSTGRES_USER="$DB_USER" \
     -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -e POSTGRES_DB="$DB_NAME" \
-    -p "$POSTGRES_PORT:5432" \
+    -p "127.0.0.1:$POSTGRES_PORT:5432" \
     -v qh-postgres-data:/var/lib/postgresql/data \
     postgres:17-alpine >/dev/null
   wait_for_postgres qh-postgres
@@ -74,7 +85,7 @@ start_mysql() {
     -e MYSQL_DATABASE="$DB_NAME" \
     -e MYSQL_USER="$DB_USER" \
     -e MYSQL_PASSWORD="$DB_PASSWORD" \
-    -p "$MYSQL_PORT:3306" \
+    -p "127.0.0.1:$MYSQL_PORT:3306" \
     -v qh-mysql-data:/var/lib/mysql \
     mysql:8.4 >/dev/null
   wait_for_mysql qh-mysql
@@ -86,17 +97,45 @@ start_mysql() {
 start_trino() {
   # Not started by default: a single-node Trino wants roughly 2 GiB of its own,
   # and starting it alongside the two databases on a small VM fails slowly rather
-  # than usefully. The VM here has been raised to 4 GiB, and it now serves in about
-  # ten seconds. See docs/compatibility.md for what was measured.
+  # than usefully. The VM here has 6 GiB; the container is capped at 3 GiB so a
+  # runaway query cannot take the databases down with it (the JVM heap follows
+  # the limit). See docs/compatibility.md for what was measured.
   podman rm -f qh-trino >/dev/null 2>&1 || true
   podman run -d --name qh-trino \
-    -p "$TRINO_PORT:8080" \
+    --memory 3g \
+    -p "127.0.0.1:$TRINO_PORT:8080" \
     trinodb/trino:latest >/dev/null
   echo "trino starting on 127.0.0.1:$TRINO_PORT (needs ~2 GiB of its own)"
 }
 
+start_toxiproxy() {
+  podman rm -f qh-toxiproxy >/dev/null 2>&1 || true
+  podman run -d --name qh-toxiproxy \
+    -p "127.0.0.1:$TOXIPROXY_API_PORT:8474" \
+    -p "127.0.0.1:$TOXIPROXY_PORT:$TOXIPROXY_PORT" \
+    ghcr.io/shopify/toxiproxy:2.12.0 >/dev/null
+  local api="http://127.0.0.1:$TOXIPROXY_API_PORT"
+  local up=""
+  for _ in $(seq 1 30); do
+    if curl -fsS "$api/version" >/dev/null 2>&1; then up=1; break; fi
+    sleep 1
+  done
+  if [[ -z "$up" ]]; then
+    echo "toxiproxy API on $api did not answer within 30 s" >&2
+    return 1
+  fi
+  # The upstream is the host-published PostgreSQL port: the default podman
+  # network has no name resolution between containers.
+  curl -fsS -X POST "$api/proxies" -d "{\"name\":\"postgres\",\"listen\":\"0.0.0.0:$TOXIPROXY_PORT\",\"upstream\":\"host.containers.internal:$POSTGRES_PORT\"}" >/dev/null
+  for stream in downstream upstream; do
+    curl -fsS -X POST "$api/proxies/postgres/toxics" \
+      -d "{\"name\":\"latency_$stream\",\"type\":\"latency\",\"stream\":\"$stream\",\"attributes\":{\"latency\":$TOXIPROXY_LATENCY_MS}}" >/dev/null
+  done
+  echo "toxiproxy ready: 127.0.0.1:$TOXIPROXY_PORT -> postgres, ${TOXIPROXY_LATENCY_MS} ms each way (API on $TOXIPROXY_API_PORT)"
+}
+
 down() {
-  for name in qh-postgres qh-mysql qh-trino; do
+  for name in qh-postgres qh-mysql qh-trino qh-toxiproxy; do
     podman rm -f "$name" >/dev/null 2>&1 || true
   done
   echo "removed the dev containers (named volumes left in place)"
@@ -113,11 +152,12 @@ main() {
     postgres) start_postgres ;;
     mysql) start_mysql ;;
     trino) start_trino ;;
+    toxiproxy) start_toxiproxy ;;
     all)
       start_postgres
       start_mysql
       ;;
-    *) echo "usage: up.sh [postgres|mysql|trino|all|--down]" >&2; return 2 ;;
+    *) echo "usage: up.sh [postgres|mysql|trino|toxiproxy|all|--down]" >&2; return 2 ;;
   esac
 }
 

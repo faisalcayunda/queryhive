@@ -71,7 +71,7 @@ up() {
 
   podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
   podman run -d --name "$CONTAINER" \
-    -p "$HOST_PORT:22" \
+    -p "127.0.0.1:$HOST_PORT:22" \
     -e QH_AUTHORIZED_KEY="$(cat "$KEY.pub")" \
     -e QH_PASSWORD="$PASSWORD" \
     "$IMAGE" sh -c '

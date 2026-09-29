@@ -287,7 +287,7 @@ Urutan batch:
 - Commit: `perf(bench): a black-box harness that drives either app the same way`.
 
 **W1-T7. Fixture (0.7).** Ukuran S.
-- Berkas: `deploy/dev/up.sh` (toxiproxy di port 55434, karena 55433 sudah terpakai di host ini; `--memory` untuk Trino), `deploy/dev/compose.yaml`, `deploy/dev/make_sql_corpus.py` (baru), `deploy/dev/make_many_tables.py` (baru, 5.000 tabel).
+- Berkas: `deploy/dev/up.sh` (toxiproxy di 127.0.0.1:55435, karena 55433 terpakai di host ini dan 55434 milik `qh-pg-old.sh`; `--memory` untuk Trino), `deploy/dev/compose.yaml`, `deploy/dev/make_sql_corpus.py` (baru), `deploy/dev/make_many_tables.py` (baru, 5.000 tabel).
 - Pelaksana: GP-s. Gate: CR.
 - Verifikasi: `bash -n deploy/dev/up.sh`, toxiproxy hidup, `tpch.sf1.lineitem` bisa dibaca, dan ukuran korpus sesuai.
 - Commit: `chore(dev): fixtures for RTT, 5,000 tables and large SQL files`.

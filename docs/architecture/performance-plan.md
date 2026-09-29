@@ -179,7 +179,7 @@ App dikendalikan lewat AX + CGEvent, dengan profil per app (pintasan Run dan Sto
 
 - 1M baris dan 500 kolom tidak butuh seed baru: `generate_series` dengan SQL yang dibangun harness.
 - Trino: `tpch.sf1.lineitem`. Katalog `tpch` sudah dipakai di §4 adoption plan, tetapi Fase 0 memverifikasi keberadaannya.
-- toxiproxy (MIT) sebagai container dev untuk RTT (port 55434; 55433 sudah terpakai di host ini).
+- toxiproxy (MIT) sebagai container dev untuk RTT (127.0.0.1:55435; 55433 terpakai di host ini dan 55434 milik `qh-pg-old.sh`).
 - Skrip 5.000 tabel di `deploy/dev/`.
 
 **0.8 Gate paritas visual.** `app/Tests/QueryHiveTests/VisualParityTests.swift` dengan baseline PNG di `__Baselines__/`, direkam dari commit P lewat `QH_RECORD_BASELINES=1`. Merekam ulang butuh persetujuan pemilik.
