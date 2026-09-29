@@ -48,8 +48,12 @@ struct QueryHiveApp: App {
         .defaultSize(width: 1320, height: 880)
 
         // The standard app-menu entry, so ⌘, works without this app inventing its own key.
+        //
+        // The updater is handed in so Settings' General pane can run the same check the menu item
+        // above does, and observe `canCheckForUpdates` while one is in flight. This scene owns the
+        // only `Updater`; a second one would start a second Sparkle controller.
         Settings {
-            SettingsView()
+            SettingsView(updater: updater)
                 .environment(model)
                 .preferredColorScheme(appearance.mode.colorScheme)
         }

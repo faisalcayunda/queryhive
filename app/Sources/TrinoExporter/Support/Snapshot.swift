@@ -95,8 +95,11 @@ enum Snapshot {
         // the one screen nobody can look at without launching.
         let hosting: NSHostingView<AnyView>
         if scene.hasPrefix("settings") {
-            let pane: SettingsView.Pane = scene == "settings-keyboard" ? .keyboard
-                : scene == "settings-fonts" ? .fonts : .appearance
+            // The scene suffix is the pane's raw value: `settings` opens General, `settings-editor`
+            // opens Editor, and so on. `settings-fonts` is the old name for that pane and still
+            // resolves, so an older review script does not silently photograph the wrong pane.
+            let name = String(scene.dropFirst("settings-".count))
+            let pane = SettingsView.Pane(rawValue: name) ?? (name == "fonts" ? .editor : .general)
             hosting = NSHostingView(rootView: AnyView(SettingsView(pane: pane)
                 .environment(model)
                 .preferredColorScheme(scheme)))
