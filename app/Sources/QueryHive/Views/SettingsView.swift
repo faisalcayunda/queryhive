@@ -505,27 +505,22 @@ private struct SoftwareUpdateControls: View {
 /// The palette: which canvas, which accent, and how hard the backdrop glows.
 struct AppearanceSettings: View {
     @Bindable private var store = ThemeStore.shared
+    /// What the list's `+` will call the appearance it keeps.
+    @State private var newLookName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            // The named combinations first, because choosing one is the whole decision for most
-            // people. The card below is where the same choice is taken apart.
-            SettingsCard(title: "Preset",
-                         detail: "Three combinations worth a single click. Each names a canvas for the dark and another for the light, so switching mode stays inside the preset. Everything below still works on its own.") {
-                presetButtons
-            }
-
-            // The canvas list on the left, and everything that is global rather than per-theme on
-            // the right. The list shows both appearances at once, which the old row of tiles could
-            // not: it filtered to the appearance in effect, so the other half was unreachable
-            // without switching mode first.
+            // One card, because there is one question: what does this app look like. The list on the
+            // left is whole appearances — the presets, and anything the user kept — and the detail on
+            // the right is the parts they are made of. Change any part and the list reads Custom,
+            // which is the honest name for "this is yours and it is not one of these yet".
             SettingsCard(title: "Appearance",
-                         detail: "Which canvas each appearance uses, the accent that paints the chrome, and how the coloured surfaces are filled. Picking a theme fills the slot for its own appearance: a dark canvas goes to Dark, a light one to Light.") {
+                         detail: "The list on the left is whole appearances: a preset names both canvases, the accent and the tone in one click. Change any part and it reads Custom, which is what you are on until the + keeps it under a name.") {
                 SettingsRow(label: "Mode") {
                     Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
                 }
                 RowDivider()
-                themeMasterDetail
+                lookMasterDetail
             }
         }
     }
@@ -587,136 +582,208 @@ struct AppearanceSettings: View {
         }
     }
 
-    /// The named combinations. Each preview is drawn in that preset's *own* tone, so a flat preset
-    /// shows a flat bar rather than a gradient one it would not produce.
-    private var presetButtons: some View {
-        HStack(spacing: 8) {
-            ForEach(ThemePreset.all) { preset in
-                Button { store.apply(preset) } label: {
-                    presetTile(preset)
-                }
-                .buttonStyle(.plain)
-                .help(preset.detail)
-                .accessibilityLabel(preset.title)
-                .accessibilityAddTraits(store.matches(preset) ? [.isSelected] : [])
-            }
-        }
-    }
-
-    /// One preset, drawn on **its own** canvas for the appearance in effect — which is what makes
-    /// `Tone.ink` the right text colour here rather than a colour chosen from the tile's palette.
-    /// Because a preset now carries a canvas per appearance, the tile it paints always matches the
-    /// window it is drawn in, so the chrome ink is already the contrasting one.
+    /// The list on the left and the detail on the right.
     ///
-    /// Split out from `presetButtons` rather than inlined: as a single expression the type checker
-    /// refused it ("unable to type-check this expression in reasonable time").
-    private func presetTile(_ preset: ThemePreset) -> some View {
-        let active = store.matches(preset)
-        let canvas = preset.theme(isDark: store.isDarkAppearance).canvas
-        return HStack(spacing: 9) {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(previewFill(preset.accent, tone: preset.tone))
-                .frame(width: 30, height: 16)
-                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .strokeBorder(Tone.ink.opacity(0.22)))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(preset.title)
-                    .font(.ui(12, weight: active ? .semibold : .medium))
-                    .foregroundStyle(active ? Tone.ink : Tone.secondary)
-                // "Blue · Glow", not "Graphite · Blue · Glow": the theme is already shown by the
-                // tile's own background, and the bar beside this line shows the accent under the
-                // tone. Spelling all three out at 10pt monospaced needs ~191pt inside a ~168pt
-                // tile, so it truncated to "Graphite · Blue · Gl…" — a label that names nothing.
-                Text("\(preset.accent.title) · \(preset.tone.title)")
-                    .font(.code(10))
-                    .foregroundStyle(Tone.ink.opacity(0.62))
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity)
-        .frame(height: 44)
-        .background(canvas, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .strokeBorder(active ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
-                          lineWidth: active ? 1.5 : 1))
-        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-    }
-
-    /// The list on the left and the detail on the right: the shape TablePro's Appearance pane has,
-    /// and the reason it is worth having is that both appearances are visible at once. The row of
-    /// tiles this replaces could only ever show the appearance in effect.
-    private var themeMasterDetail: some View {
+    /// The list is whole appearances and the detail is the parts they are made of, which is the
+    /// shape that makes "Custom" mean something: a row can only stand for the current appearance if
+    /// it names all of it, and a canvas alone does not.
+    private var lookMasterDetail: some View {
         HStack(alignment: .top, spacing: 14) {
-            themeList
+            lookList
             Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
-            themeDetail
+            lookDetail
         }
         .padding(.vertical, 6)
     }
 
-    private var themeList: some View {
+    private var lookList: some View {
         VStack(alignment: .leading, spacing: 6) {
-            themeGroup("Dark", AppTheme.allCases.filter(\.isDark))
-            themeGroup("Light", AppTheme.allCases.filter { !$0.isDark })
+            // Above the presets, because it is the state you are in rather than one of the choices.
+            if store.isCustomLook { customRow }
+            lookGroup("Presets") {
+                ForEach(ThemePreset.all) { preset in
+                    Button { store.apply(preset) } label: {
+                        lookRow(title: preset.title,
+                                detail: "\(preset.accent.title) · \(preset.tone.title)",
+                                look: preset.look,
+                                active: store.currentPreset == preset)
+                    }
+                    .buttonStyle(.plain)
+                    .help(preset.detail)
+                    .accessibilityLabel(preset.title)
+                    .accessibilityAddTraits(store.currentPreset == preset ? [.isSelected] : [])
+                }
+            }
+            if !store.savedLooks.isEmpty {
+                lookGroup("Saved") {
+                    ForEach(store.savedLooks) { saved in
+                        savedRow(saved)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            lookToolbar
         }
         .frame(width: 168, alignment: .leading)
     }
 
-    private func themeGroup(_ title: String, _ themes: [AppTheme]) -> some View {
+    /// The two actions the list cannot express as a row: keep the appearance you are on, and throw
+    /// away one you kept. Below the list, which is where TablePro puts the same pair.
+    private var lookToolbar: some View {
+        HStack(spacing: 2) {
+            Button { saveCurrentLook() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(store.isCustomLook ? Tone.ink : Tone.secondary)
+                    .frame(width: 24, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(store.isCustomLook
+                  ? "Save this appearance under the name on the right"
+                  : "This appearance is already one of the rows above")
+            .disabled(!store.isCustomLook)
+
+            Button { deleteSelectedLook() } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(selectedLook == nil ? Tone.secondary : Tone.ink)
+                    .frame(width: 24, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Delete the saved appearance this one is")
+            .disabled(selectedLook == nil)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The saved look the current appearance is exactly, which is what `−` deletes.
+    private var selectedLook: SavedLook? {
+        store.savedLooks.first { $0.look == store.currentLook }
+    }
+
+    /// Keep the current appearance. A blank name gets one, so the button is never a dead click:
+    /// a look nobody named is a look nobody can pick again.
+    private func saveCurrentLook() {
+        let trimmed = newLookName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "Appearance \(store.savedLooks.count + 1)" : trimmed
+        if store.saveLook(named: name) != nil { newLookName = "" }
+    }
+
+    private func deleteSelectedLook() {
+        guard let selected = selectedLook else { return }
+        store.deleteLook(selected.id)
+    }
+
+    @ViewBuilder
+    private func lookGroup<Content: View>(_ title: String,
+                                          @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
                 .font(.ui(9.5, weight: .semibold))
                 .foregroundStyle(Tone.secondary)
-            ForEach(themes) { theme in
-                themeRow(theme)
-            }
+            content()
         }
     }
 
-    /// One canvas in the list. The thumbnail is the theme's own canvas, so the list reads as a set
-    /// of colours rather than as a set of names, and picking one fills the slot for *its* appearance.
-    private func themeRow(_ theme: AppTheme) -> some View {
-        let active = (theme.isDark ? store.darkTheme : store.lightTheme) == theme
-        return Button { store.theme = theme } label: {
-            HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(theme.canvas)
-                    .frame(width: 24, height: 16)
-                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(Tone.ink.opacity(0.18)))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(theme.title)
-                        .font(.ui(11.5, weight: active ? .semibold : .regular))
-                        .foregroundStyle(active ? Tone.ink : Tone.ink.opacity(0.85))
-                    Text(theme.isDark ? "Dark" : "Light")
-                        .font(.ui(9.5))
-                        .foregroundStyle(Tone.secondary)
-                }
-                Spacer(minLength: 0)
+    /// One appearance in the list: a thumbnail of it, what it is called, and where it came from.
+    ///
+    /// The thumbnail is a miniature of the shell rather than a colour swatch, because what a look
+    /// decides is the whole surface — the canvas, the accent under the tone, the chrome rows — and
+    /// one colour cannot say that.
+    private func lookRow(title: String, detail: String, look: AppearanceLook,
+                         active: Bool) -> some View {
+        HStack(spacing: 9) {
+            lookThumbnail(look)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.ui(11.5, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? Tone.ink : Tone.ink.opacity(0.85))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.ui(9.5))
+                    .foregroundStyle(Tone.secondary)
+                    .lineLimit(1)
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .background(active ? Tone.accent.opacity(0.14) : .clear,
-                        in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .contentShape(Rectangle())
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .help(theme.detail)
-        .accessibilityLabel(theme.title)
-        .accessibilityAddTraits(active ? [.isSelected] : [])
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(active ? Tone.accent.opacity(0.14) : .clear,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
     }
 
-    /// The detail on the right: the canvas the list has chosen, then the three values that are
-    /// global rather than per-theme. Accent, tone and glow apply to the whole shell, so they sit
-    /// beside the preview rather than inside it.
-    private var themeDetail: some View {
+    /// The shell in miniature, drawn on the canvas for the appearance in effect. The ink comes from
+    /// that canvas's own darkness rather than from the window's, because the thumbnail can be
+    /// showing the other appearance from the one it sits in.
+    private func lookThumbnail(_ look: AppearanceLook) -> some View {
+        let isDark = store.isDarkAppearance
+        let canvas = isDark ? look.darkTheme.canvas : look.lightTheme.canvas
+        let ink: Color = isDark ? .white : .black
+        return ZStack {
+            RoundedRectangle(cornerRadius: 4, style: .continuous).fill(canvas)
+            VStack(alignment: .leading, spacing: 2) {
+                Capsule()
+                    .fill(previewFill(look.accent, tone: look.tone))
+                    .frame(width: 18, height: 4)
+                RoundedRectangle(cornerRadius: 1).fill(ink.opacity(0.28)).frame(height: 2)
+                RoundedRectangle(cornerRadius: 1).fill(ink.opacity(0.16)).frame(width: 22, height: 2)
+            }
+            .padding(5)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(width: 40, height: 26)
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .strokeBorder(Tone.ink.opacity(0.18)))
+    }
+
+    /// The state you are in when the appearance is none of the named ones. Deliberately not a
+    /// button: there is nothing to go back to, and a click that does nothing is worse than a label.
+    private var customRow: some View {
+        lookRow(title: "Custom", detail: "not a preset",
+                look: store.currentLook, active: true)
+            .accessibilityElement(children: .combine)
+    }
+
+    private func savedRow(_ saved: SavedLook) -> some View {
+        let active = saved.look == store.currentLook
+        return HStack(spacing: 0) {
+            Button { store.apply(saved.look) } label: {
+                lookRow(title: saved.name,
+                        detail: "\(saved.look.accent.title) · \(saved.look.tone.title)",
+                        look: saved.look, active: active)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(saved.name)
+            .accessibilityAddTraits(active ? [.isSelected] : [])
+            Button { store.deleteLook(saved.id) } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Tone.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Delete \(saved.name)")
+        }
+    }
+
+    /// The parts the list is made of. Both canvases are here rather than in the list, because a
+    /// canvas is one axis of an appearance and not an appearance: picking Midnight alone does not
+    /// say which light canvas or accent goes with it.
+    private var lookDetail: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(store.theme.title)
+            Text(detailTitle)
                 .font(.ui(12, weight: .semibold))
                 .foregroundStyle(Tone.ink)
             themePreview
+            SettingsRow(label: "Dark canvas") { canvasChips(dark: true) }
+            RowDivider()
+            SettingsRow(label: "Light canvas") { canvasChips(dark: false) }
+            RowDivider()
             SettingsRow(label: "Accent") { accentSwatches }
             RowDivider()
             SettingsRow(label: "Tone",
@@ -727,8 +794,59 @@ struct AppearanceSettings: View {
                     .tint(Tone.accent)
                     .disabled(!store.tone.isLuminous)
             }
+            RowDivider()
+            // The name the list's `+` saves under. Beside the appearance it names rather than in a
+            // dialog, so what is being saved and what it will be called are read together.
+            SettingsRow(label: "Name") {
+                TextField("Optional", text: $newLookName)
+                    .textFieldStyle(.plain)
+                    .font(.ui(11.5))
+                    .foregroundStyle(Tone.ink)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What the detail is showing: the preset or saved look it equals, or Custom.
+    private var detailTitle: String {
+        if let preset = store.currentPreset { return preset.title }
+        if let saved = store.savedLooks.first(where: { $0.look == store.currentLook }) {
+            return saved.name
+        }
+        return "Custom"
+    }
+
+    /// One chip per canvas for one appearance. The chip is the canvas's own colour, so the row reads
+    /// as a set of canvases rather than as a set of names.
+    private func canvasChips(dark isDark: Bool) -> some View {
+        let themes = AppTheme.allCases.filter { $0.isDark == isDark }
+        return HStack(spacing: 6) {
+            ForEach(themes) { theme in
+                let active = (isDark ? store.darkTheme : store.lightTheme) == theme
+                Button {
+                    if isDark { store.darkTheme = theme } else { store.lightTheme = theme }
+                } label: {
+                    VStack(spacing: 3) {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(theme.canvas)
+                            .frame(width: 32, height: 20)
+                            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(active ? Tone.accent.opacity(0.9) : Tone.ink.opacity(0.16),
+                                              lineWidth: active ? 2 : 1))
+                        Text(theme.title)
+                            .font(.ui(9))
+                            .foregroundStyle(active ? Tone.ink : Tone.secondary)
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(theme.detail)
+                .accessibilityLabel(theme.title)
+                .accessibilityAddTraits(active ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     /// The shell in miniature: the chosen canvas, the accent under the current tone, and three

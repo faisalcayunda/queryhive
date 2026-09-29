@@ -49,7 +49,7 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 /// Rather than rewrite all of them, the chrome is expressed through `Tone.ink`/`Tone.recess`,
 /// which are *dynamic* colours: AppKit hands back white in a dark appearance and black in a light
 /// one, resolved per draw, so every one of those call sites is already correct in both.
-enum AppTheme: String, CaseIterable, Identifiable {
+enum AppTheme: String, CaseIterable, Identifiable, Codable {
     case midnight
     case graphite
     case nord
@@ -118,7 +118,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
 /// they are perfectly good colours: they are this app's **status** vocabulary — failure, destroy,
 /// success — and an accent that duplicates one of them would make the primary Run capsule look
 /// like the destructive Replace button.
-enum AccentChoice: String, CaseIterable, Identifiable {
+enum AccentChoice: String, CaseIterable, Identifiable, Codable {
     case ice
     case violet
     case magenta
@@ -174,7 +174,7 @@ enum AccentChoice: String, CaseIterable, Identifiable {
 /// `glow` is the only tone that draws a gradient anywhere. The other two are flat by construction
 /// rather than by a contrast setting: they swap the fill, drop the sheen, drop the coloured shadow,
 /// and flatten the backdrop's radial glows, which are gradients themselves.
-enum SurfaceTone: String, CaseIterable, Identifiable {
+enum SurfaceTone: String, CaseIterable, Identifiable, Codable {
     /// The gradient capsule, the sheen, the coloured glow, the lit backdrop. What shipped.
     case glow
     /// One flat colour per surface. No gradient, no sheen, no glow.
@@ -211,7 +211,27 @@ enum SurfaceTone: String, CaseIterable, Identifiable {
 /// every tone — but three pairings are not arbitrary: the app's own look, a neutral charcoal with
 /// blue, and the same charcoal with every gradient switched off, which is the one people ask for
 /// by name.
-struct ThemePreset: Identifiable {
+/// One appearance, whole: both canvases, the accent, the tone, and how hard the glow burns.
+///
+/// The five things a preset names and a user can change. One value rather than five, so that "is
+/// the current appearance this preset" and "keep this appearance under a name" are one comparison
+/// and one copy instead of two lists that could drift apart.
+struct AppearanceLook: Codable, Equatable {
+    var darkTheme: AppTheme
+    var lightTheme: AppTheme
+    var accent: AccentChoice
+    var tone: SurfaceTone
+    var glow: Double
+}
+
+/// A look the user named and kept.
+struct SavedLook: Codable, Identifiable, Equatable {
+    var id: UUID
+    var name: String
+    var look: AppearanceLook
+}
+
+struct ThemePreset: Identifiable, Equatable {
     let id: String
     let title: String
     let detail: String
@@ -225,6 +245,16 @@ struct ThemePreset: Identifiable {
 
     /// The canvas this preset would paint in the given appearance.
     func theme(isDark: Bool) -> AppTheme { isDark ? darkTheme : lightTheme }
+
+    /// The preset as a whole appearance.
+    ///
+    /// The glow is the design's own 1.0, and `apply` sets it: a preset names all five parts, so
+    /// "pick Classic, move the glow slider" reads as custom rather than as Classic with a change
+    /// nobody was told about.
+    var look: AppearanceLook {
+        AppearanceLook(darkTheme: darkTheme, lightTheme: lightTheme,
+                       accent: accent, tone: tone, glow: 1.0)
+    }
 
     static let all: [ThemePreset] = [
         ThemePreset(id: "classic", title: "Classic",
@@ -261,6 +291,7 @@ final class ThemeStore {
     private static let lightThemeKey = "lightTheme"
     private static let uiFontKey = "uiFontFamily"
     private static let codeFontKey = "codeFontFamily"
+    private static let looksKey = "savedAppearanceLooks"
 
     /// While true, changes are held in memory and never written to `UserDefaults`. Set by
     /// `pin(theme:accent:)` for a render that must not rewrite the user's preferences — an icon
@@ -303,6 +334,18 @@ final class ThemeStore {
     }()
     private var storedCodeFont: String = {
         UserDefaults.standard.string(forKey: codeFontKey) ?? ""
+    }()
+
+    /// The looks the user named, in the order they were saved. JSON in one `UserDefaults` value
+    /// rather than a row per look, because this is appearance data and belongs where the rest of
+    /// the appearance is; a saved look that has to be fetched before the window can open would make
+    /// the palette a network of its own.
+    private var storedLooks: [SavedLook] = {
+        guard let data = UserDefaults.standard.data(forKey: looksKey),
+              let looks = try? JSONDecoder().decode([SavedLook].self, from: data) else {
+            return []
+        }
+        return looks
     }()
 
     /// Whether the app follows the system's appearance or pins one.
@@ -427,17 +470,67 @@ final class ThemeStore {
     /// Apply a named pair in one step. Goes through the same setters, so it persists the same way
     /// and is held back by the same pin.
     func apply(_ preset: ThemePreset) {
-        // Both halves, so switching Light/Dark afterwards still lands on this preset's canvas for
-        // that appearance rather than on whatever the other half happened to hold.
-        darkTheme = preset.darkTheme
-        lightTheme = preset.lightTheme
-        accent = preset.accent
-        tone = preset.tone
+        apply(preset.look)
     }
 
-    /// Whether the current pair is exactly this preset, so Settings can mark it as the active one.
-    func matches(_ preset: ThemePreset) -> Bool {
-        theme == preset.theme(isDark: isDarkAppearance) && accent == preset.accent && tone == preset.tone
+    /// The appearance as it stands, as one value.
+    var currentLook: AppearanceLook {
+        AppearanceLook(darkTheme: storedDarkTheme, lightTheme: storedLightTheme,
+                       accent: storedAccent, tone: storedTone, glow: storedGlow)
+    }
+
+    /// Apply a whole look in one step, through the same setters.
+    ///
+    /// Both canvases, so switching Light/Dark afterwards still lands on this look's canvas for that
+    /// appearance rather than on whatever the other half happened to hold.
+    func apply(_ look: AppearanceLook) {
+        darkTheme = look.darkTheme
+        lightTheme = look.lightTheme
+        accent = look.accent
+        tone = look.tone
+        glow = look.glow
+    }
+
+    /// The looks the user saved, in the order they were saved.
+    var savedLooks: [SavedLook] { storedLooks }
+
+    /// Keep the current appearance under `name`.
+    ///
+    /// Answers the row it made, or `nil` for a name that is only whitespace: a look nobody named is
+    /// a look nobody can pick again.
+    @discardableResult
+    func saveLook(named name: String) -> SavedLook? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let saved = SavedLook(id: UUID(), name: trimmed, look: currentLook)
+        storedLooks.append(saved)
+        persistLooks()
+        return saved
+    }
+
+    func deleteLook(_ id: UUID) {
+        storedLooks.removeAll { $0.id == id }
+        persistLooks()
+    }
+
+    /// The preset the current appearance is exactly, if any.
+    ///
+    /// Full equality, glow included, which is why applying a preset sets the glow too: without that,
+    /// "pick Classic, move the glow slider" would still read as Classic, and the person who moved it
+    /// was told they had changed nothing.
+    var currentPreset: ThemePreset? {
+        ThemePreset.all.first { $0.look == currentLook }
+    }
+
+    /// Whether the appearance is neither a preset nor a look the user saved.
+    var isCustomLook: Bool {
+        currentPreset == nil && !storedLooks.contains { $0.look == currentLook }
+    }
+
+    private func persistLooks() {
+        guard !isPinned else { return }
+        guard let data = try? JSONEncoder().encode(storedLooks) else { return }
+        UserDefaults.standard.set(data, forKey: Self.looksKey)
     }
 
     /// Fix the palette for a render that must not depend on the user's preferences, and must not

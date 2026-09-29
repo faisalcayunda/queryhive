@@ -80,11 +80,11 @@ enum Snapshot {
         // persist, and a review is not allowed to change the user's preferences. The order inside
         // `pin` (mode before theme) is what puts a light request in the light slot.
         let store = ThemeStore.shared
-        if let requested {
-            store.pin(theme: requested.theme, accent: requested.accent, tone: requested.tone,
-                      mode: requested.mode, systemIsDark: requested.systemIsDark,
-                      uiFont: requested.uiFont, codeFont: requested.codeFont)
-        }
+        // Always pinned, even with nothing requested: a render must not write to the user's
+        // preferences, and a scene that seeds a saved appearance would otherwise keep it for real.
+        store.pin(theme: requested?.theme, accent: requested?.accent, tone: requested?.tone,
+                  mode: requested?.mode, systemIsDark: requested?.systemIsDark,
+                  uiFont: requested?.uiFont, codeFont: requested?.codeFont)
         let scheme = store.mode.colorScheme
         let app = NSApplication.shared
         // .accessory keeps it out of the Dock and out of the menu bar for the second it lives.
@@ -314,6 +314,14 @@ enum Snapshot {
         }
 
         switch scene {
+        // A kept appearance and a state that matches neither a preset nor a saved look, so the
+        // list's Saved group and its Custom row are in the picture rather than only in the code.
+        case "settings-appearance":
+            let store = ThemeStore.shared
+            store.accent = .violet
+            store.saveLook(named: "Night shift")
+            store.accent = .mint
+
         // Open Quickly with something to find: the tree seeded above, two saved queries and a
         // history row, so the palette is reviewable without typing into it.
         case "quickly":
