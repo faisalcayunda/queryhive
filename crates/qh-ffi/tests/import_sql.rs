@@ -78,6 +78,8 @@ impl Driver for FakeDriver {
             objects_columns: vec![],
             persistent_connection: true,
             statement_timeout: true,
+            parameters: None,
+            read_only: false,
         }
     }
 

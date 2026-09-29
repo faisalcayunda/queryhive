@@ -170,6 +170,71 @@ pub struct Capabilities {
     /// over with a local timer: a local timeout stops reading, not the work, and
     /// the query keeps running and holding its resources.
     pub statement_timeout: bool,
+    /// How this driver binds parameters, or `None` when it cannot.
+    ///
+    /// `None` is a driver saying that a value must be written into the statement
+    /// text by the caller; sending it placeholders would have the server read
+    /// them literally. `Some(style)` names both the fact and the spelling, so a
+    /// caller can build the statement **for this driver** rather than guess a
+    /// dialect. This is read before connecting, like every other capability.
+    pub parameters: Option<ParameterStyle>,
+    /// Whether the driver **cannot write at all**, whatever the user chose.
+    ///
+    /// `true` is a fact about the engine (a read-only replica, a catalog that
+    /// only reads), not about the user's Safe Mode, and it is what lets a caller
+    /// raise `qh_sql`'s `FloorSource::Driver` without inventing a condition.
+    /// `false` says nothing about whether a particular statement will be
+    /// permitted — that is the connection's Safe Mode and the server's own grants.
+    pub read_only: bool,
+}
+
+/// How a driver spells a bound parameter.
+///
+/// The spelling is the driver's to declare and the caller's to follow: a
+/// statement is built **for** a driver, so the placeholder is chosen from here,
+/// never guessed at from the SQL. The two variants are the two spellings the
+/// clients here speak, and a driver that speaks neither says `None` in
+/// [`Capabilities::parameters`] instead of carrying a variant it cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterStyle {
+    /// `$1`, `$2`, … — PostgreSQL's numbered placeholders.
+    Dollar,
+    /// `?`, one per value in order — MySQL's positional placeholders.
+    Question,
+}
+
+impl ParameterStyle {
+    /// The placeholder for the value at `index` (0-based), as the SQL spells it.
+    ///
+    /// The one place the spelling lives, so a caller building a statement and a
+    /// test reading it back cannot disagree.
+    pub fn placeholder(self, index: usize) -> String {
+        match self {
+            ParameterStyle::Dollar => format!("${}", index + 1),
+            ParameterStyle::Question => "?".to_owned(),
+        }
+    }
+}
+
+/// One value a caller wants bound into a statement.
+///
+/// A closed set on purpose: these are the shapes a driver can hand to its
+/// client and have it sent natively. A value outside it — an exact decimal, a
+/// timestamp, an array — is the caller's to write into the statement text, and
+/// pretending otherwise would be a promise the clients cannot keep. `Null` is
+/// here so a parameter can be a real SQL NULL rather than the four characters.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Parameter {
+    /// A SQL NULL. Distinct from [`Parameter::Text`] with an empty string.
+    Null,
+    Bool(bool),
+    /// Signed 64-bit: every SQL integer type below `bigint`.
+    Int(i64),
+    /// MySQL's `BIGINT UNSIGNED` reaches past `i64::MAX`, the same reason
+    /// [`qh_core::Value::UInt`] exists.
+    UInt(u64),
+    Float(f64),
+    Text(String),
 }
 
 /// How to run one statement.
@@ -375,6 +440,41 @@ pub trait Session: Send {
         sql: &str,
         options: &ExecuteOptions,
     ) -> Result<Box<dyn Cursor>, EngineError>;
+
+    /// [`execute`](Self::execute), with values bound into the statement's
+    /// placeholders.
+    ///
+    /// A sibling of `execute` rather than fields on [`ExecuteOptions`], and that
+    /// is deliberate: `ExecuteOptions` is built with struct literals at call
+    /// sites that know nothing about binding, and freezing its shape is what
+    /// keeps every one of them compiling. The parameters are a second argument
+    /// set for the one command that has values to send.
+    ///
+    /// The default implementation is the honest answer for a driver that cannot
+    /// bind: an empty list is delegated to `execute`, and a non-empty one is a
+    /// usage error naming the capability. A driver that **can** bind overrides
+    /// this (`Capabilities::parameters` is its declaration). Nothing here ever
+    /// inlines a value into the SQL: a driver without binding refuses rather than
+    /// send placeholders its server would read literally.
+    ///
+    /// The caller is expected to have built `sql` with the placeholders of the
+    /// driver's own [`ParameterStyle`] and to have asked
+    /// [`Capabilities::parameters`] first.
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        if parameters.is_empty() {
+            return self.execute(sql, options).await;
+        }
+        Err(EngineError::Usage {
+            message: "this driver cannot bind parameters (Capabilities::parameters is None), so \
+                      the values must be written into the statement text instead"
+                .to_owned(),
+        })
+    }
 
     /// List the children of one level of the object tree.
     ///
@@ -602,6 +702,8 @@ mod tests {
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: true,
                 statement_timeout: true,
+                parameters: Some(ParameterStyle::Dollar),
+                read_only: false,
             }
         }
 
@@ -626,6 +728,8 @@ mod tests {
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: true,
                 statement_timeout: true,
+                parameters: Some(ParameterStyle::Dollar),
+                read_only: false,
             }
         }
 
@@ -793,6 +897,42 @@ mod tests {
         session.close().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn the_default_bound_execute_refuses_values_for_a_driver_without_binding() {
+        // The safety net under Trino: a driver that says it cannot bind refuses a
+        // non-empty value list rather than sending placeholders its server would
+        // read literally. Empty is just `execute`.
+        let driver = FakeDriver {
+            kind: DriverKind::Trino,
+            connects: Arc::new(AtomicUsize::new(0)),
+        };
+        let config = ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 8080, "qh");
+        let mut session = driver.connect(&config).await.unwrap();
+
+        let mut cursor = session
+            .execute_bound("SELECT 1", &[], &ExecuteOptions::default())
+            .await
+            .unwrap();
+        assert!(cursor.next_batch(10).await.unwrap().is_some());
+
+        let error = session
+            .execute_bound(
+                "UPDATE t SET a = $1",
+                &[Parameter::Int(1)],
+                &ExecuteOptions::default(),
+            )
+            .await
+            .err()
+            .expect("a driver without binding must refuse");
+        match error {
+            EngineError::Usage { message } => {
+                assert!(message.contains("cannot bind"), "{message}");
+            }
+            other => panic!("expected a usage error, got {other:?}"),
+        }
+        session.close().await.unwrap();
+    }
+
     #[test]
     fn a_connection_config_never_prints_its_password() {
         // A `{:?}` on a config is the easiest way to leak a password into a log,
@@ -836,6 +976,16 @@ mod tests {
             bounded.statement_timeout,
             Some(Duration::from_millis(1_500))
         );
+    }
+
+    #[test]
+    fn a_placeholder_is_spelled_by_the_driver_that_uses_it() {
+        // PostgreSQL numbers; MySQL does not. The spelling lives in one place so
+        // a builder and a driver cannot disagree about what a `?` means.
+        assert_eq!(ParameterStyle::Dollar.placeholder(0), "$1");
+        assert_eq!(ParameterStyle::Dollar.placeholder(9), "$10");
+        assert_eq!(ParameterStyle::Question.placeholder(0), "?");
+        assert_eq!(ParameterStyle::Question.placeholder(9), "?");
     }
 
     #[test]

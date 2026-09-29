@@ -88,7 +88,7 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Session, TlsMode,
+    ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
 };
 use qh_sql::strip_terminator;
 use serde::Deserialize;
@@ -432,6 +432,12 @@ impl Driver for TrinoDriver {
             persistent_connection: false,
             // The `query_max_run_time` session property, sent on the statement's POST.
             statement_timeout: true,
+            // Trino's HTTP protocol has no bind parameters: a query is text and a
+            // page of rows. A caller that wants a value out of the statement text
+            // must inline it; this driver refuses a non-empty `parameters` rather
+            // than send placeholders the coordinator would read literally.
+            parameters: None,
+            read_only: false,
         }
     }
 
@@ -913,6 +919,27 @@ impl Session for TrinoSession {
         }))
     }
 
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        if parameters.is_empty() {
+            return self.execute(sql, options).await;
+        }
+        // No bind parameters exist on the wire, so the only honest answers are
+        // "no values" or an error. Sending `?` or `$1` would hand the coordinator
+        // a placeholder as ordinary text and run a statement the caller did not
+        // build — the failure mode parameter binding exists to remove.
+        Err(EngineError::Usage {
+            message: "Trino's HTTP protocol has no bind parameters, so this statement cannot take \
+                      values; write them into the SQL text instead (a driver whose \
+                      Capabilities::parameters is None must be inlined for)"
+                .to_owned(),
+        })
+    }
+
     async fn browse(
         &mut self,
         level: BrowseLevel,
@@ -1377,6 +1404,14 @@ mod tests {
             ]
         );
         assert_eq!(capabilities.objects_columns, vec!["Name", "Type"]);
+        assert_eq!(
+            capabilities.parameters, None,
+            "the HTTP protocol has no bind parameters, so a value must be inlined"
+        );
+        assert!(
+            !capabilities.read_only,
+            "this engine can write when the server allows"
+        );
     }
 
     #[test]

@@ -453,6 +453,8 @@ mod tests {
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: self.persistent,
                 statement_timeout: true,
+                parameters: None,
+                read_only: false,
             }
         }
 

@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use qh_core::{EngineError, Value};
 use qh_driver::{
-    BrowseLevel, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions, ObjectPath, Session,
-    TlsMode,
+    BrowseLevel, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions, ObjectPath,
+    Parameter, Session, TlsMode,
 };
 use qh_driver_postgres::PostgresDriver;
 
@@ -674,4 +674,90 @@ async fn a_statement_timeout_is_a_typed_error_that_names_the_limit() {
         elapsed < Duration::from_secs(4),
         "the timeout took {elapsed:?}, which is the sleep and not the bound"
     );
+}
+
+#[tokio::test]
+async fn a_bound_statement_sends_the_value_out_of_band() {
+    // Parameters are the point: a value never becomes SQL text, so the escaping
+    // question does not arise. The temp table keeps it from touching anything in the
+    // dev database and lets it run repeatedly.
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let mut cursor = session
+        .execute(
+            "CREATE TEMP TABLE qh_bind (id int4, name text, amount numeric(10,2))",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("create temp table");
+    drain(&mut cursor, 1_000).await;
+
+    // The quote in the text is data the binder never has to escape.
+    let mut cursor = session
+        .execute_bound(
+            "INSERT INTO qh_bind (id, name, amount) VALUES ($1, $2, $3)",
+            &[
+                Parameter::Int(1),
+                Parameter::Text("O'Brien".to_owned()),
+                Parameter::Text("12.34".to_owned()),
+            ],
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("bound insert");
+    drain(&mut cursor, 1_000).await;
+    assert_eq!(cursor.affected_rows(), Some(1));
+
+    // A NULL parameter is a real NULL, not the four characters.
+    let mut cursor = session
+        .execute_bound(
+            "UPDATE qh_bind SET name = $1 WHERE id = $2",
+            &[Parameter::Null, Parameter::Int(1)],
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("bound update to null");
+    drain(&mut cursor, 1_000).await;
+    assert_eq!(cursor.affected_rows(), Some(1));
+
+    // A parameterized statement that returns rows is refused by name: the extended
+    // protocol returns binary values and this driver's decoder is the text path.
+    let refused = session
+        .execute_bound(
+            "SELECT id FROM qh_bind WHERE name = $1",
+            &[Parameter::Text("O'Brien".to_owned())],
+            &ExecuteOptions::default(),
+        )
+        .await;
+    match refused {
+        Err(EngineError::Usage { .. }) => {}
+        Err(other) => panic!("expected a usage refusal, got {other:?}"),
+        Ok(_) => panic!("a row-returning bound statement must be refused, but it ran"),
+    }
+
+    // Read the row back unparameterized: the quote survived, the NULL is a NULL, and
+    // the numeric stayed exact.
+    let mut cursor = session
+        .execute(
+            "SELECT id, name, amount FROM qh_bind",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("read back");
+    let (rows, _) = drain(&mut cursor, 10).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0][0], Value::Int(1));
+    assert_eq!(rows[0][1], Value::Null);
+    assert_eq!(
+        rows[0][2],
+        Value::Decimal {
+            unscaled: 1234,
+            scale: 2
+        }
+    );
+
+    session.close().await.expect("close");
 }
