@@ -310,7 +310,7 @@ struct PreviewResult {
 /// No longer includes Columns: the grid's own header carries every column name and its type chip,
 /// so a separate list of them was the same information twice.
 enum PanelTab: String, CaseIterable, Identifiable {
-    case result, log, files
+    case result, log, files, history, saved
 
     var id: Self { self }
 
@@ -321,6 +321,8 @@ enum PanelTab: String, CaseIterable, Identifiable {
         case .result: "Result"
         case .log: "Log"
         case .files: destination == .table ? "Table" : "Files"
+        case .history: "History"
+        case .saved: "Saved"
         }
     }
 
@@ -352,7 +354,10 @@ struct ObjectScope: Equatable {
 final class QueryTab: Identifiable {
     enum Stage { case idle, running, done, failed }
 
-    let id = UUID()
+    /// The tab's identity, and the same one the session store keeps so a relaunch can put the
+    /// front tab back in front. Passed in rather than always fresh for that reason: a restored
+    /// tab has to come back under the identity `active_tab_id` names.
+    let id: UUID
     var title: String
 
     // MARK: Objects
@@ -576,7 +581,8 @@ final class QueryTab: Identifiable {
     /// not exited yet, so the toolbar can disable Stop instead of queueing more signals.
     var stopping = false
 
-    init(title: String) {
+    init(title: String, id: UUID = UUID()) {
+        self.id = id
         self.title = title
         outputDirectory = ConnectionStore.defaultOutputDirectory
     }

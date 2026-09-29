@@ -36,6 +36,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "legacy_import",
         sql: include_str!("../migrations/0002_legacy_import.sql"),
     },
+    Migration {
+        version: 3,
+        name: "history_search",
+        sql: include_str!("../migrations/0003_history_search.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "saved_query_favourite",
+        sql: include_str!("../migrations/0004_saved_query_favourite.sql"),
+    },
 ];
 
 /// A migration that has run, as the history table remembers it.

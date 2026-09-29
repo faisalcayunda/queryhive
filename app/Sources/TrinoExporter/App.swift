@@ -23,7 +23,7 @@ enum QueryHiveMain {
 
 struct QueryHiveApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
-    @State private var model = AppModel()
+    @State private var model = AppModel(persistsSession: true)
     /// Read here, at the top of the scene, so switching the mode in Settings re-evaluates this body
     /// and the whole window takes the new scheme. `AppearanceMode.system` hands back `nil`, which is
     /// what makes SwiftUI inherit macOS's appearance — and keep inheriting it live, so a system
@@ -183,6 +183,71 @@ struct Event: Decodable {
     var mode: String?
     /// The coordinator's own state string, carried on `to_table` progress events.
     var state: String?
+
+    /// `history` command: one row per execution, newest first.
+    var entries: [HistoryEntry]?
+    /// `saved_queries` command, `list` action: the stored statements in name order. Its own key
+    /// rather than `entries`, because the two are different record shapes and one key cannot be
+    /// two of them.
+    var queries: [SavedQuery]?
+    /// `history_clear`: how many rows were living when it ran, so a caller can say what it did.
+    var cleared: Int?
+    /// `history_entry`: whether the write landed on a row that was already there. False means the
+    /// id in the reply is the one the caller would have chosen.
+    var merged: Bool?
+    /// `saved_query` reply: which action the engine took.
+    var action: String?
+    /// `saved_query` reply: the row, for `get` and `save`. Null when a `get` found nothing, which
+    /// is a normal answer and not an error.
+    var query: SavedQuery?
+    /// `saved_query` reply: whether a `rename` actually found a row.
+    var renamed: Bool?
+
+    /// `session` command: whether a stored session was found. `false` on a fresh install, which is
+    /// a normal answer the app turns into one blank tab, not an error.
+    var saved: Bool?
+    /// `session` command: the tabs as the app last wrote them, handed back in the same shape.
+    var tabs: [SessionTab]?
+    /// `session` command: which tab was in front. Absent when none was selected, which is not the
+    /// same as an empty string.
+    var activeTabId: String?
+
+    /// One execution in the engine's history.
+    ///
+    /// Three fields are optional because a row can be written before its run has finished: an
+    /// entry with no `outcome` yet is not the same as one that ended, and the engine keeps that
+    /// difference rather than filling in a zero.
+    struct HistoryEntry: Decodable, Identifiable {
+        let id: String
+        var sql: String
+        /// Unix milliseconds, read when the user asked for the run.
+        var startedAt: Int
+        var elapsedMs: Int?
+        var rowCount: Int?
+        /// `ok`, `error` or `cancelled`, or nothing yet.
+        var outcome: String?
+        var error: String?
+        /// The connection's own identity, which is also the Keychain account. Absent is a real
+        /// value: a run can be recorded before its connection has been saved.
+        var connectionId: String?
+        var deleted: Bool
+        var version: Int
+    }
+
+    /// One statement the user chose to keep.
+    struct SavedQuery: Decodable, Identifiable {
+        let id: String
+        var name: String
+        var sql: String
+        var connectionId: String?
+        var folderId: String?
+        /// Whether the user keeps this query within reach. Always on the wire, from migration 4
+        /// onwards: the engine owns the default, so the app never has to guess what an absent field
+        /// would mean.
+        var favourite: Bool
+        var deleted: Bool
+        var version: Int
+    }
 }
 
 /// A user-facing error surfaced through RootView's alert. Used for problems that happen beside

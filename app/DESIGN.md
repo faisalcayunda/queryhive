@@ -3,6 +3,11 @@
 Single source of truth for the native macOS app in `app/`. If an implementation detail
 conflicts with this file, stop and report the conflict instead of choosing silently.
 
+> **Reading note, 29 Sep 2026.** The Scope list below was corrected against the code on this date:
+> four of the five things it used to call out of scope had landed. The rest of the document was
+> written while the app was export-only, so where it describes a shell with no result grid, read
+> `PROGRESS.md` for what is actually there now.
+
 ## Scope
 
 - macOS app, SwiftUI, Apple Silicon (arm64) only, macOS 14+, **CleanMyMac surfaces on a Navicat
@@ -15,8 +20,16 @@ conflicts with this file, stop and report the conflict instead of choosing silen
   (`Support/RustEngine.swift`). No interpreter is bundled and there is no runtime path to
   configure.
 - Saved connections, Navicat style. The password lives in the macOS Keychain.
-- Out of scope: universal or Intel builds, notarization, editing table data, saved query files,
-  a result data grid (the export *is* the result).
+- Out of scope: universal or Intel builds. The engine is a static arm64 archive, so there is no
+  second architecture to link, and `app/build-dmg.sh` refuses to package anything else
+  (`app/build-dmg.sh:38`). `app/Package.swift` names no architecture at all.
+
+Four things this list used to call out of scope, and the code that settled them: the result grid
+(`Views/ResultGrid.swift`), editing table data (`Models/CellEdits.swift` and
+`Models/UpdateStatements.swift`), saved query files (`openFile` and `saveFile` in
+`Models/Shortcuts.swift`), and notarization (`app/build-dmg.sh --notarize`). The list was wrong for
+as long as those were in the tree, which is worth remembering next time a scope line here is trusted
+over `git ls-files`.
 
 There is one engine and two front ends: this app over UniFFI, and the `queryhive-engine` CLI
 (`crates/qh-ffi/src/main.rs`) that the golden harness runs. Both call the same `qh_ffi` commands,

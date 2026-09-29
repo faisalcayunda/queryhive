@@ -1,0 +1,69 @@
+name: repo hygiene
+
+# Cheap, Ubuntu-only checks. Nothing here needs Xcode or the Rust toolchain, so it stays
+# fast and it can run on every pull request.
+#
+# Sources, so this file is not the only record:
+# - actionlint version and checksum: https://github.com/rhysd/actionlint/releases/tag/v1.7.12
+#   (actionlint_1.7.12_linux_amd64.tar.gz, sha256 published in the release)
+# - `git ls-files '*.sh'` is the list of scripts, so a new script is covered without
+#   editing this workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+
+      - name: Check every tracked shell script
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no shell scripts found; the glob in this workflow is wrong"
+            exit 1
+          fi
+          printf 'checking %d scripts\n' "${#scripts[@]}"
+          shellcheck --severity=warning -- "${scripts[@]}"
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint 1.7.12
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  ${archive}" \
+            | sha256sum -c -
+          tar -xzf "$archive" actionlint
+          install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Lint the workflows
+        # actionlint checks `run:` script bodies with shellcheck when shellcheck is on
+        # PATH, so install it here too rather than relying on the job above: each job gets
+        # its own runner.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          actionlint -color

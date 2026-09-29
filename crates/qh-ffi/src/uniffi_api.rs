@@ -93,6 +93,11 @@ pub enum EngineCommand {
     Connections,
     ImportConnections,
     Credential,
+    History,
+    HistoryAdd,
+    HistoryClear,
+    SavedQueries,
+    Session,
     Objects,
     Test,
     Catalogs,
@@ -105,6 +110,46 @@ pub enum EngineCommand {
     Explain,
 }
 
+/// Every variant, in the order the enum declares them.
+///
+/// The compiler cannot iterate an enum, so this list is kept by hand, and its fixed length buys one
+/// direction of the check rather than both:
+///
+/// - **Caught.** A command added to `crate::COMMANDS` without a line here makes the two lengths
+///   differ, and the test below fails. That is the direction that shipped.
+/// - **Not caught.** A variant added to `EngineCommand` and to `name()` but not here leaves this
+///   array at 19 and `crate::COMMANDS` at 19: the lengths still match, the test passes, and
+///   `command_names()` omits a command the app can no longer ask for.
+///
+/// The second direction is why the test module also carries `arm`, an exhaustive `match` with no
+/// wildcard arm. A variant with no arm there does not compile, and the compiler is the only thing
+/// that can see a variant this array has not been told about.
+///
+/// This exists because the tautology shipped once. `command_names` used to read `crate::COMMANDS`
+/// directly and the test compared it with `crate::COMMANDS`, so four new commands reached the
+/// usage line and `Command` while `EngineCommand` stayed at fourteen, and nothing failed.
+pub const EVERY_COMMAND: [EngineCommand; 19] = [
+    EngineCommand::DbDrivers,
+    EngineCommand::Connections,
+    EngineCommand::ImportConnections,
+    EngineCommand::Credential,
+    EngineCommand::History,
+    EngineCommand::HistoryAdd,
+    EngineCommand::HistoryClear,
+    EngineCommand::SavedQueries,
+    EngineCommand::Session,
+    EngineCommand::Objects,
+    EngineCommand::Test,
+    EngineCommand::Catalogs,
+    EngineCommand::Schemas,
+    EngineCommand::Tables,
+    EngineCommand::Export,
+    EngineCommand::ToTable,
+    EngineCommand::Preview,
+    EngineCommand::Count,
+    EngineCommand::Explain,
+];
+
 impl EngineCommand {
     /// The word the CLI uses, which is also the word the golden snapshots use.
     pub fn name(self) -> &'static str {
@@ -113,6 +158,11 @@ impl EngineCommand {
             Self::Connections => "connections",
             Self::ImportConnections => "import_connections",
             Self::Credential => "credential",
+            Self::History => "history",
+            Self::HistoryAdd => "history_add",
+            Self::HistoryClear => "history_clear",
+            Self::SavedQueries => "saved_queries",
+            Self::Session => "session",
             Self::Objects => "objects",
             Self::Test => "test",
             Self::Catalogs => "catalogs",
@@ -299,9 +349,9 @@ pub fn engine_version() -> String {
 /// Every command this build offers, spelled as the CLI spells them.
 #[uniffi::export]
 pub fn command_names() -> Vec<String> {
-    crate::COMMANDS
+    EVERY_COMMAND
         .iter()
-        .map(|name| (*name).to_owned())
+        .map(|command| command.name().to_owned())
         .collect()
 }
 
@@ -409,14 +459,55 @@ mod tests {
 
     #[test]
     fn the_commands_the_surface_offers_are_the_ones_the_cli_offers() {
-        // Two lists that must not drift: the enum the app matches on, and the table the
-        // usage message and `Command::parse` come from. A variant added to one and not the
-        // other would be a command the app can ask for by name and not by type, or the
-        // reverse.
+        // Two lists that must not drift: the enum the app matches on, read through
+        // `EVERY_COMMAND`, and the table the usage message and `Command::parse` come from. A
+        // command added to one and not the other is a command the app can ask for by name and
+        // not by type, or the reverse. This comparison is worth something only because
+        // `command_names` no longer reads `crate::COMMANDS` itself; see `EVERY_COMMAND`.
         assert_eq!(command_names(), crate::COMMANDS.to_vec());
         for name in command_names() {
             let command = Command::parse(&name).expect("the CLI knows every name it lists");
             assert_eq!(command.name(), name);
+        }
+    }
+
+    #[test]
+    fn every_variant_is_one_the_surface_lists() {
+        // The half of the guard the length comparison above cannot do. `EVERY_COMMAND` is a
+        // fixed-length array, so a variant added to the enum leaves it at 18 entries and that
+        // comparison still passes while `command_names()` stops listing the new command and the app
+        // can no longer ask for it. This `match` is what refuses: it has no wildcard arm, so a
+        // variant with no arm here does not compile, and that error is the notification that
+        // `EVERY_COMMAND` and `crate::COMMANDS` both need a line.
+        //
+        // The assertion at the end is the second thing it buys: the wire name is then spelled
+        // twice, once in `name()` and once in these arms, and the two have to agree.
+        fn arm(command: &EngineCommand) -> &'static str {
+            match command {
+                EngineCommand::DbDrivers => "db_drivers",
+                EngineCommand::Connections => "connections",
+                EngineCommand::ImportConnections => "import_connections",
+                EngineCommand::Credential => "credential",
+                EngineCommand::History => "history",
+                EngineCommand::HistoryAdd => "history_add",
+                EngineCommand::HistoryClear => "history_clear",
+                EngineCommand::SavedQueries => "saved_queries",
+                EngineCommand::Session => "session",
+                EngineCommand::Objects => "objects",
+                EngineCommand::Test => "test",
+                EngineCommand::Catalogs => "catalogs",
+                EngineCommand::Schemas => "schemas",
+                EngineCommand::Tables => "tables",
+                EngineCommand::Export => "export",
+                EngineCommand::ToTable => "to_table",
+                EngineCommand::Preview => "preview",
+                EngineCommand::Count => "count",
+                EngineCommand::Explain => "explain",
+            }
+        }
+
+        for command in &EVERY_COMMAND {
+            assert_eq!(arm(command), command.name());
         }
     }
 

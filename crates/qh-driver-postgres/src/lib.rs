@@ -247,7 +247,7 @@ where
         .connect(tls)
         .await
         .map_err(|error| EngineError::Connect {
-            message: format!("{}: {error}", config.redacted()),
+            message: connect_message(config, &error),
             kind: classify_connect_error(&error),
         })?;
 
@@ -618,6 +618,27 @@ fn classify_connect_error(error: &tokio_postgres::Error) -> FailureKind {
         FailureKind::Permanent
     } else {
         FailureKind::Transient
+    }
+}
+
+/// What to say when a connection fails.
+///
+/// `tokio_postgres::Error`'s own `Display` is the two words `db error` whenever the server
+/// answered with an `ErrorResponse`; the reason lives in `as_db_error()`. Without reading it,
+/// a server that rejects the login says "db error" and nothing else, which is what happened
+/// when this was measured: the real answer was `role "qh" does not exist`. `map_query_error`
+/// already reads the server's answer this way for a failed statement, and
+/// `classify_connect_error` above already asks `as_db_error()` the same question, so this is
+/// the third place agreeing with the other two rather than a new rule.
+fn connect_message(config: &ConnectionConfig, error: &tokio_postgres::Error) -> String {
+    match error.as_db_error() {
+        Some(db_error) => format!(
+            "{}: {} (SQLSTATE {})",
+            config.redacted(),
+            db_error.message(),
+            db_error.code().code()
+        ),
+        None => format!("{}: {error}", config.redacted()),
     }
 }
 

@@ -532,3 +532,536 @@ async fn a_refused_level_names_the_commands_that_work_instead() {
         "a listing level a driver answers has to reach the driver: {error:?}"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// history and saved queries
+// --------------------------------------------------------------------------- //
+
+/// A migrated database under a temporary directory, and the `DB_PATH` that points at it.
+///
+/// The directory is handed back because dropping it deletes the database, and a test that
+/// dropped it early would be reading a file that is not there.
+fn scratch() -> (tempfile::TempDir, String) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("queryhive.sqlite3");
+    (directory, path.to_string_lossy().into_owned())
+}
+
+#[tokio::test]
+async fn history_add_records_and_history_lists_it() {
+    let (_directory, database) = scratch();
+    let connection = SyncId::now();
+
+    let written = one(
+        Command::HistoryAdd,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("CONNECTION_ID", connection.as_str()),
+            ("SQL", "SELECT 1"),
+            ("STARTED_AT", "1700000000000"),
+            ("ELAPSED_MS", "12"),
+            ("ROW_COUNT", "1"),
+            ("OUTCOME", "ok"),
+        ],
+    )
+    .await;
+    assert_eq!(written["event"], "history_entry");
+    assert_eq!(
+        written["merged"], false,
+        "nothing was stored to merge into, so this is the record's own id"
+    );
+
+    let listed = one(Command::History, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["event"], "history");
+    let entries = listed["entries"].as_array().expect("an array of entries");
+    assert_eq!(entries.len(), 1, "one execution, one entry: {listed}");
+    assert_eq!(entries[0]["id"], written["id"]);
+    assert_eq!(entries[0]["sql"], "SELECT 1");
+    assert_eq!(entries[0]["outcome"], "ok");
+    assert_eq!(entries[0]["row_count"], 1);
+    assert_eq!(entries[0]["elapsed_ms"], 12);
+    assert_eq!(entries[0]["connection_id"], connection.as_str());
+    assert_eq!(entries[0]["deleted"], false);
+}
+
+#[tokio::test]
+async fn a_blank_elapsed_ms_is_a_null_and_not_a_zero() {
+    // The app sets the settings it knows about, so a key that is present and empty means
+    // "nothing to say" -- the same convention `CONNECTION_ID` follows. Reading it as zero
+    // would report that a query took no time, which is a fact about a different query.
+    let (_directory, database) = scratch();
+    one(
+        Command::HistoryAdd,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SQL", "SELECT 1"),
+            ("STARTED_AT", "1700000000000"),
+            ("ELAPSED_MS", ""),
+            ("ROW_COUNT", ""),
+        ],
+    )
+    .await;
+
+    let listed = one(Command::History, &[("DB_PATH", database.as_str())]).await;
+    let entry = &listed["entries"][0];
+    assert_eq!(entry["elapsed_ms"], Json::Null);
+    assert_eq!(entry["row_count"], Json::Null);
+    assert_eq!(entry["outcome"], Json::Null);
+}
+
+#[tokio::test]
+async fn history_add_merges_two_saves_of_one_event() {
+    // `idx_history_dedupe` makes two saves of one event one event, and the reply is the only
+    // place a caller learns that its write landed on a row that was already there.
+    let (_directory, database) = scratch();
+    let settings = [
+        ("DB_PATH", database.as_str()),
+        ("SQL", "SELECT 1"),
+        ("STARTED_AT", "1700000000000"),
+    ];
+
+    let first = one(Command::HistoryAdd, &settings).await;
+    let second = one(Command::HistoryAdd, &settings).await;
+    assert_eq!(first["merged"], false);
+    assert_eq!(second["merged"], true, "the second save is the same event");
+    assert_eq!(first["id"], second["id"]);
+
+    let listed = one(Command::History, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["entries"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn history_clear_counts_only_what_was_living() {
+    let (_directory, database) = scratch();
+    for offset in 0..2i64 {
+        let started = (1_700_000_000_000i64 + offset).to_string();
+        one(
+            Command::HistoryAdd,
+            &[
+                ("DB_PATH", database.as_str()),
+                ("SQL", "SELECT 1"),
+                ("STARTED_AT", started.as_str()),
+            ],
+        )
+        .await;
+    }
+
+    let cleared = one(Command::HistoryClear, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(cleared["cleared"], 2);
+    let again = one(Command::HistoryClear, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(
+        again["cleared"], 0,
+        "a tombstone is not cleared a second time"
+    );
+
+    let listed = one(Command::History, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["entries"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn saved_queries_saves_lists_renames_and_deletes() {
+    let (_directory, database) = scratch();
+    let saved = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "save"),
+            ("NAME", "Penerima 2026"),
+            ("SQL", "SELECT * FROM penerima_manfaat"),
+        ],
+    )
+    .await;
+    assert_eq!(saved["action"], "save");
+    let id = saved["query"]["id"]
+        .as_str()
+        .expect("an identity")
+        .to_owned();
+
+    let listed = one(
+        Command::SavedQueries,
+        &[("DB_PATH", database.as_str()), ("SAVED_ACTION", "list")],
+    )
+    .await;
+    let queries = listed["queries"].as_array().expect("an array of queries");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0]["name"], "Penerima 2026");
+    assert_eq!(queries[0]["deleted"], false);
+
+    let renamed = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "rename"),
+            ("SAVED_ID", id.as_str()),
+            ("NAME", "Penerima 2026 final"),
+        ],
+    )
+    .await;
+    assert_eq!(renamed["renamed"], true);
+
+    let read = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "get"),
+            ("SAVED_ID", id.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(read["query"]["name"], "Penerima 2026 final");
+    assert_eq!(
+        read["query"]["version"], 2,
+        "the name moved with the revision, which is what a sync reads"
+    );
+
+    let deleted = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "delete"),
+            ("SAVED_ID", id.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(deleted["deleted"], true);
+
+    let empty = one(
+        Command::SavedQueries,
+        &[("DB_PATH", database.as_str()), ("SAVED_ACTION", "list")],
+    )
+    .await;
+    assert_eq!(empty["queries"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn history_searches_the_statements_it_holds() {
+    let (_directory, database) = scratch();
+    for (sql, started) in [
+        ("SELECT * FROM penerima_manfaat", 1_700_000_000_000i64),
+        ("SELECT * FROM pengguna", 1_700_000_000_001),
+    ] {
+        let started = started.to_string();
+        one(
+            Command::HistoryAdd,
+            &[
+                ("DB_PATH", database.as_str()),
+                ("SQL", sql),
+                ("STARTED_AT", started.as_str()),
+            ],
+        )
+        .await;
+    }
+
+    // A search is the third question the listing can answer, beside "the newest" and "one
+    // connection's": the app's own search field sets this key.
+    let found = one(
+        Command::History,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("HISTORY_SEARCH", "penerima"),
+        ],
+    )
+    .await;
+    let entries = found["entries"].as_array().expect("an array of entries");
+    assert_eq!(
+        entries.len(),
+        1,
+        "one of the two statements matches: {found}"
+    );
+    assert_eq!(entries[0]["sql"], "SELECT * FROM penerima_manfaat");
+
+    // Punctuation that would be FTS5 syntax if it were passed through: it has to come back as an
+    // empty result, not as a failed command.
+    let punctuation = one(
+        Command::History,
+        &[("DB_PATH", database.as_str()), ("HISTORY_SEARCH", "(*")],
+    )
+    .await;
+    assert_eq!(punctuation["entries"].as_array().map(Vec::len), Some(0));
+
+    // And a blank field is "no search", which is the whole list.
+    let blank = one(
+        Command::History,
+        &[("DB_PATH", database.as_str()), ("HISTORY_SEARCH", "")],
+    )
+    .await;
+    assert_eq!(blank["entries"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn a_saved_query_can_be_favourited_and_the_listing_says_so() {
+    let (_directory, database) = scratch();
+    let saved = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "save"),
+            ("NAME", "Penerima 2026"),
+            ("SQL", "SELECT * FROM penerima_manfaat"),
+        ],
+    )
+    .await;
+    let id = saved["query"]["id"].as_str().expect("an id").to_owned();
+    assert_eq!(
+        saved["query"]["favourite"], false,
+        "a new query is not a favourite"
+    );
+
+    // No `FAVOURITE` at all means "keep it". A caller that only knows how to add a star should not
+    // have to spell the value as well.
+    let marked = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "favourite"),
+            ("SAVED_ID", id.as_str()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        marked["favourite"], true,
+        "a bare favourite means keep it: {marked}"
+    );
+    assert_eq!(marked["found"], true);
+
+    let listed = one(
+        Command::SavedQueries,
+        &[("DB_PATH", database.as_str()), ("SAVED_ACTION", "list")],
+    )
+    .await;
+    assert_eq!(
+        listed["queries"][0]["favourite"], true,
+        "the listing carries the flag"
+    );
+
+    let cleared = one(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "favourite"),
+            ("SAVED_ID", id.as_str()),
+            ("FAVOURITE", "0"),
+        ],
+    )
+    .await;
+    assert_eq!(cleared["favourite"], false, "and it can be taken back off");
+
+    // A third value is refused by name rather than read as false: "maybe" is a caller's bug, and
+    // silently un-favouriting a query is the worst possible way to report it.
+    let error = events(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "favourite"),
+            ("SAVED_ID", id.as_str()),
+            ("FAVOURITE", "maybe"),
+        ],
+    )
+    .await
+    .expect_err("a favourite is one of two answers");
+    assert!(error.message().contains("unknown FAVOURITE"), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_new_local_commands_refuse_what_they_cannot_do() {
+    let (_directory, database) = scratch();
+
+    let error = events(
+        Command::HistoryAdd,
+        &[("DB_PATH", database.as_str()), ("SQL", "   ")],
+    )
+    .await
+    .expect_err("a blank statement is not an execution to record");
+    assert!(matches!(error, CliError::Usage(_)), "{error:?}");
+
+    let error = events(
+        Command::HistoryAdd,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SQL", "SELECT 1"),
+            ("OUTCOME", "maybe"),
+        ],
+    )
+    .await
+    .expect_err("an outcome is one of three words");
+    assert!(error.message().contains("unknown OUTCOME"), "{error:?}");
+
+    let error = events(Command::SavedQueries, &[("DB_PATH", database.as_str())])
+        .await
+        .expect_err("an action is required");
+    assert!(
+        error.message().contains("SAVED_ACTION is required"),
+        "{error:?}"
+    );
+
+    let error = events(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "save"),
+            ("SQL", "SELECT 1"),
+        ],
+    )
+    .await
+    .expect_err("a saved query needs a name");
+    assert!(error.message().contains("NAME is required"), "{error:?}");
+
+    let error = events(
+        Command::SavedQueries,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SAVED_ACTION", "rename"),
+            ("NAME", "whatever"),
+        ],
+    )
+    .await
+    .expect_err("renaming needs the row's own identity");
+    assert!(
+        error.message().contains("SAVED_ID is required"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_round_trips_the_tabs_it_was_handed() {
+    let (_directory, database) = scratch();
+    let tabs = r#"[{"id":"a","sql":"SELECT 1"},{"id":"b","sql":"SELECT 2"}]"#;
+
+    let saved = one(
+        Command::Session,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SESSION_ACTION", "save"),
+            ("TABS_JSON", tabs),
+            ("ACTIVE_TAB_ID", "b"),
+        ],
+    )
+    .await;
+    assert_eq!(saved["saved"], true);
+
+    let loaded = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "load")],
+    )
+    .await;
+    assert_eq!(loaded["saved"], true, "there is a session: {loaded}");
+    // The blob comes back parsed, as an array, rather than as a string the caller has to parse
+    // again. The command never looks inside it, so this is the app's own JSON unchanged.
+    assert_eq!(loaded["tabs"], serde_json::from_str::<Json>(tabs).unwrap());
+    assert_eq!(loaded["active_tab_id"], "b");
+
+    // A second save replaces the first rather than adding a second session.
+    one(
+        Command::Session,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SESSION_ACTION", "save"),
+            ("TABS_JSON", r#"[{"id":"c","sql":"SELECT 3"}]"#),
+        ],
+    )
+    .await;
+    let replaced = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "load")],
+    )
+    .await;
+    assert_eq!(replaced["tabs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(replaced["tabs"][0]["id"], "c");
+    assert!(
+        replaced.get("active_tab_id").is_none(),
+        "a save with no front tab leaves the key out rather than sending an empty string: {replaced}"
+    );
+}
+
+#[tokio::test]
+async fn a_database_with_no_session_says_so_rather_than_failing() {
+    // A fresh install. The app turns this into one blank tab; an error here would make every
+    // first launch look like a failure.
+    let (_directory, database) = scratch();
+    let loaded = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "load")],
+    )
+    .await;
+    assert_eq!(loaded["saved"], false);
+    assert!(loaded.get("tabs").is_none(), "{loaded}");
+}
+
+#[tokio::test]
+async fn clearing_a_session_reports_it_and_a_load_then_finds_nothing() {
+    let (_directory, database) = scratch();
+    one(
+        Command::Session,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SESSION_ACTION", "save"),
+            ("TABS_JSON", r#"[{"id":"a"}]"#),
+        ],
+    )
+    .await;
+
+    let cleared = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "clear")],
+    )
+    .await;
+    assert_eq!(cleared["cleared"], true);
+    let again = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "clear")],
+    )
+    .await;
+    assert_eq!(again["cleared"], false, "there is nothing left to forget");
+
+    let loaded = one(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "load")],
+    )
+    .await;
+    assert_eq!(loaded["saved"], false);
+}
+
+#[tokio::test]
+async fn a_session_save_refuses_what_it_cannot_store() {
+    let (_directory, database) = scratch();
+
+    let error = events(
+        Command::Session,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SESSION_ACTION", "save"),
+            ("TABS_JSON", "   "),
+        ],
+    )
+    .await
+    .expect_err("a blank session is not a session");
+    assert!(
+        error.message().contains("TABS_JSON is required"),
+        "{error:?}"
+    );
+
+    // Not JSON at all. Refused here so a session that cannot be parsed is reported at quit
+    // rather than discovered at the next launch.
+    let error = events(
+        Command::Session,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("SESSION_ACTION", "save"),
+            ("TABS_JSON", "{not json"),
+        ],
+    )
+    .await
+    .expect_err("a blob that is not JSON cannot be stored");
+    assert!(error.message().contains("must be JSON"), "{error:?}");
+
+    let error = events(
+        Command::Session,
+        &[("DB_PATH", database.as_str()), ("SESSION_ACTION", "maybe")],
+    )
+    .await
+    .expect_err("an action is one of three words");
+    assert!(
+        error.message().contains("unknown SESSION_ACTION"),
+        "{error:?}"
+    );
+}

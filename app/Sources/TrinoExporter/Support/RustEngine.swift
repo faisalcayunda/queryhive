@@ -1,7 +1,7 @@
 import Foundation
 import QueryHiveFFI
 
-/// The Fase 2 engine: the same fourteen commands, reached by calling into the Rust engine instead
+/// The Fase 2 engine: the same commands, reached by calling into the Rust engine instead
 /// of spawning the bundled Python process (blueprint §1.6, ADR-0004).
 ///
 /// This is the only type in the app that imports the FFI module, and `Engine.current` names it:
@@ -73,6 +73,11 @@ struct RustEngine: DatabaseEngine {
         "connections": .connections,
         "import_connections": .importConnections,
         "credential": .credential,
+        "history": .history,
+        "history_add": .historyAdd,
+        "history_clear": .historyClear,
+        "saved_queries": .savedQueries,
+        "session": .session,
         "objects": .objects,
         "test": .test,
         "catalogs": .catalogs,
@@ -136,6 +141,17 @@ struct RustEngine: DatabaseEngine {
             }
         }
         return handle
+    }
+
+    func runBlocking(_ command: String, env: [String: String]) {
+        // Not the general path; see the protocol's note. The one caller is the session write during
+        // termination, and it needs no events: it is a best-effort save of the tabs that were open,
+        // and a failure has nowhere left to be shown. The FFI call is synchronous, so this returns
+        // only once the row is written.
+        guard let named = Self.commands[command] else { return }
+        let settings = env.map { Setting(key: $0.key, value: $0.value) }
+        QueryHiveFFI.run(command: named, settings: settings,
+                         sink: DiscardingSink(), cancel: RunCancel())
     }
 
     func terminateAll() {
@@ -226,6 +242,15 @@ final class Sink: EventSink, @unchecked Sendable {
             deliver(event)
         }
     }
+}
+
+/// The sink for a blocking run, which reads no events.
+///
+/// `runBlocking` is used for the session save at termination, and the reply is one line nobody
+/// reads. A sink rather than an optional because `EventSink` is the FFI's parameter type, and an
+/// empty implementation is clearer than a `nil` the layer would have to special-case.
+final class DiscardingSink: EventSink, @unchecked Sendable {
+    func onEvent(line: String) {}
 }
 
 /// The handle a caller holds while a Rust run is in flight.

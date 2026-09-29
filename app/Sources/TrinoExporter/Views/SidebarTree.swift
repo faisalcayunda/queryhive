@@ -21,6 +21,12 @@ struct SidebarTree: View {
             header
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
+                    // Favourites sit above the objects on purpose: the tree is a catalogue of what the
+                    // server has, and a favourite is a statement the user decided to keep. Putting it
+                    // at the top is the entire point of marking one.
+                    if !model.favouriteQueries.isEmpty {
+                        favourites
+                    }
                     if model.tree.isEmpty {
                         emptyState
                     } else if let ids = visibleIDs, ids.isEmpty {
@@ -41,6 +47,21 @@ struct SidebarTree: View {
             Rectangle().fill(Tone.recess.opacity(0.18))
         }
         .overlay(alignment: .trailing) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1) }
+        // The sidebar shows favourites and the panel that reads them is not part of the launch path,
+        // so the sidebar is what asks for them. Without this the section stays empty until the user
+        // visits Saved, which is the opposite of within reach.
+        .onAppear { model.loadSavedQueries() }
+    }
+
+    /// The saved queries the user keeps within reach.
+    private var favourites: some View {
+        FavouritesSection(queries: model.favouriteQueries) { query in
+            // A favourite with no tab open has nowhere to go. The row is still drawn, so the list does
+            // not change shape with the editor's state, but it does nothing.
+            if let tab = model.selectedTab {
+                model.loadIntoEditor(query.sql, in: tab)
+            }
+        }
     }
 
     private var header: some View {
@@ -134,6 +155,55 @@ struct SidebarTree: View {
 /// the whole subtree whenever the parent redraws. With a tree this size that is what made
 /// expanding and scrolling feel sluggish. A function can call itself and still return a concrete
 /// `some View`, so every row keeps its identity and only what changed is redrawn.
+/// The favourites section of the sidebar, on its own.
+///
+/// A view rather than a computed property on `SidebarTree` so it can be drawn without the tree. The
+/// sidebar's rows sit in a `LazyVStack` inside a `ScrollView`, and an offscreen render gives that no
+/// viewport, so lazily-laid-out rows never draw — which is exactly what an offscreen render of the
+/// whole sidebar shows. The section standing alone does draw, and it is the part worth looking at.
+struct FavouritesSection: View {
+    let queries: [Event.SavedQuery]
+    let load: (Event.SavedQuery) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("FAVOURITES")
+                .font(.ui(9.5, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Tone.secondary)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 2)
+
+            ForEach(queries) { query in
+                Button { load(query) } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(Tone.ice)
+                        Text(query.name)
+                            .font(.ui(11.5))
+                            .foregroundStyle(Tone.ink.opacity(0.9))
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(query.sql)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+            }
+
+            Rectangle()
+                .fill(Tone.ink.opacity(0.08))
+                .frame(height: 1)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct TreeRow: View {
     @Environment(AppModel.self) private var model
     @Bindable var node: TreeNode

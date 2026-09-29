@@ -29,13 +29,14 @@ struct SettingsView: View {
     }
 
     enum Pane: String, CaseIterable, Hashable {
-        case appearance, fonts, keyboard
+        case appearance, fonts, keyboard, data
 
         var title: String {
             switch self {
             case .appearance: "Appearance"
             case .fonts: "Fonts"
             case .keyboard: "Keyboard"
+            case .data: "Data"
             }
         }
 
@@ -46,6 +47,7 @@ struct SettingsView: View {
             case .appearance: "paintpalette"
             case .fonts: "textformat"
             case .keyboard: "keyboard"
+            case .data: "clock.arrow.circlepath"
             }
         }
     }
@@ -70,6 +72,7 @@ struct SettingsView: View {
                 case .appearance: AppearanceSettings()
                 case .fonts: FontSettings()
                 case .keyboard: KeyboardSettings()
+                case .data: DataSettings()
                 }
             }
             // No rubber-banding when the pane already fits, which would otherwise let a short pane
@@ -597,6 +600,53 @@ struct KeyboardSettings: View {
                     }
                 }
                 .padding(.vertical, 6)
+            }
+        }
+    }
+}
+
+/// What the app keeps, and for how long.
+///
+/// The history is the only thing this app writes without being asked, so the two controls that
+/// govern it belong where they can be reached rather than as constants in the code.
+struct DataSettings: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Query history",
+                         detail: "Every Run is written down with its statement, its connection, how long it took, and how it ended. Export and Explain are not recorded: a plan is not a result, and a history that mixed looking at rows with writing them somewhere would answer neither question.") {
+                Toggle(isOn: $model.recordsHistory) {
+                    Text("Record every Run")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .padding(.vertical, 6)
+
+                RowDivider()
+
+                HStack(spacing: 8) {
+                    Text("Rows the panel reads")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                    Spacer(minLength: 12)
+                    TextField("", value: $model.historyLimit, format: .number)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .font(.code(11.5))
+                        .frame(width: 64)
+                    Stepper("", value: $model.historyLimit, in: 50...5000, step: 50)
+                        .labelsHidden()
+                }
+                .padding(.vertical, 6)
+
+                Text("A cap rather than a filter. The engine reads newest first, so lowering it hides the oldest entries and keeps the recent ones. Turning recording off leaves what is already written alone; clearing it happens in the History panel.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -1,0 +1,86 @@
+name: verify
+
+# The gate from `docs/architecture/tablepro-adoption-plan.md` §0, minus the golden live
+# cases: those need the dev containers from `deploy/dev/`, which are not part of CI.
+#
+# Runs on macOS because this job builds and tests the app: the `swift build and test` step at the
+# bottom needs the Swift toolchain, and that only exists on macOS. That is the whole reason, and it
+# needs no measurement.
+#
+# An earlier version of this comment gave a different and wrong reason: that `crates/qh-credentials`
+# pulls `security-framework` in on every platform, so no Linux run could dodge it. It pulls them only
+# on macOS (`crates/qh-credentials/Cargo.toml:20`, a `cfg(target_os = "macos")` dependency table),
+# and the crate ships a non-macOS `SecretStore` returning `Unsupported` (`keychain.rs:120-139`), so
+# Linux would probably have worked for the Rust half. The job stays on macOS for the Swift half; the
+# portability measurement the plan still lists as pending (§0.2) is not what decided it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: engine and app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache the cargo registry
+        # Only the registry and git checkouts, not `target/`: the build directory is
+        # several gigabytes and a cache that size costs more to move than to rebuild.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Install cargo-deny
+        # Pinned to the version the local gate was run with, so a passing run here means
+        # the same thing as a passing run on a developer's machine.
+        run: cargo install cargo-deny --locked --version 0.20.2
+
+      - name: cargo deny
+        run: cargo deny check licenses
+
+      - name: Regenerate the FFI bindings
+        run: ./app/build-ffi.sh
+
+      - name: The committed bindings must not be stale
+        # `app/Generated/` is committed on purpose: the FFI surface is a contract the app is
+        # written against, so a change to it should appear in review as a diff rather than as
+        # a compile error on whichever machine regenerates first. This is the check that
+        # keeps it from going stale. `app/build-ffi.sh` says the same thing in its header.
+        run: |
+          if ! git diff --exit-code -- app/Generated; then
+            echo "::error::app/Generated is stale. Run ./app/build-ffi.sh and commit the result."
+            exit 1
+          fi
+          echo "app/Generated matches the engine's current surface"
+
+      - name: swift build and test
+        working-directory: app
+        run: |
+          swift build
+          swift test

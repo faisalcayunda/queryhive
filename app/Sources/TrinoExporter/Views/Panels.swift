@@ -31,6 +31,8 @@ struct BottomPanel: View {
                         } else {
                             FilesPanel(tab: tab)
                         }
+                    case .history: HistoryPanel(tab: tab)
+                    case .saved: SavedQueriesPanel(tab: tab)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -91,6 +93,8 @@ struct BottomPanel: View {
         case .log: tab.logLines.isEmpty ? nil : tab.logLines.count
         case .result: tab.preview.map { $0.rows.count }
         case .files: tab.files.isEmpty ? nil : tab.files.count
+        case .history: model.historyEntries.isEmpty ? nil : model.historyEntries.count
+        case .saved: model.savedQueries.isEmpty ? nil : model.savedQueries.count
         }
     }
 }
@@ -334,5 +338,320 @@ struct FilesPanel: View {
                 .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
             }
         }
+    }
+}
+
+// MARK: History and saved queries
+
+/// A failure line for the two library panels.
+///
+/// In place rather than in an alert, because reading the history is never urgent enough to
+/// interrupt what the user is typing, and a panel that silently showed nothing would look exactly
+/// like an empty history.
+private func libraryBanner(_ text: String) -> some View {
+    HStack(spacing: 6) {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(Tone.coral)
+        Text(text)
+            .font(.ui(10.5))
+            .foregroundStyle(Tone.coral)
+            .lineLimit(2)
+        Spacer()
+    }
+    .padding(.horizontal, Metrics.gutter)
+    .padding(.vertical, 4)
+}
+
+private func libraryEmpty(_ text: String) -> some View {
+    Text(text)
+        .font(.ui(11))
+        .foregroundStyle(Tone.secondary)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+}
+
+/// Every execution the engine has written down, newest first.
+///
+/// The list is the engine's rather than this tab's: it spans connections and tabs, which is why it
+/// lives on `AppModel` and why the badge counts the same rows whichever tab is in front. Clicking a
+/// row puts its statement back in the editor, which is the whole reason to keep a history.
+struct HistoryPanel: View {
+    @Environment(AppModel.self) private var model
+    var tab: QueryTab
+
+    // The search term lives on `AppModel`, not in `@State` here, and the reason is not tidiness: a
+    // finished Run re-reads the list, and that re-read has to carry the term the user is looking
+    // at. A term owned by this view could only be handed over from outside, and would arrive
+    // stale. The panel still asks the engine rather than filtering the rows it holds: FTS5 is what
+    // makes "the statements containing these words" answerable, and a filter written here would be
+    // a second answer to the same question, free to disagree with the first.
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let failure = model.historyError { libraryBanner(failure) }
+            searchField
+            if model.historyEntries.isEmpty {
+                libraryEmpty(model.historySearch.isEmpty
+                             ? "Nothing yet. Every Run is recorded here."
+                             : "Nothing matches \(model.historySearch).")
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(model.historyEntries) { entry in
+                            HistoryRow(entry: entry,
+                                       connection: model.connectionName(for: entry.connectionId)) {
+                                model.loadIntoEditor(entry.sql, in: tab)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        // A keystroke cancels the task the one before it started, so typing a word starts one read
+        // rather than one per letter. A read already running is not cancelled by that, which is why
+        // `loadHistory` carries a token of its own. It also runs on the first appearance, which is
+        // why there is no separate `onAppear`.
+        .task(id: model.historySearch) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            model.loadHistory(search: model.historySearch)
+        }
+    }
+
+    /// A `Binding` to the model's own field, so the text field writes the one place the term lives.
+    private var searchBinding: Binding<String> {
+        Binding(get: { model.historySearch }, set: { model.historySearch = $0 })
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Tone.secondary)
+            TextField("Search statements", text: searchBinding)
+                .textFieldStyle(.plain)
+                .font(.ui(11))
+            if !model.historySearch.isEmpty {
+                IconButton(symbol: "xmark.circle.fill", help: "Clear the search", diameter: 18) {
+                    model.historySearch = ""
+                }
+            }
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 5)
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+    }
+}
+
+/// One execution in the History panel.
+///
+/// Internal rather than private so a render test can draw it on its own, for the same reason
+/// `SavedQueryRow` is: the panel's rows sit in a `LazyVStack` inside a `ScrollView`, and an offscreen
+/// render gives that no viewport, so the rows never draw as part of the panel.
+struct HistoryRow: View {
+    let entry: Event.HistoryEntry
+    /// The connection's name, when the row has one the app still knows about.
+    let connection: String?
+    let load: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 12)
+                .padding(.top, 3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.sql)
+                    .font(.code(11.5))
+                    .foregroundStyle(Tone.ink.opacity(0.85))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(detail)
+                    .font(.ui(10))
+                    .foregroundStyle(Tone.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(started, format: .dateTime.month(.abbreviated).day().hour().minute())
+                .font(.code(10))
+                .foregroundStyle(Tone.ink.opacity(0.35))
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 4)
+        .background(hovering ? Tone.ink.opacity(0.05) : .clear)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: load)
+    }
+
+    private var started: Date {
+        Date(timeIntervalSince1970: Double(entry.startedAt) / 1000)
+    }
+
+    private var symbol: String {
+        switch entry.outcome {
+        case "ok": "checkmark.circle.fill"
+        case "error": "exclamationmark.circle.fill"
+        case "cancelled": "slash.circle.fill"
+        default: "clock"
+        }
+    }
+
+    private var tint: Color {
+        switch entry.outcome {
+        case "ok": Tone.mint
+        case "error": Tone.coral
+        case "cancelled": Tone.amber
+        default: Tone.gray
+        }
+    }
+
+    private var detail: String {
+        var parts: [String] = []
+        // The connection comes first: the same statement against two databases is two different
+        // facts, and it is what tells two otherwise identical rows apart.
+        if let connection { parts.append(connection) }
+        switch entry.outcome {
+        case "ok": parts.append("ok")
+        case "error": parts.append("error")
+        case "cancelled": parts.append("cancelled")
+        default: parts.append("running")
+        }
+        if let rows = entry.rowCount { parts.append(pluralized(rows, "row")) }
+        if let elapsed = entry.elapsedMs { parts.append("\(elapsed) ms") }
+        if let error = entry.error { parts.append(error) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The statements the user chose to keep.
+///
+/// Saving reads the statement from the editor rather than from the grid's last run, because the
+/// thing worth keeping is what is on screen now, not what happened to run last.
+struct SavedQueriesPanel: View {
+    @Environment(AppModel.self) private var model
+    var tab: QueryTab
+    /// The inline name field, shown only while saving. A field in the panel rather than a sheet:
+    /// the panel is already the thing the user is looking at, and a sheet for one word is a window
+    /// to dismiss.
+    @State private var naming = false
+    @State private var name = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let failure = model.savedError { libraryBanner(failure) }
+            toolbar
+            if model.savedQueries.isEmpty {
+                libraryEmpty("Nothing saved yet. Write a query, then Save current.")
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(model.savedQueries) { query in
+                            SavedQueryRow(query: query,
+                                          load: { model.loadIntoEditor(query.sql, in: tab) },
+                                          delete: { model.deleteSavedQuery(query.id) },
+                                          toggleFavourite: { model.toggleFavourite(query) })
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .onAppear { model.loadSavedQueries() }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 8) {
+            if naming {
+                TextField("Name", text: $name)
+                    .textFieldStyle(.plain)
+                    .font(.ui(11))
+                    .frame(width: 220)
+                    .onSubmit(commit)
+                PillButton(title: "Save", symbol: "checkmark", compact: true, action: commit)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                IconButton(symbol: "xmark", help: "Cancel", diameter: 20) {
+                    naming = false
+                    name = ""
+                }
+            }
+            Spacer()
+            PillButton(title: "Save current", symbol: "square.and.arrow.down", compact: true) {
+                name = ""
+                naming = true
+            }
+            .help("Save the editor's statement under a name")
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 5)
+    }
+
+    private func commit() {
+        // A name that is only whitespace is refused here as well as in `saveQuery`, so the button
+        // never looks like it did something.
+        guard model.saveQuery(tab, named: name) else { return }
+        naming = false
+        name = ""
+    }
+}
+
+/// One saved query in the Saved panel.
+///
+/// Internal rather than private so a render test can draw it on its own. The panel keeps its rows in
+/// a `LazyVStack` inside a `ScrollView`, and an offscreen render gives that no viewport, so the rows
+/// never draw when the whole panel is rendered. Standing alone this one does, and the star is the
+/// part of this panel worth looking at.
+struct SavedQueryRow: View {
+    let query: Event.SavedQuery
+    let load: () -> Void
+    let delete: () -> Void
+    let toggleFavourite: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // The lead glyph is the star, and it is always drawn. A favourite that only revealed
+            // itself under the pointer would be telling nobody anything, and the decorative bookmark
+            // this replaced was never doing any work.
+            Button(action: toggleFavourite) {
+                Image(systemName: query.favourite ? "star.fill" : "star")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(query.favourite ? Tone.ice : Tone.secondary)
+                    .frame(width: 14)
+            }
+            .buttonStyle(.plain)
+            .help(query.favourite ? "Remove from favourites" : "Keep in the sidebar")
+            .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(query.name)
+                    .font(.ui(11.5, weight: .semibold))
+                    .foregroundStyle(Tone.ink.opacity(0.9))
+                Text(query.sql)
+                    .font(.code(11))
+                    .foregroundStyle(Tone.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // The tap target is the text block, not the whole row. On the row it swallowed the two
+            // buttons beside it, so a click on Delete ran `load` as well and deleting a query also
+            // put its statement back in the editor. A gesture and a `Button` in one subtree have no
+            // priority relationship to appeal to, so the fix is to keep them out of each other's
+            // way rather than to order them.
+            .contentShape(Rectangle())
+            .onTapGesture(perform: load)
+            Spacer(minLength: 8)
+            if hovering {
+                IconButton(symbol: "arrow.up.forward.app", help: "Load into the editor",
+                           diameter: 20, action: load)
+                IconButton(symbol: "trash", help: "Delete", diameter: 20, action: delete)
+            }
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 4)
+        .background(hovering ? Tone.ink.opacity(0.05) : .clear)
+        .onHover { hovering = $0 }
     }
 }

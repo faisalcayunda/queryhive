@@ -89,6 +89,15 @@ final class MockEngine: DatabaseEngine, @unchecked Sendable {
 
     func terminateAll() {}
 
+    func runBlocking(_ command: String, env: [String: String]) {
+        // Recorded, not answered: the protocol's blocking path discards events, and the only thing
+        // a scripted engine can prove about it is that the app asked for the right command with the
+        // right settings.
+        lock.lock()
+        defer { lock.unlock() }
+        invocations.append(Invocation(command: command, env: env))
+    }
+
     private func deliver(_ events: [Event], status: Int32, stderr: String,
                          onEvent: @escaping (Event) -> Void,
                          onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) {

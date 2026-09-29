@@ -30,12 +30,16 @@
 //! they disagree.
 
 mod connections;
+mod history;
 pub mod import;
 pub mod migrate;
+mod session;
 
 pub use connections::{ConnectionGroup, ConnectionKind, ConnectionRecord};
+pub use history::{Outcome, QueryHistoryRecord, SavedQueryRecord};
 pub use import::{ImportPlan, ImportReport, ImportedSource, SkippedRow};
 pub use migrate::{AppliedMigration, Migration, MIGRATIONS};
+pub use session::{SessionRecord, SESSION_ID};
 
 use std::path::Path;
 
@@ -81,6 +85,14 @@ pub enum StorageError {
 
     #[error("{text:?} is not a database kind this engine knows")]
     UnknownKind { text: String },
+
+    /// An `outcome` the column holds and this build does not know.
+    ///
+    /// Its own variant rather than [`StorageError::UnknownKind`], because the message that
+    /// variant carries names a database kind and would send a reader looking at the wrong
+    /// column.
+    #[error("{text:?} is not an outcome this engine knows")]
+    UnknownOutcome { text: String },
 
     #[error("the row holds {text:?} where an identity belongs: {reason}")]
     BadId { text: String, reason: String },
@@ -379,6 +391,10 @@ mod tests {
                 "updated_at",
                 "deleted_at",
                 "version",
+                // Added by migration 4. Part of the blueprint rather than an implementation detail:
+                // whether a query is kept within reach is data this app owns, and a test that had to
+                // be told about it is the reason this list is spelled out here at all.
+                "favourite",
             ]
         );
         assert_eq!(

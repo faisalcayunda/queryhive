@@ -18,8 +18,11 @@ import Foundation
 /// promising it here would promise operations no implementation in this tree can perform yet. The
 /// gap is now measured rather than assumed, and it is wider than "typed events": there are no typed
 /// event or page types, no typed `ConnectionTest`/`DriverDescriptor`, no result-set handle or
-/// window (ADR-0004 keeps the data plane off this surface deliberately), and no command for query
-/// history or saved queries at all. Every one of those is an FFI addition, not an app-side one.
+/// window (ADR-0004 keeps the data plane off this surface deliberately). Query history, saved
+/// queries and session restore used to be on that list and are not any more: `history`,
+/// `history_add`, `history_clear`, `saved_queries` and `session` exist as of 29 Sep 2026, which is
+/// why this paragraph no longer names them.
+/// Everything still on the list is an FFI addition, not an app-side one.
 protocol DatabaseEngine: Sendable {
     /// Runs one operation. Events and the exit handler arrive on the main queue.
     ///
@@ -34,6 +37,17 @@ protocol DatabaseEngine: Sendable {
     /// Stops everything this engine still has running, used when the app terminates: a run left
     /// in flight would keep working after the window is gone.
     func terminateAll()
+
+    /// Runs one command to completion on the calling thread and discards its events.
+    ///
+    /// One caller: `AppModel` writing the session during `applicationWillTerminate`. `run` reports
+    /// completion by hopping to the main queue, and at termination the main queue is the one
+    /// waiting — a completion scheduled there would never arrive, so the save would be asked for
+    /// and never happen. This blocks instead of hopping.
+    ///
+    /// Synchronous by necessity, so it is deliberately not the general path: everything that can
+    /// wait uses `run`, which keeps the main thread free.
+    func runBlocking(_ command: String, env: [String: String])
 }
 
 /// A handle to one running operation. Callers only ever stop it, so stopping it is all this

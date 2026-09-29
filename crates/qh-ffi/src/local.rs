@@ -1,10 +1,13 @@
-//! The three local commands: the connection store, its legacy import, and the password.
+//! The local commands: the connection store, its legacy import, the password, the query
+//! history, the saved queries, and the session.
 //!
 //! None of them opens a driver, and none of them is a transcription of the Python engine
 //! — it had no local store at all. What they have instead is a contract with the app:
 //! `connections` is what the sidebar is painted from, `import_connections` is the
 //! one-shot move of the old `connections.json` into the database, and `credential` is the
-//! only path by which a saved password leaves the Keychain.
+//! only path by which a saved password leaves the Keychain. `history`, `history_add`,
+//! `history_clear` and `saved_queries` are what the History and Saved panels read, and
+//! `session` is what brings the tabs back after a relaunch.
 //!
 //! # Why these are driven by settings and not by arguments
 //!
@@ -31,7 +34,8 @@ use std::sync::OnceLock;
 
 use qh_credentials::{account_key, KeychainStore, MemoryStore, SecretStore};
 use qh_storage::import::{self, ImportReport};
-use qh_storage::{ConnectionRecord, Storage};
+use qh_storage::{ConnectionRecord, Outcome, QueryHistoryRecord, SavedQueryRecord, Storage};
+use qh_sync::SyncId;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value as Json};
 
@@ -166,9 +170,280 @@ pub async fn credential(settings: &Settings, out: &mut dyn Emitter) -> Result<()
     Ok(())
 }
 
+/// `history`: the executions this engine has written down.
+///
+/// `HISTORY_LIMIT` caps the list and `CONNECTION_ID` narrows it to one connection. Both are
+/// optional: the common question is "what did I just run", and it names no connection.
+pub async fn history(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let limit = history_limit(&settings)?;
+        let filter = connection_filter(&settings)?;
+        // Blank means "no search", the same convention `CONNECTION_ID` follows, so the app can set
+        // the key unconditionally as it clears the field.
+        let search = settings.text("HISTORY_SEARCH", "");
+        let storage = open_storage(&settings)?;
+        let entries = if search.trim().is_empty() {
+            match filter {
+                Some(id) => storage.history_for_connection(&id, limit)?,
+                None => storage.history(limit)?,
+            }
+        } else {
+            storage.search_history(&search, filter.as_ref(), limit)?
+        };
+        let listed = entries.iter().map(history_json).collect::<Vec<_>>();
+        Ok(event("history").field("entries", listed).build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `history_add`: write down one execution.
+///
+/// `STARTED_AT` is the event's own time and defaults to now. It is the column the dedupe
+/// index is on, so a caller replaying a recorded run has to pass the original moment, not
+/// the moment of the replay. The reply says whether the write merged into an existing row,
+/// because the caller cannot tell from the id alone and it is the one case where the id it
+/// gets back is not the id it would have had.
+///
+/// `STARTED_AT=0` counts as absent rather than as 1970, the same reading a blank value gets: the
+/// setting's own default is 0, so 0 is what "the caller did not say" looks like here. No real run
+/// happened at the epoch, so nothing is lost by that reading, but it is worth knowing before someone
+/// replays a hundred rows through a loop that forgot to pass the key.
+pub async fn history_add(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let sql = settings.text("SQL", "");
+        if sql.trim().is_empty() {
+            return Err(CliError::Usage(
+                "SQL is required to record an execution".to_owned(),
+            ));
+        }
+        let started_at = match settings.number("STARTED_AT", 0)? {
+            0 => qh_storage::now_millis(),
+            given => given,
+        };
+
+        let mut record = QueryHistoryRecord::new(connection_filter(&settings)?, sql, started_at);
+        record.elapsed_ms = optional_number(&settings, "ELAPSED_MS")?;
+        record.row_count = optional_number(&settings, "ROW_COUNT")?;
+        record.outcome = outcome_of(&settings)?;
+        let error_text = settings.text("ERROR_TEXT", "");
+        record.error_text = if error_text.is_empty() {
+            None
+        } else {
+            Some(error_text)
+        };
+
+        let storage = open_storage(&settings)?;
+        let written = storage.record_history(&record)?;
+        Ok(event("history_entry")
+            .field("id", written.as_str())
+            .field("merged", written != record.meta.id)
+            .build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `history_clear`: clear the history, all of it or one connection's.
+///
+/// The count is of rows that were living, so calling it twice reports zero the second time.
+/// The rows stay as tombstones, which is what every deletion in this database does.
+pub async fn history_clear(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let storage = open_storage(&settings)?;
+        let filter = connection_filter(&settings)?;
+        let cleared = storage.clear_history(filter.as_ref(), qh_storage::now_millis())?;
+        Ok(event("history_clear").field("cleared", cleared).build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `saved_queries`: list, read, write, rename or delete one saved query.
+///
+/// One command with an action rather than five commands, for the same reason `credential`
+/// is one: the app sets settings rather than building an argv, and five names would put
+/// five entries in the usage line to describe one thing the user thinks of as one thing.
+pub async fn saved_queries(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let action = saved_action_of(&settings)?;
+        let storage = open_storage(&settings)?;
+        let at = qh_storage::now_millis();
+        match action.as_str() {
+            "list" => Ok(event("saved_queries")
+                .field(
+                    "queries",
+                    storage
+                        .saved_queries()?
+                        .iter()
+                        .map(saved_query_json)
+                        .collect::<Vec<_>>(),
+                )
+                .build()),
+            "get" => {
+                let id = saved_id(&settings)?;
+                let record = storage.saved_query(&id)?;
+                Ok(event("saved_query")
+                    .field("action", "get")
+                    .field("id", id.as_str())
+                    .maybe("query", record.as_ref().map(saved_query_json))
+                    .build())
+            }
+            "save" => {
+                let name = settings.text("NAME", "");
+                if name.trim().is_empty() {
+                    return Err(CliError::Usage(
+                        "NAME is required to save a query".to_owned(),
+                    ));
+                }
+                let sql = settings.text("SQL", "");
+                if sql.trim().is_empty() {
+                    return Err(CliError::Usage(
+                        "SQL is required to save a query".to_owned(),
+                    ));
+                }
+                let record = SavedQueryRecord::new(name, sql, connection_filter(&settings)?, at);
+                storage.save_query(&record)?;
+                Ok(event("saved_query")
+                    .field("action", "save")
+                    .field("query", saved_query_json(&record))
+                    .build())
+            }
+            "rename" => {
+                let id = saved_id(&settings)?;
+                let name = settings.text("NAME", "");
+                if name.trim().is_empty() {
+                    return Err(CliError::Usage(
+                        "NAME is required to rename a query".to_owned(),
+                    ));
+                }
+                let renamed = storage.rename_saved_query(&id, name, at)?;
+                Ok(event("saved_query")
+                    .field("action", "rename")
+                    .field("id", id.as_str())
+                    .field("renamed", renamed)
+                    .build())
+            }
+            "favourite" => {
+                let id = saved_id(&settings)?;
+                // Read as a value rather than tested for presence, because both answers are
+                // legitimate and the absent case still has to mean one of them. Absent means "keep
+                // it", so a bare `SAVED_ACTION=favourite SAVED_ID=...` does the obvious thing.
+                let favourite = match settings.text("FAVOURITE", "").trim() {
+                    "" | "1" | "true" | "yes" => true,
+                    "0" | "false" | "no" => false,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "unknown FAVOURITE '{other}'; expected 1 or 0"
+                        )))
+                    }
+                };
+                let found = storage.set_saved_query_favourite(&id, favourite, at)?;
+                Ok(event("saved_query")
+                    .field("action", "favourite")
+                    .field("id", id.as_str())
+                    .field("favourite", favourite)
+                    .field("found", found)
+                    .build())
+            }
+            _ => {
+                let id = saved_id(&settings)?;
+                let deleted = storage.soft_delete_saved_query(&id, at)?;
+                Ok(event("saved_query")
+                    .field("action", "delete")
+                    .field("id", id.as_str())
+                    .field("deleted", deleted)
+                    .build())
+            }
+        }
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
 // --------------------------------------------------------------------------- //
 // helpers
 // --------------------------------------------------------------------------- //
+
+/// `session`: the query tabs that were open, saved and read back as one blob.
+///
+/// `SESSION_ACTION` names the action. `TABS_JSON` is the app's own JSON — this command does not
+/// look inside it, because what a tab is made of is the app's business and a field added to one
+/// should not need a migration here. It is refused when it is not JSON at all, which is the one
+/// check worth making: a session that cannot be parsed is better reported at quit than
+/// discovered at the next launch.
+///
+/// `load` answers with `saved:false` when there is nothing, rather than an empty list. A fresh
+/// install has no session, and that is a normal answer the app turns into one blank tab; an
+/// `error` there would make every first launch look like a failure.
+pub async fn session(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let action = session_action_of(&settings)?;
+        let storage = open_storage(&settings)?;
+        match action.as_str() {
+            "save" => {
+                let tabs = settings.text("TABS_JSON", "");
+                if tabs.trim().is_empty() {
+                    return Err(CliError::Usage(
+                        "TABS_JSON is required to save a session".to_owned(),
+                    ));
+                }
+                if serde_json::from_str::<Json>(&tabs).is_err() {
+                    return Err(CliError::Usage(
+                        "TABS_JSON must be JSON, and this is not".to_owned(),
+                    ));
+                }
+                // Blank means "no front tab", the convention `CONNECTION_ID` follows.
+                let active = settings.text("ACTIVE_TAB_ID", "");
+                let active = (!active.trim().is_empty()).then_some(active);
+                storage.save_session(&tabs, active.as_deref(), qh_storage::now_millis())?;
+                Ok(event("session")
+                    .field("action", "save")
+                    .field("saved", true)
+                    .build())
+            }
+            "load" => match storage.session()? {
+                Some(record) => {
+                    // Parsed here so the caller reads an array rather than a string it has to
+                    // parse back. A blob that will not parse becomes `null`, which the app reads
+                    // as "nothing to restore" — the same reading a broken connection `options`
+                    // gets, and for the same reason: one unreadable value is not a reason to
+                    // refuse the whole answer.
+                    let tabs: Json = serde_json::from_str(&record.tabs_json).unwrap_or(Json::Null);
+                    Ok(event("session")
+                        .field("action", "load")
+                        .field("saved", true)
+                        .field("tabs", tabs)
+                        .maybe("active_tab_id", record.active_tab_id)
+                        .build())
+                }
+                None => Ok(event("session")
+                    .field("action", "load")
+                    .field("saved", false)
+                    .build()),
+            },
+            _ => {
+                let cleared = storage.clear_session(qh_storage::now_millis())?;
+                Ok(event("session")
+                    .field("action", "clear")
+                    .field("cleared", cleared)
+                    .build())
+            }
+        }
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
 
 /// Run the blocking half of a local command off the runtime's worker threads.
 ///
@@ -280,6 +555,141 @@ fn import_event(source: Option<&Path>, source_found: bool, report: Option<&Impor
                 .unwrap_or_default(),
         )
         .build()
+}
+
+/// How many history entries a listing may return.
+fn history_limit(settings: &Settings) -> Result<usize, CliError> {
+    let limit = settings.number("HISTORY_LIMIT", 100)?;
+    // A negative limit reaches SQLite as "no limit", which is the opposite of what a caller
+    // that asked for a number meant.
+    Ok(usize::try_from(limit.max(0)).unwrap_or(0))
+}
+
+/// The connection a command is scoped to, when the caller named one.
+///
+/// An empty value means "no filter", not "the connection whose identity is the empty
+/// string": the app sets every setting it knows about, and one it does not want arrives
+/// blank.
+fn connection_filter(settings: &Settings) -> Result<Option<SyncId>, CliError> {
+    let raw = settings.text("CONNECTION_ID", "");
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    SyncId::parse(&raw).map(Some).map_err(|error| {
+        CliError::Usage(format!("CONNECTION_ID {raw:?} is not an identity: {error}"))
+    })
+}
+
+/// The saved query a `get`, `rename` or `delete` names.
+///
+/// `SAVED_ID`, not `CONNECTION_ID`: a saved query has its own identity and also carries the
+/// connection it belongs to, and one key for both would make `rename` ambiguous.
+fn saved_id(settings: &Settings) -> Result<SyncId, CliError> {
+    let raw = settings.text("SAVED_ID", "");
+    if raw.is_empty() {
+        return Err(CliError::Usage(
+            "SAVED_ID is required for get, rename and delete".to_owned(),
+        ));
+    }
+    SyncId::parse(&raw)
+        .map_err(|error| CliError::Usage(format!("SAVED_ID {raw:?} is not an identity: {error}")))
+}
+
+/// An optional number, where unset and zero are different answers.
+///
+/// Blank counts as unset, the same convention [`connection_filter`] follows. `is_set` alone
+/// would not do: it is true whenever the key exists, and the app sets the keys it knows
+/// about. Reading a blank as `Some(0)` would turn "no elapsed time recorded" into "it took
+/// no time", which is a different fact about a different query.
+fn optional_number(settings: &Settings, key: &str) -> Result<Option<i64>, CliError> {
+    if settings.text(key, "").is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(settings.number(key, 0)?))
+}
+
+/// The outcome a caller is recording, refused by name when it is not one of the three.
+fn outcome_of(settings: &Settings) -> Result<Option<Outcome>, CliError> {
+    let raw = settings.text("OUTCOME", "");
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    Outcome::parse(&raw).map(Some).map_err(|_| {
+        CliError::Usage(format!(
+            "unknown OUTCOME '{raw}'; expected ok, error or cancelled"
+        ))
+    })
+}
+
+/// The `saved_queries` action, refused by name when it is not one of the five.
+fn saved_action_of(settings: &Settings) -> Result<String, CliError> {
+    let raw = settings.text("SAVED_ACTION", "");
+    if raw.is_empty() {
+        return Err(CliError::Usage(
+            "SAVED_ACTION is required; expected list, get, save, rename or delete".to_owned(),
+        ));
+    }
+    let action = raw.to_ascii_lowercase();
+    if !matches!(
+        action.as_str(),
+        "list" | "get" | "save" | "rename" | "delete" | "favourite"
+    ) {
+        return Err(CliError::Usage(format!(
+            "unknown SAVED_ACTION '{raw}'; expected list, get, save, rename, favourite or delete"
+        )));
+    }
+    Ok(action)
+}
+
+/// The `session` action, refused by name when it is not one of the three.
+fn session_action_of(settings: &Settings) -> Result<String, CliError> {
+    let raw = settings.text("SESSION_ACTION", "");
+    if raw.is_empty() {
+        return Err(CliError::Usage(
+            "SESSION_ACTION is required; expected save, load or clear".to_owned(),
+        ));
+    }
+    let action = raw.to_ascii_lowercase();
+    if !matches!(action.as_str(), "save" | "load" | "clear") {
+        return Err(CliError::Usage(format!(
+            "unknown SESSION_ACTION '{raw}'; expected save, load or clear"
+        )));
+    }
+    Ok(action)
+}
+
+/// One history row as the `history` event carries it.
+///
+/// The nulls are the point, exactly as they are in [`connection_json`]: an execution that
+/// has not finished has no elapsed time and no outcome, and an empty string would be a
+/// second value the app had to know means "not yet".
+fn history_json(record: &QueryHistoryRecord) -> Json {
+    json!({
+        "id": record.meta.id.as_str(),
+        "connection_id": record.connection_id.as_ref().map(SyncId::as_str),
+        "sql": record.sql_text,
+        "started_at": record.started_at,
+        "elapsed_ms": record.elapsed_ms,
+        "row_count": record.row_count,
+        "outcome": record.outcome.map(Outcome::as_str),
+        "error": record.error_text,
+        "deleted": record.meta.is_deleted(),
+        "version": record.meta.version.get(),
+    })
+}
+
+/// One saved query as the `saved_queries` event carries it.
+fn saved_query_json(record: &SavedQueryRecord) -> Json {
+    json!({
+        "id": record.meta.id.as_str(),
+        "name": record.name,
+        "sql": record.sql_text,
+        "connection_id": record.connection_id.as_ref().map(SyncId::as_str),
+        "folder_id": record.folder_id.as_ref().map(SyncId::as_str),
+        "favourite": record.favourite,
+        "deleted": record.meta.is_deleted(),
+        "version": record.meta.version.get(),
+    })
 }
 
 /// The `credential` action, refused by name when it is not one of the four.

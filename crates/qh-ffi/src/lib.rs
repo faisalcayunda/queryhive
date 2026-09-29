@@ -466,6 +466,11 @@ pub enum Command {
     Connections,
     ImportConnections,
     Credential,
+    History,
+    HistoryAdd,
+    HistoryClear,
+    SavedQueries,
+    Session,
     Objects,
     Test,
     Catalogs,
@@ -484,13 +489,19 @@ pub enum Command {
 /// browse-and-write commands in a fixed order, and a caller that parses that suffix
 /// must keep seeing it. A new command can only be added ahead of `objects` — which is
 /// why `objects` sits near the head, ahead of the frozen suffix, rather than beside the
-/// other browse commands where it belongs semantically. The three local commands are
-/// ahead of it for the same reason.
-pub const COMMANDS: [&str; 14] = [
+/// other browse commands where it belongs semantically. The local commands are ahead of it
+/// for the same reason, and there are eight of them now rather than the three that sat
+/// there when this order was written.
+pub const COMMANDS: [&str; 19] = [
     "db_drivers",
     "connections",
     "import_connections",
     "credential",
+    "history",
+    "history_add",
+    "history_clear",
+    "saved_queries",
+    "session",
     "objects",
     "test",
     "catalogs",
@@ -511,6 +522,11 @@ impl Command {
             "connections" => Command::Connections,
             "import_connections" => Command::ImportConnections,
             "credential" => Command::Credential,
+            "history" => Command::History,
+            "history_add" => Command::HistoryAdd,
+            "history_clear" => Command::HistoryClear,
+            "saved_queries" => Command::SavedQueries,
+            "session" => Command::Session,
             "objects" => Command::Objects,
             "test" => Command::Test,
             "catalogs" => Command::Catalogs,
@@ -549,6 +565,11 @@ pub async fn run(
         Command::Connections => local::connections(settings, out).await,
         Command::ImportConnections => local::import_connections(settings, out).await,
         Command::Credential => local::credential(settings, out).await,
+        Command::History => local::history(settings, out).await,
+        Command::HistoryAdd => local::history_add(settings, out).await,
+        Command::HistoryClear => local::history_clear(settings, out).await,
+        Command::SavedQueries => local::saved_queries(settings, out).await,
+        Command::Session => local::session(settings, out).await,
         Command::Objects => commands::objects(settings, out, engine).await,
         Command::Test => commands::test(settings, out, engine).await,
         Command::Catalogs => commands::catalogs(settings, out, engine).await,

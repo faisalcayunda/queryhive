@@ -183,4 +183,83 @@ final class EventDecodingTests: XCTestCase {
         XCTAssertNil(EngineWire.event(in: Data("".utf8)))
         XCTAssertNil(EngineWire.event(in: Data("{\"message\": \"no event field\"}".utf8)))
     }
+
+    // MARK: History and saved queries
+    //
+    // These four commands are the only ones with no case in `tests/golden`: the corpus predates
+    // them, so the fixture here is the engine's own output, copied verbatim from a run against a
+    // temporary database. The failure this still catches is the quiet one — a field the engine
+    // renamed arrives as `nil`, the panel shows an empty cell, and nothing anywhere says so.
+
+    func testTheHistoryEventDecodesIntoItsRecords() throws {
+        let event = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"history","entries":[{"id":"01a0eaa3-5927-767a-9e56-d0ce0e8d95a7","connection_id":"8d7e7312-a9d5-43df-9b4e-8e64b964a587","sql":"SELECT count(*) FROM t","started_at":1790642968000,"elapsed_ms":42,"row_count":1,"outcome":"ok","error":null,"deleted":false,"version":1}]}"#.utf8)))
+        let entry = try XCTUnwrap(event.entries?.first)
+
+        XCTAssertEqual(entry.sql, "SELECT count(*) FROM t")
+        XCTAssertEqual(entry.startedAt, 1_790_642_968_000)
+        XCTAssertEqual(entry.elapsedMs, 42)
+        XCTAssertEqual(entry.rowCount, 1)
+        XCTAssertEqual(entry.outcome, "ok")
+        XCTAssertEqual(entry.deleted, false)
+        XCTAssertEqual(entry.version, 1)
+        XCTAssertEqual(entry.connectionId, "8d7e7312-a9d5-43df-9b4e-8e64b964a587",
+                       "connection_id reaches connectionId, which is also the Keychain account")
+    }
+
+    func testAnUnfinishedHistoryEntryKeepsItsMissingAnswerAsNothing() throws {
+        // A row can be written before its run has an answer, and "no answer yet" is not the same
+        // as zero: a zero would draw a finished run that took no time and returned no rows.
+        let event = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"history","entries":[{"id":"x","connection_id":null,"sql":"SELECT 1","started_at":1,"elapsed_ms":null,"row_count":null,"outcome":null,"error":null,"deleted":false,"version":1}]}"#.utf8)))
+        let entry = try XCTUnwrap(event.entries?.first)
+
+        XCTAssertNil(entry.outcome)
+        XCTAssertNil(entry.elapsedMs)
+        XCTAssertNil(entry.rowCount)
+        XCTAssertNil(entry.connectionId)
+    }
+
+    func testTheSavedQueryEventsDecodeIntoTheirRecords() throws {
+        let listed = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"saved_queries","queries":[{"id":"01a0ea97-d51a-74f1-a00c-f103e4770ad3","name":"Penerima 2026","sql":"SELECT * FROM penerima_manfaat","connection_id":"8d7e7312-a9d5-43df-9b4e-8e64b964a587","folder_id":null,"favourite":true,"deleted":false,"version":1}]}"#.utf8)))
+        let query = try XCTUnwrap(listed.queries?.first)
+
+        XCTAssertEqual(query.name, "Penerima 2026")
+        XCTAssertEqual(query.version, 1)
+        XCTAssertNil(query.folderId)
+        XCTAssertTrue(query.favourite, "the flag decides whether the sidebar lists it")
+
+        // The single-row reply is a different shape: the record sits under `query`, and a `get`
+        // that found nothing leaves it null rather than failing the command.
+        let single = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"saved_query","action":"get","id":"01a0ea97-d51a-74f1-a00c-f103e4770ad3","query":null}"#.utf8)))
+        XCTAssertEqual(single.action, "get")
+        XCTAssertNil(single.query)
+
+        let renamed = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"saved_query","action":"rename","id":"01a0ea97-d51a-74f1-a00c-f103e4770ad3","renamed":true}"#.utf8)))
+        XCTAssertEqual(renamed.renamed, true)
+
+        let written = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"history_entry","id":"01a0eaa3-5927-767a-9e56-d0ce0e8d95a7","merged":false}"#.utf8)))
+        XCTAssertEqual(written.merged, false)
+
+        let cleared = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"history_clear","cleared":2}"#.utf8)))
+        XCTAssertEqual(cleared.cleared, 2)
+    }
+
+    func testTheSessionEventsDecodeIntoTheTabsTheyCarry() throws {
+        // The shape the app wrote is the shape it reads back: the engine stores the blob opaquely
+        // and hands it over parsed. A key renamed here is a tab that comes back without its SQL,
+        // and nothing would say so — the field would just be empty.
+        let saved = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"session","action":"load","saved":true,"tabs":[{"id":"01A0EAA3-0000-7000-8000-000000000001","title":"Query 1","sql":"SELECT 1","connection":null,"destination":"file","format":"csv","outputName":"export","outputDirectory":null,"rowLimit":1000,"contextDatabase":"","contextSchema":"","targetCatalog":"","targetSchema":"","targetTable":"","writeMode":"create"}],"active_tab_id":"01A0EAA3-0000-7000-8000-000000000001"}"#.utf8)))
+        XCTAssertEqual(saved.saved, true)
+        let tab = try XCTUnwrap(saved.tabs?.first)
+        XCTAssertEqual(tab.sql, "SELECT 1")
+        XCTAssertEqual(tab.title, "Query 1")
+        XCTAssertEqual(tab.rowLimit, 1000)
+        XCTAssertNil(tab.connection)
+        XCTAssertEqual(saved.activeTabId, "01A0EAA3-0000-7000-8000-000000000001",
+                       "`active_tab_id` reaches `activeTabId`")
+
+        // A fresh install: no session is a normal answer, and there is nothing to restore.
+        let none = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"session","action":"load","saved":false}"#.utf8)))
+        XCTAssertEqual(none.saved, false)
+        XCTAssertNil(none.tabs)
+    }
 }

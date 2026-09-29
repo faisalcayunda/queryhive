@@ -47,6 +47,23 @@ final class AppModel {
     var tabs: [QueryTab] = []
     var selectedTabID: UUID?
 
+    /// Whether this model reads and writes the session store.
+    ///
+    /// Off by default, and the app is the one caller that turns it on. A test that builds a model
+    /// should write nothing to the user's session, and a test never relaunches; the app is the only
+    /// place the feature has anything to do.
+    let persistsSession: Bool
+
+    /// Whether the session has been read yet.
+    ///
+    /// Saving is refused until it has. `init` makes a placeholder tab before the restore answers,
+    /// and a save at that moment would write the placeholder over the very session the restore is
+    /// about to read.
+    private var sessionReady = false
+
+    /// The termination hook that writes the session one last time.
+    private var terminationObserver: NSObjectProtocol?
+
     // MARK: Layout
 
     var sidebarWidth: CGFloat = 264
@@ -76,13 +93,24 @@ final class AppModel {
 
     private var tabCounter = 0
 
-    init() {
+    init(persistsSession: Bool = false) {
+        self.persistsSession = persistsSession
         let loaded = ConnectionStore.load()
         connections = loaded.document.connections
         groups = loaded.document.groups
         notice = loaded.notice
         rebuildTree()
         newTab()
+        if persistsSession {
+            observeTermination()
+            restoreSession()
+        }
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
     }
 
     // MARK: Derived
@@ -107,9 +135,81 @@ final class AppModel {
         return picked.isEmpty ? (connection(for: tab)?.schema ?? "") : picked
     }
 
+    /// The engine's history, newest first, as last read.
+    ///
+    /// Held here rather than on `QueryTab` because the history is the app's rather than one tab's:
+    /// it spans connections and tabs, and the panel showing it shows the same list whichever tab
+    /// is in front.
+    /// What the History panel's search field holds.
+    ///
+    /// On the model rather than in the panel's own `@State` for one reason: a finished Run
+    /// re-reads the list, and that re-read has to use the same search the user is looking at.
+    var historySearch = ""
+
+    /// Which history read is the current one.
+    ///
+    /// Two can be in flight: the search field starts one per pause in typing, and a finished Run
+    /// starts one. Without this, whichever answered last wrote the list, so a superseded search's
+    /// results could land on top of the newer ones. `previewToken` guards the same race.
+    private var historyRead = 0
+
+    var historyEntries: [Event.HistoryEntry] = []
+
+    /// The saved queries, in name order, as last read.
+    var savedQueries: [Event.SavedQuery] = []
+
+    /// The saved queries the user keeps within reach, for the sidebar.
+    ///
+    /// Derived rather than kept as a second list: two lists can disagree after a save or a delete,
+    /// and the only thing this one adds is a filter.
+    var favouriteQueries: [Event.SavedQuery] {
+        savedQueries.filter(\.favourite)
+    }
+
+    /// Keep a saved query within reach, or stop keeping it.
+    func toggleFavourite(_ query: Event.SavedQuery) {
+        let env = [
+            "SAVED_ACTION": "favourite",
+            "SAVED_ID": query.id,
+            "FAVOURITE": query.favourite ? "0" : "1",
+        ]
+        _ = Engine.current.run("saved_queries", env: env, onEvent: { event in
+            if event.event == "error" { self.savedError = event.message }
+        }, onExit: { _, _ in
+            // Re-read rather than flipping the flag in place: the engine owns the revision, and both
+            // the sidebar and the panel should show what it stored, not what this hoped it stored.
+            self.loadSavedQueries()
+        })
+    }
+
+    /// Why the last read of either list failed.
+    ///
+    /// Shown inside the panel rather than in an alert: reading the history is never urgent enough
+    /// to interrupt what the user is typing, and a panel that silently showed nothing would be
+    /// indistinguishable from an empty history.
+    /// The last failure on the history side, and on the saved-query side.
+    ///
+    /// Two fields rather than one shared `libraryError`, which is what this was: one field put a
+    /// failed save into the History panel's banner, and let a successful history read clear an error
+    /// the Saved panel was still showing. The two panels are separate, so their errors are too.
+    var historyError: String?
+    var savedError: String?
+
     func connection(for tab: QueryTab) -> Connection? {
         guard let id = tab.connectionID else { return nil }
         return connections.first { $0.id == id }
+    }
+
+    /// The display name of the connection a history row belongs to.
+    ///
+    /// `nil` for a row with no connection and for one whose connection has since been deleted. The
+    /// panel draws nothing either way rather than a placeholder, because the row is still true.
+    ///
+    /// Matched as a UUID string rather than by comparing identities, because that is what the engine
+    /// stores on the row: `recordHistory` writes `uuidString.lowercased()`.
+    func connectionName(for historyID: String?) -> String? {
+        guard let historyID, let id = UUID(uuidString: historyID) else { return nil }
+        return connections.first { $0.id == id }?.name
     }
 
     var selectedNode: TreeNode? {
@@ -440,6 +540,7 @@ final class AppModel {
         // message about the absence of content. It starts as its header alone, and every path that
         // produces something (Run, Explain, opening a table) already sets `panelCollapsed = false`.
         panelCollapsed = true
+        saveSession()
     }
 
     /// Whether the panel has anything to show for this tab, which is what decides whether it is
@@ -478,6 +579,7 @@ final class AppModel {
             // leaving it open would be state that contradicts what is on screen.
             syncPanelToSelectedTab()
         }
+        saveSession()
     }
 
     func closeSelectedTab() {
@@ -495,11 +597,107 @@ final class AppModel {
            let node = connectionNode(for: connectionID) {
             selectedNodeID = node.id
         }
+        saveSession()
     }
 
     func rememberDestination(_ tab: QueryTab) {
         UserDefaults.standard.set(tab.outputDirectory?.path, forKey: "lastOutputDirectory")
         UserDefaults.standard.set(tab.format.rawValue, forKey: "lastFormat")
+    }
+
+    // MARK: Session
+
+    /// Reads the session the last launch wrote, and replaces the placeholder tab with it.
+    ///
+    /// The placeholder is made first so the model always has a tab to show, and the restore takes
+    /// over only a workspace nobody has used yet. If the load is slower than the user, or the
+    /// session is empty, the placeholder stays — which is also what a first launch gets.
+    ///
+    /// `sessionReady` is set when this answers, whichever way it went: from then on the workspace
+    /// is real and worth writing down.
+    private func restoreSession() {
+        var restored: [SessionTab]?
+        var active: String?
+        Engine.current.run("session", env: sessionEnvironment(["SESSION_ACTION": "load"]),
+                           onEvent: { event in
+            guard event.event == "session", event.saved == true else { return }
+            restored = event.tabs
+            active = event.activeTabId
+        }, onExit: { [weak self] status, _ in
+            guard let self else { return }
+            self.sessionReady = true
+            guard status == 0, let restored, !restored.isEmpty else { return }
+            // Only a workspace nobody has used: one tab, no SQL, no run, not a listing. Otherwise
+            // the user is already working and their tab is the one that wins.
+            guard self.tabs.count == 1, let only = self.tabs.first,
+                  !only.hasSQL, only.stage == .idle, only.preview == nil,
+                  only.objectScope == nil else { return }
+            self.tabs = restored.map { $0.tab() }
+            self.tabCounter = max(self.tabCounter, self.tabs.count)
+            if let active, let front = self.tabs.first(where: {
+                $0.id.uuidString.caseInsensitiveCompare(active) == .orderedSame
+            }) {
+                self.selectedTabID = front.id
+            } else {
+                self.selectedTabID = self.tabs.first?.id
+            }
+            self.syncPanelToSelectedTab()
+        })
+    }
+
+    /// Writes the open tabs to the session store.
+    ///
+    /// Fire and forget, like the history write: the reply is one line nobody reads, and a failed
+    /// save has nowhere useful to be shown. Called when the set of tabs changes, when the tab in
+    /// front changes, and once more at termination — the last one is what catches SQL typed since
+    /// the last tab event.
+    func saveSession() {
+        guard let env = sessionSaveEnvironment() else { return }
+        _ = Engine.current.run("session", env: env, onEvent: { _ in }, onExit: { _, _ in })
+    }
+
+    /// Writes the session on the calling thread, for termination.
+    ///
+    /// The same write as `saveSession`, through the engine's blocking path: at
+    /// `applicationWillTerminate` the main queue is the one waiting, so a completion hopped to it
+    /// would never run and the last edits would be lost.
+    func saveSessionBlocking() {
+        guard let env = sessionSaveEnvironment() else { return }
+        Engine.current.runBlocking("session", env: env)
+    }
+
+    /// The settings a session save runs with, or `nil` when there is nothing to save yet.
+    private func sessionSaveEnvironment() -> [String: String]? {
+        guard persistsSession, sessionReady else { return nil }
+        let snapshot = tabs.map(SessionTab.init)
+        guard let data = try? JSONEncoder().encode(snapshot),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        var env = sessionEnvironment(["SESSION_ACTION": "save", "TABS_JSON": json])
+        if let id = selectedTabID { env["ACTIVE_TAB_ID"] = id.uuidString }
+        return env
+    }
+
+    /// The settings a session command runs with.
+    ///
+    /// `DB_PATH` is added only when something redirected the connections store — the test suite.
+    /// The app leaves it out so the session lands in the engine's own default database, the same
+    /// file the history and the saved queries live in; naming the file here would be a second place
+    /// that has to agree with the engine about what it is called.
+    private func sessionEnvironment(_ base: [String: String]) -> [String: String] {
+        guard let root = ConnectionStore.root else { return base }
+        var env = base
+        env["DB_PATH"] = root.appendingPathComponent("queryhive.sqlite3").path
+        return env
+    }
+
+    /// Writes the session once more on the way out, which is what catches SQL typed since the last
+    /// tab event.
+    private func observeTermination() {
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.saveSessionBlocking()
+        }
     }
 
     // MARK: Connections
@@ -1489,6 +1687,9 @@ final class AppModel {
 
         let run = UUID()
         tab.previewToken = run
+        // When the user asked for it, which is what the history row's `started_at` records. Read
+        // here rather than inside the engine because the engine only knows when it started work.
+        let startedAt = Date()
         var message: String?
         var columns: [Event.Column] = []
         var rows: [[String?]] = []
@@ -1533,14 +1734,209 @@ final class AppModel {
             tab.previewProcess = nil
             tab.previewing = false
             guard status == 0, finished else {
+                // Read before `preview` is cleared on the next line. The elapsed time lives on the
+                // result, so recording it after the clear wrote `null` for every failed and
+                // cancelled run: a failure still knows how long it took to fail.
+                let elapsed = tab.preview?.elapsedMS
                 tab.previewError = message ?? log.split(separator: "\n").last.map(String.init)
                     ?? "The engine exited with status \(status)."
                 tab.preview = nil
                 tab.note(.error, tab.previewError ?? "Preview failed")
                 tab.panel = .log
+                Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
+                                   outcome: tab.cancelled ? "cancelled" : "error",
+                                   elapsedMS: elapsed, rowCount: rows.count,
+                                   error: tab.previewError, recording: self.recordsHistory)
+                // Re-read, so a History panel that is already on screen counts this run without
+                // the user having to switch panels. `onAppear` only fires once per appearance.
+                self.loadHistory(search: self.historySearch)
                 return
             }
+            Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
+                               outcome: "ok", elapsedMS: tab.preview?.elapsedMS,
+                               rowCount: rows.count, error: nil,
+                               recording: self.recordsHistory)
+            self.loadHistory(search: self.historySearch)
         })
+    }
+
+    /// Leaves one row in the engine's history for a Run that has finished.
+    ///
+    /// Run is `preview`, so this is where a Run becomes a fact: the statement, the connection,
+    /// when the user asked for it, how long it took, how many rows came back, and how it ended.
+    /// Only Run writes history. Explain does not, because a plan is not a result, and Export does
+    /// not, because a history that mixed "I looked at this" with "I wrote this somewhere" would
+    /// answer neither question.
+    ///
+    /// Fire and forget. The reply is one line nobody reads, and letting a failed history write
+    /// reach the screen would turn a query that worked into a visible failure. `history_add`
+    /// dedupes on connection, statement and start, so two finishes of one run stay one row.
+    ///
+    /// Static because it needs nothing from the model, and an instance method would put `self`
+    /// inside a closure that outlives this call for no reason.
+    private static func recordHistory(connection: Connection, sql: String, startedAt: Date,
+                                      outcome: String, elapsedMS: Int?, rowCount: Int?,
+                                      error: String?, recording: Bool) {
+        // The switch in Settings reaches the history here and nowhere else, so there is one place to
+        // look when a user asks why a run was not written down. Passed in rather than read from
+        // `UserDefaults` here, because the default-inversion that makes it on-by-default is the
+        // property's business and not this function's.
+        guard recording else { return }
+        // No `DB_PATH` and no `DB_*`: `history_add` is a local command that never opens a driver,
+        // and without `DB_PATH` the engine writes to the same Application Support database the
+        // app's connections already live in.
+        var env: [String: String] = [
+            "SQL": sql,
+            "CONNECTION_ID": connection.id.uuidString.lowercased(),
+            "STARTED_AT": String(Int(startedAt.timeIntervalSince1970 * 1000)),
+            "OUTCOME": outcome,
+        ]
+        if let elapsedMS = elapsedMS { env["ELAPSED_MS"] = String(elapsedMS) }
+        if let rowCount = rowCount { env["ROW_COUNT"] = String(rowCount) }
+        if let error = error { env["ERROR_TEXT"] = error }
+        _ = Engine.current.run("history_add", env: env, onEvent: { _ in }, onExit: { _, _ in })
+    }
+
+    /// How many history rows one read asks for, and whether a Run is recorded at all.
+    ///
+    /// Not in `ThemeStore` even though that is where the other preferences live: neither of these is
+    /// appearance, and the engine call that records a run has to read the toggle without knowing a
+    /// theme exists. The shape is `shortcutScheme`'s above, and for the same reason.
+    ///
+    /// A cap rather than everything: the panel is a list a person scrolls, and a year of runs is a
+    /// list nobody scrolls to the end of. The engine reads newest first, so the cap costs the oldest
+    /// entries rather than the recent ones.
+    var historyLimit: Int = {
+        let stored = UserDefaults.standard.integer(forKey: "historyLimit")
+        return stored > 0 ? stored : 200
+    }() {
+        didSet { UserDefaults.standard.set(historyLimit, forKey: "historyLimit") }
+    }
+
+    /// Whether a Run leaves a row in the history.
+    ///
+    /// On by default, which is why this checks for the stored *object* rather than for the value:
+    /// `bool(forKey:)` answers `false` for a key that was never written, so reading the value
+    /// directly would make the first launch the one launch that records nothing.
+    var recordsHistory: Bool = {
+        UserDefaults.standard.object(forKey: "recordsHistory") as? Bool ?? true
+    }() {
+        didSet { UserDefaults.standard.set(recordsHistory, forKey: "recordsHistory") }
+    }
+
+    /// Reads the engine's history into `historyEntries`, optionally narrowed to `search`.
+    ///
+    /// Fire and forget, like the write above, and it keeps the list it already had on a failure:
+    /// a read that did not answer is not a reason to blank a panel the user is looking at. Called
+    /// when the panel appears, when the search changes, and after a run finishes, which are the
+    /// moments the list can have changed.
+    ///
+    /// The search runs in the engine rather than here. FTS5 is what makes "find the statements
+    /// containing these words" answerable at all, and a second implementation over the rows in
+    /// memory would be a second answer to the same question.
+    func loadHistory(search: String = "") {
+        historySearch = search
+        historyRead += 1
+        let read = historyRead
+        var entries: [Event.HistoryEntry]?
+        var failure: String?
+        var env = ["HISTORY_LIMIT": String(historyLimit)]
+        // Left out rather than sent empty when there is nothing to search for: the engine reads a
+        // blank as "no search" as well, so this is only about not naming a key with no value.
+        if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            env["HISTORY_SEARCH"] = search
+        }
+        _ = Engine.current.run("history", env: env, onEvent: { event in
+            switch event.event {
+            case "history": entries = event.entries ?? []
+            case "error": failure = event.message
+            default: break
+            }
+        }, onExit: { status, log in
+            // A superseded read says nothing, whichever way it went: its answer describes a search
+            // the user has already moved on from, and its failure is not this read's failure.
+            guard read == self.historyRead else { return }
+            guard status == 0, let entries = entries else {
+                self.historyError = failure ?? self.lastLine(of: log)
+                    ?? "The engine exited with status \(status)."
+                return
+            }
+            self.historyEntries = entries
+            self.historyError = nil
+        })
+    }
+
+    /// Reads the saved queries into `savedQueries`.
+    func loadSavedQueries() {
+        var queries: [Event.SavedQuery]?
+        var failure: String?
+        _ = Engine.current.run("saved_queries", env: ["SAVED_ACTION": "list"],
+                               onEvent: { event in
+            switch event.event {
+            case "saved_queries": queries = event.queries ?? []
+            case "error": failure = event.message
+            default: break
+            }
+        }, onExit: { status, log in
+            guard status == 0, let queries = queries else {
+                self.savedError = failure ?? self.lastLine(of: log)
+                    ?? "The engine exited with status \(status)."
+                return
+            }
+            self.savedQueries = queries
+            self.savedError = nil
+        })
+    }
+
+    /// Saves the tab's statement under `name`, then re-reads the list.
+    ///
+    /// Answers `false` without running anything when the name or the statement is blank, so the
+    /// sheet can refuse an empty name before a command is started. The engine refuses them too,
+    /// because a caller that is not this app has no sheet to refuse it in.
+    @discardableResult
+    func saveQuery(_ tab: QueryTab, named name: String, from source: QuerySource = .all) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sql = tab.sql(for: source)
+        guard !trimmed.isEmpty,
+              !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+
+        var env: [String: String] = ["SAVED_ACTION": "save", "NAME": trimmed, "SQL": sql]
+        // The connection is what the query was written against, and it is worth keeping: the same
+        // statement is a different statement against another database.
+        if let id = tab.connectionID { env["CONNECTION_ID"] = id.uuidString.lowercased() }
+        _ = Engine.current.run("saved_queries", env: env, onEvent: { event in
+            if event.event == "error" { self.savedError = event.message }
+        }, onExit: { _, _ in
+            self.loadSavedQueries()
+        })
+        return true
+    }
+
+    /// Deletes a saved query, then re-reads the list.
+    func deleteSavedQuery(_ id: String) {
+        _ = Engine.current.run("saved_queries",
+                               env: ["SAVED_ACTION": "delete", "SAVED_ID": id],
+                               onEvent: { event in
+            if event.event == "error" { self.savedError = event.message }
+        }, onExit: { _, _ in
+            self.loadSavedQueries()
+        })
+    }
+
+    /// Puts a statement from the history or the saved list into the tab's editor.
+    ///
+    /// Replaces the editor's text rather than opening a tab: the list is a way back to something
+    /// the user already wrote, and a second tab for the same statement is how a person ends up
+    /// with five copies of one query. Undo still brings back what was there.
+    func loadIntoEditor(_ sql: String, in tab: QueryTab) {
+        tab.sql = sql
+        tab.panel = .result
+        panelCollapsed = false
+    }
+
+    /// The last non-empty line of the engine's log, which is where it puts a failure's reason.
+    private func lastLine(of log: String) -> String? {
+        log.split(separator: "\n").last.map(String.init)
     }
 
     func cancelPreview(_ tab: QueryTab) {

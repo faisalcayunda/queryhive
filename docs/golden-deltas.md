@@ -22,6 +22,14 @@
 > tidak disebut lagi di sini; daftarnya ada di `EXACT` pada berkas uji itu, dan penjaganya menolak
 > snapshot baru yang belum masuk salah satu daftar, dengan id yang **di-parse** dari tabel kasus
 > live, bukan dicocokkan sebagai potongan teks.
+>
+> **Diperiksa ulang 29 Sep 2026.** 43/17/4/22 masih angka yang benar, dan itu diukur, bukan
+> disalin: `find tests/golden -name '*.ndjson' | wc -l` → 43, `tests/golden/index.json` → 43 entri,
+> dan `EXACT`/`ACCEPTED`/`LIVE` di `crates/qh-ffi/tests/golden.rs` berturut-turut 17, 4, 22 —
+> jumlahnya 43, dan penjaganya menolak selisihnya. Yang **belum** bergerak adalah larian live: 14
+> kasus MySQL dan Trino belum dijalankan sejak 24 Sep karena image-nya belum ada di mesin ini, jadi
+> `12/22` tetap milik larian parsial 29 Sep 2026 dan bukan angka hari ini. Catatan rencana adopsi
+> yang menyebut baris 43 ini "basi" karena itu keliru, dan sudah dikoreksi di sana.
 
 ## Aturan
 
@@ -73,6 +81,21 @@ adalah teksnya, dan pengguna tidak perlu tahu bahwa kegagalannya dulu datang dar
 
 Yang harus dijaga test: pesannya sendiri tetap sama kata per kata, dan `warnings` tetap ikut pada
 kegagalan yang sudah mengubah sesuatu (DROP dari `replace`).
+
+**Satu pesan ternyata ditulis ulang, bukan hanya kehilangan awalan**, ditemukan 29 Sep 2026 saat 22
+kasus live dijalankan terhadap container yang sungguhan. `schemas` pada MySQL dulu berbunyi
+
+    ValueError: mysql has no schema level; catalogs lists its databases and tables lists their tables
+
+dan yang dijalankan engine Rust sekarang berbunyi
+
+    mysql has no schema level; use catalogs or tables instead
+
+Jadi klaim "kata per kata" di atas tidak berlaku untuk pesan ini. Yang belum diputuskan pemiliknya
+mana yang disimpan, dan karena itu `tests/golden/schemas/mysql_schemas_live.ndjson` **sengaja belum
+direkam ulang**: selama belum diputuskan, selisihnya tetap terlihat oleh `tools/golden/live_cases.py`,
+dan itu memang gunanya harness itu. Menutupnya dengan `--record` sebelum ada keputusan akan menghapus
+satu-satunya tempat perbedaan itu terlihat.
 
 ### D-5 — Baris `usage` memuat nama binary, bukan nama skrip · **Bukan regresi**
 
@@ -159,6 +182,13 @@ dengan kutipnya.
 Rust akan merender `3 days, 4:05:06`, tanpa kutip. Isi teksnya sengaja **dipertahankan sama**
 supaya perbedaannya hanya pada kutip — perbedaan yang sekecil mungkin dan mudah diuji.
 
+Sel `a_uuid` di kasus yang sama kehilangan kutipnya lewat jalur yang sama, dan itu perlu disebut
+karena sel itu ikut menentukan angka byte di D-9. psycopg mengembalikan `uuid.UUID`, yang bukan tipe
+JSON, jadi `default=str` mengubahnya menjadi string JSON lengkap dengan kutipnya; mesin Rust mengirim
+teks `uuid` apa adanya. Diukur 29 Sep 2026: dari enam sel yang ejaannya berubah pada
+`SELECT * FROM type_zoo`, tiga milik D-9 (`ints`, `texts`, `nested`), satu milik D-1
+(`tiny_negative`), dan dua milik entri ini (`an_interval`, `a_uuid`).
+
 ### D-8 — `columns.type` adalah **nama tipe**, bukan kode DBAPI · **Perbaikan disengaja**
 
 Mesin Python mengirim apa yang diberikan deskripsi DBAPI: sebuah **kode angka** — `23` untuk
@@ -179,6 +209,13 @@ dan bercabang atasnya; sebuah kode angka membuatnya harus menghafal tabel milik 
 diklasifikasikan oleh entri ini, bukan ditimbang ulang satu per satu tiap kali. Peringatannya:
 satu perubahan penamaan di sisi driver menggerakkan beberapa kasus sekaligus, jadi perubahan
 seperti itu dilakukan dengan sadar, bukan sebagai efek samping.
+
+**Kasus mana, per 29 Sep 2026.** Diukur dengan menjalankan kedelapan kasus PostgreSQL live terhadap
+container dev. Empat merah di medan ini: `postgres_type_zoo_live`, `postgres_batching_live`,
+`postgres_explain_live`, dan `postgres_export_live`. Pada `batching` dan `explain` itu satu-satunya
+sebabnya. Empat yang hijau, `postgres_catalogs_live`, `postgres_tables_live`, `postgres_objects_live`
+dan `postgres_count_live`, hijau karena tidak memancarkan `columns` sama sekali, bukan karena
+tipenya kebetulan cocok.
 
 ### D-9 — Nilai array Postgres tetap literal server, bukan daftar JSON · **Bukan regresi**
 

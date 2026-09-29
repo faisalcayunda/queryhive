@@ -30,6 +30,15 @@
 > Bundle sekarang bersifat self-contained: mesinnya statis, jadi `otool -L` pada
 > `Contents/MacOS/QueryHive` tidak lagi menyebut library Rust mana pun. Perubahan itu mendarat di
 > `367dec7`.
+>
+> **Status 29 Sep 2026:** favorit saved query mendarat lewat migrasi 0004 dan menutup kriteria §1.5
+> yang terakhir; lalu `session_restore` disambungkan dan menutup Fase 1. Verifikasi berat hari itu:
+> `cargo test --workspace` → **0 gagal**, `swift build && swift test` → **169 tes / 0 gagal**,
+> `./app/build.sh` → `Built dist/QueryHive.app`,
+> `/usr/bin/python3 tools/golden/live_cases.py` → **12/22** (sepuluh selisihnya delta terdokumentasi,
+> satu di luar cakupan D-4 dan keputusannya masih terbuka; 14 kasus MySQL/Trino belum dijalankan).
+> Restore tab dibuktikan pada bundel sungguhan lewat AppleScript quit, bukan hanya lewat render
+> offscreen. Seluruh pekerjaan Fase 0 + Fase 1 **sudah di-commit**.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -1655,7 +1664,144 @@ skripnya sekali lagi.
 menerangkan isinya dan bahwa ia snapshot dari sesi yang masih berjalan sehingga bagian akhirnya tidak
 ikut. Di-gitignore, karena 77 MB transkrip tidak bisa ditarik keluar dari riwayat git begitu masuk.
 
-## Perkakas lokal (sengaja tidak masuk repo)`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
+### Favorit saved query, 22 kasus golden live, dan UI yang akhirnya bisa dilihat (29 Sep 2026)
+
+**Favorit saved query mendarat, dan itu menutup §1.5** — kriteria Fase 1 yang terakhir. Bentuknya:
+kolom `favourite` pada `saved_query` lewat migrasi `0004_saved_query_favourite.sql`, aksi `favourite`
+pada perintah `saved_queries`, bintang di baris panel Saved, dan bagian FAVOURITES di atas pohon objek
+pada sidebar.
+
+Tiga keputusan yang sengaja diambil begitu, karena ketiganya bisa saja sebaliknya. Favorit itu
+**kolom, bukan tabel**: tabel favorit akan menjadi identitas kedua untuk baris yang sama, bebas
+berbeda pendapat soal apakah baris itu masih hidup. Menyalakan favorit itu **revisi**, seperti
+`rename_saved_query`, supaya perangkat yang merekonsiliasi baris ini melihat satu suntingan; tapi
+mengulang permintaan yang sama **bukan** revisi, karena revisi yang mengabarkan tidak ada perubahan
+akan membuat setiap rekonsiliasi melihat suntingan yang tidak pernah terjadi. Dan bintangnya
+**selalu** tergambar, tidak muncul saat pointer mendekat, karena favorit yang menyembunyikan diri
+tidak memberi tahu siapa pun apa pun. Nilai `FAVOURITE` yang ketiga ditolak dengan menyebut namanya
+(`unknown FAVOURITE 'maybe'; expected 1 or 0`), bukan dibaca sebagai `false`.
+
+**Upgrade produksi v3 → v4 terbukti pada database yang sungguhan.** Database aplikasi yang sudah ada
+di versi 3 dijalankan tanpa `DB_PATH`; sesudahnya `user_version=4`, kolom `favourite` ada, dan
+`schema_migration` berisi empat baris. Ini pertama kalinya jalur itu dijalankan di luar tes.
+
+**Nit `VACUUM` diukur, bukan diwakili komentar.** Kekhawatirannya nyata secara teori: indeks FTS
+menyimpan rowid tabel konten, `query_history` ber-primary key TEXT sehingga rowid-nya implisit, dan
+`VACUUM` boleh menomori ulang — yang kalau terjadi akan membuat pencarian menjawab dengan statement
+yang salah menempel pada kata yang benar. Hasil ukurannya **tidak terjadi**: rowid utuh sesudah
+`VACUUM` meski tabelnya punya lubang sungguhan, dan
+`a_vacuum_does_not_move_the_search_index_onto_the_wrong_rows` mengawal jalur itu. **Tes pertamanya
+ompong**, dan itu ketahuan sebelum diklaim: celahnya dibuat dengan `soft_delete_history`, padahal itu
+`UPDATE` — tidak ada baris hilang, sehingga `VACUUM` tidak punya apa pun untuk dinomori ulang dan
+tesnya lulus tanpa menguji apa pun. Diganti hard delete, baru tesnya berarti.
+
+**22 kasus golden live dijalankan: 12 cocok, 10 selisih.** Yang diminta — 14 kasus MySQL+Trino —
+sendiri 8 cocok dan 6 selisih. Satu koreksi yang perlu dicatat: runtime lokalnya **podman**, bukan
+Docker; saya sempat menyimpulkan dari ingatan alih-alih membaca `deploy/dev/up.sh`, yang sudah
+menuliskannya. Sepuluh selisih itu seluruhnya **delta Python → Rust yang sudah terdokumentasi** —
+D-8 (kini `columns.type` nama tipe, bukan kode DBAPI) untuk setiap selisih `columns`, dan
+D-1/D-2/D-3/D-9 untuk `data`. Satu selisih **di luar cakupan D-4**: pesan `schemas` MySQL berbunyi
+`ValueError: mysql has no schema level; catalogs lists its databases and tables lists their tables`
+saat direkam, dan kini `mysql has no schema level; use catalogs or tables instead`. D-4 hanya
+mengklaim awalan `ValueError: ` yang hilang, sementara D-4 sendiri mensyaratkan pesannya tetap sama
+**kata per kata**. Snapshot live-nya **sengaja belum direkam ulang** supaya selisihnya tetap terlihat
+sampai teks mana yang dipilih diputuskan; alasannya dicatat di `docs/golden-deltas.md`. Yang perlu
+diingat pembaca berikutnya: 22 kasus LIVE ini **tidak** diperiksa `cargo test`, hanya oleh harness
+manual — itu sebabnya 594 tes bisa hijau sementara 10 selisih ini terbuka.
+
+**UI akhirnya bisa dilihat tanpa izin layar.** `screencapture -l 7311` ditolak
+(`could not create image from window`) karena Screen Recording belum diberikan, jadi jalurnya
+dibalik: `ImageRenderer` di dalam tes menggambar view ke PNG, dan `NSHostingView` menggambarnya lewat
+pohon AppKit sungguhan. Sepuluh PNG ada di `app/.build/render/`, digambar ulang dengan
+`QH_RENDER_DIR=app/.build/render swift test --filter SidebarRenderTests`. Yang terbukti terlihat:
+bagian FAVOURITES sidebar, bintang di **dua keadaan** (terisi warna versus garis luar), baris History
+lengkap dengan kolom koneksi (`BGN Production · ok · 514 rows · 412 ms`) dan ketiga ikon hasilnya,
+serta tab Data dengan **sakelar biru menyala, kolom batas 200, dan stepper asli**.
+
+Dua batas teknik itu, supaya tidak dipakai berlebihan. `ImageRenderer` menggambar kontrol interaktif
+sebagai placeholder kuning "tidak tersedia", dan **klaim awal bahwa kontrol tidak bisa dilihat
+ternyata salah** — `NSHostingView` menggambarnya dengan benar, dan itu ketahuan karena dicoba, bukan
+karena disimpulkan. Sebaliknya `NSHostingView` kehilangan teks panel History, karena warnanya
+dirancang untuk latar gelap aplikasi yang tidak disediakan render offscreen. Dan yang paling penting:
+**render membuktikan tentang view-nya, bukan bahwa aplikasi menaruhnya di layar.** Itu masih belum
+terbukti, jadi klaim "UI sudah diverifikasi" tidak boleh dibaca lebih jauh dari ini.
+
+Baris di dalam `LazyVStack`/`ScrollView` tidak tergambar saat panelnya dirender utuh — tanpa window
+tidak ada viewport. Karena itu `FavouritesSection` dipisah menjadi view sendiri, dan `SavedQueryRow`
+serta `HistoryRow` diubah dari `private` menjadi internal, ketiganya supaya bisa digambar dan
+diperiksa. Kalau salah satunya kelak tidak lagi dipakai tes, pelebaran akses itu layak dicabut.
+
+**Verifikasi sendiri, setelah delegasi gagal.** Verifier independen dikirim dua kali dan **keduanya
+tidak menyampaikan hasil** — statusnya sukses tapi keluarannya hanya kalimat pembuka. Jadi
+**verifikasi independen belum terjadi**, dan yang di bawah ini adalah self-verification, yang jelas
+lebih lemah karena yang menilai adalah penulis kodenya. Yang diperiksa: (a) baris terhapus tidak
+bocor ke daftar — `saved_queries()` menyaring `WHERE deleted_at IS NULL` dan uji runtime
+favoritkan-lalu-hapus mengembalikan `{"queries":[]}`, sementara `get` langsung pada id itu masih
+menjawab `deleted=true, favourite=true` seperti yang seharusnya untuk sebuah tombstone; (b) tesnya
+**berbeban**, dibuktikan dengan mencabut `favourite = excluded.favourite` dari klausa upsert sehingga
+**tepat dua tes favorit gagal dan hanya itu**, lalu dikembalikan (594 hijau lagi, dan string-nya
+muncul tepat sekali lagi). Yang **tidak** diperiksa: `set_saved_query_favourite` membaca lalu
+menulis, jadi dua penulis serentak bisa kehilangan satu suntingan — bentuknya sama dengan setiap
+metode pengubah lain di berkas itu, jadi ini sifat yang sudah ada dan bukan yang dibawa masuk oleh
+perubahan ini, tapi juga belum diuji di bawah konkurensi.
+
+Verifikasi berat 29 Sep 2026: `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**594 lulus / 0 gagal** ✅, `swift build && swift test` → **164 tes / 0 gagal** ✅. **Nol commit.**
+
+### Session restore: tab kembali setelah restart, dan Fase 1 ditutup (29 Sep 2026)
+
+**`session_restore` akhirnya tersambung.** Tabelnya sudah ada sejak `0001_init.sql:59` dan tidak
+pernah dipakai kode mana pun; sekarang perintah `session` (`save` | `load` | `clear`) menulisnya.
+Bentuknya **satu baris tetap** di bawah id `00000000-0000-7000-8000-000000000001`, dengan seluruh tab
+sebagai satu blob JSON di `tab_json` dan tab depan di `active_tab_id`.
+
+Kenapa satu baris dan bukan satu per tab: urutan tab ikut dipulihkan, dan tabelnya tidak punya kolom
+sortir — himpunan baris tidak punya urutan sendiri, dan menambah kolom berarti migrasi untuk urutan
+yang sudah dibawa JSON. Blob-nya opaque, jadi field baru pada tab tidak butuh migrasi; alasannya sama
+dengan `options` pada koneksi. Yang disimpan adalah **pekerjaan** (SQL, koneksi, tujuan Run), bukan
+hasil: grid dan log sengaja tidak ikut. Dan tab daftar objek kembali sebagai tab query kosong, bukan
+listing yang langsung berjalan lagi saat launch.
+
+**Perintah FFI kesembilan belas, jadi invariant #11 kembali terpakai.** Keempat daftar disentuh
+bersamaan (`COMMANDS`, `Command`, `EngineCommand`/`EVERY_COMMAND`, `RustEngine.commands`), lalu
+`./app/build-ffi.sh` dijalankan. Pengawasnya tetap tes yang sama, dan tidak ada yang perlu ditambah di
+sana karena daftarnya memang diturunkan dari sumber yang sama.
+
+**Terminate butuh jalur memblokir.** `run` mengabarkan selesai dengan melompat ke main queue; saat
+`applicationWillTerminate` main queue itulah yang menunggu, jadi completion yang dijadwalkan di sana
+tidak akan pernah berjalan dan tab yang diketik sejak event tab terakhir akan hilang. Karena itu
+`DatabaseEngine` bertambah `runBlocking` — satu pemanggil, dan alasannya ditulis di protokolnya.
+`MockEngine` merekamnya, jadi yang bisa dibuktikan mock adalah bahwa app meminta perintah yang benar.
+
+**Bukti, dan bedanya dari klaim.** Sesi ditulis ke database default engine yang sama dengan history
+dan saved queries; `DB_PATH` hanya ditambahkan bila sesuatu mengalihkan `ConnectionStore` — suite tes —
+supaya tes tidak menyentuh database pengguna. Buktinya bertingkat:
+`a_session_outlives_the_connection_that_wrote_it` (storage, lewat dua koneksi ke file yang sama),
+empat tes perintah di `crates/qh-ffi/tests/local.rs`, tes app `SessionTests` yang menanam sesi lewat
+engine sungguhan ke database sementara lalu membangun `AppModel(persistsSession: true)` dan menunggu
+tabnya kembali, dan yang terakhir **bundel sungguhan**: `./app/build.sh` → `app/dist/QueryHive.app`,
+sesi `SELECT 424242` ditanam ke database produksi, app dijalankan dengan `open`, diminta berhenti lewat
+AppleScript. Baris sesi sesudahnya memuat id, judul, dan SQL yang ditanam **plus** `outputDirectory`
+yang diisi `QueryTab.init` — bukti bahwa app membangun ulang tabnya lalu menuliskannya kembali, bukan
+menggemakan blob lama. Database pengguna dikembalikan dari salinan sebelum pengukuran.
+
+**Satu premis rencana ternyata keliru lagi.** Catatan rencana adopsi menyebut
+`docs/golden-deltas.md:18` "masih menulis 43 kasus" sebagai angka basi. Diperiksa: korpusnya memang 43
+(`*.ndjson` = 43, `index.json` = 43 entri, `EXACT`+`ACCEPTED`+`LIVE` = 17+4+22), jadi berkas itu
+menulis jawaban yang benar. Yang benar-benar belum cuma larian live 14 kasus MySQL/Trino, karena
+image-nya belum ada di mesin ini.
+
+Verifikasi berat 29 Sep 2026 (sesudah session): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` → **0 gagal**
+(hitungannya bergantung suite live yang di-skip tanpa container), `cargo deny check licenses` →
+`licenses ok` ✅, `swift build && swift test` → **169 tes / 0 gagal** ✅, `./app/build.sh` →
+`Built dist/QueryHive.app` ✅. Fase 0 dan Fase 1 ditutup, dan seluruh pekerjaan itu di-commit
+bersama dokumen ini.
+
+## Perkakas lokal (sengaja tidak masuk repo)
+
+`tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang
 dikirim produk. Karena itu ia **di-gitignore** dan tidak ada di repo — alasannya sama seperti skrip
 sekali pakai tidak di-commit: pohon repo seharusnya menggambarkan produknya.
 

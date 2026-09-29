@@ -11,6 +11,11 @@ __pycache__/
 app/.build/
 app/.engine/
 
+# Scratch from running the app by hand (a window id probe, a launch log). Not part of the
+# product, and a root-level build directory is what SwiftPM would make if it were ever run
+# from the repository root rather than from `app/`.
+.build/
+
 # macOS and archive cruft that arrived with the checkout.
 .DS_Store
 __MACOSX/
