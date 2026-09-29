@@ -46,11 +46,12 @@ struct SettingsView: View {
     /// `general` is first because it is where the app's own settings live, and because the bar
     /// opens there. The raw values are also the snapshot scene suffixes (`settings-appearance`, …).
     enum Pane: String, CaseIterable, Hashable {
-        case general, appearance, editor, data, keyboard
+        case general, account, appearance, editor, data, keyboard
 
         var title: String {
             switch self {
             case .general: "General"
+            case .account: "Account"
             case .appearance: "Appearance"
             case .editor: "Editor"
             case .data: "Data"
@@ -58,12 +59,14 @@ struct SettingsView: View {
             }
         }
 
-        /// The SF Symbol the bar draws above the label. The names are TablePro's own for these five
+        /// The SF Symbol the bar draws above the label. The names are TablePro's own for these
         /// ideas — `gearshape`, `paintbrush`, `doc.text`, `tablecells`, `keyboard` — so the bar
-        /// reads the same way in both apps.
+        /// reads the same way in both apps. `person.crop.circle` is this app's own, because the
+        /// pane is about who is using it rather than about TablePro's credential profiles.
         var symbol: String {
             switch self {
             case .general: "gearshape"
+            case .account: "person.crop.circle"
             case .appearance: "paintbrush"
             case .editor: "doc.text"
             case .data: "tablecells"
@@ -116,6 +119,7 @@ struct SettingsView: View {
     private var paneContent: some View {
         switch pane {
         case .general: GeneralSettings(updater: updater)
+        case .account: AccountSettings()
         case .appearance: AppearanceSettings()
         case .editor: EditorSettings()
         case .data: DataSettings()
@@ -252,6 +256,125 @@ private struct RowDivider: View {
 /// The app's own settings: the software update, and the one button that puts every appearance
 /// choice back where it started.
 ///
+/// The Account pane: who this application is running as, and what is saved for them.
+///
+/// Named Account rather than Profiles on purpose. TablePro's Profiles pane manages reusable
+/// credential and SSH sets, which this app does not have; what this pane manages is the identity
+/// itself and the rows that belong to it. Calling it Profiles would promise the other feature.
+struct AccountSettings: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Sign in",
+                         detail: "Signing in is what makes a profile belong to someone. It uses the "
+                             + "browser you already have, through Google's authorization-code flow with "
+                             + "PKCE, and this app keeps no token afterwards: what it stores is the "
+                             + "provider, the account's own id at the provider, and optionally an email "
+                             + "and a name. It never touches a database connection.") {
+                identityRow
+                if let notice = model.accountNotice {
+                    RowDivider()
+                    Text(notice)
+                        .font(.ui(10.5))
+                        .foregroundStyle(Tone.ink.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 6)
+                }
+            }
+
+            SettingsCard(title: "Profiles",
+                         detail: "What this account has saved. A profile is owned by the account "
+                             + "above, so it belongs to the identity rather than to the machine.") {
+                if model.profiles.isEmpty {
+                    Text("Nothing saved yet. A profile is written by whichever feature owns its "
+                         + "kind, and none does yet.")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 6)
+                } else {
+                    ForEach(model.profiles) { profile in
+                        profileRow(profile)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            // One call: `loadAccount` reads the profiles once it has the account, so the pane does
+            // not start two local commands at once.
+            model.loadAccount()
+        }
+    }
+
+    private var signedIn: Bool { model.account?.provider != nil }
+
+    private var identityRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: signedIn ? "person.crop.circle.fill" : "person.crop.circle.badge.questionmark")
+                .font(.system(size: 22))
+                .foregroundStyle(signedIn ? Tone.accent : Tone.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(identityTitle)
+                    .font(.ui(12, weight: .semibold))
+                    .foregroundStyle(Tone.ink)
+                Text(identityDetail)
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 12)
+            if signedIn {
+                PillButton(title: "Sign out", symbol: "rectangle.portrait.and.arrow.right",
+                           role: .quiet) {
+                    model.signOut()
+                }
+            } else {
+                PillButton(title: model.signingIn ? "Waiting for the browser…" : "Sign in with Google",
+                           symbol: "arrow.up.right.square") {
+                    model.signInWithGoogle()
+                }
+                .disabled(model.signingIn)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var identityTitle: String {
+        guard let account = model.account, account.provider != nil else { return "Not signed in" }
+        return account.displayName ?? account.email ?? "Signed in"
+    }
+
+    private var identityDetail: String {
+        guard let account = model.account, let provider = account.provider else {
+            return "A local account already owns anything saved here."
+        }
+        let who = account.email ?? account.subject ?? "no subject"
+        return "\(provider.capitalized) · \(who)"
+    }
+
+    private func profileRow(_ profile: Event.Profile) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 11))
+                .foregroundStyle(Tone.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(profile.name)
+                    .font(.ui(11.5))
+                    .foregroundStyle(Tone.ink)
+                Text(profile.kind)
+                    .font(.code(10))
+                    .foregroundStyle(Tone.secondary)
+            }
+            Spacer(minLength: 12)
+            PillButton(title: "Delete", symbol: "trash", role: .destructive) {
+                model.deleteProfile(profile.id)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+}
+
 /// The reset lives here rather than beside the palette it resets because it is not a palette
 /// control: `ThemeStore.reset()` also returns both fonts to the system face, so it is the app's
 /// "start over" button and belongs with the other whole-app setting. TablePro's General pane keeps

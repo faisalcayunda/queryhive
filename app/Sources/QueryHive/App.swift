@@ -239,6 +239,16 @@ struct Event: Decodable {
     /// same as an empty string.
     var activeTabId: String?
 
+    /// `account` command: the application's own identity.
+    var account: Account?
+    /// `profiles` command, `list`: the living profiles. Its own key rather than reusing `queries`,
+    /// which is a different record shape.
+    var profiles: [Profile]?
+    /// `profile` replies: the one row a `get` or `save` names.
+    var profile: Profile?
+    /// `profile_delete`: whether there was a row to delete. False is a no-op, not a failure.
+    var deleted: Bool?
+
     /// One execution in the engine's history.
     ///
     /// Three fields are optional because a row can be written before its run has finished: an
@@ -274,6 +284,32 @@ struct Event: Decodable {
         var favourite: Bool
         var deleted: Bool
         var version: Int
+    }
+
+    /// One account, as the engine's `account` event carries it.
+    ///
+    /// A row with no provider is a real state rather than an error: the account exists from the
+    /// first launch so that a profile saved before anyone has signed in still has an owner.
+    struct Account: Decodable, Equatable {
+        let id: String
+        var provider: String?
+        var subject: String?
+        var email: String?
+        var displayName: String?
+        var signedInAt: Int?
+        var signedOutAt: Int?
+    }
+
+    /// One thing saved for an account.
+    ///
+    /// The `payload` the engine carries is deliberately not decoded here: it is the kind's own
+    /// body, and a pane that showed it would be showing a blob. Whatever owns a kind will decode
+    /// it when it exists.
+    struct Profile: Decodable, Identifiable, Equatable {
+        let id: String
+        var ownerId: String
+        var kind: String
+        var name: String
     }
 }
 

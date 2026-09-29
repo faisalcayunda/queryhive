@@ -228,6 +228,13 @@ impl Storage {
         let _mode: String = self
             .conn
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        // A busy timeout, because more than one command can be in flight in one process: the app
+        // runs each on its own queue, so two writes that arrive together would otherwise make the
+        // second fail with `SQLITE_BUSY` rather than wait its turn. WAL keeps a reader off the
+        // writer's back; it does not stop two writers colliding. Five seconds is longer than any
+        // local statement here takes, and short enough that a lock which is genuinely stuck still
+        // reports instead of hanging.
+        self.conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(())
     }
 

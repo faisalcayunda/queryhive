@@ -104,6 +104,15 @@ plutil -replace CFBundleVersion -string "$BUILD" "$app/Contents/Info.plist"
 plutil -replace SUFeedURL -string "$FEED_URL" "$app/Contents/Info.plist"
 plutil -replace SUPublicEDKey -string "$PUBLIC_KEY" "$app/Contents/Info.plist"
 
+# The Google OAuth client id, when the builder has one: a `Desktop app` client from Google Cloud,
+# passed as QH_GOOGLE_CLIENT_ID. Left out otherwise, in which case the Account pane says what is
+# missing rather than offering a button that cannot work. It is not a secret — a desktop client has
+# no secret to keep, which is why the flow uses PKCE — but it belongs to whoever owns the project,
+# so it is a build input rather than a constant in the source.
+if [ -n "${QH_GOOGLE_CLIENT_ID:-}" ]; then
+    plutil -replace QHGoogleClientID -string "$QH_GOOGLE_CLIENT_ID" "$app/Contents/Info.plist"
+fi
+
 if [ -f ../assets/icon.icns ]; then
     cp ../assets/icon.icns "$app/Contents/Resources/AppIcon.icns"
 fi

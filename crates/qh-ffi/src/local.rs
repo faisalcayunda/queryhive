@@ -507,15 +507,20 @@ pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), 
     let settings = settings.clone();
     let built = on_blocking(move || {
         let storage = open_storage(&settings)?;
-        let owner = storage.app_account_or_create(qh_storage::now_millis())?.meta.id;
         let action = settings.text("PROFILE_ACTION", "list").trim().to_ascii_lowercase();
         match action.as_str() {
             "list" => {
+                // The account is read, not created. Listing what an account owns must not bring an
+                // account into existence, and it is also what keeps two commands from writing to
+                // the same database at once: `load` and `sign_in` are what create the row.
+                let records = match storage.app_account()? {
+                    Some(account) => storage.profiles(&account.meta.id)?,
+                    None => Vec::new(),
+                };
                 let kind = non_empty(&settings, "KIND")
                     .map(|text| profile_kind_of(&text))
                     .transpose()?;
-                let records = storage
-                    .profiles(&owner)?
+                let records = records
                     .into_iter()
                     .filter(|record| kind.map_or(true, |kind| record.kind == kind))
                     .map(|record| profile_json(&record))

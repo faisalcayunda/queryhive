@@ -228,6 +228,18 @@ final class AppModel {
     /// The saved queries, in name order, as last read.
     var savedQueries: [Event.SavedQuery] = []
 
+    /// The application's own identity, and the profiles it owns.
+    ///
+    /// Read from the engine's `account` and `profiles` commands. The account exists from the first
+    /// launch, so a profile saved before anyone signs in still has an owner.
+    var account: Event.Account?
+    var profiles: [Event.Profile] = []
+    /// What the Account pane says when a sign-in fails, or when it cannot start for want of a
+    /// client id. Shown in the pane rather than as an alert: nothing else is blocked by it.
+    var accountNotice: String?
+    /// Whether a sign-in is in flight, so the button can say so rather than looking inert.
+    var signingIn = false
+
     /// The saved queries the user keeps within reach, for the sidebar.
     ///
     /// Derived rather than kept as a second list: two lists can disagree after a save or a delete,
@@ -737,7 +749,7 @@ final class AppModel {
     private func restoreSession() {
         var restored: [SessionTab]?
         var active: String?
-        Engine.current.run("session", env: sessionEnvironment(["SESSION_ACTION": "load"]),
+        Engine.current.run("session", env: localEnvironment(["SESSION_ACTION": "load"]),
                            onEvent: { event in
             guard event.event == "session", event.saved == true else { return }
             restored = event.tabs
@@ -791,18 +803,22 @@ final class AppModel {
         let snapshot = tabs.map(SessionTab.init)
         guard let data = try? JSONEncoder().encode(snapshot),
               let json = String(data: data, encoding: .utf8) else { return nil }
-        var env = sessionEnvironment(["SESSION_ACTION": "save", "TABS_JSON": json])
+        var env = localEnvironment(["SESSION_ACTION": "save", "TABS_JSON": json])
         if let id = selectedTabID { env["ACTIVE_TAB_ID"] = id.uuidString }
         return env
     }
 
-    /// The settings a session command runs with.
+    /// The settings a command that reaches the local database runs with.
     ///
-    /// `DB_PATH` is added only when something redirected the connections store — the test suite.
-    /// The app leaves it out so the session lands in the engine's own default database, the same
-    /// file the history and the saved queries live in; naming the file here would be a second place
-    /// that has to agree with the engine about what it is called.
-    private func sessionEnvironment(_ base: [String: String]) -> [String: String] {
+    /// `DB_PATH` is added only when something redirected the connections store — the test suite and
+    /// a snapshot render. The app leaves it out so these commands land in the engine's own default
+    /// database, the same file the history and the saved queries live in; naming the file here would
+    /// be a second place that has to agree with the engine about what it is called.
+    ///
+    /// Named for the database rather than for the session because the account and profile commands
+    /// need the same redirection: a snapshot must not create an account row in the database the user
+    /// actually uses.
+    private func localEnvironment(_ base: [String: String]) -> [String: String] {
         guard let root = ConnectionStore.root else { return base }
         var env = base
         env["DB_PATH"] = root.appendingPathComponent("queryhive.sqlite3").path
@@ -2466,6 +2482,107 @@ final class AppModel {
             }
             self.savedQueries = queries
             self.savedError = nil
+        })
+    }
+
+    // MARK: Account and profiles
+
+    /// Reads the account row, which the engine creates on first use, then the profiles it owns.
+    ///
+    /// Chained rather than fired side by side: both reach the same SQLite file and the account read
+    /// is a write the first time, so running them together is a collision for no gain. The engine's
+    /// busy timeout would wait it out; not racing is better.
+    func loadAccount() {
+        _ = Engine.current.run("account", env: localEnvironment(["ACCOUNT_ACTION": "load"]),
+                               onEvent: { event in
+            switch event.event {
+            case "account": self.account = event.account
+            case "error": self.accountNotice = event.message
+            default: break
+            }
+        }, onExit: { _, _ in
+            self.loadProfiles()
+        })
+    }
+
+    /// Reads the profiles this account owns.
+    func loadProfiles() {
+        _ = Engine.current.run("profiles", env: localEnvironment(["PROFILE_ACTION": "list"]),
+                               onEvent: { event in
+            switch event.event {
+            case "profiles": self.profiles = event.profiles ?? []
+            case "error": self.accountNotice = event.message
+            default: break
+            }
+        }, onExit: { _, _ in })
+    }
+
+    /// Sign in with Google, then write what the provider said into the account row.
+    ///
+    /// The browser round trip happens here rather than in the engine, because the engine has no
+    /// window and cannot open one. What reaches the engine is the three facts the provider gave
+    /// us: the provider, the subject, and optionally an email and a name. No token is stored, so
+    /// there is nothing to leak later.
+    func signInWithGoogle() {
+        guard !signingIn else { return }
+        guard let clientID = GoogleSignIn.clientID else {
+            accountNotice = GoogleSignIn.Failure.noClientID.errorDescription
+            return
+        }
+        signingIn = true
+        accountNotice = nil
+        Task { @MainActor in
+            defer { signingIn = false }
+            do {
+                let identity = try await GoogleSignInFlow.signIn(clientID: clientID)
+                signIn(identity)
+            } catch {
+                accountNotice = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
+    /// Write a completed sign-in into the account row.
+    ///
+    /// Separate from the flow above so it can be driven without a browser: the flow's job ends at
+    /// the identity, and this is what turns one into the engine's own words.
+    func signIn(_ identity: GoogleSignIn.Identity) {
+        var env: [String: String] = [
+            "ACCOUNT_ACTION": "sign_in",
+            "PROVIDER": "google",
+            "SUBJECT": identity.subject,
+        ]
+        if let email = identity.email { env["EMAIL"] = email }
+        if let name = identity.displayName { env["DISPLAY_NAME"] = name }
+        _ = Engine.current.run("account", env: localEnvironment(env), onEvent: { event in
+            switch event.event {
+            case "account": self.account = event.account
+            case "error": self.accountNotice = event.message
+            default: break
+            }
+        }, onExit: { _, _ in })
+    }
+
+    /// Sign out. The row keeps the subject and the email: signing out is a fact, not an erasure.
+    func signOut() {
+        _ = Engine.current.run("account", env: localEnvironment(["ACCOUNT_ACTION": "sign_out"]),
+                               onEvent: { event in
+            switch event.event {
+            case "account": self.account = event.account
+            case "error": self.accountNotice = event.message
+            default: break
+            }
+        }, onExit: { _, _ in })
+    }
+
+    /// Remove one profile, then re-read the list.
+    func deleteProfile(_ id: String) {
+        _ = Engine.current.run("profile_delete", env: localEnvironment(["PROFILE_ID": id]),
+                               onEvent: { event in
+            if event.event == "error" { self.accountNotice = event.message }
+        }, onExit: { _, _ in
+            self.loadProfiles()
         })
     }
 

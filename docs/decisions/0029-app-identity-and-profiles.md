@@ -130,3 +130,41 @@ ada sign-in yang bisa menurunkan kuncinya.
   mendahuluinya.
 - Sign-in dengan Google belum ada; yang ada adalah tabel, modul storage, dan jalur Keychain-nya.
   Langkah berikutnya butuh client ID di Google Cloud Console, tipe *Desktop app*.
+
+## Addendum, 29 Sep 2026: bentuk sign-in, dan kenapa bukan yang lain
+
+Sign-in-nya sekarang ada, di sisi **app**, dan addendum ini mencatat empat keputusan yang membentuknya.
+
+**Authorization code dengan PKCE, tanpa client secret.** Aplikasi desktop tidak bisa menyimpan rahasia:
+apa pun yang ikut dalam bundel bisa dibaca. Yang membuktikan callback itu milik kita adalah code
+verifier, bukan secret. Tantangan dikirim sebagai S256.
+
+**Redirect ke loopback, bukan URL scheme.** Google menyatakan loopback IP flow "will continue to be
+supported on desktop apps", sementara yang dideprekasi adalah client type iOS, Android, dan Chrome.
+Jadi app membuka listener HTTP di port ephemeral pada `127.0.0.1`, mengirim browser ke sana, dan
+membaca satu request yang datang. Listener itu berhenti setelah satu request.
+
+**Tidak ada token yang disimpan.** Yang ditulis ke baris akun hanya provider, subject, dan
+opsional email serta nama. Ini permintaan pengguna secara harfiah ("untuk aplikasi saja"), dan
+konsekuensinya enak: tidak ada refresh token yang bisa bocor, dan tidak ada panggilan ke API Google
+setelah sign-in.
+
+**Perjalanan browser ada di app, bukan di engine.** Engine tidak punya jendela dan tidak bisa
+membukanya. Yang diterima engine adalah tiga fakta hasil sign-in, lewat command `account` yang sudah
+ada. Ini juga sebabnya ADR ini tidak berubah pada bagian koneksi: tidak ada satu pun baris di jalur
+connect yang tersentuh.
+
+**Namanya "Account", bukan "Profiles".** Pane TablePro dengan nama Profiles mengatur kredensial dan
+SSH yang bisa dipakai ulang; QueryHive tidak punya itu. Yang dikelola pane ini adalah identitasnya
+sendiri beserta baris yang jadi miliknya, dan memakai nama Profiles akan menjanjikan fitur yang lain.
+
+**Yang terverifikasi, dan yang tidak.** PKCE, URL otorisasi, parsing callback (`code`, `state`,
+`error`), dan identitas di dalam `id_token` diuji; `state` diperiksa di dalam fungsi parsing, bukan
+diserahkan ke pemanggil. Dua ujung yang butuh dunia luar, listener loopback dan penukaran token,
+tidak diuji dan tidak bisa diuji tanpa client ID dan orang di depan browser.
+
+Dua perbaikan yang ikut mendarat karena addendum ini, keduanya cacat yang nyata, bukan teoretis:
+`profiles list` dulu memanggil `app_account_or_create`, sehingga membaca daftar profil ikut menulis
+baris akun; dan `qh-storage` tidak punya busy timeout, sehingga dua penulisan yang datang bersamaan
+gagal dengan `SQLITE_BUSY` alih-alih menunggu. Yang kedua terlihat sebagai "database is locked" di
+render pertama pane ini.

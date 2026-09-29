@@ -90,6 +90,16 @@ enum Snapshot {
         // .accessory keeps it out of the Dock and out of the menu bar for the second it lives.
         app.setActivationPolicy(.accessory)
 
+        // A render must not read or write what the user owns. Pointing the connections store at a
+        // throwaway directory redirects `connections.json`, and `AppModel`'s local commands take
+        // their `DB_PATH` from the same override: without this, a pane that runs a command when it
+        // appears — the Account pane's `account` load, which creates the row — would write to the
+        // database the user actually uses.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qh-snapshot-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        ConnectionStore.root = root
+
         let model = seeded(scene: scene)
         // Settings is its own scene in the running app, so it needs its own root here or it stays
         // the one screen nobody can look at without launching.
