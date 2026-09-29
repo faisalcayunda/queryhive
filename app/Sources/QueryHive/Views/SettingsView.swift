@@ -48,6 +48,14 @@ struct SettingsView: View {
     enum Pane: String, CaseIterable, Hashable {
         case general, account, appearance, editor, data, keyboard
 
+        /// The panes the bar shows.
+        ///
+        /// `account` is deliberately not one of them: signing in needs a Google client id this build
+        /// does not ship, so a pane whose only action says "not configured" is noise in the bar. The
+        /// pane itself, its snapshot scene and the engine commands behind it all stay, so putting it
+        /// back is one line once a client id is set.
+        static let visible: [Pane] = allCases.filter { $0 != .account }
+
         var title: String {
             switch self {
             case .general: "General"
@@ -136,7 +144,7 @@ struct SettingsView: View {
         GeometryReader { geometry in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    ForEach(Pane.allCases, id: \.self) { option in
+                    ForEach(Pane.visible, id: \.self) { option in
                         paneItem(option)
                     }
                 }
