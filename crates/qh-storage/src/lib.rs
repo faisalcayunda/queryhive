@@ -30,6 +30,7 @@
 //! they disagree.
 
 mod connections;
+mod execution_log;
 mod history;
 pub mod import;
 mod mcp_token;
@@ -37,6 +38,7 @@ pub mod migrate;
 mod session;
 
 pub use connections::{ConnectionGroup, ConnectionKind, ConnectionRecord};
+pub use execution_log::{hash_statement, ExecutionRecord, NewExecution, GENESIS};
 pub use history::{Outcome, QueryHistoryRecord, SavedQueryRecord};
 pub use import::{ImportPlan, ImportReport, ImportedSource, SkippedRow};
 pub use mcp_token::{hash_token, McpTokenRecord, TokenState};
@@ -107,6 +109,21 @@ pub enum StorageError {
     /// would send them looking in the wrong place.
     #[error("the mcp_token row holds {column} that is not a JSON array of strings: {reason}")]
     BadMcpTokenJson { column: String, reason: String },
+
+    /// The execution log's chain did not verify: a row was changed, removed or inserted.
+    ///
+    /// Its own variant because the message has to say which row and what was expected.
+    /// "The database refused the statement" would send a reader looking at SQLite rather
+    /// than at the tampering the chain exists to make visible.
+    #[error(
+        "execution log row {seq} does not continue its chain: expected {expected:?}, \
+         found {found:?}"
+    )]
+    BrokenExecutionChain {
+        seq: i64,
+        expected: String,
+        found: String,
+    },
 
     #[error("HOME is not set, so there is nowhere to keep the database")]
     NoHomeDirectory,
@@ -440,6 +457,24 @@ mod tests {
                 "token_prefix",
             ]
         );
+        // Migration 7. No sync columns and no statement text: it is an append-only audit
+        // chain, and `statement_hash` is the only thing it keeps of the statement.
+        assert_eq!(
+            columns("execution_log"),
+            vec![
+                "seq",
+                "id",
+                "at",
+                "safe_mode",
+                "decision",
+                "statement_kind",
+                "statement_index",
+                "statement_hash",
+                "reason",
+                "prev_hash",
+                "chain_hash",
+            ]
+        );
     }
 
     #[test]
@@ -465,10 +500,12 @@ mod tests {
             names,
             vec![
                 "idx_connection_live",
+                "idx_execution_log_at",
                 "idx_history_dedupe",
                 "idx_history_started"
             ],
-            "the live-connections list, the autosave de-duplication, and the history order"
+            "the live-connections list, the execution-log order, the autosave \
+             de-duplication, and the history order"
         );
 
         // The connection index is partial, which is what keeps it small while tombstones

@@ -79,3 +79,6 @@ Rincian yang mengikat:
 - **Setelan timeout tetap milik run, bukan koneksi.** Keduanya soal keselamatan tetapi menjawab
   pertanyaan berbeda: timeout adalah berapa lama satu run boleh berjalan, Safe Mode adalah apa yang
   sebuah koneksi tolak sama sekali.
+- **Tingkat keempat, floor, dan execution log menyusul di ADR-0026.** Tiga tingkat di sini tetap
+  berlaku apa adanya; 0026 menambah `confirm`, floor yang memilih kondisi paling ketat, dan tabel
+  `execution_log`.

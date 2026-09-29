@@ -5,13 +5,32 @@
 //! has a window: the CLI, the MCP server, and the app. A rule kept in a Swift picker
 //! would be a rule the other two never see.
 //!
-//! # The three levels
+//! # The four levels
 //!
-//! | `SAFE_MODE` | refuses |
-//! |---|---|
-//! | `full` | nothing |
-//! | `no_ddl` | DDL, and anything the classifier cannot read |
-//! | `read_only` | every write, every DDL, and anything the classifier cannot read |
+//! | `SAFE_MODE` | refuses | asks first |
+//! |---|---|---|
+//! | `full` | nothing | nothing |
+//! | `no_ddl` | DDL, and anything the classifier cannot read | nothing |
+//! | `confirm` | DDL, and anything the classifier cannot read | every write |
+//! | `read_only` | every write, every DDL, and anything the classifier cannot read | nothing |
+//!
+//! `confirm` is the level between "run it" and "refuse it": a write runs only when the
+//! caller has said `SAFE_MODE_CONFIRMED=1` for this run. That is the engine's whole idea
+//! of a confirmation — a boolean the caller could only have set after asking its user.
+//! Touch ID, a dialog and a keychain prompt are the app's business and are deliberately
+//! not modelled here: the CLI and the MCP server have no window to raise, and a level an
+//! embedding caller cannot express is a level that would silently become "refuse".
+//!
+//! The four are a **strictness chain**, which is what lets a floor pick one of them
+//! without ever weakening the user's own choice:
+//!
+//! ```text
+//! full < no_ddl < confirm < read_only
+//! ```
+//!
+//! Each step refuses strictly more *unconfirmed* statements than the one before. `confirm`
+//! sits above `no_ddl` because it adds a confirmation the user's own level did not demand,
+//! and below `read_only` because a confirmed write still runs.
 //!
 //! # The rule is conservative, and that is the point
 //!
@@ -69,6 +88,19 @@ impl StatementKind {
             StatementKind::Unknown => "unclassified",
         }
     }
+
+    /// The stable token a stored record uses for this kind.
+    ///
+    /// [`label`](Self::label) is a sentence a person reads and may be reworded; this is a
+    /// value an execution-log row is compared against, so it is frozen.
+    pub const fn token(self) -> &'static str {
+        match self {
+            StatementKind::ReadOnly => "read_only",
+            StatementKind::Dml => "dml",
+            StatementKind::Ddl => "ddl",
+            StatementKind::Unknown => "unknown",
+        }
+    }
 }
 
 impl std::fmt::Display for StatementKind {
@@ -78,6 +110,9 @@ impl std::fmt::Display for StatementKind {
 }
 
 /// What a connection refuses, named the way the `SAFE_MODE` setting names it.
+///
+/// The four variants are ordered by [`strictness`](SafeMode::strictness); that order is
+/// what a [`SafeModeFloor`] uses to pick the strictest of several conditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafeMode {
     /// Refuses nothing. The engine's default, so the CLI and the golden corpus are
@@ -85,12 +120,34 @@ pub enum SafeMode {
     Full,
     /// Allows DML, refuses DDL and anything unclassified.
     NoDdl,
+    /// Allows a read; asks for an explicit confirmation before a write; refuses DDL and
+    /// anything unclassified.
+    Confirm,
     /// Refuses every write, every DDL, and anything unclassified.
     ReadOnly,
 }
 
-/// Every spelling the setting accepts, in the order a message lists them.
-pub const SAFE_MODES: [&str; 3] = ["full", "no_ddl", "read_only"];
+/// Every spelling the setting accepts, in strictness order, which is also the order a
+/// message lists them.
+pub const SAFE_MODES: [&str; 4] = ["full", "no_ddl", "confirm", "read_only"];
+
+/// What one mode does about one statement before the caller's confirmation is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Runs as asked.
+    Allow,
+    /// Runs when the caller has explicitly confirmed this run, and not otherwise.
+    Confirm,
+    /// Does not run.
+    Refuse,
+}
+
+impl Decision {
+    /// Whether the statement runs without any further input from the caller.
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Decision::Allow)
+    }
+}
 
 impl SafeMode {
     /// Parse a setting value. `None` for a spelling nobody recognises, rather than a
@@ -99,6 +156,7 @@ impl SafeMode {
         match name.trim().to_ascii_lowercase().as_str() {
             "full" => Some(SafeMode::Full),
             "no_ddl" => Some(SafeMode::NoDdl),
+            "confirm" => Some(SafeMode::Confirm),
             "read_only" => Some(SafeMode::ReadOnly),
             _ => None,
         }
@@ -108,35 +166,97 @@ impl SafeMode {
         match self {
             SafeMode::Full => "full",
             SafeMode::NoDdl => "no_ddl",
+            SafeMode::Confirm => "confirm",
             SafeMode::ReadOnly => "read_only",
         }
     }
 
-    /// Why this mode refuses a statement of `kind`, or `None` when it allows it.
+    /// How restrictive this mode is, as a number a floor can take the maximum of.
     ///
-    /// The wording is the sentence a user reads, so it says what the mode is and what
-    /// the statement was, not which internal enum value matched.
-    pub fn refusal(self, kind: StatementKind) -> Option<&'static str> {
+    /// The steps are deliberately total and cumulative: each higher number refuses
+    /// strictly more *unconfirmed* statements than the one below it. `no_ddl` (1) lets a
+    /// `DELETE` run without asking; `confirm` (2) refuses that `DELETE` until the caller
+    /// confirms and still refuses DDL; `read_only` (3) refuses the `DELETE` outright. So a
+    /// floor that raises `no_ddl` to `confirm` can never let anything through that the
+    /// user's own choice would have refused.
+    pub const fn strictness(self) -> u8 {
         match self {
-            SafeMode::Full => None,
+            SafeMode::Full => 0,
+            SafeMode::NoDdl => 1,
+            SafeMode::Confirm => 2,
+            SafeMode::ReadOnly => 3,
+        }
+    }
+
+    /// The stricter of two modes. Ties return `self`, which is arbitrary and safe: equal
+    /// strictness means equal behaviour.
+    pub const fn strictest(self, other: Self) -> Self {
+        if other.strictness() > self.strictness() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// What this mode does about a statement of `kind`, before any confirmation.
+    pub const fn decision(self, kind: StatementKind) -> Decision {
+        match self {
+            SafeMode::Full => Decision::Allow,
             SafeMode::NoDdl => match kind {
-                StatementKind::ReadOnly | StatementKind::Dml => None,
-                StatementKind::Ddl => {
-                    Some("DDL is not allowed on a connection whose Safe Mode is no_ddl")
-                }
-                StatementKind::Unknown => Some(
-                    "the classifier could not tell whether this statement is read-only, and a \
-                     no_ddl connection treats an unclassified statement as a write",
-                ),
+                StatementKind::ReadOnly | StatementKind::Dml => Decision::Allow,
+                StatementKind::Ddl | StatementKind::Unknown => Decision::Refuse,
+            },
+            SafeMode::Confirm => match kind {
+                StatementKind::ReadOnly => Decision::Allow,
+                StatementKind::Dml => Decision::Confirm,
+                StatementKind::Ddl | StatementKind::Unknown => Decision::Refuse,
             },
             SafeMode::ReadOnly => match kind {
-                StatementKind::ReadOnly => None,
-                StatementKind::Dml => Some("writing is not allowed on a read-only connection"),
-                StatementKind::Ddl => Some("DDL is not allowed on a read-only connection"),
-                StatementKind::Unknown => Some(
-                    "the classifier could not tell whether this statement is read-only, and a \
-                     read-only connection refuses an unclassified statement",
-                ),
+                StatementKind::ReadOnly => Decision::Allow,
+                StatementKind::Dml | StatementKind::Ddl | StatementKind::Unknown => {
+                    Decision::Refuse
+                }
+            },
+        }
+    }
+
+    /// Why this mode will not run a statement of `kind` as-is, or `None` when it runs
+    /// without asking.
+    ///
+    /// "As-is" is the whole of it: a `Confirm` decision has a reason here because the
+    /// statement does not run until the caller confirms, which is exactly the answer
+    /// [`crate::check`] needs. The wording is the sentence a user reads, so it says what
+    /// the mode is and what the statement was, not which internal enum value matched.
+    pub fn refusal(self, kind: StatementKind) -> Option<&'static str> {
+        match self.decision(kind) {
+            Decision::Allow => None,
+            Decision::Confirm => Some(
+                "writing runs on a confirm connection only after an explicit confirmation \
+                 (SAFE_MODE_CONFIRMED=1)",
+            ),
+            Decision::Refuse => match self {
+                SafeMode::NoDdl => {
+                    Some("DDL is not allowed on a connection whose Safe Mode is no_ddl")
+                }
+                SafeMode::Confirm => match kind {
+                    StatementKind::Ddl => {
+                        Some("DDL is not allowed on a connection whose Safe Mode is confirm")
+                    }
+                    _ => Some(
+                        "the classifier could not tell whether this statement is read-only, and \
+                         a confirm connection refuses an unclassified statement",
+                    ),
+                },
+                SafeMode::ReadOnly => match kind {
+                    StatementKind::Dml => Some("writing is not allowed on a read-only connection"),
+                    StatementKind::Ddl => Some("DDL is not allowed on a read-only connection"),
+                    _ => Some(
+                        "the classifier could not tell whether this statement is read-only, and \
+                         a read-only connection refuses an unclassified statement",
+                    ),
+                },
+                // `Full` never reaches a `Refuse`, and `Confirm` has no other arm.
+                SafeMode::Full => None,
             },
         }
     }
@@ -145,6 +265,92 @@ impl SafeMode {
 impl std::fmt::Display for SafeMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// One independent reason a run's mode may not be the level the user chose.
+///
+/// The order matters and is not cosmetic: it is the tie-break when two sources raise the
+/// same level, and the highest source is the one a message should name. A policy outranks
+/// a connection, which outranks a driver, which outranks the user's own setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FloorSource {
+    /// The user's own `SAFE_MODE`.
+    User,
+    /// The driver cannot write, whatever the user chose.
+    Driver,
+    /// The connection is marked read-only, whatever the user chose.
+    Connection,
+    /// A policy outside the connection pinned a minimum.
+    Policy,
+}
+
+impl FloorSource {
+    /// The words a message uses to say where a floor came from.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FloorSource::User => "the connection's own Safe Mode",
+            FloorSource::Driver => "the driver, which cannot write",
+            FloorSource::Connection => "the connection, which is marked read-only",
+            FloorSource::Policy => "a policy pinned outside the connection",
+        }
+    }
+}
+
+impl std::fmt::Display for FloorSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Several independent conditions, each naming a minimum, resolved to the strictest one.
+///
+/// This exists so a floor can never be the *first* condition that happened to be true.
+/// TablePro learned that the hard way: a first-match chain is only right while the order
+/// is right, and adding a fourth condition is what makes it wrong. Resolving by
+/// [`SafeMode::strictness`] makes the answer independent of the order the conditions were
+/// added in.
+///
+/// A floor is a value computed for one run and never written back into the user's
+/// setting: when the condition goes away, the user's own level is what remains.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SafeModeFloor {
+    entries: Vec<(FloorSource, SafeMode)>,
+}
+
+impl SafeModeFloor {
+    /// A floor with no conditions in it. Its [`resolve`](Self::resolve) is `None`.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add one condition's minimum. Repeated conditions stack, and the strictest wins.
+    pub fn raise(&mut self, source: FloorSource, mode: SafeMode) {
+        self.entries.push((source, mode));
+    }
+
+    /// The strictest condition, and which one it was, or `None` for an empty floor.
+    ///
+    /// Ties are broken by [`FloorSource`]'s own order, so the message names the most
+    /// authoritative reason rather than whichever was pushed first.
+    pub fn resolve(&self) -> Option<(SafeMode, FloorSource)> {
+        self.entries
+            .iter()
+            .copied()
+            .max_by_key(|(source, mode)| (mode.strictness(), *source))
+            .map(|(source, mode)| (mode, source))
+    }
+
+    /// Whether no condition has been raised.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The conditions, in the order they were raised.
+    pub fn iter(&self) -> impl Iterator<Item = (FloorSource, SafeMode)> + '_ {
+        self.entries.iter().copied()
     }
 }
 
@@ -166,6 +372,93 @@ pub enum SafeModeError {
         /// A flattened, shortened rendering of the refused statement.
         statement: String,
     },
+
+    /// A statement the mode would run after an explicit confirmation, which this caller
+    /// did not give.
+    ///
+    /// Its own variant rather than [`SafeModeError::Refused`] because the two ask the
+    /// caller for different things: a refusal is final, and this one is a question. A CLI
+    /// can offer to re-run with `SAFE_MODE_CONFIRMED=1`; an error string that said
+    /// "refused" would read as a dead end.
+    #[error(
+        "SAFE_MODE={mode} requires confirmation for statement {index} ({kind}): {reason}: \
+         {statement}"
+    )]
+    NeedsConfirmation {
+        mode: SafeMode,
+        /// 1-based position among the statements the classifier read.
+        index: usize,
+        kind: StatementKind,
+        reason: &'static str,
+        /// A flattened, shortened rendering of the statement awaiting confirmation.
+        statement: String,
+    },
+}
+
+/// One statement's decision, and enough of the statement to log it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementDecision<'a> {
+    /// 1-based position among the statements the classifier read.
+    pub index: usize,
+    pub kind: StatementKind,
+    /// The statement text, trimmed of its surrounding trivia.
+    pub statement: &'a str,
+    /// What the mode does about it before the caller's confirmation is counted.
+    pub decision: Decision,
+    /// Why it does not run as-is, matching [`SafeMode::refusal`].
+    pub reason: Option<&'static str>,
+}
+
+impl StatementDecision<'_> {
+    /// The error this statement raises, or `None` when it runs.
+    ///
+    /// The single place a [`SafeModeError`] is built from a decision, so [`check`],
+    /// [`check_confirmed`] and the engine's execution log cannot disagree about what a
+    /// decision means.
+    pub fn refusal_error(&self, mode: SafeMode, confirmed: bool) -> Option<SafeModeError> {
+        let reason = self.reason.unwrap_or("this statement is not allowed here");
+        match self.decision {
+            Decision::Allow => None,
+            Decision::Confirm if confirmed => None,
+            Decision::Confirm => Some(SafeModeError::NeedsConfirmation {
+                mode,
+                index: self.index,
+                kind: self.kind,
+                reason,
+                statement: snippet(self.statement),
+            }),
+            Decision::Refuse => Some(SafeModeError::Refused {
+                mode,
+                index: self.index,
+                kind: self.kind,
+                reason,
+                statement: snippet(self.statement),
+            }),
+        }
+    }
+}
+
+/// Every statement in a script with the decision this mode makes about it.
+///
+/// The statements a refusal counts, in the order it counts them. It returns all of them
+/// rather than stopping at the first that is not allowed, because the caller that logs
+/// decisions (the engine) needs to say which statement stopped the script and would
+/// otherwise have to classify a second time to find out.
+pub fn decisions(mode: SafeMode, sql: &str) -> Vec<StatementDecision<'_>> {
+    statements(sql)
+        .into_iter()
+        .enumerate()
+        .map(|(offset, statement)| {
+            let kind = classify(statement);
+            StatementDecision {
+                index: offset + 1,
+                kind,
+                statement,
+                decision: mode.decision(kind),
+                reason: mode.refusal(kind),
+            }
+        })
+        .collect()
 }
 
 /// What one statement does, by reading its text.
@@ -224,28 +517,27 @@ const DDL_WORDS: [&str; 17] = [
     "VACUUM", "CLUSTER", "ANALYZE", "REFRESH", "ATTACH", "DETACH", "LOCK", "INTO",
 ];
 
-/// Check a whole script against a Safe Mode.
+/// Check a whole script against a Safe Mode, with no confirmation given.
 ///
-/// Every statement is classified, and the script is refused if **any** of them is. The
-/// errant statement is named by its position and quoted, because "one of your statements
-/// is not allowed" is not something a user can act on.
+/// The caller that has one — the engine, which reads `SAFE_MODE_CONFIRMED` — uses
+/// [`check_confirmed`]. This is the shape every caller that predates the `confirm` level
+/// uses, and it is what a `confirm` connection refuses until the caller says otherwise.
 pub fn check(mode: SafeMode, sql: &str) -> Result<(), SafeModeError> {
-    if mode == SafeMode::Full {
-        return Ok(());
-    }
-    for (offset, statement) in statements(sql).into_iter().enumerate() {
-        let kind = classify(statement);
-        if let Some(reason) = mode.refusal(kind) {
-            return Err(SafeModeError::Refused {
-                mode,
-                index: offset + 1,
-                kind,
-                reason,
-                statement: snippet(statement),
-            });
-        }
-    }
-    Ok(())
+    check_confirmed(mode, false, sql)
+}
+
+/// Check a whole script against a Safe Mode, with the caller's confirmation.
+///
+/// Every statement is classified, and the script is refused if **any** of them is not
+/// allowed. The errant statement is named by its position and quoted, because "one of your
+/// statements is not allowed" is not something a user can act on. A statement a `confirm`
+/// mode would run only after a confirmation is refused when `confirmed` is `false`, with
+/// [`SafeModeError::NeedsConfirmation`] so the caller can tell the two apart.
+pub fn check_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Result<(), SafeModeError> {
+    decisions(mode, sql)
+        .into_iter()
+        .find_map(|statement| statement.refusal_error(mode, confirmed))
+        .map_or(Ok(()), Err)
 }
 
 /// One statement of a script, and the 1-based line it starts on.
@@ -467,7 +759,10 @@ mod tests {
             kind,
             statement,
             ..
-        } = error;
+        } = error
+        else {
+            panic!("a read_only refusal is final, not a question");
+        };
         assert_eq!(index, 2, "the second statement is the one refused");
         assert_eq!(kind, StatementKind::Ddl);
         assert_eq!(statement, "DROP TABLE people");
@@ -546,5 +841,85 @@ mod tests {
         let shortened = snippet(&long);
         assert!(shortened.ends_with('…'));
         assert_eq!(shortened.chars().count(), 81);
+    }
+
+    #[test]
+    fn confirm_runs_a_write_only_after_a_confirmation() {
+        assert_eq!(SafeMode::parse("confirm"), Some(SafeMode::Confirm));
+        assert_eq!(SafeMode::Confirm.as_str(), "confirm");
+
+        // A read needs no confirmation.
+        assert!(check(SafeMode::Confirm, "SELECT 1").is_ok());
+        assert!(check_confirmed(SafeMode::Confirm, true, "SELECT 1").is_ok());
+        // A write is a question, not a dead end: the refusal says so and names the
+        // statement, and the same script passes once the caller confirms.
+        let error = check(SafeMode::Confirm, "INSERT INTO people VALUES (1)").unwrap_err();
+        assert!(
+            matches!(error, SafeModeError::NeedsConfirmation { .. }),
+            "a write on a confirm connection is a question: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("requires confirmation"),
+            "{error}"
+        );
+        assert!(check_confirmed(SafeMode::Confirm, true, "INSERT INTO people VALUES (1)").is_ok());
+        // DDL and the unreadable stay refused even with a confirmation: confirming a
+        // statement whose effects the classifier cannot name is not a safety decision.
+        assert!(check_confirmed(SafeMode::Confirm, true, "DROP TABLE people").is_err());
+        assert!(check_confirmed(SafeMode::Confirm, true, "SET search_path = public").is_err());
+    }
+
+    #[test]
+    fn the_strictness_order_is_full_no_ddl_confirm_read_only() {
+        let order = [
+            SafeMode::Full,
+            SafeMode::NoDdl,
+            SafeMode::Confirm,
+            SafeMode::ReadOnly,
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pair[0].strictness() < pair[1].strictness(),
+                "{:?} must be stricter than {:?}",
+                pair[1],
+                pair[0]
+            );
+            assert_eq!(pair[0].strictest(pair[1]), pair[1]);
+            assert_eq!(pair[1].strictest(pair[0]), pair[1]);
+        }
+    }
+
+    #[test]
+    fn a_floor_picks_the_strictest_condition_not_the_first() {
+        let mut floor = SafeModeFloor::new();
+        assert!(floor.is_empty());
+        assert_eq!(floor.resolve(), None);
+        // The first condition is the loosest; a first-match chain would return `no_ddl`.
+        floor.raise(FloorSource::User, SafeMode::Full);
+        floor.raise(FloorSource::Connection, SafeMode::NoDdl);
+        floor.raise(FloorSource::Policy, SafeMode::ReadOnly);
+        assert_eq!(
+            floor.resolve(),
+            Some((SafeMode::ReadOnly, FloorSource::Policy))
+        );
+        // Adding a looser condition after the strict one does not lower the floor.
+        floor.raise(FloorSource::Driver, SafeMode::Confirm);
+        assert_eq!(
+            floor.resolve(),
+            Some((SafeMode::ReadOnly, FloorSource::Policy))
+        );
+    }
+
+    #[test]
+    fn a_floor_tie_names_the_most_authoritative_source() {
+        // Two sources at the same level: the message should name the policy, not the
+        // first one pushed. Strictness alone cannot choose, so the source must.
+        let mut floor = SafeModeFloor::new();
+        floor.raise(FloorSource::User, SafeMode::ReadOnly);
+        floor.raise(FloorSource::Policy, SafeMode::ReadOnly);
+        assert_eq!(
+            floor.resolve(),
+            Some((SafeMode::ReadOnly, FloorSource::Policy))
+        );
     }
 }

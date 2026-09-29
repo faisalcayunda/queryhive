@@ -30,12 +30,13 @@ use qh_driver::{
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
-use qh_sql::{SafeMode, SAFE_MODES};
+use qh_sql::{Decision, FloorSource, SafeMode, SafeModeFloor, SAFE_MODES};
 use serde_json::{json, Value as Json};
 
 use crate::config;
 use crate::env::Settings;
 use crate::events::{event, Emitter};
+use crate::execution_log::{self, DecisionEntry, LogDecision};
 use crate::progress::{Progress, PROGRESS_MS_DEFAULT};
 use crate::retry::{self, RetryPolicy};
 use crate::sql_ident::{qualified, reference, slots, SlotStyle};
@@ -99,32 +100,124 @@ pub(crate) fn statement_timeout(settings: &Settings) -> Result<Option<Duration>,
     Ok((milliseconds > 0).then(|| Duration::from_millis(milliseconds as u64)))
 }
 
-/// The Safe Mode a run is under, from `SAFE_MODE`.
+/// Every condition that can raise a run's Safe Mode, and the strictest of them.
 ///
-/// Absent is `full`, which is what every caller that predates this setting sends.
-/// A spelling nobody recognises is refused by name: a typo in a safety setting is
+/// Three conditions exist here. The user's own `SAFE_MODE` is the base; `DB_READ_ONLY`
+/// is the connection's own marking, so a connection the app knows is read-only stays
+/// read-only whatever level is chosen; and `SAFE_MODE_FLOOR` is a minimum pinned from
+/// outside the connection — an embedding caller, an external-client gate, a managed
+/// policy — which is the one input a configuration profile would set if this project had
+/// one. The floor is resolved by [`SafeMode::strictness`](qh_sql::SafeMode::strictness),
+/// never by which condition matched first, and it is **never written back**: it is a value
+/// for one run, and when the condition goes away the user's own level is what remains.
+///
+/// A driver that cannot write would be a fourth condition, raised at
+/// [`FloorSource::Driver`]. No driver in this workspace declares that — `Capabilities` has
+/// no such bit, and the driver crates are out of scope for this change — so the source is
+/// defined and resolved but nothing raises it today. That is stated rather than faked.
+pub(crate) fn safe_mode_floor(settings: &Settings) -> Result<SafeModeFloor, CliError> {
+    let mut floor = SafeModeFloor::new();
+    floor.raise(
+        FloorSource::User,
+        parse_safe_mode(&settings.text("SAFE_MODE", ""), "SAFE_MODE")?,
+    );
+    if settings.flag("DB_READ_ONLY", false) {
+        floor.raise(FloorSource::Connection, SafeMode::ReadOnly);
+    }
+    let pinned = settings.text("SAFE_MODE_FLOOR", "");
+    if !pinned.is_empty() {
+        floor.raise(
+            FloorSource::Policy,
+            parse_safe_mode(&pinned, "SAFE_MODE_FLOOR")?,
+        );
+    }
+    Ok(floor)
+}
+
+/// The Safe Mode a run is under, after every floor has been applied.
+///
+/// Absent `SAFE_MODE` is `full`, which is what every caller that predates this setting
+/// sends. A spelling nobody recognises is refused by name: a typo in a safety setting is
 /// not a decision to make silently, the same rule `sslmode` follows.
 pub(crate) fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
-    let raw = settings.text("SAFE_MODE", "");
-    if raw.is_empty() {
+    Ok(safe_mode_floor(settings)?
+        .resolve()
+        .map(|(mode, _source)| mode)
+        .unwrap_or(SafeMode::Full))
+}
+
+/// Parse one Safe Mode value, refusing an unknown spelling by the setting's own name.
+fn parse_safe_mode(raw: &str, key: &str) -> Result<SafeMode, CliError> {
+    if raw.trim().is_empty() {
         return Ok(SafeMode::Full);
     }
-    SafeMode::parse(&raw).ok_or_else(|| {
+    SafeMode::parse(raw).ok_or_else(|| {
         CliError::Usage(format!(
-            "unknown SAFE_MODE '{raw}'; expected {}",
+            "unknown {key} '{raw}'; expected {}",
             SAFE_MODES.join(", ")
         ))
     })
 }
 
-/// Refuse a script the connection's Safe Mode does not allow.
+/// Whether this run carries the caller's explicit confirmation.
 ///
-/// The engine's own guard, and deliberately not the UI's: the CLI and the MCP
-/// server run this same code, and neither has a picker to enforce anything. A
-/// refusal is a usage error decided before the network is touched, so a read-only
-/// connection refuses a `DROP` without opening one.
+/// `SAFE_MODE_CONFIRMED=1` is the whole of a confirmation as far as the engine can see it:
+/// a boolean only a caller that asked its user could have set. The dialog, the biometric
+/// prompt and the password fallback are the app's, and are deliberately not modelled here.
+pub(crate) fn safe_mode_confirmed(settings: &Settings) -> bool {
+    settings.flag("SAFE_MODE_CONFIRMED", false)
+}
+
+/// Refuse a script the connection's Safe Mode does not allow, with no confirmation.
+///
+/// This is the shape every caller that predates the `confirm` level uses, including the
+/// bulk `apply_changes` and `import_data` paths: a single confirmation cannot cover a whole
+/// plan, so a `confirm` connection refuses them until the caller raises the level.
 pub(crate) fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
-    qh_sql::check(mode, sql).map_err(|error| CliError::Usage(error.to_string()))
+    guard_confirmed(mode, false, sql)
+}
+
+/// Refuse a script the connection's Safe Mode does not allow, recording every decision.
+///
+/// The engine's own guard, and deliberately not the UI's: the CLI and the MCP server run
+/// this same code, and neither has a picker to enforce anything. A refusal is a usage error
+/// decided before the network is touched, so a read-only connection refuses a `DROP`
+/// without opening one. Each decision reaches the execution log, and a failed log write is
+/// a failure: an audit record that could not be written is not quietly skipped.
+pub(crate) fn guard_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Result<(), CliError> {
+    for statement in qh_sql::decisions(mode, sql) {
+        let error = statement.refusal_error(mode, confirmed);
+        let decision = match (&error, statement.decision) {
+            (None, Decision::Confirm) => LogDecision::Confirmed,
+            (None, _) => LogDecision::Allowed,
+            (Some(_), Decision::Confirm) => LogDecision::NeedsConfirmation,
+            (Some(_), _) => LogDecision::Refused,
+        };
+        execution_log::record(&DecisionEntry {
+            safe_mode: mode,
+            index: statement.index,
+            kind: statement.kind,
+            statement: statement.statement,
+            decision,
+            // The reason is why the statement did not run as-is. A row that ran — allowed,
+            // or allowed after a confirmation — has no failing reason to record, and the
+            // confirmation sentence belongs to the question, not to the answer.
+            reason: error.as_ref().and(statement.reason),
+        })?;
+        if let Some(error) = error {
+            return Err(CliError::Usage(error.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// [`guard_confirmed`] with the confirmation taken from the run's own settings.
+///
+/// The five single-statement commands use this, so a `confirm` connection runs a write the
+/// caller sent `SAFE_MODE_CONFIRMED=1` for and asks otherwise. The bulk paths keep the
+/// unconfirmed [`guard`] deliberately: one confirmation does not cover a plan.
+pub(crate) fn guard_for(settings: &Settings, mode: SafeMode, sql: &str) -> Result<(), CliError> {
+    guard_confirmed(mode, safe_mode_confirmed(settings), sql)
 }
 
 /// Where a browse or objects call is aimed.
@@ -582,7 +675,7 @@ pub async fn export(
     // The Safe Mode is checked before the connect step, so a read-only connection
     // refuses a write without opening one.
     let mode = safe_mode(settings)?;
-    guard(mode, &sql)?;
+    guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let format = format_of(settings)?;
     let directory = out_dir(settings)?;
@@ -836,7 +929,7 @@ pub async fn to_table(
     // a read-only connection refuses `replace` without opening one: `to_table`'s
     // write mode is a decision of the engine and not of the UI that offered it.
     for statement in &statements {
-        guard(safe, statement)?;
+        guard_for(settings, safe, statement)?;
     }
 
     out.emit(event("step").field("step", "connect").build())?;
@@ -979,7 +1072,7 @@ pub async fn preview(
     // Checked before the connect step: a read-only connection refuses a write
     // without opening one.
     let mode = safe_mode(settings)?;
-    guard(mode, &sql)?;
+    guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     // Floored at one: a preview that returned no rows at all would tell the caller
     // nothing about the statement.
@@ -1022,7 +1115,7 @@ pub async fn explain(
     // without opening one. The statement is the caller's own; the driver's `EXPLAIN`
     // prefix is added later and does not change what was asked.
     let mode = safe_mode(settings)?;
-    guard(mode, &sql)?;
+    guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let started = Instant::now();
@@ -1236,7 +1329,7 @@ pub async fn count(
     // `count` wraps a `WITH … DELETE` in a `SELECT COUNT(*)` that would run it, so the
     // gate has to look at what was asked and not at the wrapper.
     let mode = safe_mode(settings)?;
-    guard(mode, &sql)?;
+    guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let statement = qh_sql::count_statement(&sql)?;
     let config = connection(settings, engine)?;

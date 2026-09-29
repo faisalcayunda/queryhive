@@ -58,6 +58,15 @@ fn main() -> ExitCode {
     let settings = Settings::from_env();
     let engine = RealEngine::new();
 
+    // Install the execution log before any command runs, so the first decision is
+    // written down. A log that cannot be opened does not stop the command — the run is
+    // still guarded — but it is said out loud on stderr, because a silent gap is the one
+    // outcome an audit log must not have. The library and its tests install nothing, so
+    // this is the only place the engine's own database is opened for logging.
+    if let Err(error) = qh_ffi::execution_log::install_from_settings(&settings) {
+        eprintln!("queryhive-engine: the execution log is not being written: {error}");
+    }
+
     // Unwinding across this boundary is caught rather than allowed through: a panic
     // would otherwise leave the app with a truncated protocol and no `error` event.
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {

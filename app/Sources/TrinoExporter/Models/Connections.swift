@@ -123,9 +123,18 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
 
 /// What a connection refuses, as the engine's `SAFE_MODE` names it.
 ///
-/// Three levels rather than a boolean, because "allow writes but not schema changes" is a
-/// real middle ground: someone poking at a production replica wants to run an `UPDATE` on
-/// one row without being able to `DROP` the table.
+/// Four levels rather than a boolean, because both middle grounds are real: someone poking
+/// at a production replica wants to run an `UPDATE` on one row without being able to `DROP`
+/// the table, and someone who wants the engine to stop and ask before touching data does
+/// not want it to stop and ask before a `SELECT`.
+///
+/// `confirm` is the engine's whole idea of a confirmation: a write runs only when the run
+/// carries `SAFE_MODE_CONFIRMED=1`, a boolean only a caller that asked its user could have
+/// set. Touch ID, a dialog and the password fallback are the app's business — the CLI and
+/// the MCP server have no window to raise, so the engine cannot express them and does not
+/// pretend to. This window does not yet set that flag on its runs; until it does, selecting
+/// `confirm` makes the engine refuse writes from the app, which is the honest behaviour of a
+/// level whose confirmation the app cannot give.
 ///
 /// The engine is what enforces this — the CLI and the MCP server run the same guard — so
 /// this enum is only how the level is chosen and stored. It reaches the engine as
@@ -135,6 +144,8 @@ enum ConnectionSafeMode: String, CaseIterable, Identifiable, Codable {
     /// Run anything. The default, and what every connection made before this setting did.
     case full
     case noDDL = "no_ddl"
+    /// Run a read; ask before a write; refuse DDL.
+    case confirm
     case readOnly = "read_only"
 
     var id: Self { self }
@@ -143,6 +154,7 @@ enum ConnectionSafeMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .full: "Full"
         case .noDDL: "No DDL"
+        case .confirm: "Confirm"
         case .readOnly: "Read only"
         }
     }
@@ -153,6 +165,8 @@ enum ConnectionSafeMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .full: "Anything runs, including DDL."
         case .noDDL: "Writes are allowed; CREATE, ALTER, DROP and the rest of DDL are refused."
+        case .confirm:
+            "Reads run; every write waits for an explicit confirmation, and DDL is refused."
         case .readOnly: "Only reads run. Every write and every DDL is refused."
         }
     }

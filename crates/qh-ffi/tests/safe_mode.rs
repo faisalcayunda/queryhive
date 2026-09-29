@@ -206,7 +206,121 @@ async fn an_unknown_safe_mode_is_refused_by_name() {
     .await;
     assert_eq!(
         usage_message(&error),
-        "unknown SAFE_MODE 'maybe'; expected full, no_ddl, read_only"
+        "unknown SAFE_MODE 'maybe'; expected full, no_ddl, confirm, read_only"
+    );
+    assert_eq!(engine.connects(), 0);
+}
+
+#[tokio::test]
+async fn confirm_refuses_a_write_until_the_caller_confirms_it() {
+    let engine = CountingEngine::new();
+    // A write is a question, and the question is asked before the connection.
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("SAFE_MODE", "confirm"),
+            ("SQL", "INSERT INTO people VALUES (1)"),
+        ],
+    )
+    .await;
+    let message = usage_message(&error);
+    assert!(message.contains("requires confirmation"), "{message}");
+    assert!(message.contains("statement 1"), "{message}");
+    assert_eq!(engine.connects(), 0);
+
+    // The same run with the caller's confirmation reaches the connection — which this
+    // engine fails on purpose, so reaching it is the proof.
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("SAFE_MODE", "confirm"),
+            ("SAFE_MODE_CONFIRMED", "1"),
+            ("SQL", "INSERT INTO people VALUES (1)"),
+        ],
+    )
+    .await;
+    assert!(matches!(error, CliError::Connect(_)), "{error:?}");
+    assert_eq!(engine.connects(), 1);
+
+    // DDL and the unreadable stay refused even with a confirmation.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("SAFE_MODE", "confirm"),
+            ("SAFE_MODE_CONFIRMED", "1"),
+            ("SQL", "DROP TABLE people"),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("confirm"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+}
+
+#[tokio::test]
+async fn a_read_only_connection_floor_raises_a_full_setting() {
+    // The user chose `full`; the connection is marked read-only. The run is read-only, and
+    // the refusal happens before the connection is opened. Nothing is written back: the
+    // same settings without `DB_READ_ONLY` run the write.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("SAFE_MODE", "full"),
+            ("DB_READ_ONLY", "1"),
+            ("SQL", "DROP TABLE people"),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("read-only"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[("SAFE_MODE", "full"), ("SQL", "DROP TABLE people")],
+    )
+    .await;
+    assert!(
+        matches!(error, CliError::Connect(_)),
+        "without the floor, full still runs it: {error:?}"
+    );
+    assert_eq!(engine.connects(), 1);
+}
+
+#[tokio::test]
+async fn a_policy_floor_is_the_stricter_of_two_conditions() {
+    // The user chose `no_ddl` and a policy pinned `read_only`. The floor must pick the
+    // strictest, not the first condition, so a write is refused outright rather than
+    // reaching the connection.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("SAFE_MODE", "no_ddl"),
+            ("SAFE_MODE_FLOOR", "read_only"),
+            ("SQL", "INSERT INTO people VALUES (1)"),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("read-only"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+
+    // A floor spelling nobody knows is refused by its own setting's name.
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[("SAFE_MODE_FLOOR", "maybe"), ("SQL", "SELECT 1")],
+    )
+    .await;
+    assert_eq!(
+        usage_message(&error),
+        "unknown SAFE_MODE_FLOOR 'maybe'; expected full, no_ddl, confirm, read_only"
     );
     assert_eq!(engine.connects(), 0);
 }

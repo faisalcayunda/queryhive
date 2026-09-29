@@ -91,6 +91,10 @@ pub mod commands;
 pub mod config;
 pub mod env;
 pub mod events;
+/// Where the engine writes down every Safe Mode decision. The table and its chain are
+/// `qh-storage`'s; this is the process-scoped sink the binaries install. A library
+/// caller installs nothing, so a test run writes no decisions.
+pub mod execution_log;
 pub mod import;
 pub mod local;
 /// The MCP server's protocol, tools, scope rules and handshake (Fase 2). A separate
