@@ -179,7 +179,7 @@ App dikendalikan lewat AX + CGEvent, dengan profil per app (pintasan Run dan Sto
 
 - 1M baris dan 500 kolom tidak butuh seed baru: `generate_series` dengan SQL yang dibangun harness.
 - Trino: `tpch.sf1.lineitem`. Katalog `tpch` sudah dipakai di §4 adoption plan, tetapi Fase 0 memverifikasi keberadaannya.
-- toxiproxy (MIT) sebagai container dev untuk RTT.
+- toxiproxy (MIT) sebagai container dev untuk RTT (port 55434; 55433 sudah terpakai di host ini).
 - Skrip 5.000 tabel di `deploy/dev/`.
 
 **0.8 Gate paritas visual.** `app/Tests/QueryHiveTests/VisualParityTests.swift` dengan baseline PNG di `__Baselines__/`, direkam dari commit P lewat `QH_RECORD_BASELINES=1`. Merekam ulang butuh persetujuan pemilik.
@@ -331,7 +331,7 @@ Prasyarat P (`SQLEditor.swift` dan `HighlightBandTests.swift` ada di pekerjaan y
   - Checkpoint state per N baris, lalu lex ulang dari checkpoint sampai state konvergen.
   - Batas statement dari `scan.rs` yang sudah dipakai engine.
   - Region lipatan: port `SQLFolding.regions`.
-- **Permukaan FFI.** Objek UniFFI `EditorDocument` dengan `replace(start_utf16, len_utf16, text) -> revision` dan `analysis(revision, visible) -> bytes` (span dalam UTF-16, statement, lipatan). Rentang terlihat dikerjakan di pool `USER_INITIATED`, sisanya di `UTILITY` (ADR-0010). Swift menerapkan hasilnya di main bila revisinya masih terkini, dan tidak mengirim edit selama `hasMarkedText` (IME).
+- **Permukaan FFI.** Objek UniFFI `EditorDocument` dengan `replace(start_utf16, len_utf16, text) -> revision` dan `analysis(revision, visible) -> bytes` (span dalam UTF-16, statement, lipatan). Rentang terlihat dikerjakan di pool `USER_INITIATED`, sisanya di `UTILITY` (ADR-0010). Swift menerapkan hasilnya di main bila revisinya masih terkini, Penjaga IME ada di sisi penerapan, bukan di sisi kirim: edit tetap dikirim selama `hasMarkedText`, dan `apply` serta penjadwal idle menunggu komposisi selesai (ADR-0033, D-9).
 - **Yang dihapus.** Pemindaian regex di `SQLSyntax` (palet tetap), bagian statement di `SQLScanner.swift` (duplikat `scan.rs`), dan pemindaian di `SQLFolding`.
 - **Batas naik** dari 200.000 ke 2.000.000 karakter, sama dengan plafon TablePro. Rentang terlihat diwarnai lebih dulu, sisanya bertahap di latar.
 
@@ -521,6 +521,13 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
 8. **Editor.** Pewarnaan dan folding sekarang bekerja di atas 200k karakter. Karakter yang baru diketik bisa berwarna dasar selama ≤ 1 frame.
 9. **Grid.** Tooltip AppKit (sistem yang sama dengan `.help` SwiftUI), dan nilainya penuh. Field editor AppKit menggantikan `TextField` SwiftUI, dengan perilaku Return, Esc, dan undo yang dikunci tes. Kolom tidak bisa di-drag untuk dipindah, sama seperti hari ini.
 10. **Sort dan search dengan edit tertunda ditolak** dengan pesan (Fase 3).
+11. **Pemecahan statement di editor mengikuti `scan.rs`** (4B, dan W4-T2b untuk Run), jadi editor sepakat dengan engine. Perbedaan terhadap `sqlStatements` Swift hari ini:
+    - `;` di dalam `"a;b"` atau `` `a;b` `` tidak lagi memecah;
+    - `;` di dalam `$tag$ … $tag$` tidak lagi memecah;
+    - potongan yang hanya komentar (`SELECT 1; -- akhir`) bukan statement lagi, jadi tanpa band dan run mark;
+    - teks CRLF yang memuat `--`: komentar baris berakhir di LF, bukan tidak pernah berakhir;
+    - potongan yang hanya NBSP, U+2028, atau VT dianggap signifikan (`is_ascii_whitespace`), tidak lagi dibuang.
+12. **Karakter yang baru diketik mewarisi warna tetangga** selama ≤ 1 frame sampai pewarnaan asinkron tiba (typing attributes, bukan warna dasar). Mengetik di dalam komentar atau string tidak berkedip.
 
 ## 15. ADR yang dibatalkan, diamandemen, atau dibuat
 

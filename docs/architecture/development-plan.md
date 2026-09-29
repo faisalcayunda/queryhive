@@ -54,6 +54,7 @@ Aturan yang selalu ditulis di brief:
 ### 0.3 Konkurensi dan worktree
 
 - **Maksimal 3 implementer bersamaan.** Architect, reviewer, dan Explore tidak dihitung, tetapi tidak boleh berjalan saat sesi benchmark (§0.4).
+- **Worktree (dimatikan di run ini).** Pada 30 Sep 2026 disk bebas host 30 GiB (< 60, §2.1), jadi implementer berjalan serial di checkout utama. Aturan di bawah berlaku bila disk cukup.
 - **Worktree.** Bila ada ≥ 2 implementer yang menyentuh Swift atau Rust bersamaan, masing-masing memakai `isolation: worktree`.
   - Worktree Swift perlu `./app/build-ffi.sh debug` sekali, karena `app/Package.swift` mencari arsip di `<root worktree>/target/ffi/static/`.
   - Worktree Rust memakai `target/` miliknya sendiri.
@@ -104,7 +105,7 @@ Orkestrator menyimpan ledger di scratchpad sesi (bukan di repo). Isinya:
 | G-APP | `./app/build.sh && app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot "$SCRATCH/smoke.png" --scene done` | gate gelombang, dan tugas yang menyentuh `app/build.sh`, `Package.swift`, atau resource |
 | G-BENCH(a) | `python3 deploy/dev/bench_app.py --axis <a> --label <fase>-<yyyymmdd> --repeat <n>`, lalu `python3 deploy/dev/bench_fetch.py --report-only` | tugas bench (eksklusif) |
 | G-BENCHQ | subset cepat `--bench ttfr-pg,scroll-1m,type-10k` dengan n = 5, dibanding rekaman gelombang sebelumnya | gate W9–W13 (NFR-P9) |
-| G-LEAK | `MallocStackLogging=1 leaks --atExit -- app/.build/debug/QueryHive --bench tabs-100`, lalu direktori `~/Library/Caches/QueryHive/spill` harus kosong | Fase 6, dan final |
+| G-LEAK | `MallocStackLogging=1 leaks --atExit -- app/.build/debug/QueryHive --bench tabs-100`, lalu `store_stats().stores == 0` dan `spilled_bytes == 0` di akhir `tabs-100` (berkas spill di-unlink saat dibuat, jadi pemeriksaan direktori spill hampa) | Fase 6, dan final |
 | **G-HEAVY** | G-RUST + G-DENY + G-FFI + G-SWIFT + G-VIS + G-GOLDEN + G-APP | penutupan setiap gelombang |
 
 ## 2. Lingkungan (W0-T2)
@@ -119,6 +120,7 @@ Fakta yang sudah diverifikasi orkestrator:
 1. **Ukur host.** `sysctl -n hw.memsize hw.model hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu` dan `df -h`.
    - Syarat ruang disk: ≥ 60 GB bebas.
    - Bila kurang: worktree dibatasi 1 dan build TablePro dilewati (dicatat).
+   - **Tercatat 30 Sep 2026:** disk bebas host 30 GiB (< 60). Worktree dimatikan (implementer serial di checkout utama) dan W1-T9 (build TablePro) dilewati. Semua sumbu TablePro ditulis `tidak diukur (izin OS)`.
 2. **Resize VM podman (P-02, otonom dengan pagar):**
    - Hanya bila `podman ps -a` kosong atau hanya berisi container `qh-*`. Bila ada container lain, VM tidak diubah; skenario Trino ditulis `tidak diukur (VM)`.
    - Catat nilai lama lewat `podman machine inspect`.
@@ -145,7 +147,7 @@ Fakta yang sudah diverifikasi orkestrator:
 | W1 | **Fase 0**: pengukuran, harness, baseline visual | W0 | 10 | setiap sumbu punya angka QueryHive atau alasan tertulis; baseline ter-commit; profil 0.1 tercatat |
 | W2 | **Fase 1** dan **Fase 4A**, plus blueprint Fase 2, 4B, dan 6 | W1 | 9 | gate standar Fase 1 dan 4A (fungsional); angka dicatat |
 | W3 | **Fase 2** dan **Fase 4B-core**, plus blueprint Fase 5 | W2 | 6 | tes kebocoran state, golden tidak berubah, verdict architect-reviewer |
-| W4 | **Fase 3** (Batch 7), **Fase 4B-integrasi**, **Fase 6-core** | W3 | 7 | paritas lexer 100%, tes perilaku Batch 7, tes enkripsi spill |
+| W4 | **Fase 3** (Batch 7), **Fase 4B-integrasi**, **Fase 6-core** | W3 | 8 | paritas lexer 100%, tes perilaku Batch 7, tes enkripsi spill |
 | W5 | **Fase 5** (grid), dan **Fase 6-engine** di Rust | W4 | 5 | paritas visual grid, daftar paritas fitur, tes AX |
 | W6 | **Fase 6-Swift** (integrasi data plane) | W5 | 5 | tes diferensial, G-LEAK, paritas terhadap baseline Fase 5 |
 | W7 | **Fase 7** (plafon ingest, opsi bersyarat) | W6 | 7 | golden dan `type_zoo` live identik |
@@ -285,7 +287,7 @@ Urutan batch:
 - Commit: `perf(bench): a black-box harness that drives either app the same way`.
 
 **W1-T7. Fixture (0.7).** Ukuran S.
-- Berkas: `deploy/dev/up.sh` (toxiproxy, `--memory` untuk Trino), `deploy/dev/compose.yaml`, `deploy/dev/make_sql_corpus.py` (baru), `deploy/dev/make_many_tables.py` (baru, 5.000 tabel).
+- Berkas: `deploy/dev/up.sh` (toxiproxy di port 55434, karena 55433 sudah terpakai di host ini; `--memory` untuk Trino), `deploy/dev/compose.yaml`, `deploy/dev/make_sql_corpus.py` (baru), `deploy/dev/make_many_tables.py` (baru, 5.000 tabel).
 - Pelaksana: GP-s. Gate: CR.
 - Verifikasi: `bash -n deploy/dev/up.sh`, toxiproxy hidup, `tpch.sf1.lineitem` bisa dibaca, dan ukuran korpus sesuai.
 - Commit: `chore(dev): fixtures for RTT, 5,000 tables and large SQL files`.
@@ -301,6 +303,7 @@ Urutan batch:
 - Commit: `perf(bench): the ADR-0013 claim profiled, and two assumptions checked`.
 
 **W1-T9. Build TablePro.** Ukuran S, dengan batas waktu 60 menit dan maksimal 3 percobaan. Di luar repo.
+- **Dilewati di run ini (30 Sep 2026):** disk bebas host 30 GiB (< 60, §2.1). Head-to-head TablePro ditulis `tidak diukur (izin OS)`, dan `competitor_rev` tetap dicatat bila repo TablePro terbaca.
 - Langkah:
   - `git -C …/TablePro rev-parse HEAD` dicatat sebagai `competitor_rev`;
   - XcodeGen dan `scripts/download-libs.sh`;
@@ -369,9 +372,10 @@ T1, T2, dan T3 berjalan paralel di worktree. A1–A3 berjalan paralel karena han
 **W3-T1. Fase 2: `EngineHost`, pool, dan TTFR.** Ukuran L. Implementer **GP-o**, karena kebenaran reset, konkurensi pool, dan tunnel bersama adalah bug yang diam.
 - Cakupan: FR-PERF-03, NFR-P1 (S1, S3, S4), NFR-P8.
 - Berkas:
-  - `crates/qh-ffi/src/{host.rs (baru),lib.rs,commands.rs,uniffi_api.rs,tunnel.rs,local.rs}`;
+  - `crates/qh-ffi/src/{host.rs (baru),lib.rs,commands.rs,uniffi_api.rs,tunnel.rs,local.rs,retry.rs}`, `crates/qh-ffi/tests/host.rs` (baru);
+  - `crates/qh-ffi/examples/bench_ffi.rs` (pindah ke `EngineHost` di commit 1, karena `run` bebas UniFFI dihapus);
   - `crates/qh-driver/src/lib.rs` (`Session::reset`);
-  - `crates/qh-driver-{postgres,mysql,trino}/src/lib.rs`;
+  - `crates/qh-driver-{postgres,mysql,trino}/src/lib.rs`, `crates/qh-driver-mysql/tests/integration.rs`;
   - `crates/qh-tunnel/src/*`;
   - `Support/RustEngine.swift`, `Support/DatabaseEngine.swift`;
   - `Models/AppModel.swift` (warm-up, pemuatan pohon lewat host);
@@ -382,18 +386,21 @@ T1, T2, dan T3 berjalan paralel di worktree. A1–A3 berjalan paralel karena han
   - G-RUST, G-FFI, G-SWIFT, G-GOLDEN (tidak berubah);
   - G-LIVE (PostgreSQL, Trino, SSH);
   - G-BENCH(1), pohon, 5.000 tabel.
-- Commit: boleh dua, masing-masing dengan gate:
-  - `perf(engine): an engine host with a session pool that resets every run`;
-  - `perf(engine): capped previews keep their session, warm-up on select, one round trip fewer`.
+- **Reconnect** (verdict AR, `fase-2-engine-host.md`): statement hanya dijalankan ulang di koneksi pengganti bila `ReadOnly`, atau bila teksnya persis `BEGIN`/`START TRANSACTION`. `Connect` tidak dianggap "belum terkirim", dan `retry::execute` tidak diberi koneksi segar untuk write. Tes T5 membuktikannya.
+- Commit: sampai tiga, masing-masing dengan gate (DB dan SF ikut menjaga F dan commit 1):
+  - F `fix(mysql): one session keeps one connection, so a transaction is one`. Mendarat **sebelum** commit 1, bisa diuji sendiri lewat L5 tanpa pool (`crates/qh-driver-mysql/tests/integration.rs`), dan bisa di-revert terpisah;
+  - 1 `perf(engine): an engine host with a session pool that resets every run`;
+  - 2 `perf(engine): capped previews keep their session, warm-up on select, one round trip fewer`.
 
 **W3-T2. Fase 4B-core.** Ukuran M. Implementer **GP-o**, karena semantik regex dan aturan EOF harus direproduksi persis, di atas pemetaan UTF-8 ke UTF-16.
 - Cakupan: FR-PERF-04.
 - Berkas:
-  - `crates/qh-sql/src/editor.rs` (baru), `crates/qh-sql/src/lib.rs`, `crates/qh-sql/tests/editor_*.rs`, `crates/qh-sql/tests/fixtures/`;
-  - `app/Tests/QueryHiveTests/LexerFixtureExport.swift` (baru; mengekspor span `SQLSyntax` saat `QH_EXPORT_FIXTURES=1`).
+  - `crates/qh-sql/src/editor/` (direktori baru), `crates/qh-sql/src/lib.rs`, `crates/qh-sql/tests/editor_*.rs`, `crates/qh-sql/tests/fixtures/`;
+  - `crates/qh-sql/src/scan.rs` (refaktor: satu fungsi jalan internal dengan callback, keluaran `scan()` identik) dan `crates/qh-sql/tests/scan_refactor.rs` (tes diferensial `scan()` sebelum dan sesudah);
+  - `app/Tests/QueryHiveTests/LexerFixtureExport.swift` (baru; mengekspor span `SQLSyntax` saat `QH_EXPORT_FIXTURES=1`), `app/Tests/QueryHiveTests/UnicodeTableExport.swift` (baru; tabel Unicode, hidup terus sesudah commit B W4-T2).
 - Uji acak berbenih tanpa dependensi baru. `proptest` hanya bila `cargo deny` lulus.
-- Gate: RR, TD, CR.
-- Verifikasi: G-RUST (paritas terhadap fixture Swift), G-SWIFT.
+- Gate: RR, TD, CR, dan **SEC** khusus untuk diff `scan.rs` (`scan()` adalah dasar Safe Mode).
+- Verifikasi: G-RUST (paritas terhadap fixture Swift, `scan_refactor.rs`), G-SWIFT.
 - Commit: `feat(sql): an incremental editor lexer with statement and fold analysis in qh-sql`.
 
 **W3-A1.** Blueprint Fase 5. code-architect · opus, dengan spesifikasi kursor dan AX dari UX dan AX. Pemeriksa AR.
@@ -407,6 +414,8 @@ T1, T2, dan T3 berjalan paralel di worktree. A1–A3 berjalan paralel karena han
 ### W4: Fase 3, Fase 4B-integrasi, dan Fase 6-core
 
 T1, T2, dan T3 berjalan paralel dengan berkas yang terpisah. T4 dijalankan setelah T1 dan T3.
+
+Urutan T2: commit A → W4-T1 → W4-T2b → commit B. Tidak ada tugas lain di antara A dan B selain W4-T2b, dan W4 tidak boleh ditutup sebelum W4-T2b mendarat.
 
 **W4-T1. Fase 3: Batch 7 server-first.** Ukuran S–M.
 - Cakupan: FR-GRID-03, FR-GRID-04 (O-8), V-1.
@@ -423,31 +432,45 @@ T1, T2, dan T3 berjalan paralel dengan berkas yang terpisah. T4 dijalankan setel
 - Verifikasi: G-SWIFT, G-VIS (rekam ulang V-1 saja), G-GOLDEN.
 - Commit: `feat(grid): sort and search go to the server first, with one source for the header's sort state`.
 
-**W4-T2. Fase 4B-integrasi.** Ukuran M.
+**W4-T2. Fase 4B-integrasi.** Ukuran M. Dua commit (D-13, verdict AR `fase-4b-editor-analysis.md`): A menambah FFI dan tes paritas tanpa mengubah perilaku, dan `EditorAnalysis` belum tersambung ke editor; B mengganti jalur dan menghapus regex.
 - Cakupan: FR-PERF-04, FR-ED-09, NFR-P5.
 - Berkas:
-  - `crates/qh-ffi/src/editor.rs` (baru), `crates/qh-ffi/src/lib.rs` (satu baris `mod`), `app/Generated/`;
-  - `Views/SQLEditor.swift`, `Views/SQLSyntax.swift`, `Support/SQLFolding.swift`, `Models/SQLScanner.swift` (bagian statement dihapus);
-  - `Support/EditorAnalysis.swift` (baru).
+  - A: `crates/qh-ffi/src/editor.rs` (baru), `crates/qh-ffi/src/lib.rs` (satu baris `mod`), `app/Generated/`, `Support/EditorAnalysis.swift` (baru), tes baru `EditorLexerParityTests.swift` (L4 dan L5) dan `EditorAnalysisTests.swift`;
+  - B: `Views/SQLEditor.swift`, `Views/SQLSyntax.swift`, `Support/SQLFolding.swift`, tes `EditorFindAndFoldingTests.swift` (ubah kecil), `EditorRotorTests.swift` (baru), `LexerFixtureExport.swift` (dihapus; `UnicodeTableExport.swift` tetap), dan `EditorLexerParityTests.swift` (dipangkas);
+  - `Models/SQLScanner.swift` **tidak disentuh** (tidak punya bagian statement).
 - Pelaksana: GP-s. Gate: SR, RR, SEC (buffer FFI, semua ekspor throwing), AX (hook rotor), AR, CR.
 - Verifikasi:
   - G-RUST, G-FFI, G-SWIFT;
-  - tes Swift yang membandingkan span lewat FFI dan span regex atas korpus. Tes ini harus lulus **sebelum** regex dihapus.
+  - tes Swift yang membandingkan span lewat FFI dan span regex atas korpus (L4, L5). Tes ini harus lulus **sebelum** regex dihapus, jadi hasilnya masuk laporan commit A;
   - G-VIS (editor);
   - `--bench type-10k` ≤ 4 ms dan `type-2m` ≤ 8 ms.
-- Commit: `perf(editor): analysis moves to Rust, colouring and folding reach 2M characters`.
+- Commit: dua, masing-masing dengan gate:
+  - A `feat(editor): rust analysis behind a parity test`;
+  - B `perf(editor): analysis moves to Rust, colouring and folding reach 2M characters`.
+
+**W4-T2b. Satu pemecah statement untuk editor dan Run.** Ukuran S. Wajib (verdict AR `fase-4b-editor-analysis.md` §15.1): tanpa tugas ini, sesudah commit B band dan run mark memakai `scan.rs` sementara Run masih memakai pemindai Swift, sehingga `select "a;b"` tampil satu statement tetapi Run mengirim `select "a`.
+- Berkas: `Models/QueryTab.swift` (hanya isi dan komentar doc `sqlStatements(in:)`, dengan signature tetap dan `sqlStatement(in:atUTF16Offset:)` tidak diubah), `app/Tests/QueryHiveTests/StatementSplitTests.swift` (baru).
+- Isi: badan `sqlStatements(in:)` diganti pemecahan berbasis `scan.rs` lewat FFI commit A. Tes invarian `statementRanges == sqlStatements`.
+- Urutan: sesudah commit A dan W4-T1, sebelum commit B W4-T2.
+- Pelaksana: GP-s. Gate: SR, DB, CR.
+- Verifikasi: G-SWIFT, G-VIS (tidak ada piksel berubah).
+- Commit: `refactor(editor): one statement splitter for the editor and Run`.
 
 **W4-T3. Fase 6-core: codec, view, dan spill terenkripsi.** Ukuran L.
 - Cakupan: FR-PERF-05, NFR-S3.
 - Berkas:
-  - `crates/qh-result-store/src/{codec.rs,store.rs,view.rs (baru),spill.rs (baru),lib.rs}`, `crates/qh-result-store/Cargo.toml` (`ring`, `rayon`, `unicode-segmentation`);
-  - `crates/qh-rt/src/lib.rs` (pool rayon ber-QoS);
+  - `crates/qh-result-store/src/{codec.rs,store.rs,view.rs (baru),spill.rs (baru),registry.rs (baru),collate.rs (baru),render.rs (baru),lib.rs}`, `crates/qh-result-store/Cargo.toml` (`ring`, `rayon`, `unicode-segmentation`), tes `crates/qh-result-store/tests/{spill.rs,window.rs,view.rs}`;
+  - `crates/qh-rt/src/lib.rs` (pool rayon ber-QoS), `crates/qh-rt/Cargo.toml`;
   - `Cargo.toml`, `Cargo.lock`.
 - Pelaksana: GP-s. Gate: RR, SEC (nonce, AAD, umur kunci, `0600`, sapuan), TD, SF (disk penuh), CR.
 - Verifikasi:
   - G-RUST, G-DENY;
   - tes spill: teks biasa tidak ada di berkas, kunci salah gagal, manipulasi gagal, mode berkas `0600`, sapuan yatim;
   - tes view dan window.
+- **Perbaikan wajib** (R-15, verdict AR `fase-6-data-plane.md`):
+  - `Unknown` bentuk 2 (`raw`) lolos round-trip codec: hari ini `codec.rs` men-decode-nya menjadi `text` lossy dengan `raw: None`, sehingga teks sel berubah senyap dari hex;
+  - sapuan spill (direktori `0700`, tanpa mengikuti symlink) yang hari ini tidak ada;
+  - penimpaan berkas spill: `create(true).truncate(true)` dengan penghitung per store membuat dua store dalam satu proses menimpa berkas yang sama, jadi berkas dibuat `create_new` (`0600`) lalu di-unlink sebelum byte pertama ditulis.
 - Commit: `feat(store): a typed columnar codec, a rayon view, and spill encrypted with a per-process key`.
 
 **W4-T4. Fixture diferensial sort, filter, dan search.** Ukuran S.
@@ -483,7 +506,7 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
 
 **W5-T2. Fase 6-engine.** Ukuran L. Implementer **GP-o**, karena menyangkut umur handle, generation, dan panic lintas FFI.
 - Cakupan: FR-PERF-05.
-- Berkas: `crates/qh-ffi/src/{host.rs,store_api.rs (baru),commands.rs (`RESULT_SINK=store`),uniffi_api.rs,lib.rs}`, `app/Generated/`, `app/Tests/QueryHiveTests/ResultHandleSmokeTests.swift` (baru).
+- Berkas: `crates/qh-ffi/src/{host.rs,store_api.rs (baru),commands.rs (`RESULT_SINK=store`),events.rs,uniffi_api.rs,lib.rs}`, `crates/qh-ffi/Cargo.toml`, `crates/qh-ffi/examples/bench_ffi.rs` (kasus `window`), `crates/qh-ffi/tests/store_sink.rs` (baru), `Cargo.lock` (hanya tepi `qh-ffi → qh-result-store`), `app/Generated/`, `app/Tests/QueryHiveTests/ResultHandleSmokeTests.swift` (baru).
 - Gate: RR, SEC, TD, SF, AR, CR.
 - Verifikasi: G-RUST, G-FFI, G-SWIFT, G-GOLDEN (CLI tidak berubah), dan `bench_ffi window`.
 - Commit: `feat(engine): a store sink and ResultHandle windows over UniFFI`.
@@ -502,8 +525,10 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
 - Cakupan: FR-PERF-05, FR-GRID-03 dan FR-GRID-04 (fallback Rust, "off" lewat store dasar), NFR-P1 (S2), P2, P3, P8.
 - Berkas:
   - `Models/StoreRows.swift` (baru), `Models/{QueryTab,AppModel,GridSort,GridSearch,WritePlan}.swift`;
-  - `Support/RustEngine.swift`, `Views/ResultGridTable.swift` (polling `displayLink`), `Views/CellValueViewer.swift`;
-  - `App.swift` (sapuan spill saat startup).
+  - `Support/RustEngine.swift`, `Support/DatabaseEngine.swift`, `Views/ResultGridTable.swift` (polling `displayLink`), `Views/ResultGrid.swift`, `Views/CellValueViewer.swift`, `Views/SettingsView.swift`;
+  - `Support/Snapshot.swift`, `Support/BenchMode.swift` (skenario memakai `store_from_rows` di luar interval ukur);
+  - `App.swift` (sapuan spill saat startup);
+  - tes di `app/Tests/QueryHiveTests/`: `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), `ResultGridTests.swift`, `GridColumnsTests.swift`, `Batch7Tests.swift`, `TabCloseTests.swift`, `MockEngine.swift`, `RowLimitSettingTests.swift`.
 - Dihapus: penumpukan baris, `previewPaintInterval`, `displayedCache`, dan `GridSort.order` di jalur panas.
 - Clamp naik ke 5.000.000.
 - Gate: SR, SF, AR, CR, PO.
@@ -628,7 +653,7 @@ Maksimal 3 lane berjalan bersamaan.
 | W11-T3 | Form koneksi di app, item Keychain, prompt host key, validasi bernama, ⌘↩, Navicat SSH, pemetaan MCP | FR-CON-01…05, 07…09; V-11 | `Views/ConnectionsViews.swift`, `Views/HostKeySheet.swift` (baru), `Models/Connections.swift`, `Support/NavicatImport.swift`, `Models/AppModel+Connections.swift`, `crates/qh-ffi/src/mcp.rs` (pemetaan), `crates/qh-ffi/tests/mcp.rs` | GP-s | SEC, SR, RR, UX, AX | G-SWIFT, G-RUST, G-LIVE (Keychain), CLI end-to-end lewat tunnel: `SSH_HOST=127.0.0.1 SSH_PORT=52222 … queryhive-engine test` | L | `feat(connections): an SSH section with Keychain secrets and a host-key prompt, JWT and CA fields` |
 | W11-T4 | Label jenis objek, anak kolom, dan tab DDL read-only | FR-TREE-01…03; V-11 | `Views/SchemaOutline.swift`, `Models/SchemaTree.swift`, `Models/AppModel+Tree.swift`, `Models/QueryTab.swift` (jenis tab DDL) | GP-s | SR, UX, AX | G-SWIFT, scene baru | M | `feat(tree): views are labelled, tables show their columns, and DDL opens read-only` |
 | W11-T5 | Tool MCP `describe_table` dan `table_ddl` | FR-MCP-01 | `crates/qh-ffi/src/mcp.rs`, `docs/mcp-stability.md`, `crates/qh-ffi/tests/{mcp.rs,mcp_stdio.rs}` | GP-s | SEC, RR | G-RUST (allowlist kosong menolak; `read_only` tetap) | S | `feat(mcp): describe_table and table_ddl, inside the same scope and allowlist` |
-| W11-T6 | Autocomplete dari katalog dengan resolusi alias (tanpa cache kedua) | FR-ED-05 | `crates/qh-sql/src/editor.rs` (API referensi tabel dan alias), `crates/qh-ffi/src/editor.rs`, `app/Generated/`, `Models/SQLSuggestions.swift`, `Models/AppModel+Completion.swift` | GP-s | RR, SR, CR | G-RUST, G-FFI, G-SWIFT (`SuggestionScopeTests`), G-BENCHQ (ketikan) | M | `feat(editor): column suggestions from the catalog, with aliases resolved` |
+| W11-T6 | Autocomplete dari katalog dengan resolusi alias (tanpa cache kedua) | FR-ED-05 | `crates/qh-sql/src/editor/` (API referensi tabel dan alias), `crates/qh-ffi/src/editor.rs`, `app/Generated/`, `Models/SQLSuggestions.swift`, `Models/AppModel+Completion.swift` | GP-s | RR, SR, CR | G-RUST, G-FFI, G-SWIFT (`SuggestionScopeTests`), G-BENCHQ (ketikan) | M | `feat(editor): column suggestions from the catalog, with aliases resolved` |
 
 **W11-D** (ADR 0038, 0039, 0040) dan **W11-C**, lalu gate W11.
 
@@ -720,18 +745,20 @@ Lihat §9.
 | `crates/qh-ffi/src/lib.rs` (baris `mod` dianggap boleh digabung tangan) | ikut lane FFI |
 | Tiga driver | W3-T1 → W7-T1 → W7-T2 dan W7-T4 (PostgreSQL dan Trino, berkas terpisah) → W7-T3 → W10-T6 → W11-T1 → W11-T2 → W13-T2 → W13-T4 |
 | `crates/qh-ffi/src/mcp.rs` | W11-T3 → W11-T5 |
-| `Cargo.toml`, `Cargo.lock` | W4-T3 → W7-T2 → W7-T5 |
+| `Cargo.toml`, `Cargo.lock` | W4-T3 → W5-T2 (hanya `Cargo.lock`, tepi `qh-ffi → qh-result-store`) → W7-T2 → W7-T5 |
+| `crates/qh-ffi/examples/bench_ffi.rs` | W1-T2 → W3-T1 → W5-T2 |
 | `tests/golden/`, `crates/qh-ffi/tests/golden.rs` | W2-T1 → W11-T1 → W12-T3 |
 | `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0. Sesudahnya, satu pemilik per extension. |
-| `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W5-T1 → W6-T1 → W11-T4 → W12-T2 → W12-T4 → W13-T1 |
-| `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W9-T5 → W10-T3 → W12-T4 → W13-T1 → W13-T3 |
+| `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W11-T4 → W12-T2 → W12-T4 → W13-T1 |
+| `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T5 → W10-T3 → W12-T4 → W13-T1 → W13-T3 |
 | `Views/ResultGridTable.swift`, `GridRowView`, `GridHeaderView` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
 | `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W10-T6 → W10-T7 → W12-T2 |
 | `Views/Workspace.swift` | W2-T3 → W9-T1 → W9-T4 → W9-T8 → W12-T2 |
 | `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 |
 | `Support/Theme.swift` | W9-T1 → W9-T7 → W10-T2 |
 | `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W9-T4 → W11-T3 |
-| `Support/Snapshot.swift` | W1-T3 → W5-T1 → W9-T8 |
+| `Support/Snapshot.swift` | W1-T3 → W5-T1 → W6-T1 → W9-T8 |
+| `Support/BenchMode.swift` | W1-T4 → W6-T1 |
 | `__Baselines__/` | hanya lewat langkah merge orkestrator (§0.5) |
 
 **Freeze** (`performance-plan.md` §0). Selama Fase 4 dan 5 tidak ada fitur yang menyentuh `SQLEditor.swift` atau `ResultGrid.swift`. Urutan gelombang di atas sudah memenuhinya: fitur baru dimulai di W9.
@@ -834,7 +861,7 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 6. **W12-T3 dan W12-T4, skrip dan result set.** Protokol event baru ditambah UX baru.
 7. **W11-T2 dan W11-T3, SSH.** Kepercayaan dan Keychain. Pengujian ujung ke ujung bergantung pada `qh-sshd-dev`.
 8. **W13-T7, lokalisasi.** Resource bundel SwiftPM di app yang dirakit `build.sh` belum pernah dicoba di repo ini.
-9. **W1-T9, build TablePro.** Butuh jaringan dan XcodeGen.
+9. **W1-T9, build TablePro.** Butuh jaringan dan XcodeGen. Dilewati di run ini (disk 30 GiB).
 10. **W1-T6 dan W1-T10, harness black-box.** Terhalang izin OS. Hasilnya tercatat dan tidak menggagalkan gate.
 
 ## 11. Yang masih terbuka
