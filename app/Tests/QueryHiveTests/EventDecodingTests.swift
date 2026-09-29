@@ -26,7 +26,7 @@ final class EventDecodingTests: XCTestCase {
     /// test` runs from the package directory today, and a test that depends on where it was
     /// started is a test that fails on the next tool.
     private static let goldenRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // TrinoExporterTests
+        .deletingLastPathComponent()  // QueryHiveTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // app
         .deletingLastPathComponent()  // the repository root

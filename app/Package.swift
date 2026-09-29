@@ -2,9 +2,9 @@
 import PackageDescription
 import Foundation
 
-// The target is rooted at Sources/TrinoExporter because that is where the sources already
-// lived when this app was a half-finished port; the executable it produces is QueryHive, which
-// is the name app/build.sh looks for and the name the bundle carries.
+// The target is rooted at Sources/QueryHive, the application's own name; the executable it
+// produces is QueryHive, which is the name app/build.sh looks for and the name the bundle
+// carries.
 //
 // `Generated/` is the Rust engine's Swift surface, produced by app/build-ffi.sh and committed
 // (blueprint §8, "Binding … di-commit"). UniFFI's generator splits it in two, so the package does
@@ -72,7 +72,7 @@ let package = Package(
         .executableTarget(
             name: "QueryHive",
             dependencies: ["QueryHiveFFI", .product(name: "Sparkle", package: "Sparkle")],
-            path: "Sources/TrinoExporter",
+            path: "Sources/QueryHive",
             linkerSettings: [
                 .unsafeFlags(
                     [
@@ -115,7 +115,7 @@ let package = Package(
         .testTarget(
             name: "QueryHiveTests",
             dependencies: ["QueryHive"],
-            path: "Tests/TrinoExporterTests"
+            path: "Tests/QueryHiveTests"
         ),
     ]
 )

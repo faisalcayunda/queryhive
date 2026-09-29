@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerates Sources/TrinoExporter/Support/DriverLogos.swift from assets/drivers/*.svg.
+# Regenerates Sources/QueryHive/Support/DriverLogos.swift from assets/drivers/*.svg.
 #
 #   ./app/make-driver-logos.sh
 #
@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-OUT="Sources/TrinoExporter/Support/DriverLogos.swift"
+OUT="Sources/QueryHive/Support/DriverLogos.swift"
 SRC="../assets/drivers"
 
 {
