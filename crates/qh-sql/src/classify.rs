@@ -42,7 +42,7 @@
 
 use thiserror::Error;
 
-use crate::scan::{has_significant_text, scan};
+use crate::scan::{first_significant, has_significant_text, scan};
 
 /// What one statement does, as far as reading its text can say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,13 +248,30 @@ pub fn check(mode: SafeMode, sql: &str) -> Result<(), SafeModeError> {
     Ok(())
 }
 
-/// The statements in a script, with the trivia-only pieces dropped.
+/// One statement of a script, and the 1-based line it starts on.
 ///
-/// Split on the separators [`crate::scan`] found, so a `;` inside a literal, a comment or
-/// a dollar-quoted body is content and not a statement boundary. A piece that is only
-/// whitespace and comments is not a statement and does not get a number — which is why
-/// this is the list a refusal counts, and not [`crate::statement_count`].
-pub fn statements(sql: &str) -> Vec<&str> {
+/// [`statements`] drops the line because its only caller classifies. An importer
+/// needs to say *where* a statement failed, and the line is the only handle a user
+/// has on a file of ten thousand statements. Both slices come from the same
+/// [`scan`], so the count and the positions cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptStatement<'a> {
+    /// The 1-based line of the statement's first significant character.
+    ///
+    /// A leading comment or blank line does not move it: the line is where the
+    /// statement really starts, which is the line an error message should name.
+    pub line: usize,
+    /// The statement text, with surrounding whitespace and comments trimmed.
+    pub text: &'a str,
+}
+
+/// The statements in a script, with the line each one starts on.
+///
+/// Split on the separators [`crate::scan`] found, so a `;` inside a literal, a comment
+/// or a dollar-quoted body is content and not a statement boundary. A piece that is only
+/// whitespace and comments is not a statement and does not get a line — which is why this
+/// is the list a refusal counts, and not [`crate::statement_count`].
+pub fn statements_with_lines(sql: &str) -> Vec<ScriptStatement<'_>> {
     if !has_significant_text(sql) {
         return Vec::new();
     }
@@ -262,18 +279,49 @@ pub fn statements(sql: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let mut start = 0;
     for &separator in &scan.separators {
-        push(&mut found, &sql[start..separator]);
+        push_with_line(&mut found, sql, start, separator);
         start = separator + 1;
     }
-    push(&mut found, &sql[start..]);
+    push_with_line(&mut found, sql, start, sql.len());
     found
 }
 
-fn push<'a>(found: &mut Vec<&'a str>, piece: &'a str) {
-    let trimmed = piece.trim();
-    if has_significant_text(trimmed) {
-        found.push(trimmed);
-    }
+/// The statements in a script, with the trivia-only pieces dropped.
+///
+/// The text-only view of [`statements_with_lines`], kept because most callers
+/// classify and never ask where a statement is.
+pub fn statements(sql: &str) -> Vec<&str> {
+    statements_with_lines(sql)
+        .into_iter()
+        .map(|statement| statement.text)
+        .collect()
+}
+
+fn push_with_line<'a>(
+    found: &mut Vec<ScriptStatement<'a>>,
+    sql: &'a str,
+    start: usize,
+    end: usize,
+) {
+    let piece = &sql[start..end];
+    // The line of the first significant byte, so a piece that opens with a header
+    // comment is still reported on the line its statement really starts on.
+    let Some(leading) = first_significant(piece) else {
+        return;
+    };
+    found.push(ScriptStatement {
+        line: line_at(sql, start + leading),
+        text: piece.trim(),
+    });
+}
+
+/// The 1-based line `offset` sits on.
+fn line_at(sql: &str, offset: usize) -> usize {
+    sql.as_bytes()[..offset]
+        .iter()
+        .filter(|&&byte| byte == b'\n')
+        .count()
+        + 1
 }
 
 /// A shortened, single-line rendering of a statement for a message.
@@ -463,6 +511,33 @@ mod tests {
         assert_eq!(statements("SELECT 1 -- note;").len(), 1);
         // Trivia-only pieces get no number.
         assert_eq!(statements("SELECT 1;; -- x").len(), 1);
+    }
+
+    #[test]
+    fn statements_carry_the_line_their_first_word_is_on() {
+        let found = statements_with_lines("SELECT 1;\n\n  SELECT 2;\n");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].line, 1);
+        assert_eq!(found[0].text, "SELECT 1");
+        // The blank line and the leading spaces are skipped: the line is where the
+        // statement really starts, not where the previous `;` left off.
+        assert_eq!(found[1].line, 3);
+        assert_eq!(found[1].text, "SELECT 2");
+        // Leading comments and whitespace before the first statement do not move it
+        // off the line its first word is on.
+        let lead = statements_with_lines("-- header\nSELECT 1");
+        assert_eq!(lead[0].line, 2);
+        // The two views agree on the text.
+        assert_eq!(
+            statements("SELECT 1;\nSELECT 2")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            statements_with_lines("SELECT 1;\nSELECT 2")
+                .into_iter()
+                .map(|statement| statement.text.to_owned())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

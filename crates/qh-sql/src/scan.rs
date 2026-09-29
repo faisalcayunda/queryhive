@@ -257,6 +257,17 @@ fn leading_keyword(sql: &str) -> Option<String> {
 /// Used to tell "no statement at all" from "one statement". A string of only
 /// separators and comments is not a statement.
 pub fn has_significant_text(sql: &str) -> bool {
+    first_significant(sql).is_some()
+}
+
+/// The byte offset of the first significant byte — not whitespace, not a
+/// comment, not a `;` — or `None` when there is none.
+///
+/// The offset is what lets a caller name the *line* a statement starts on even
+/// when the piece it was split into opens with a header comment. Sharing the
+/// skip logic with [`has_significant_text`] is the point: the two cannot
+/// disagree about where the real text begins.
+pub(crate) fn first_significant(sql: &str) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -282,9 +293,9 @@ pub fn has_significant_text(sql: &str) -> bool {
             }
             continue;
         }
-        return true;
+        return Some(index);
     }
-    false
+    None
 }
 
 /// How many statements `sql` holds.

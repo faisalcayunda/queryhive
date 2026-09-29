@@ -233,7 +233,7 @@ comes back, which is what the app decodes.
 | `objects` `catalogs` `schemas` `tables` | introspection for the object tree |
 | `test` | connect and report, without reading rows |
 | `export` | stream a query into any of the ten formats |
-| `import_data` | stream a CSV, or read an XLSX whole, into a table (ADR-0019) |
+| `import_data` | stream a CSV, read an XLSX whole, or run a `.sql` file's statements into a table (ADR-0019, ADR-0022) |
 | `apply_changes` | run a reviewed INSERT/UPDATE/DELETE plan in one transaction (ADR-0020) |
 | `to_table` | `CREATE TABLE AS` / `DROP + CREATE` / `INSERT INTO … SELECT` |
 | `preview` `count` `explain` | the first N rows, a row count, the plan |
@@ -262,9 +262,20 @@ Batching and output:
 | `LIMIT` | 1000 | `preview`'s row cap |
 | `PROGRESS_MS` | engine default | how often a progress event is emitted |
 | `TARGET_CATALOG` `TARGET_SCHEMA` `TARGET_TABLE` `WRITE_MODE` | | `to_table`'s destination |
+| `IMPORT_PATH` `IMPORT_FORMAT` | —, file extension | the `.csv`/`.xlsx`/`.sql` to import; `IMPORT_FORMAT` is `csv`, `xlsx` or `sql` |
+| `ON_ERROR` | `stop` | `stop` (rollback), `commit` (keep the prefix), `skip` (no transaction) |
+| `COLUMNS` | header row | `[{source,target,include}]`; required when a CSV has no header |
+| `FOREIGN_KEYS` | `on` | `off` disables the server's foreign-key checks for the import, restored at both exits |
+| `IMPORT_BATCH` `NULL_TEXT` `DELIMITER` `HEADER` `SHEET` | | row-import options |
 
 Per-format options: `DELIMITER ENCODING HEADER BOM NULL_TEXT` (txt/csv), `JSONL`,
 `SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH DBF_ENCODING`.
+
+`import_data` has two families. CSV and XLSX fill a table named by
+`TARGET_TABLE`; a `.sql` file is split into statements by the same scanner the
+SQL editor and the classifier use, and the statements run one at a time under the
+same error modes and transaction policy. There is no `GO` batch separator: it is
+a SQL Server client command, not a statement any of these drivers has.
 
 ## Format notes
 
