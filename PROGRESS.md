@@ -1969,6 +1969,37 @@ Verifikasi berat 29 Sep 2026 (sesudah Fase 4): `cargo fmt --all --check` ✅,
 **674 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
 `swift build && swift test` → **222 tes / 0 gagal** ✅.
 
+### Pengerasan dari studi TablePro: dua batas, dua perbaikan performa (29 Sep 2026)
+
+Studi sumber TablePro menghasilkan daftar di plan §12. Yang dikerjakan lebih dulu adalah yang
+menutup lubang di kode yang sudah dikirim, bukan menambah fitur.
+
+**Verifikasi jumlah baris sudah ditutup Fase 5.** `apply_changes` menjalankan statement pemanggil di
+dalam satu transaksi dan membandingkan `affected` dengan `expected`: ber-PK gagal pada
+`actual > expected` (MySQL melaporkan nol untuk UPDATE yang menulis nilai yang sudah ada), keyless
+pada `actual != expected`. Meleset berarti seluruh rencana di-rollback. Itu menutup 12.1.1 dan 12.1.2.
+
+**Dua batas ukuran, karena input tidak tepercaya.** Folding menolak dokumen di atas
+`foldingSizeLimit` (200.000 unit) dan tidak memberi region sama sekali — teksnya tidak disentuh.
+Angkanya sengaja **lebih rendah** dari dua juta milik TablePro, karena scanner-nya saat itu belum satu
+pass. Reader sel terstruktur tidak mem-parse nilai di atas `parseLimit` (100.000) dan memotong di atas
+`textLimit` (500.000) **dengan penanda** — reader yang diam-diam memotong ekor adalah reader yang
+berbohong. Kolom terstruktur tetap bisa dibuka di atas batas parse, menampilkan teks mentah server,
+dan Copy selalu mengambil nilai utuh.
+
+**Dua perbaikan performa, keduanya menunjuk baris.** `ResultGrid.displayedRows` dulu memfilter dan
+menyortir pada setiap akses, dan body membacanya beberapa kali per render; sekarang kerja itu tinggal
+di `QueryTab.displayedRows` dan di-cache oleh `gridRevision` yang dinaikkan oleh tiga hal yang bisa
+mengubah jawabannya (preview baru, filter, sort). Dan folding dulu melokasikan tiap statement dengan
+menjalankan ulang scanner — yang memindai seluruh dokumen — lalu mencari teksnya, sekali per
+statement: O(n·k). Sekarang `sqlStatement` dan `sqlStatements` berbagi satu pass.
+
+**Yang belum.** Sort server untuk hasil berhalaman (masih dicatat di banner grid), penjaga perubahan
+panjang untuk folding (tidak lagi jadi bottleneck setelah scanner satu pass), dan seluruh pengerasan
+MCP di §12.3.
+
+Verifikasi: `swift build` selesai, `swift test` **234 tes / 0 gagal**. Sisi Rust tidak berubah.
+
 ## Perkakas lokal (sengaja tidak masuk repo)
 
 `tools/kenari_search.py` adalah alat bantu riset saat membangun aplikasi, bukan bagian dari yang

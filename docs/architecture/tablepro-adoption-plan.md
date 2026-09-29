@@ -756,6 +756,17 @@ Bagian ini **belum dijadwalkan** dan bukan fase. Isinya keluar dari
 dan yang membedakannya dari §8: ini bukan fitur yang hilang, melainkan hal yang sudah dikirim tetapi
 belum sekuat pembandingnya. Urutannya menurut ongkos per nilai, bukan menurut fase.
 
+> **Status 29 Sep 2026.** 12.1.1 dan 12.1.2 ditutup oleh Fase 5 (`apply_changes` memverifikasi
+> jumlah baris di dalam transaksi, dengan aturan ber-PK dan keyless yang sama). 12.1.3 dan 12.1.4
+> mendarat sebagai batas ukuran folding dan batas input reader (`foldingSizeLimit`, `parseLimit`,
+> `textLimit`). 12.2.1 dan 12.2.3 mendarat: `displayedRows` kini di-cache per `gridRevision`, dan
+> batas statement dihitung dalam satu pass sehingga folding berhenti kuadratik. Yang **belum**:
+> 12.1.5 (sort server untuk hasil berhalaman — masih dicatat di banner, belum ada jalannya), 12.2.2
+> (penjaga perubahan panjang untuk folding — tidak lagi jadi bottleneck setelah scanner jadi satu
+> pass, karena biayanya kini setara `SQLSyntax.apply` yang memang jalan tiap ketikan), dan seluruh
+> 12.3 (pengerasan MCP, yang menurut bagiannya sendiri baru perlu kalau MCP dipakai lebih dari satu
+> orang).
+
 ### 12.1 Kebenaran — yang paling mendesak, dan kecil
 
 1. **`UPDATE` dari edit sel tidak diverifikasi jumlah barisnya.** `Models/UpdateStatements.swift`
