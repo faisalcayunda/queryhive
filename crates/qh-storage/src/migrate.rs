@@ -51,6 +51,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "mcp_token",
         sql: include_str!("../migrations/0005_mcp_token.sql"),
     },
+    Migration {
+        version: 6,
+        name: "mcp_token_prefix",
+        sql: include_str!("../migrations/0006_mcp_token_prefix.sql"),
+    },
 ];
 
 /// A migration that has run, as the history table remembers it.

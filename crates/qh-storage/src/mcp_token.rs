@@ -34,6 +34,22 @@ use crate::{Storage, StorageError};
 /// in a log or a paste rather than looking like an arbitrary blob.
 pub const TOKEN_PREFIX: &str = "qhmcp_";
 
+/// How many characters of the random part the `token_prefix` column keeps.
+///
+/// Eight is TablePro's number and it is enough for a person: 16 hex characters would be a longer
+/// list entry for no more recognisability, and four would collide too often to be worth showing.
+/// The remainder of the token is 256 random bits, so this reveals nothing usable.
+pub const TOKEN_PREFIX_CHARS: usize = 8;
+
+/// The non-secret head of a token, as the `token_prefix` column stores it.
+///
+/// `qhmcp_` plus the first [`TOKEN_PREFIX_CHARS`] of the random part — long enough to match a
+/// pasted string to a row in a list, short enough to be useless to anyone who reads it.
+pub fn token_prefix_of(token: &str) -> String {
+    let end = TOKEN_PREFIX.len() + TOKEN_PREFIX_CHARS;
+    token.get(..end).unwrap_or(token).to_owned()
+}
+
 /// Bytes of randomness in a token, before hexing: 256 bits.
 pub const TOKEN_BYTES: usize = 32;
 
@@ -53,6 +69,9 @@ pub struct McpTokenRecord {
     pub name: String,
     /// The SHA-256 hex of the token. Never the token.
     pub token_hash: String,
+    /// The non-secret head of the token, for a human reading a list. Empty on a row written
+    /// before migration 6, whose token is unrecoverable by design.
+    pub token_prefix: String,
     /// A JSON array of tool names, kept as text so a new tool needs no migration.
     pub scopes_json: String,
     /// A JSON array of connection ids the token may reach.
@@ -138,7 +157,7 @@ fn string_array(text: &str, column: &str) -> Result<Vec<String>, StorageError> {
 }
 
 const MCP_TOKEN_COLUMNS: &str = "id, name, token_hash, scopes_json, connections_json, \
-     expires_at, revoked_at, last_used_at, updated_at, deleted_at, version";
+     expires_at, revoked_at, last_used_at, updated_at, deleted_at, version, token_prefix";
 
 impl Storage {
     /// Issue a token and write its hash, returning the plaintext once.
@@ -158,6 +177,7 @@ impl Storage {
             id: SyncId::now(),
             name: name.to_owned(),
             token_hash: hash_token(&token),
+            token_prefix: token_prefix_of(&token),
             scopes_json: serde_json::to_string(scopes).expect("a list of strings serialises"),
             connections_json: serde_json::to_string(connections)
                 .expect("a list of strings serialises"),
@@ -170,8 +190,9 @@ impl Storage {
         };
         self.conn.execute(
             "INSERT INTO mcp_token (id, name, token_hash, scopes_json, connections_json, \
-              expires_at, revoked_at, last_used_at, updated_at, deleted_at, version) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              expires_at, revoked_at, last_used_at, updated_at, deleted_at, version, \
+              token_prefix) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 record.id.as_str(),
                 record.name,
@@ -184,6 +205,7 @@ impl Storage {
                 record.updated_at,
                 record.deleted_at,
                 record.version,
+                record.token_prefix,
             ],
         )?;
         Ok((token, record))
@@ -297,6 +319,7 @@ fn read_mcp_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpTokenRecord> {
         updated_at: row.get(8)?,
         deleted_at,
         version: row.get(10)?,
+        token_prefix: row.get(11)?,
     })
 }
 
@@ -344,6 +367,61 @@ mod tests {
             .mcp_token_by_hash(&hash_token("qhmcp_not-the-token"))
             .expect("lookup")
             .is_none());
+    }
+
+    #[test]
+    fn a_token_records_a_recognisable_prefix_but_not_its_string() {
+        let storage = storage();
+        let (token, record) = storage
+            .issue_mcp_token("listed", &[], &[], None, 1)
+            .expect("issue");
+
+        // The prefix is the head of the token and nothing more: what a person matches a row
+        // against, and not enough to use the token.
+        assert_eq!(record.token_prefix, token_prefix_of(&token));
+        assert!(token.starts_with(&record.token_prefix));
+        assert_eq!(
+            record.token_prefix.len(),
+            TOKEN_PREFIX.len() + TOKEN_PREFIX_CHARS
+        );
+        assert_ne!(record.token_prefix, token);
+        // And the row still does not hold the whole string.
+        assert!(!record.token_hash.contains(&token));
+        assert!(record.token_prefix.len() < token.len());
+    }
+
+    #[test]
+    fn a_row_written_before_the_prefix_column_reads_as_empty() {
+        // Migration 6 adds the column; a row that predates it has no prefix to fill in, because
+        // its token is unrecoverable by design. Empty is displayed as such rather than guessed at.
+        use crate::migrate::MIGRATIONS;
+
+        let storage = Storage::in_memory().expect("in-memory database");
+        for migration in MIGRATIONS.iter().take(5) {
+            storage
+                .conn
+                .execute_batch(migration.sql)
+                .expect("apply up to version 5");
+        }
+        storage
+            .conn
+            .execute(
+                "INSERT INTO mcp_token (id, name, token_hash, scopes_json, connections_json, \
+                  updated_at, version) \
+                 VALUES ('01a0eb73-68d2-73d1-8e7a-813a293335b9', 'old', 'deadbeef', '[]', '[]', \
+                         1700000000000, 1)",
+                [],
+            )
+            .expect("a row from before the column existed");
+
+        storage
+            .conn
+            .execute_batch(MIGRATIONS[5].sql)
+            .expect("the prefix migration");
+
+        let id = SyncId::parse("01a0eb73-68d2-73d1-8e7a-813a293335b9").expect("an id");
+        let found = storage.mcp_token(&id).expect("lookup").expect("the row");
+        assert_eq!(found.token_prefix, "");
     }
 
     #[test]

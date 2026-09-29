@@ -1122,12 +1122,28 @@ pub fn handshake_path() -> Option<PathBuf> {
 }
 
 /// Write the handshake, creating its directory if needed.
+///
+/// The file is `0600`: it names a live token's row and a pid, and nothing but this user has any
+/// business reading it. The mode is the writer's half of the check [`read_handshake`] makes.
 pub fn write_handshake(path: &std::path::Path, handshake: &Handshake) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let text = serde_json::to_string(&handshake.to_json()).expect("a handshake is serialisable");
-    std::fs::write(path, text)
+    // Tightened after the write as well as asked for at creation: `.mode()` only applies when the
+    // file is created, so an existing file left looser by an older build would otherwise stay so.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    drop(file);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Remove the handshake, ignoring a file that is already gone.
@@ -1139,7 +1155,19 @@ pub fn remove_handshake(path: &std::path::Path) {
 ///
 /// The "ignored" half is the point: a server killed with SIGKILL never removes its file,
 /// and a reader that trusted a stale pid would try to talk to a process that is gone.
+///
+/// A file anybody can read is ignored too, because it names a live token row: the writer creates
+/// it `0600`, so a looser mode means somebody else wrote it, and the safe reading of that is to
+/// disbelieve the file. The owner and executable checks TablePro makes are deliberately not done:
+/// nothing in this tree reads the handshake yet, and there is no safe `getuid` without `libc`
+/// (which this crate forbids). That is stated rather than skipped silently.
 pub fn read_handshake(path: &std::path::Path) -> Option<Handshake> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.mode() & 0o077 != 0 {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
     let value: Json = serde_json::from_str(&text).ok()?;
     let pid = u32::try_from(value.get("pid")?.as_u64()?).ok()?;
@@ -1200,6 +1228,9 @@ pub fn token_listing(tokens: &[McpTokenRecord]) -> Json {
             .map(|token| json!({
                 "id": token.id.as_str(),
                 "name": token.name,
+                // The non-secret head, so a person can match a row to a token they are holding
+                // without the row holding anything that could be used as one.
+                "prefix": token.token_prefix,
                 "scopes": token.scopes().unwrap_or_default(),
                 "connections": token.connections().unwrap_or_default(),
                 "expires_at": token.expires_at,

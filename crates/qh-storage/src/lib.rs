@@ -437,6 +437,7 @@ mod tests {
                 "updated_at",
                 "deleted_at",
                 "version",
+                "token_prefix",
             ]
         );
     }

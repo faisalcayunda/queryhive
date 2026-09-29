@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use qh_ffi::mcp::{self, Handshake, McpToken, Server};
 use qh_ffi::RealEngine;
-use qh_storage::{ConnectionKind, ConnectionRecord, Storage};
+use qh_storage::{ConnectionKind, ConnectionRecord, McpTokenRecord, Storage};
+use qh_sync::SyncId;
 use serde_json::{json, Value as Json};
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -598,4 +599,61 @@ fn a_handshake_whose_pid_is_gone_is_ignored() {
 #[test]
 fn the_servers_own_pid_is_alive() {
     assert!(mcp::pid_is_alive(std::process::id()));
+}
+
+#[test]
+fn a_handshake_others_can_read_is_ignored() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("mcp-handshake.json");
+    let handshake = Handshake {
+        pid: std::process::id(),
+        started_at: 1,
+        token_id: "t".to_owned(),
+        server_version: "0.1.0".to_owned(),
+    };
+    mcp::write_handshake(&path, &handshake).expect("write");
+
+    // The writer makes it 0600, so its own reader accepts it.
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the handshake is written for this user only");
+    assert!(mcp::read_handshake(&path).is_some());
+
+    // A file somebody else loosened names a live token row, so it is not believed.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("loosen");
+    assert_eq!(mcp::read_handshake(&path), None);
+}
+
+#[test]
+fn the_token_listing_carries_the_prefix_and_never_the_hash() {
+    // What an operator reads when deciding which token to revoke: a name and a head they can match
+    // against a string they are holding. The hash is not useful to them and is not shown.
+    let record = McpTokenRecord {
+        id: SyncId::parse("01a0eb73-68d2-73d1-8e7a-813a293335b9").expect("an id"),
+        name: "Claude Desktop".to_owned(),
+        token_hash: "deadbeef".to_owned(),
+        token_prefix: "qhmcp_0123abcd".to_owned(),
+        scopes_json: "[\"db_drivers\"]".to_owned(),
+        connections_json: "[]".to_owned(),
+        expires_at: None,
+        revoked_at: None,
+        last_used_at: None,
+        updated_at: 1,
+        deleted_at: None,
+        version: 1,
+    };
+    let listing = mcp::token_listing(&[record]);
+    let row = &listing["tokens"][0];
+    assert_eq!(row["prefix"], "qhmcp_0123abcd");
+    assert_eq!(row["name"], "Claude Desktop");
+    assert_eq!(row["scopes"], json!(["db_drivers"]));
+    assert!(
+        row.get("token_hash").is_none(),
+        "the listing never carries the hash: {row}"
+    );
 }

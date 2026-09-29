@@ -1994,11 +1994,22 @@ mengubah jawabannya (preview baru, filter, sort). Dan folding dulu melokasikan t
 menjalankan ulang scanner — yang memindai seluruh dokumen — lalu mencari teksnya, sekali per
 statement: O(n·k). Sekarang `sqlStatement` dan `sqlStatements` berbagi satu pass.
 
-**Yang belum.** Sort server untuk hasil berhalaman (masih dicatat di banner grid), penjaga perubahan
-panjang untuk folding (tidak lagi jadi bottleneck setelah scanner satu pass), dan seluruh pengerasan
-MCP di §12.3.
+**Pengerasan MCP, sebagian.** Kolom prefiks token mendarat (migrasi `0006`): `list` kini menampilkan
+`prefix` — kepala token yang cukup untuk mencocokkan baris dengan string yang dipegang operator, dan
+tidak cukup untuk dipakai. Handshake ditulis `0600` dan pembacanya mengabaikan berkas yang mode-nya
+lebih longgar, karena berkas itu menyebut baris token yang hidup. Pemeriksaan pemilik dan executable
+milik TablePro **tidak** dilakukan: belum ada pembaca handshake di pohon ini, dan tidak ada `getuid`
+yang aman tanpa `libc`. Tiga item sisanya diputuskan di `docs/mcp-stability.md`: pencabutan tidak
+punya request berjalan untuk dibatalkan (loop `serve` sekuensial), rate limit ditunda, dan "External
+Clients" menunggu MCP dipakai lebih dari satu orang. Halaman itu juga mencatat satu celah: server
+belum menolak versi protokol yang tidak dikenal dengan daftar versi yang didukung.
 
-Verifikasi: `swift build` selesai, `swift test` **234 tes / 0 gagal**. Sisi Rust tidak berubah.
+**Yang belum.** Sort server untuk hasil berhalaman (masih dicatat di banner grid), penjaga perubahan
+panjang untuk folding (tidak lagi jadi bottleneck setelah scanner satu pass), dan tiga item MCP yang
+diputuskan di atas.
+
+Verifikasi: `cargo test --workspace` **704 lulus / 0 gagal**, `swift build` selesai, `swift test`
+**234 tes / 0 gagal**.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 

@@ -763,9 +763,8 @@ belum sekuat pembandingnya. Urutannya menurut ongkos per nilai, bukan menurut fa
 > batas statement dihitung dalam satu pass sehingga folding berhenti kuadratik. Yang **belum**:
 > 12.1.5 (sort server untuk hasil berhalaman — masih dicatat di banner, belum ada jalannya), 12.2.2
 > (penjaga perubahan panjang untuk folding — tidak lagi jadi bottleneck setelah scanner jadi satu
-> pass, karena biayanya kini setara `SQLSyntax.apply` yang memang jalan tiap ketikan), dan seluruh
-> 12.3 (pengerasan MCP, yang menurut bagiannya sendiri baru perlu kalau MCP dipakai lebih dari satu
-> orang).
+> pass, karena biayanya kini setara `SQLSyntax.apply` yang memang jalan tiap ketikan), dan sebagian
+> 12.3 (prefiks token dan pengerasan handshake mendarat; tiga item sisanya diputuskan di §12.3).
 
 ### 12.1 Kebenaran — yang paling mendesak, dan kecil
 
@@ -838,6 +837,16 @@ pemeriksaan kepercayaan handshake (pemilik berkas, mode, pid hidup, executable p
 kebijakan stabilitas tool/resource sebelum tool ke-10 mendarat; rate limit pada autentikasi; dan
 memisahkan "External Clients" dari Safe Mode sebagai lapisan tersendiri. Pairing PKCE adalah cetak
 biru kalau MCP menjadi fitur pengguna, bukan hanya token lewat CLI.
+
+**Hasil 29 Sep 2026, sebagian dan dengan alasannya.** Kolom prefiks token mendarat (migrasi `0006`;
+`list` menampilkan `prefix`), dan handshake kini ditulis `0600` serta **diabaikan pembacanya** bila
+mode-nya lebih longgar — pemeriksaan pemilik/executable sengaja tidak dilakukan karena belum ada
+pembaca handshake di pohon ini dan tidak ada `getuid` yang aman tanpa `libc`. Tiga item sisanya
+diputuskan, bukan dikerjakan, dan alasannya di [`docs/mcp-stability.md`](../mcp-stability.md):
+pencabutan tidak punya request berjalan untuk dibatalkan (loop `serve` sekuensial), rate limit
+ditunda karena token 256-bit tidak punya ruang tebak, dan "External Clients" menunggu MCP dipakai
+lebih dari satu orang. Halaman kebijakan stabilitas itu juga mencatat satu celah: server belum
+menolak versi protokol yang tidak dikenal dengan daftar versi yang didukung.
 
 ### 12.4 Yang **tidak** masuk daftar ini
 
