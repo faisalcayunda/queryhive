@@ -7,6 +7,7 @@ import SwiftUI
 enum QueryHiveMain {
     @MainActor
     static func main() {
+        PerfSignposts.launchBegin()
         if let path = AppIconRenderer.requestedSheetPath() {
             AppIconRenderer.runSheet(path: path)
         }
@@ -17,6 +18,9 @@ enum QueryHiveMain {
             Snapshot.run(path: path, scene: Snapshot.requestedScene(),
                          width: Snapshot.requestedWidth() ?? 1240)
         }
+        // `--bench <scenario>` runs a measurement and exits; only `launch` comes back, to let the
+        // real app start and report its own first frame.
+        if CommandLine.arguments.contains("--bench") { BenchMode.run() }
         QueryHiveApp.main()
     }
 }
@@ -126,6 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
+        PerfSignposts.watchFirstFrame()
         ThemeStore.shared.systemIsDark = app.effectiveAppearance.isDark
         appearanceObservation = app.observe(\.effectiveAppearance, options: [.new]) { _, change in
             guard let appearance = change.newValue else { return }
@@ -134,6 +139,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Under `--bench` a quit request is refused and logged: a benchmark that dies silently
+    /// because something asked the app to quit is a lost measurement, not a result.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        PerfSignposts.recording ? BenchMode.refuseTermination() : .terminateNow
+    }
 
     // An engine child left running would keep writing after the window is gone.
     func applicationWillTerminate(_ notification: Notification) {

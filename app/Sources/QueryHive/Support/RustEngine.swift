@@ -233,6 +233,7 @@ final class Sink: EventSink, @unchecked Sendable {
         // into stderr: the engine writes nothing else to this channel.
         guard let event = EngineWire.event(in: Data(line.utf8)) else { return }
 
+        PerfSignposts.engineEvent(event.event)
         if event.event == "error" {
             lock.lock()
             message = event.message

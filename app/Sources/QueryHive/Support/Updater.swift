@@ -25,7 +25,8 @@ final class Updater: ObservableObject {
     /// standard user driver is the UI we want, and nothing here needs to override how Sparkle
     /// decides to install.
     init() {
-        controller = SPUStandardUpdaterController(startingUpdater: true,
+        // Not under `--bench`: a benchmark must not phone home or raise Sparkle's own dialogs.
+        controller = SPUStandardUpdaterController(startingUpdater: !CommandLine.arguments.contains("--bench"),
                                                   updaterDelegate: nil,
                                                   userDriverDelegate: nil)
         controller.updater.publisher(for: \.canCheckForUpdates)

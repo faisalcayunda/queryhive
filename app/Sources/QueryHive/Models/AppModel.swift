@@ -605,6 +605,15 @@ final class AppModel {
         return TreeNode.table(name, parent: parent)
     }
 
+    /// `--bench` only: the password of its throwaway connection, so a benchmark never reads or
+    /// writes a Keychain item. Nil in the real app.
+    static var benchPassword: String?
+
+    /// The one place a saved connection's password is read, so `--bench` can stand in for it.
+    static func storedPassword(for id: UUID) throws -> String? {
+        try benchPassword ?? ConnectionKeychain.get(for: id)
+    }
+
     func newTab(connectionID: UUID? = nil) {
         tabCounter += 1
         let tab = QueryTab(title: "Query \(tabCounter)")
@@ -1042,7 +1051,7 @@ final class AppModel {
             return
         }
         connections = next
-        if let password = try? ConnectionKeychain.get(for: id), !password.isEmpty {
+        if let password = try? Self.storedPassword(for: id), !password.isEmpty {
             do {
                 try ConnectionKeychain.set(password, for: copy.id)
             } catch {
@@ -1490,7 +1499,7 @@ final class AppModel {
         let command: String
         var env: [String: String]
         do {
-            env = try Self.connectionEnvironment(connection, password: ConnectionKeychain.get(for: connection.id))
+            env = try Self.connectionEnvironment(connection, password: Self.storedPassword(for: connection.id))
         } catch {
             node.error = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
@@ -2271,6 +2280,7 @@ final class AppModel {
     private func runPreview(_ tab: QueryTab, sql: String, connection: Connection,
                             env: [String: String], clearSearch: Bool = true,
                             baseSQL: String? = nil, serverSort: ServerSortMark? = nil) {
+        PerfSignposts.runBegin()
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
@@ -2318,6 +2328,7 @@ final class AppModel {
                 tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
                                             queryID: nil, elapsedMS: 0)
             case "rows":
+                if !rows.isEmpty || event.data?.isEmpty == false { PerfSignposts.firstRowsEvent() }
                 rows.append(contentsOf: event.data ?? [])
                 // A partial grid while the rest arrives: the point of batching, on a clock rather
                 // than once per batch. Every paint costs a copy of the whole buffer here and a
@@ -2330,6 +2341,7 @@ final class AppModel {
                                                 queryID: tab.preview?.queryID, elapsedMS: 0)
                 }
             case "done":
+                PerfSignposts.runDone()
                 truncated = event.truncated ?? false
                 finished = true
                 tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
@@ -2340,6 +2352,7 @@ final class AppModel {
             }
         }, onExit: { status, log in
             guard tab.previewToken == run else { return }
+            PerfSignposts.cancelEnd()
             tab.previewProcess = nil
             tab.previewing = false
             guard status == 0, finished else {
@@ -2680,6 +2693,7 @@ final class AppModel {
     }
 
     func cancelPreview(_ tab: QueryTab) {
+        if tab.previewProcess != nil { PerfSignposts.cancelBegin() }
         tab.previewProcess?.terminate()
     }
 
@@ -2844,6 +2858,7 @@ final class AppModel {
         tab.stopping = true
         tab.cancelled = true
         tab.note(.warning, "Stopping…")
+        if tab.process != nil { PerfSignposts.cancelBegin() }
         tab.process?.terminate()
     }
 
@@ -2921,6 +2936,7 @@ final class AppModel {
             self.handle(event, in: tab)
         }, onExit: { status, log in
             guard tab.runToken == run else { return }
+            PerfSignposts.cancelEnd()
             tab.process = nil
             tab.stopping = false
             if tab.cancelled {
@@ -3110,7 +3126,7 @@ final class AppModel {
     private func connectionEnvironment(_ connection: Connection) throws -> [String: String] {
         let password: String?
         do {
-            password = try ConnectionKeychain.get(for: connection.id)
+            password = try Self.storedPassword(for: connection.id)
         } catch {
             throw EngineLaunchError(message: "Couldn't read the password for \(connection.name) from Keychain: \(error.localizedDescription)")
         }

@@ -37,6 +37,7 @@ struct SQLEditor: NSViewRepresentable {
         container.autoresizesSubviews = true
 
         let textView = SQLTextView()
+        PerfSignposts.watchTextKit(textView)
         textView.isRichText = false
         textView.isEditable = true
         textView.isSelectable = true
@@ -111,6 +112,7 @@ struct SQLEditor: NSViewRepresentable {
         // The layout switches, before anything is drawn: the gutter's visibility, the wrapping, the
         // tab stops and the invisible characters are all properties of the text view.
         context.coordinator.applyLayout()
+        PerfSignposts.logTextKit(textView)
         ruler.onToggleFold = { [weak coordinator = context.coordinator] offset in
             coordinator?.toggleFold(headerOffset: offset)
         }
@@ -338,6 +340,8 @@ struct SQLEditor: NSViewRepresentable {
         // MARK: Text changes
 
         func textDidChange(_ notification: Notification) {
+            let started = PerfSignposts.didChangeBegin()
+            defer { PerfSignposts.didChangeEnd(started: started) }
             guard let textView = notification.object as? NSTextView else { return }
             // Before anything reads the text: this rewrites the word just finished, and the fold,
             // colour and completion passes should see the text that will actually be sent.
@@ -971,6 +975,7 @@ final class SQLTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        PerfSignposts.keystrokeBegin()
         if let interceptKey, interceptKey(event) { return }
         super.keyDown(with: event)
     }

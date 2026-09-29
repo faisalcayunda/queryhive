@@ -287,7 +287,12 @@ struct ResultGrid: View {
                         LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                             Section {
                                 ForEach(Array(displayedRows.enumerated()), id: \.offset) { index, row in
-                                    rowView(row, index: index, columns: preview.columns, widths: widths)
+                                    if index == 0 {
+                                        rowView(row, index: index, columns: preview.columns, widths: widths)
+                                            .onAppear { PerfSignposts.firstPaint() }
+                                    } else {
+                                        rowView(row, index: index, columns: preview.columns, widths: widths)
+                                    }
                                 }
                             } header: {
                                 headerRow(preview, widths: widths)
