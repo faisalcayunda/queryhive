@@ -424,7 +424,17 @@ struct ResultGrid: View {
     /// the server sent otherwise.
     @ViewBuilder
     private func cellView(key: CellKey, original: String?, column: Event.Column) -> some View {
-        let shown = tab.cellEdits.value(at: key) ?? original
+        // `stored` is what an edit, a copy and an export see; `shown` is only what is drawn. The
+        // display format is rendering-only, so it is applied here and nowhere else.
+        let stored = tab.cellEdits.value(at: key) ?? original
+        // A hand-written query has no table, so there is nowhere to file a per-column format and
+        // the cell shows the server's own text. The format is read from the store rather than held
+        // as state, which is why closing the reader — a state change — is what repaints the cell.
+        let identity = ColumnFormatStore.identity(connection: tab.connectionID,
+                                                  table: tab.sourceTable,
+                                                  column: column.name)
+        let format = identity.map { ColumnFormatStore.format($0) } ?? .raw
+        let shown = stored.map { format.render($0, type: column.type) }
         if editingCell == key {
             TextField("", text: $editingText)
                 .textFieldStyle(.plain)
@@ -434,7 +444,7 @@ struct ResultGrid: View {
                 .onSubmit { commitEdit(at: key) }
                 .onExitCommand { cancelEdit() }
                 .onAppear { editorFocused = true }
-        } else if GridValue.isOpenable(value: shown, type: column.type) {
+        } else if GridValue.isOpenable(value: stored, type: column.type) {
             // A structured value — ARRAY, MAP, ROW, JSON, or JSON that happens to live in a varchar
             // — opens its whole self instead of standing in for it with one truncated line. The
             // double-click is the one editing uses; the difference is that for a value the reader
@@ -444,7 +454,10 @@ struct ResultGrid: View {
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { viewingCell = key }
                 .popover(isPresented: popoverBinding(for: key), arrowEdge: .bottom) {
-                    CellValueViewer(value: shown ?? "", column: column.name, type: column.type)
+                    // The reader gets the stored value and the cell's origin, so its format menu
+                    // can file a choice under the same identity the grid reads it from.
+                    CellValueViewer(value: stored ?? "", column: column.name, type: column.type,
+                                    connectionID: tab.connectionID, table: tab.sourceTable)
                 }
         } else {
             cell(shown)
