@@ -37,6 +37,11 @@ struct ResultGrid: View {
     @State private var editingText = ""
     @FocusState private var editorFocused: Bool
 
+    /// The cell whose whole value is open in the reader popover, by its position on screen. Reset
+    /// with everything else positional when the rows change, though a popover dismisses itself as
+    /// soon as the pointer leaves it, so in practice it is open only while the pointer is inside.
+    @State private var viewingCell: CellKey?
+
     /// Whether the review of the queued changes is open.
     @State private var reviewingChanges = false
 
@@ -82,13 +87,28 @@ struct ResultGrid: View {
         }
     }
 
-    /// The rows the grid draws: everything fetched, narrowed by whatever filters are set.
-    /// Filtering happens here and nowhere else — it never reaches the server and never rewrites the
-    /// statement, which is why the footer says how many rows it had to work with.
-    private var filteredRows: [[String?]] {
+    /// The rows the grid draws, in the order it draws them: everything fetched, narrowed by
+    /// whatever filters are set, then sorted. Both happen here and nowhere else — neither reaches
+    /// the server and neither rewrites the statement, which is why the header says the sort is over
+    /// the rows already fetched.
+    ///
+    /// Sort last, so the order is applied to the set that survives the filter rather than to the
+    /// whole fetch and then thrown away. Every positional thing in this view — the selection, the
+    /// queued edits, the copy, the paste — indexes *these* rows, because these are what the user
+    /// pointed at. `QueryTab.setGridSort` and the filter's own `didSet` clear that state when the
+    /// order changes, for exactly that reason.
+    private var displayedRows: [[String?]] {
         guard let preview = tab.preview else { return [] }
-        guard !tab.columnFilters.isEmpty else { return preview.rows }
-        return preview.rows.filter { row in
+        let filtered = filteredRows(preview.rows)
+        guard let sort = tab.gridSort else { return filtered }
+        return sort.order(filtered)
+    }
+
+    /// The fetched rows a filter keeps. Split out from `displayedRows` so the sort is the last step
+    /// rather than something the filter has to know about.
+    private func filteredRows(_ rows: [[String?]]) -> [[String?]] {
+        guard !tab.columnFilters.isEmpty else { return rows }
+        return rows.filter { row in
             tab.columnFilters.allSatisfy { index, filter in
                 filter.matches(index < row.count ? row[index] : nil)
             }
@@ -103,7 +123,7 @@ struct ResultGrid: View {
 
     /// What the body of the grid has to say for itself, or `nil` while it has rows to draw.
     private func placeholder(_ preview: PreviewResult) -> GridPlaceholder? {
-        GridPlaceholder.whenEmpty(shown: filteredRows.count, fetched: preview.rows.count,
+        GridPlaceholder.whenEmpty(shown: displayedRows.count, fetched: preview.rows.count,
                                   loading: loadingLabel)
     }
 
@@ -211,7 +231,7 @@ struct ResultGrid: View {
                 ScrollView([.horizontal, .vertical]) {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                         Section {
-                            ForEach(Array(filteredRows.enumerated()), id: \.offset) { index, row in
+                            ForEach(Array(displayedRows.enumerated()), id: \.offset) { index, row in
                                 rowView(row, index: index, columns: preview.columns, widths: widths)
                             }
                         } header: {
@@ -246,11 +266,11 @@ struct ResultGrid: View {
     /// The selected block as the tab-separated text a spreadsheet reads back as a table, or `nil`
     /// when nothing is selected.
     ///
-    /// `filteredRows`, not the fetched rows: the user pointed at what is on screen, so what they
+    /// `displayedRows`, not the fetched rows: the user pointed at what is on screen, so what they
     /// copy is what they saw. A filter that hid a row must not put it back in the paste.
     private func selectionText(withHeaders: Bool) -> String? {
         guard let preview = tab.preview, let selection = tab.cellSelection else { return nil }
-        return GridClipboard.text(rows: filteredRows, headers: preview.columns.map(\.name),
+        return GridClipboard.text(rows: displayedRows, headers: preview.columns.map(\.name),
                                   selection: selection, withHeaders: withHeaders)
     }
 
@@ -270,6 +290,8 @@ struct ResultGrid: View {
         Divider()
         Button("Edit Cell…") { beginEditingSelection() }
             .disabled(tab.cellSelection == nil)
+        Button("View Value…") { viewSelectedValue() }
+            .disabled(selectedCell() == nil)
         Button("Paste") { pasteIntoSelection() }
             .disabled(tab.cellSelection == nil)
         Divider()
@@ -286,22 +308,23 @@ struct ResultGrid: View {
     }
 
     private func headerRow(_ columns: [Event.Column], widths: [CGFloat]) -> some View {
-        HStack(spacing: 0) {
-            gutter("#")
-            ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
-                VStack(alignment: isNumeric(column.type) ? .trailing : .leading, spacing: 3) {
-                    Text(column.name)
-                        .font(.code(12, weight: .semibold))
-                        .foregroundStyle(Tone.ink.opacity(0.92))
-                        .lineLimit(1)
-                    Chip(text: column.type, tint: typeTint(column.type))
+        VStack(alignment: .leading, spacing: 0) {
+            // The sort's own sentence, above the names. A chevron beside a column says *which* column
+            // and which way; it cannot say that this is an in-memory order over the rows already
+            // fetched. That is the part the plan asked to be written down, and it matters: a sorted
+            // grid looks exactly like a sorted result.
+            if let sort = tab.gridSort {
+                GridSortBanner(column: columnName(sort.column, in: columns),
+                               direction: sort.direction,
+                               fetched: tab.preview?.rows.count ?? 0,
+                               onClear: { tab.setGridSort(nil) })
+            }
+            HStack(spacing: 0) {
+                gutter("#")
+                ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
+                    headerCell(index, column,
+                               width: widths.indices.contains(index) ? widths[index] : 120)
                 }
-                .frame(width: widths.indices.contains(index) ? widths[index] : 120,
-                       alignment: isNumeric(column.type) ? .trailing : .leading)
-                .padding(.horizontal, cellPadding)
-                .padding(.vertical, 6)
-                .overlay(alignment: .topTrailing) { filterButton(index) }
-                .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
             }
         }
         // `Tone.recess` rather than a literal dark navy. This was `Color(hex: 0x141726)`, the one
@@ -320,13 +343,55 @@ struct ResultGrid: View {
         .overlay(Rectangle().fill(Tone.ink.opacity(0.12)).frame(height: 1), alignment: .bottom)
     }
 
+    /// One column's header cell, and the door to the sort: clicking it cycles ascending, descending,
+    /// and off. The whole cell is the target rather than a small glyph, because a header that only
+    /// sorts from one 10pt corner is a header nobody sorts from.
+    private func headerCell(_ index: Int, _ column: Event.Column, width: CGFloat) -> some View {
+        let numeric = isNumeric(column.type)
+        let sort = tab.gridSort?.column == index ? tab.gridSort : nil
+        return Button {
+            tab.setGridSort(GridSort.next(tab.gridSort, clickedColumn: index))
+        } label: {
+            VStack(alignment: numeric ? .trailing : .leading, spacing: 3) {
+                HStack(spacing: 3) {
+                    Text(column.name)
+                        .font(.code(12, weight: .semibold))
+                        .foregroundStyle(Tone.ink.opacity(0.92))
+                        .lineLimit(1)
+                    if let sort {
+                        Image(systemName: sort.direction.symbol)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(Tone.accent)
+                    }
+                }
+                Chip(text: column.type, tint: typeTint(column.type))
+            }
+            .frame(width: width, alignment: numeric ? .trailing : .leading)
+            .padding(.horizontal, cellPadding)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) { filterButton(index) }
+        .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
+        .help("Sort by \(column.name) — over the rows already fetched, not the whole result")
+    }
+
+    /// A column's name by position, for the sort banner. Falls back to the position when the sort
+    /// and the columns disagree, which can happen for the instant between a new result's columns
+    /// landing and its sort being cleared.
+    private func columnName(_ index: Int, in columns: [Event.Column]) -> String {
+        columns.indices.contains(index) ? columns[index].name : "column \(index + 1)"
+    }
+
     private func rowView(_ row: [String?], index: Int, columns: [Event.Column], widths: [CGFloat]) -> some View {
         HStack(spacing: 0) {
             gutter("\(index + 1)")
             ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, column in
                 let key = CellKey(row: index, column: columnIndex)
                 let staged = tab.cellEdits.value(at: key) != nil
-                cellView(key: key, original: columnIndex < row.count ? row[columnIndex] : nil)
+                cellView(key: key, original: columnIndex < row.count ? row[columnIndex] : nil,
+                         column: column)
                     .frame(width: widths.indices.contains(columnIndex) ? widths[columnIndex] : 120,
                            alignment: isNumeric(column.type) ? .trailing : .leading)
                     .padding(.horizontal, cellPadding)
@@ -364,7 +429,8 @@ struct ResultGrid: View {
     /// One cell: the editor while it is being edited, the staged text when it has one, and the value
     /// the server sent otherwise.
     @ViewBuilder
-    private func cellView(key: CellKey, original: String?) -> some View {
+    private func cellView(key: CellKey, original: String?, column: Event.Column) -> some View {
+        let shown = tab.cellEdits.value(at: key) ?? original
         if editingCell == key {
             TextField("", text: $editingText)
                 .textFieldStyle(.plain)
@@ -374,14 +440,56 @@ struct ResultGrid: View {
                 .onSubmit { commitEdit(at: key) }
                 .onExitCommand { cancelEdit() }
                 .onAppear { editorFocused = true }
+        } else if GridValue.isOpenable(value: shown, type: column.type) {
+            // A structured value — ARRAY, MAP, ROW, JSON, or JSON that happens to live in a varchar
+            // — opens its whole self instead of standing in for it with one truncated line. The
+            // double-click is the one editing uses; the difference is that for a value the reader
+            // can show, reading it is the more useful default, and the context menu still offers
+            // Edit Cell… for the other one.
+            cell(shown)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { viewingCell = key }
+                .popover(isPresented: popoverBinding(for: key), arrowEdge: .bottom) {
+                    CellValueViewer(value: shown ?? "", column: column.name, type: column.type)
+                }
         } else {
-            cell(tab.cellEdits.value(at: key) ?? original)
+            cell(shown)
                 .contentShape(Rectangle())
                 // Double-click, the gesture every table editor uses. The context menu carries the
                 // same action, because a drag gesture sits on the row and which of the two claims a
                 // click is not something a snapshot can prove.
                 .onTapGesture(count: 2) { beginEdit(at: key) }
         }
+    }
+
+    /// The text a cell currently shows: the staged edit when there is one, the server's value
+    /// otherwise. The same rule `cellView` uses, so the menu and the reader cannot disagree with
+    /// the cell about what it holds.
+    private func cellValue(at key: CellKey) -> String? {
+        tab.cellEdits.value(at: key) ?? originalText(at: key)
+    }
+
+    /// The selected cell when its value is one the reader can open, or `nil` when it is not — or
+    /// when nothing is selected. Drives the context menu item's enabled state.
+    private func selectedCell() -> (value: String, column: Event.Column)? {
+        guard let preview = tab.preview, let selection = tab.cellSelection,
+              preview.columns.indices.contains(selection.left) else { return nil }
+        let column = preview.columns[selection.left]
+        let key = CellKey(row: selection.top, column: selection.left)
+        guard let value = cellValue(at: key),
+              GridValue.isOpenable(value: value, type: column.type) else { return nil }
+        return (value, column)
+    }
+
+    /// Open the reader on the selection's top-left cell, the cell its own double-click would open.
+    private func viewSelectedValue() {
+        guard let selection = tab.cellSelection, selectedCell() != nil else { return }
+        viewingCell = CellKey(row: selection.top, column: selection.left)
+    }
+
+    /// The reader's presentation, bound to one cell's key so only that cell's popover can be open.
+    private func popoverBinding(for key: CellKey) -> Binding<Bool> {
+        Binding(get: { viewingCell == key }, set: { if !$0 { viewingCell = nil } })
     }
 
     /// Open the editor over one cell, seeded with what the cell currently shows.
@@ -397,7 +505,7 @@ struct ResultGrid: View {
     /// for.
     private func commitEdit(at key: CellKey) {
         if let selection = tab.cellSelection, selection.cellCount > 1 {
-            tab.cellEdits.fill(editingText, over: selection, rows: filteredRows)
+            tab.cellEdits.fill(editingText, over: selection, rows: displayedRows)
         } else {
             tab.cellEdits.edit(editingText, at: key, original: originalText(at: key))
         }
@@ -411,8 +519,8 @@ struct ResultGrid: View {
 
     /// The value the server sent for a cell, before any staged edit.
     private func originalText(at key: CellKey) -> String? {
-        guard filteredRows.indices.contains(key.row) else { return nil }
-        let row = filteredRows[key.row]
+        guard displayedRows.indices.contains(key.row) else { return nil }
+        let row = displayedRows[key.row]
         return row.indices.contains(key.column) ? row[key.column] : nil
     }
 
@@ -428,7 +536,7 @@ struct ResultGrid: View {
         guard let selection = tab.cellSelection, let preview = tab.preview,
               let text = NSPasteboard.general.string(forType: .string) else { return }
         tab.cellEdits.paste(text, at: CellKey(row: selection.top, column: selection.left),
-                            rows: filteredRows, columnCount: preview.columns.count)
+                            rows: displayedRows, columnCount: preview.columns.count)
     }
 
     /// The statements the queued edits would run, or none when the app cannot say which table to
@@ -436,7 +544,7 @@ struct ResultGrid: View {
     private var pendingStatements: [String] {
         guard let preview = tab.preview, let table = tab.sourceTable,
               let connection = model.connection(for: tab) else { return [] }
-        return UpdateStatements.generate(edits: tab.cellEdits, rows: filteredRows,
+        return UpdateStatements.generate(edits: tab.cellEdits, rows: displayedRows,
                                          columns: preview.columns, table: table,
                                          kind: connection.kind)
     }
@@ -448,10 +556,10 @@ struct ResultGrid: View {
     private func selectionDrag(row: Int, widths: [CGFloat]) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                guard let preview = tab.preview, !preview.columns.isEmpty, !filteredRows.isEmpty
+                guard let preview = tab.preview, !preview.columns.isEmpty, !displayedRows.isEmpty
                 else { return }
                 let target = geometry.cell(at: value.location, inRow: row, widths: widths,
-                                           lastRow: filteredRows.count - 1,
+                                           lastRow: displayedRows.count - 1,
                                            lastColumn: preview.columns.count - 1)
                 if dragAnchor == nil { dragAnchor = target }
                 guard let anchor = dragAnchor else { return }
@@ -514,7 +622,7 @@ struct ResultGrid: View {
         }
         let fetched = tab.columnFilters.isEmpty
             ? preview.rows.count
-            : filteredRows.count
+            : displayedRows.count
         let scope = tab.columnFilters.isEmpty ? "" : " of \(preview.rows.count.formatted())"
 
         if let total = tab.totalRows {
@@ -724,6 +832,44 @@ struct ResultGrid: View {
         } message: {
             Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
         }
+    }
+}
+
+/// The header's own sentence about the sort.
+///
+/// A chevron on a column says *which* column and which way; it cannot say that this is an order over
+/// the rows already fetched. That is the part the plan asked to be written down, because a sorted
+/// grid looks exactly like a sorted result and the difference matters: the rows outside the limit are
+/// not in this order at all.
+///
+/// A view of its own rather than four lines inside `headerRow` so the sentence can be rendered and
+/// looked at without standing up the whole grid.
+struct GridSortBanner: View {
+    let column: String
+    let direction: GridSort.Direction
+    let fetched: Int
+    let onClear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.accent)
+            Text("Sorted by \(column) \(direction == .ascending ? "↑" : "↓") · in memory over the "
+                 + "\(pluralized(fetched, "row")) fetched — not the whole result.")
+                .font(.ui(10.5))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize()
+            Button(action: onClear) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Tone.ink.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+            .help("Clear the sort and go back to the server's own order")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 }
 
