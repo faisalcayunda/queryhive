@@ -104,9 +104,12 @@ sebuah profil yang memaksa `no_ddl` masih bisa dilewati `SAFE_MODE_CONFIRMED`.
 current line, highlight current statement, word wrap, code folding, show invisible characters, dan
 tab width. Ketujuhnya mendarat sebagai store preferensi editor tersendiri.
 
-**Tugas yang belum dikerjakan.** Empat item pane Editor TablePro yang **bukan setelan** melainkan
-fitur. Masing-masing dicatat di sini dengan apa yang ia butuhkan, supaya tidak ada sakelar yang
-menjanjikan sesuatu yang tidak ada.
+**Status 29 Sep 2026.** Ketujuh setelan mendarat, dan begitu pula empat dari lima tugas di bawah:
+run button per statement (`203c433`), auto-uppercase keywords (`b559925`), alur `:name` (`7189bc3`),
+dan pemeriksaan `UpdateStatements.literal` (`eb69841`, yang menemukan cacat nyata: teks ber-tipe
+numerik ditulis ke SQL tanpa diperiksa di jalur inline Trino). Yang tersisa hanya Vim mode, ditunda
+atas permintaan pengguna. Daftar di bawah disimpan sebagai catatan apa yang masing-masing butuhkan
+dan apa yang sengaja tidak dibangun.
 
 1. **Run button beside each statement.** App sudah punya "Run Current Statement"; yang belum adalah
    tombolnya di gutter. Butuh satu glyph per rentang statement di `LineNumberRulerView`, memakai
