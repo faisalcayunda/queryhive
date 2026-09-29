@@ -40,6 +40,12 @@ tentang rotasi key, Apple Developer ID, serta riset web bukan pekerjaan agen.
 
 ## Rencana
 
+> **Status 29 Sep 2026.** Batch 1 selesai. Lane A mendarat sebagai `30aef13` (floor ADR-0027
+> ditutup, `cargo test` 770/0), Lane B sebagai `d502d0c` (default row limit dan Appearance
+> master-detail, `swift test` 395/0), dan keempat keputusan Batch 2 dicatat di `2dbe952`.
+> Berikutnya: lane command profil `preference` (menyentuh `lib.rs`, `tests/golden.rs`, dan
+> `EngineCommand` di app), lalu Open Quickly.
+
 ### Batch 1, Lane A: floor Safe Mode (engine, serial)
 
 Aksi pertama: dua tes gagal di `crates/qh-ffi/tests/safe_mode.rs`.
