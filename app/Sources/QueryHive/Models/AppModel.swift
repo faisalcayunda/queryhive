@@ -25,6 +25,14 @@ final class AppModel {
     var selectedNodeID: String?
     var treeFilter = ""
 
+    /// Open Quickly: whether it is showing, what is typed into it, and which result is highlighted.
+    ///
+    /// On the model rather than in the view because the menu command that opens it lives in the
+    /// menu bar, outside the view that draws the palette.
+    var openQuicklyOpen = false
+    var openQuicklyQuery = ""
+    var openQuicklyIndex = 0
+
     /// The key-binding scheme, remembered across launches.
     ///
     /// Every binding in the app is read through `shortcut(for:)`, so switching this takes effect
@@ -1267,6 +1275,56 @@ final class AppModel {
         }
         walk(tree)
         return result
+    }
+
+    /// The results Open Quickly is showing, best first.
+    var quickResults: [QuickResult] {
+        QuickSearch.results(query: openQuicklyQuery, nodes: allNodes(),
+                            savedQueries: savedQueries, history: historyEntries)
+    }
+
+    func openQuickly() {
+        openQuicklyQuery = ""
+        openQuicklyIndex = 0
+        openQuicklyOpen = true
+    }
+
+    /// Move the highlight by `delta`, staying inside the list.
+    func moveQuickHighlight(by delta: Int) {
+        let count = quickResults.count
+        guard count > 0 else { return }
+        openQuicklyIndex = min(max(openQuicklyIndex + delta, 0), count - 1)
+    }
+
+    /// Do what a result says, and close the palette.
+    func applyQuickResult(_ result: QuickResult) {
+        switch result.action {
+        case .revealNode(let id):
+            revealNode(id)
+        case .loadSQL(let sql):
+            if let tab = selectedTab { loadIntoEditor(sql, in: tab) }
+        }
+        openQuicklyOpen = false
+    }
+
+    /// Select a node and open whatever has to open for it to be visible.
+    ///
+    /// Selecting alone would leave a table inside a collapsed schema, which looks like nothing
+    /// happened. The walk is over the same tree the sidebar draws, so a node that is not loaded
+    /// yet is simply not found.
+    func revealNode(_ id: String) {
+        selectedNodeID = id
+        func walk(_ nodes: [TreeNode]) -> Bool {
+            for node in nodes {
+                if node.id == id { return true }
+                if let children = node.children, walk(children) {
+                    node.expanded = true
+                    return true
+                }
+            }
+            return false
+        }
+        _ = walk(tree)
     }
 
     /// Rebuilds the roots from `connections`, reusing the node that already exists for an id so

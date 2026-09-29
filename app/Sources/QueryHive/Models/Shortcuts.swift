@@ -18,6 +18,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case commentLine
     case format
     case closeTab
+    case openQuickly
 
     var id: String { rawValue }
 
@@ -36,6 +37,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .commentLine: "Comment / Uncomment"
         case .format: "Format SQL"
         case .closeTab: "Close Tab"
+        case .openQuickly: "Open Quickly"
         }
     }
 }
@@ -144,6 +146,9 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         .saveFile: Shortcut("s", .command),
         .exportData: Shortcut("e", .command),
         .closeTab: Shortcut("w", .command),
+        // ⇧⌘O, one shift away from Open File: it opens something, and the file opener is the
+        // command a user already knows at ⌘O.
+        .openQuickly: Shortcut("o", [.command, .shift]),
         .commentLine: Shortcut("/", .command),
     ]
 }

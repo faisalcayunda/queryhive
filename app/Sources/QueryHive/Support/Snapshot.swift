@@ -304,6 +304,29 @@ enum Snapshot {
         }
 
         switch scene {
+        // Open Quickly with something to find: the tree seeded above, two saved queries and a
+        // history row, so the palette is reviewable without typing into it.
+        case "quickly":
+            model.openQuicklyQuery = "pener"
+            model.openQuicklyOpen = true
+            model.openQuicklyIndex = 0
+            model.savedQueries = [
+                Event.SavedQuery(
+                    id: "s1", name: "penerima per wilayah",
+                    sql: "SELECT kode_wilayah, COUNT(*) FROM hive.analytics.penerima_manfaat GROUP BY 1",
+                    connectionId: nil, folderId: nil, favourite: true, deleted: false, version: 1),
+                Event.SavedQuery(
+                    id: "s2", name: "Wilayah terbaru",
+                    sql: "SELECT * FROM hive.analytics.wilayah ORDER BY diperbarui DESC",
+                    connectionId: nil, folderId: nil, favourite: false, deleted: false, version: 1),
+            ]
+            model.historyEntries = [
+                Event.HistoryEntry(
+                    id: "h1", sql: "SELECT COUNT(*) FROM hive.analytics.penerima_manfaat",
+                    startedAt: 0, elapsedMs: 812, rowCount: 1, outcome: "ok", error: nil,
+                    connectionId: nil, deleted: false, version: 1),
+            ]
+
         // Groups holding the seeded connections, so the folder rows — their mark, their count of
         // connections and the way a connection reads inside one — are reviewable without clicking
         // through the menu that makes them.

@@ -81,6 +81,19 @@ struct RootView: View {
                  ? "Connections can be moved into it from a connection's Group menu."
                  : "The connection will be filed into it.")
         }
+        // Open Quickly floats over the workspace rather than taking a sheet: it is a keyboard
+        // detour, and Escape has to be able to close it without leaving the window.
+        .overlay {
+            if model.openQuicklyOpen {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.16)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.openQuicklyOpen = false }
+                    OpenQuickly()
+                        .padding(.top, 84)
+                }
+            }
+        }
     }
 }
 

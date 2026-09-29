@@ -80,6 +80,11 @@ struct QueryHiveApp: App {
                 Button("Load SQL File…") { model.selectedTab?.loadSQLFromFile() }
                     .keyboardShortcut(model.shortcut(for: .openFile))
                     .disabled(model.selectedTab == nil)
+                // Where a user looks for it, next to the other opener: ⇧⌘O, and the palette does
+                // the rest. Always available, because the tree and the saved queries exist even
+                // with no connection open.
+                Button("Open Quickly…") { model.openQuickly() }
+                    .keyboardShortcut(model.shortcut(for: .openQuickly))
                 Button("Import Data from File…") { model.presentImport() }
                     .disabled(model.connections.isEmpty)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
