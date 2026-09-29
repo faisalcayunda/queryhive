@@ -21,6 +21,7 @@ final class EditorPreferences {
     private static let wordWrapKey = "editorWordWrap"
     private static let codeFoldingKey = "editorCodeFolding"
     private static let showInvisiblesKey = "editorShowInvisibles"
+    private static let autoUppercaseKey = "editorAutoUppercaseKeywords"
     private static let tabWidthKey = "editorTabWidth"
 
     /// The store these switches are read from and written to.
@@ -36,6 +37,7 @@ final class EditorPreferences {
     private var storedWordWrap: Bool
     private var storedCodeFolding: Bool
     private var storedShowInvisibles: Bool
+    private var storedAutoUppercase: Bool
     private var storedTabWidth: Int
 
     init(defaults: UserDefaults = .standard) {
@@ -46,6 +48,7 @@ final class EditorPreferences {
         storedWordWrap = Self.on(defaults, Self.wordWrapKey, default: true)
         storedCodeFolding = Self.on(defaults, Self.codeFoldingKey, default: true)
         storedShowInvisibles = Self.on(defaults, Self.showInvisiblesKey, default: false)
+        storedAutoUppercase = Self.on(defaults, Self.autoUppercaseKey, default: false)
         let tabWidth = defaults.integer(forKey: Self.tabWidthKey)
         storedTabWidth = tabWidth > 0 ? tabWidth : 4
     }
@@ -97,6 +100,13 @@ final class EditorPreferences {
         set { storedShowInvisibles = newValue; persist() }
     }
 
+    /// Whether a keyword becomes upper case as soon as it is finished. Off by default: it rewrites
+    /// what was typed, and a setting that does that should be chosen rather than discovered.
+    var autoUppercaseKeywords: Bool {
+        get { storedAutoUppercase }
+        set { storedAutoUppercase = newValue; persist() }
+    }
+
     /// How wide a tab is, in spaces. Clamped, because the value comes from a control and a zero
     /// would put every tab stop on top of the last.
     var tabWidth: Int {
@@ -111,6 +121,7 @@ final class EditorPreferences {
         defaults.set(storedWordWrap, forKey: Self.wordWrapKey)
         defaults.set(storedCodeFolding, forKey: Self.codeFoldingKey)
         defaults.set(storedShowInvisibles, forKey: Self.showInvisiblesKey)
+        defaults.set(storedAutoUppercase, forKey: Self.autoUppercaseKey)
         defaults.set(storedTabWidth, forKey: Self.tabWidthKey)
     }
 }
@@ -128,12 +139,14 @@ struct EditorLayout: Equatable {
     var wordWrap: Bool
     var codeFolding: Bool
     var showInvisibles: Bool
+    var autoUppercaseKeywords: Bool
     var tabWidth: Int
 
     /// What an untouched install has, for anything that needs a layout without a store behind it.
     static let standard = EditorLayout(showLineNumbers: true, highlightCurrentLine: true,
                                        highlightCurrentStatement: true, wordWrap: true,
-                                       codeFolding: true, showInvisibles: false, tabWidth: 4)
+                                       codeFolding: true, showInvisibles: false,
+                                       autoUppercaseKeywords: false, tabWidth: 4)
 
     static var current: EditorLayout {
         let prefs = EditorPreferences.shared
@@ -143,6 +156,7 @@ struct EditorLayout: Equatable {
                             wordWrap: prefs.wordWrap,
                             codeFolding: prefs.codeFolding,
                             showInvisibles: prefs.showInvisibles,
+                            autoUppercaseKeywords: prefs.autoUppercaseKeywords,
                             tabWidth: prefs.tabWidth)
     }
 }

@@ -169,6 +169,9 @@ struct SQLEditor: NSViewRepresentable {
         private var debounce: DispatchWorkItem?
         private var suppressAutoTrigger = false
         private var isColouring = false
+        /// True while the uppercase pass is replacing text, so the `textDidChange` that replacement
+        /// raises does not start another one.
+        private var isUppercasing = false
 
         /// The string the last fold-shift was measured against. Folding is keyed by header offset,
         /// so an edit has to be told which text it came from to know how far the offsets moved.
@@ -188,6 +191,32 @@ struct SQLEditor: NSViewRepresentable {
         }
 
         // MARK: Layout switches
+
+        /// Uppercase the keyword the keystroke just finished, and say whether it did.
+        ///
+        /// The edit goes through `shouldChangeText`/`didChangeText` rather than through the text
+        /// storage alone, so it is one undoable step and the delegate is told — which is what makes
+        /// the syntax pass repaint the word it changed.
+        @discardableResult
+        private func uppercaseFinishedKeyword(_ textView: NSTextView) -> Bool {
+            guard !isUppercasing,
+                  let replacement = KeywordCase.replacement(in: textView.string as NSString,
+                                                            caret: textView.selectedRange().location)
+            else { return false }
+            isUppercasing = true
+            defer { isUppercasing = false }
+
+            let selected = textView.selectedRange()
+            guard textView.shouldChangeText(in: replacement.range,
+                                            replacementString: replacement.text) else { return false }
+            textView.textStorage?.replaceCharacters(in: replacement.range, with: replacement.text)
+            textView.didChangeText()
+            // The caret sat after the delimiter, and the word before it got longer or shorter.
+            let delta = (replacement.text as NSString).length - replacement.range.length
+            textView.setSelectedRange(NSRange(location: selected.location + delta,
+                                              length: selected.length))
+            return true
+        }
 
         /// Put the editor's switches into the text view, and only the ones that moved.
         ///
@@ -267,6 +296,13 @@ struct SQLEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            // Before anything reads the text: this rewrites the word just finished, and the fold,
+            // colour and completion passes should see the text that will actually be sent.
+            if parent.layout.autoUppercaseKeywords, uppercaseFinishedKeyword(textView) {
+                // The replacement raised `textDidChange` again, and that pass has already done the
+                // rest of this work. Doing it here as well would scan the document twice per word.
+                return
+            }
             parent.text = textView.string
             // Folds are recomputed before the syntax pass, because the syntax pass is what applies
             // them: the other order would paint the previous text's folds onto this one.

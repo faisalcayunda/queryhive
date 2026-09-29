@@ -933,6 +933,8 @@ struct EditorSettings: View {
                 RowDivider()
                 editorToggle("Show invisible characters", isOn: $prefs.showInvisibles)
                 RowDivider()
+                editorToggle("Auto-uppercase keywords", isOn: $prefs.autoUppercaseKeywords)
+                RowDivider()
                 HStack(spacing: 8) {
                     Text("Tab width")
                         .font(.ui(11.5))
