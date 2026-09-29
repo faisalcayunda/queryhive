@@ -161,8 +161,11 @@ final class AppModel {
         rebuildTree()
         newTab()
         if persistsSession {
+            // The termination observer is registered whichever way the startup setting goes, and
+            // the session is written either way: turning the setting on later has to bring back the
+            // workspace you had, not the one from whenever the setting was last on.
             observeTermination()
-            restoreSession()
+            if restoreTabsOnLaunch { restoreSession() }
         }
     }
 
@@ -644,6 +647,53 @@ final class AppModel {
     func closeSelectedTab() {
         guard let id = selectedTabID else { return }
         closeTab(id)
+    }
+
+    /// Close every tab but this one.
+    ///
+    /// The named tab stays selected, so the one the user was looking at does not move under the
+    /// pointer. Every tab goes through `closeTab`, which terminates a running tab's process — the
+    /// same thing the single-tab close does, and the reason these do not edit the array themselves.
+    func closeOtherTabs(keeping id: UUID) {
+        for other in tabs where other.id != id {
+            closeTab(other.id)
+        }
+        selectTab(id)
+    }
+
+    /// Close every tab to the right of this one, "right" being the strip's order.
+    func closeTabs(after id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        for other in tabs.suffix(from: index + 1) {
+            closeTab(other.id)
+        }
+    }
+
+    /// Close every tab, leaving the workspace empty.
+    ///
+    /// `tabCounter` is deliberately not reset: `newTab` names from it, and going back to "Query 1"
+    /// would give two tabs the same name within one session.
+    func closeAllTabs() {
+        for tab in tabs {
+            closeTab(tab.id)
+        }
+    }
+
+    /// Whether the workspace comes back the way it was left.
+    ///
+    /// On by default, which is what this app has always done. Off, a launch starts at one empty tab
+    /// and the last session is not read.
+    var restoreTabsOnLaunch: Bool = AppModel.storedRestoreTabsOnLaunch() {
+        didSet { UserDefaults.standard.set(restoreTabsOnLaunch, forKey: AppModel.restoreTabsKey) }
+    }
+
+    static let restoreTabsKey = "restoreTabsOnLaunch"
+
+    /// The stored answer, for the initializer and for tests.
+    static func storedRestoreTabsOnLaunch(in defaults: UserDefaults = .standard) -> Bool {
+        // `object(forKey:)` rather than `bool(forKey:)`: the latter cannot tell "off" from "never
+        // set", and a setting nobody has opened Settings for has to default to on.
+        defaults.object(forKey: restoreTabsKey) as? Bool ?? true
     }
 
     func selectTab(_ id: UUID) {

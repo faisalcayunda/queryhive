@@ -260,10 +260,27 @@ struct GeneralSettings: View {
     /// The app scene's Sparkle controller, or `nil` in a snapshot. See `SoftwareUpdateRow`.
     let updater: Updater?
 
+    @Environment(AppModel.self) private var model
     @Bindable private var store = ThemeStore.shared
 
     var body: some View {
+        @Bindable var model = model
         VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Startup",
+                         detail: "What the workspace holds when QueryHive opens: the tabs you left, "
+                             + "with their statements and their results, or one empty tab. The session is "
+                             + "written either way, so turning this back on brings back the workspace you "
+                             + "had rather than the one from whenever it was last on.") {
+                Toggle(isOn: $model.restoreTabsOnLaunch) {
+                    Text("Reopen the tabs from last time")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .padding(.vertical, 6)
+            }
+
             SettingsCard(title: "Software update",
                          detail: "QueryHive updates through Sparkle: it reads an appcast over HTTPS, "
                              + "checks the archive against the signing key in the bundle, then swaps the app and "

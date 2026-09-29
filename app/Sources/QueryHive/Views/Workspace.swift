@@ -142,6 +142,15 @@ struct TabChip: View {
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onTapGesture { model.selectTab(tab.id) }
         .onHover { hovering = $0 }
+        .contextMenu {
+            Button("Close") { model.closeTab(tab.id) }
+            Button("Close Others") { model.closeOtherTabs(keeping: tab.id) }
+                .disabled(model.tabs.count < 2)
+            Button("Close Tabs to the Right") { model.closeTabs(after: tab.id) }
+                .disabled(model.tabs.last?.id == tab.id)
+            Divider()
+            Button("Close All") { model.closeAllTabs() }
+        }
         .help(tab.summary)
     }
 
