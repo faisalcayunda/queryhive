@@ -2046,11 +2046,30 @@ dipakai grid** — lane-nya tidak boleh menyentuh `ResultGrid.swift`, jadi penya
 orkestrator setelah merge — dan find dapat mode regex di samping mode literal, dengan pola tidak
 valid sebagai keadaan yang ditampilkan bar, bukan crash.
 
-**Yang belum.** Gelombang 2: kolom grid (sembunyi/pindah/ganti nama), pencarian cross-column ke
-server, preset filter, Safe Mode enam tingkat + floor + execution log, truncate/drop lewat konfirmasi,
-sort server, **parameter binding** (keputusan trait driver; Trino tidak punya parameter), undo
-coalescing, UI peta kolom impor, pairing PKCE. Gelombang 3 (structure editor, routines/UDT, backup,
-copy object, Open Quickly, external API) butuh keputusan produk dulu.
+**Yang belum.** Gelombang 3: truncate/drop tabel lewat konfirmasi; sort server untuk hasil
+berhalaman; **parameter binding** (keputusan trait driver; Trino tidak punya parameter); UI peta kolom
+impor; pairing PKCE; dan menutup tiga gap gelombang 2 di bawah. Gelombang 4 (structure editor,
+routines/UDT, backup, copy object, Open Quickly, external API) butuh keputusan produk dulu.
+
+**Gelombang 2, selesai dan di-merge.** Dua lane paralel. **Safe Mode** kini punya tingkat `confirm`
+yang ditegakkan engine — menolak DDL dan statement tak terklasifikasi, menggantungkan DML pada
+`SAFE_MODE_CONFIRMED=1` — sehingga rantai `full < no_ddl < confirm < read_only` tetap benar dan tidak
+ada floor yang bisa meloloskan apa yang tingkat pengguna sendiri tolak; **floor** memilih yang paling
+ketat lewat urutan `strictness`; dan **execution log** menyimpan statement sebagai SHA-256 dengan
+rantai hash (migrasi `0007`), dibuktikan hidup oleh lima proses engine dan skrip Python independen
+yang menghitung ulang setiap hash (ADR-0026). **Grid** dapat kolom yang bisa disembunyikan, dipindah,
+dan diganti nama dengan rekonsiliasi sort/filter yang tetap ber-indeks sumber; pencarian cross-column
+di memori plus escalate ke server lewat perintah `preview`; filter sebagai preset; dan undo
+coalescing satu langkah per sesi edit.
+
+**Tiga gap yang dilaporkan gelombang 2, dan itu nyata.** App belum mengirim `SAFE_MODE_CONFIRMED`
+jadi memilih `confirm` di picker membuat engine menolak tulisan app; floor `driver read-only` belum
+tersambung ke `Capabilities`; dan keputusan MCP serta penolakan awal `import_data` belum ikut
+tercatat ke execution log. Ketiganya masuk gelombang 3.
+
+Verifikasi berat 29 Sep 2026 (sesudah gelombang 2): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**751 lulus / 0 gagal** ✅, `swift build && swift test` → **341 tes / 0 gagal** ✅.
 
 **Catatan yang sudah ditutup.** ADR-0021, 0022 dan 0023 sempat berbahasa Inggris karena brief
 agennya meminta begitu, sementara ADR lain berbahasa Indonesia — kesalahan brief saya. Ketiganya

@@ -12,7 +12,7 @@
 > `--snapshot`). Fase 5 mendarat 29 Sep 2026 dan diukur di §7, sebagian: mesin untuk ketiga itemnya
 > ada dan diuji, tetapi lembar mapping impor dan gestur insert/delete di grid belum dibangun. §12
 > (pengerasan) dikerjakan pada tanggal yang sama dan statusnya ada di sana; §13 (menutup gap terhadap
-> TablePro) mendarat gelombang 1, dengan gelombang 2 dan 3 dicatat di bagian itu.
+> TablePro) sudah mendarat gelombang 1 dan 2, dengan gelombang 3 dan 4 dicatat di bagian itu.
 
 ## 0. Prinsip dan aturan gate
 
@@ -874,11 +874,23 @@ Bukan fase, dan bukan bagian dari §12: §12 adalah lubang di kode yang sudah di
 | MCP resources, prompts, versi | `resources/list`+`read` (scope+allowlist yang sama dengan tool), `prompts/list`+`get`, dan `initialize` menolak versi tak dikenal dengan `-32022` + `data.supported` | ADR-0023 |
 | Kedalaman viewer + find | mode Tree (cap 5.000 node) dan Hex (cap 10 KB), format tampilan per kolom (Raw/Text/UUID/Unix/JSON) yang kini benar-benar dipakai grid, mode regex di find | — |
 
-**Yang belum, dan urutannya.** Gelombang 2: sembunyikan/pindah/ganti nama kolom grid, pencarian
-cross-column yang naik ke server, filter sebagai preset; Safe Mode enam tingkat + floor + execution
-log; truncate/drop tabel lewat konfirmasi; sort server untuk hasil berhalaman (12.1.5); **parameter
-binding** — sengaja tidak dikerjakan karena Trino tidak punya parameter di protokol HTTP-nya, jadi ini
-keputusan trait driver tersendiri; dan undo coalescing. Lalu UI impor (peta kolom) dan pairing PKCE.
+**Gelombang 2, selesai.** Dua lane paralel, di-merge, gate hijau (`cargo test` 751/0, `swift test`
+341/0):
+
+| Irisan | Hasil | Keputusan |
+|---|---|---|
+| Kedalaman Safe Mode | tingkat **`confirm`** (menolak DDL/tak terklasifikasi, menggantungkan DML pada `SAFE_MODE_CONFIRMED=1`) sehingga rantai `full < no_ddl < confirm < read_only` tetap benar; **floor** memilih yang paling ketat lewat `strictness`, bukan yang pertama cocok; **execution log** ber-hash-chain (migrasi `0007`) yang menyimpan statement sebagai SHA-256 | ADR-0026 |
+| Kedalaman grid | sembunyikan/pindah/ganti nama kolom dengan **rekonsiliasi** (sort & filter tetap ber-indeks sumber, jadi ikut kolom yang bergerak dan tidak salah jatuh ke tetangga); pencarian cross-column di memori + **escalate ke server** lewat perintah `preview`; filter sebagai **preset**; **undo coalescing** satu langkah per sesi edit | — |
+
+**Yang belum, dan urutannya.** Gelombang 3: truncate/drop tabel lewat konfirmasi; sort server untuk
+hasil berhalaman (12.1.5); **parameter binding** (keputusan trait driver — Trino tidak punya
+parameter di protokol HTTP-nya); UI peta kolom impor; pairing PKCE; **dan menutup tiga gap yang
+dilaporkan gelombang 2** — jalur run app yang mengirim `SAFE_MODE_CONFIRMED` (tanpa itu, memilih
+`confirm` di picker membuat engine menolak tulisan app), floor `driver read-only` yang belum
+tersambung ke `Capabilities`, dan keputusan MCP serta penolakan awal `import_data` yang belum ikut
+tercatat ke execution log. Gelombang 4 (structure editor, routines/UDT, backup & restore, copy
+object, Open Quickly, external API) butuh keputusan produk dulu, dan tetangganya sudah ditolak §9.
+
 
 **Gelombang 3 — butuh keputusan produk, bukan sekadar kerja.** Structure editor, routines/UDT, backup &
 restore PostgreSQL, copy object antar engine, Open Quickly, external API. Sebagian tetangganya sudah
