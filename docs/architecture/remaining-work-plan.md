@@ -68,19 +68,21 @@ default-nya. Tidak ada irisan dengan Lane A.
 
 Gate: `swift build && swift test`, target 392/0. Kedua lane di-merge `--no-ff` setelah hijau.
 
-### Batch 2: checkpoint keputusan
+### Batch 2: checkpoint keputusan, sudah dijawab 29 Sep 2026
 
-Satu pesan ke pengguna, empat pertanyaan digabung.
+1. **Profiles: kind pertama adalah `preference`.** Setelan aplikasi per akun. Konsumennya paling
+   jelas dan tidak menyentuh koneksi, jadi ia dibangun lebih dulu; `connection` dan `saved_query`
+   menyusul bila ada kebutuhan.
+2. **Notifications: tidak dibangun.** App belum punya permukaan notifikasi dan belum ada pelacakan
+   operasi panjang.
+3. **Gelombang 4: hanya Open Quickly.** Structure editor, routines/UDT, backup & restore, copy
+   object, dan external API tidak dikerjakan.
+4. **Pane MCP: tetap ditunda** sampai MCP dipakai lebih dari satu orang.
 
-1. Profiles: kind pertama apa, skema `payload_json`-nya, dan bolehkah sebuah profil menetapkan
-   `SAFE_MODE_FLOOR`.
-2. Notifications: ya atau tidak.
-3. Gelombang 4: rekomendasi Open Quickly (app-only, memakai schema tree yang ada, tanpa permukaan
-   Safe Mode), atau tidak sama sekali.
-4. Pane MCP: konfirmasi tetap ditunda.
-
-Command profil di `lib.rs` dikerjakan setelah jawaban nomor satu ada, sebagai lane tersendiri karena
-menyentuh `lib.rs`, `tests/golden.rs`, dan `EngineCommand` di app.
+Command profil di `lib.rs` dikerjakan sebagai lane tersendiri karena menyentuh `lib.rs`,
+`tests/golden.rs`, dan `EngineCommand` di app. Sebuah profil **boleh** menetapkan
+`SAFE_MODE_FLOOR`, dan itulah alasan floor ditutup lebih dulu di Lane A: sebelum addendum ADR-0027,
+sebuah profil yang memaksa `no_ddl` masih bisa dilewati `SAFE_MODE_CONFIRMED`.
 
 ### Di luar agen
 
