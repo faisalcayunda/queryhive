@@ -13,6 +13,7 @@ final class SQLFindBar: NSView, NSSearchFieldDelegate {
     private let countLabel = NSTextField(labelWithString: "")
     private let caseToggle = NSButton()
     private let wholeWordToggle = NSButton()
+    private let regexToggle = NSButton()
     private let previousButton = NSButton()
     private let nextButton = NSButton()
     private let replaceToggle = NSButton()
@@ -38,8 +39,14 @@ final class SQLFindBar: NSView, NSSearchFieldDelegate {
         var options: FindReplace.Options = []
         if caseToggle.state == .on { options.insert(.caseSensitive) }
         if wholeWordToggle.state == .on { options.insert(.wholeWord) }
+        if regexToggle.state == .on { options.insert(.regularExpression) }
         return options
     }
+
+    /// The message for a pattern that will not compile, or `nil` when the current one is usable.
+    /// Read by the coordinator, which skips the search rather than searching for nothing, and by
+    /// tests, which is why it is not private.
+    private(set) var patternError: String?
 
     /// Whether the replace row is showing. The container is told to re-lay-out, because a find bar
     /// that is tall enough for one row and then asked to draw two would clip the second.
@@ -88,8 +95,10 @@ final class SQLFindBar: NSView, NSSearchFieldDelegate {
 
         style(toggle: caseToggle, title: "Aa", help: "Match case")
         style(toggle: wholeWordToggle, title: "W", help: "Whole words only")
+        style(toggle: regexToggle, title: ".*", help: "Regular expression")
         caseToggle.action = #selector(optionsChanged)
         wholeWordToggle.action = #selector(optionsChanged)
+        regexToggle.action = #selector(optionsChanged)
 
         style(symbol: previousButton, "chevron.up", help: "Previous match (⇧⌘G)", action: #selector(previousPressed))
         style(symbol: nextButton, "chevron.down", help: "Next match (⌘G)", action: #selector(nextPressed))
@@ -114,7 +123,8 @@ final class SQLFindBar: NSView, NSSearchFieldDelegate {
         replaceAllButton.toolTip = "Replace every match"
 
         let row = NSStackView(views: [searchField, countLabel, previousButton, nextButton,
-                                      caseToggle, wholeWordToggle, replaceToggle, closeButton])
+                                      caseToggle, wholeWordToggle, regexToggle, replaceToggle,
+                                      closeButton])
         row.orientation = .horizontal
         row.spacing = 6
         row.alignment = .centerY
@@ -177,10 +187,32 @@ final class SQLFindBar: NSView, NSSearchFieldDelegate {
 
     /// The count readout. An empty query shows nothing rather than "No matches", because nothing
     /// has been searched for yet.
+    ///
+    /// A result clears any pattern error first: the two share the one label, and a stale "Invalid
+    /// pattern" next to a real count would be the bar lying about what it found.
     func setResult(count: Int, current: Int?) {
+        patternError = nil
+        countLabel.toolTip = nil
         let hasQuery = !query.isEmpty
         countLabel.stringValue = hasQuery ? FindReplace.summary(count: count, index: current) : ""
         countLabel.textColor = count == 0 && hasQuery ? NSColor(Tone.coral) : Tone.readoutNS
+    }
+
+    /// Show that the current pattern will not compile.
+    ///
+    /// The message itself is the tooltip; the label carries the short state, because a long
+    /// compiler string next to the search field would push the toggles off the bar. Pass `nil` to
+    /// clear, which `setResult` also does on the next successful search.
+    func setPatternError(_ message: String?) {
+        patternError = message
+        countLabel.stringValue = message == nil ? "" : "Invalid pattern"
+        countLabel.textColor = message == nil ? Tone.readoutNS : NSColor(Tone.coral)
+        countLabel.toolTip = message
+    }
+
+    /// Turn the regular-expression toggle on or off. Used by tests and by any future state restore.
+    func setRegularExpression(_ on: Bool) {
+        regexToggle.state = on ? .on : .off
     }
 
     // MARK: Actions

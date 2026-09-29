@@ -34,6 +34,18 @@ enum GridValue {
         return ["array", "map(", "row(", "json"].contains { lowered.contains($0) }
     }
 
+    /// Whether a column's type is one whose cells are bytes rather than text.
+    ///
+    /// The engine renders `bytea`, `BLOB` and `varbinary` as lowercase hex
+    /// (`crates/qh-core/src/render.rs::hex_encode`), so a cell of one of these can be decoded back
+    /// and shown as a hex dump. The match is a substring because the drivers spell the family
+    /// differently — PostgreSQL `bytea`, MySQL `blob`/`tinyblob`/`mediumblob`/`longblob`/`binary`,
+    /// Trino `varbinary` — and every one of those contains one of these words.
+    static func isBinary(type: String) -> Bool {
+        let lowered = type.lowercased()
+        return ["bytea", "blob", "binary"].contains { lowered.contains($0) }
+    }
+
     /// The pretty-printed form of a value when it parses as JSON, or `nil` when it does not.
     ///
     /// Keys are sorted so one value always prints the same way; the viewer's job is to be read, not
@@ -63,15 +75,16 @@ enum GridValue {
         return head + "\n\n… truncated for display (\(length.formatted()) units); Copy keeps the whole value."
     }
 
-    /// Whether a cell is worth opening: a structured column, or text that is itself a JSON object
-    /// or array.
+    /// Whether a cell is worth opening: a structured column, a binary column, or text that is
+    /// itself a JSON object or array.
     ///
     /// The second half makes JSON stored in a plain `varchar` readable, which is common enough in
     /// this data. The container check keeps it narrow: `true`, `42` and `"x"` parse as JSON too, and
-    /// a cell that opens a viewer only to show the same word it already shows is noise.
+    /// a cell that opens a viewer only to show the same word it already shows is noise. A binary
+    /// column always opens, because the hex dump is something the one-line cell cannot show.
     static func isOpenable(value: String?, type: String) -> Bool {
         guard let value, !value.isEmpty else { return false }
-        if isStructured(type: type) { return true }
+        if isStructured(type: type) || isBinary(type: type) { return true }
         return looksLikeJSON(value) && prettyPrinted(value) != nil
     }
 

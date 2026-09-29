@@ -357,8 +357,18 @@ struct SQLEditor: NSViewRepresentable {
 
         private func findQueryChanged(_ query: String) {
             guard let textView else { return }
+            let options = findBar?.options ?? []
+            // An invalid pattern is a state the bar shows, not a search: running it would find
+            // nothing and read as "No matches", which is a different and wrong answer.
+            if let error = FindReplace.patternError(needle: query, options: options) {
+                findMatches = []
+                findIndex = nil
+                updateFindHighlight()
+                findBar?.setPatternError(error)
+                return
+            }
             findMatches = FindReplace.ranges(in: textView.string as NSString, needle: query,
-                                             options: findBar?.options ?? [])
+                                             options: options)
             findIndex = FindReplace.currentIndex(of: findMatches, selection: textView.selectedRange())
             updateFindHighlight()
             findBar?.setResult(count: findMatches.count, current: findIndex)

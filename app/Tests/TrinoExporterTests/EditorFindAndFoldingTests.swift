@@ -269,6 +269,15 @@ final class EditorFindAndFoldingTests: XCTestCase {
         bar.isReplacing = true
         bar.frame = NSRect(x: 0, y: 0, width: 520, height: bar.fittingSize.height)
         try render(bar, named: "find-bar-replace.png")
+
+        // The regex toggle on and a pattern that will not compile: the state the bar shows instead
+        // of a crash or a fake "No matches".
+        bar.isReplacing = false
+        bar.setQuery("(")
+        bar.setRegularExpression(true)
+        bar.setPatternError("Invalid pattern: the value is invalid")
+        bar.frame = NSRect(x: 0, y: 0, width: 520, height: bar.fittingSize.height)
+        try render(bar, named: "find-bar-invalid.png")
     }
 
     /// Draws the editor with a statement folded. The PNG is the deliverable; the assertions are a
