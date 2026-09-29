@@ -58,6 +58,24 @@ pub use memory::MemoryStore;
 /// would lose them quietly.
 pub const SERVICE: &str = "id.data-ecosystem.queryhive";
 
+/// The prefix a profile's Keychain account carries.
+///
+/// One Keychain service holds both kinds of item, so the account string is what keeps them
+/// apart. A connection's account is its UUID — what the app has written since long before
+/// this engine existed, and not ours to change. [`account_key`] folds a UUID-shaped account
+/// to upper case and passes anything else through untouched, so an account beginning with
+/// this prefix can never be read as a connection's: a UUID opens with a hex digit, and the
+/// prefix opens with `p`.
+pub const PROFILE_ACCOUNT_PREFIX: &str = "profile:";
+
+/// The Keychain account a profile's secret lives under.
+///
+/// The profile's id goes through [`account_key`] first, so a profile id that happens to be a
+/// UUID gets the same single spelling a connection's does, and one profile has one account.
+pub fn account_for_profile(id: &str) -> String {
+    format!("{PROFILE_ACCOUNT_PREFIX}{}", account_key(id))
+}
+
 /// Why a secret could not be read or written.
 #[derive(Debug, Error)]
 pub enum CredentialError {

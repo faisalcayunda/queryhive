@@ -333,7 +333,7 @@ fn read_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionGroup> {
     })
 }
 
-fn to_sync_id(text: &str) -> rusqlite::Result<SyncId> {
+pub(crate) fn to_sync_id(text: &str) -> rusqlite::Result<SyncId> {
     SyncId::parse(text).map_err(|error| {
         to_sql_error(&StorageError::BadId {
             text: text.to_owned(),
@@ -347,7 +347,7 @@ fn to_sync_id(text: &str) -> rusqlite::Result<SyncId> {
 /// `FromSqlConversionFailure` is rusqlite's own variant for it, and it is what makes the
 /// row-level error carry a column index — which is the difference between "one row is
 /// corrupt" and "the database is corrupt".
-fn to_sql_error(error: &StorageError) -> rusqlite::Error {
+pub(crate) fn to_sql_error(error: &StorageError) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
         rusqlite::types::Type::Text,

@@ -32,6 +32,7 @@
 mod connections;
 mod execution_log;
 mod history;
+mod identity;
 pub mod import;
 mod mcp_token;
 pub mod migrate;
@@ -40,6 +41,7 @@ mod session;
 pub use connections::{ConnectionGroup, ConnectionKind, ConnectionRecord};
 pub use execution_log::{hash_statement, ExecutionRecord, NewExecution, GENESIS};
 pub use history::{Outcome, QueryHistoryRecord, SavedQueryRecord};
+pub use identity::{app_account_id, AppAccount, ProfileKind, ProfileRecord, Provider};
 pub use import::{ImportPlan, ImportReport, ImportedSource, SkippedRow};
 pub use mcp_token::{hash_token, McpTokenRecord, TokenState};
 pub use migrate::{AppliedMigration, Migration, MIGRATIONS};
@@ -97,6 +99,17 @@ pub enum StorageError {
     /// column.
     #[error("{text:?} is not an outcome this engine knows")]
     UnknownOutcome { text: String },
+
+    /// A `provider` the column holds and this build does not know.
+    ///
+    /// Its own variant rather than a shared "unknown enum" one, because the message a
+    /// reader gets has to name the column they should look at.
+    #[error("{text:?} is not an identity provider this engine knows")]
+    UnknownProvider { text: String },
+
+    /// A `kind` the column holds and this build does not know.
+    #[error("{text:?} is not a profile kind this engine knows")]
+    UnknownProfileKind { text: String },
 
     #[error("the row holds {text:?} where an identity belongs: {reason}")]
     BadId { text: String, reason: String },
@@ -502,10 +515,11 @@ mod tests {
                 "idx_connection_live",
                 "idx_execution_log_at",
                 "idx_history_dedupe",
-                "idx_history_started"
+                "idx_history_started",
+                "profile_owner_kind"
             ],
             "the live-connections list, the execution-log order, the autosave \
-             de-duplication, and the history order"
+             de-duplication, the history order, and one owner's profiles"
         );
 
         // The connection index is partial, which is what keeps it small while tombstones

@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "execution_log",
         sql: include_str!("../migrations/0007_execution_log.sql"),
     },
+    Migration {
+        version: 8,
+        name: "identity",
+        sql: include_str!("../migrations/0008_identity.sql"),
+    },
 ];
 
 /// A migration that has run, as the history table remembers it.
