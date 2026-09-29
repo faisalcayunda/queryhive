@@ -26,6 +26,9 @@ struct SQLEditor: NSViewRepresentable {
     /// The editor's own switches, passed as a value: SwiftUI re-applies a representable when the
     /// value it was given changes, and a reference to the store would never change.
     let layout: EditorLayout
+    /// Called with a statement's first offset when its run marker is clicked in the gutter. The
+    /// host decides what running means; the editor only knows where the statement starts.
+    let onRunStatement: ((Int) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -110,6 +113,9 @@ struct SQLEditor: NSViewRepresentable {
         context.coordinator.applyLayout()
         ruler.onToggleFold = { [weak coordinator = context.coordinator] offset in
             coordinator?.toggleFold(headerOffset: offset)
+        }
+        ruler.onRun = { [weak coordinator = context.coordinator] offset in
+            coordinator?.runStatement(at: offset)
         }
         textView.interceptKey = { [weak coordinator = context.coordinator] event in
             coordinator?.handle(event) ?? false
@@ -239,7 +245,38 @@ struct SQLEditor: NSViewRepresentable {
             if previous?.codeFolding != layout.codeFolding {
                 refreshFolds(previous: textView.string)
             }
+            updateRunMarks()
             updateHighlight(textView)
+        }
+
+        /// The gutter's run markers, from the statement ranges the text already gave us.
+        private func updateRunMarks() {
+            guard let ruler else { return }
+            ruler.showsRunMarks = parent.layout.runButtonPerStatement
+            guard parent.layout.runButtonPerStatement else {
+                ruler.runMarks = []
+                return
+            }
+            let lineStarts = SQLFolding.lineStarts(in: (textView?.string ?? "") as NSString)
+            ruler.runMarks = statementBounds.compactMap { range in
+                let line = SQLFolding.line(containing: range.location, lineStarts: lineStarts)
+                return LineNumberRulerView.RunMark(headerLine: line, headerOffset: range.location)
+            }
+        }
+
+        /// Run the statement that starts at `offset`.
+        ///
+        /// The offset is put where a run reads it — the tab's own selection — and then the host is
+        /// asked to run, so the gutter and the Run menu take the same path through the model.
+        func runStatement(at offset: Int) {
+            guard let textView else { return }
+            let length = (textView.string as NSString).length
+            guard offset >= 0, offset <= length else { return }
+            let selection = NSRange(location: offset, length: 0)
+            textView.setSelectedRange(selection)
+            parent.selection = selection
+            parent.caret = offset
+            parent.onRunStatement?(offset)
         }
 
         /// Wrap, or run off the right edge. In AppKit these are one decision: a container that
@@ -621,12 +658,12 @@ struct SQLEditor: NSViewRepresentable {
         private func refreshFolds(previous: String) {
             guard let textView else { return }
             let text = textView.string
-            // The caret's statement is what the highlight needs, and it is computed here rather
-            // than on every caret move: this runs when the text changes, which is when the ranges
-            // can have changed. Off, nothing pays for it.
-            statementBounds = parent.layout.highlightCurrentStatement
-                ? SQLFolding.statementRanges(in: text)
-                : []
+            // Both the caret's band and the gutter's run markers read these, so they are computed
+            // when either wants them, and never on a caret move.
+            let wantsStatements = parent.layout.highlightCurrentStatement
+                || parent.layout.runButtonPerStatement
+            statementBounds = wantsStatements ? SQLFolding.statementRanges(in: text) : []
+            defer { updateRunMarks() }
             // Folding off means no regions and no markers. The offsets are dropped with them: a
             // fold that was collapsed when the switch went off would otherwise come back somewhere
             // else when it went on again, because the text may have changed in between.
@@ -1049,6 +1086,30 @@ final class LineNumberRulerView: NSRulerView {
     /// Called with a mark's `headerOffset` when its marker is clicked.
     var onToggleFold: ((Int) -> Void)?
 
+    /// One run marker: the first line of a statement, and the offset a click hands back.
+    struct RunMark: Equatable {
+        /// 0-based line the marker sits on.
+        let headerLine: Int
+        /// UTF-16 offset of the statement's first character.
+        let headerOffset: Int
+    }
+
+    /// Markers for the statements that can be run. Empty when the switch is off.
+    var runMarks: [RunMark] = [] {
+        didSet { needsDisplay = true }
+    }
+
+    /// Whether the run column is reserved at all, which is what decides the gutter's width.
+    var showsRunMarks = false {
+        didSet {
+            guard showsRunMarks != oldValue else { return }
+            updateWidth()
+        }
+    }
+
+    /// Called with a mark's `headerOffset` when its run marker is clicked.
+    var onRun: ((Int) -> Void)?
+
     init(textView: NSTextView) {
         self.textView = textView
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
@@ -1066,9 +1127,14 @@ final class LineNumberRulerView: NSRulerView {
             if character == "\n" { count += 1 }
         }
         lineCount = lines
-        let wanted = Self.gutterWidth(forLines: lines)
-        if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
+        updateWidth()
         needsDisplay = true
+    }
+
+    /// The width the current line count and the run column ask for.
+    private func updateWidth() {
+        let wanted = Self.gutterWidth(forLines: lineCount, showsRunMarks: showsRunMarks)
+        if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
     }
 
     /// The text's own inset inside the text view. Named because the placeholder overlay in
@@ -1080,8 +1146,8 @@ final class LineNumberRulerView: NSRulerView {
     ///
     /// An overlay that wants to sit exactly where the text sits has to add both, and this is that
     /// sum in one place. Guessing it produced a placeholder drawn *under* the line numbers.
-    static func textOriginX(forLines lines: Int) -> CGFloat {
-        gutterWidth(forLines: lines) + textInset.width
+    static func textOriginX(forLines lines: Int, showsRunMarks: Bool = false) -> CGFloat {
+        gutterWidth(forLines: lines, showsRunMarks: showsRunMarks) + textInset.width
     }
 
     /// Wide enough for the number it will have to show, so the gutter does not jump sideways when
@@ -1089,10 +1155,20 @@ final class LineNumberRulerView: NSRulerView {
     /// does not get.
     ///
     /// Internal rather than private so the placeholder can be told where the text starts.
-    static func gutterWidth(forLines lines: Int) -> CGFloat {
+    static func gutterWidth(forLines lines: Int, showsRunMarks: Bool = false) -> CGFloat {
         let digits = CGFloat(max(2, String(max(lines, 1)).count))
-        return digits * 7.5 + 20
+        return digits * 7.5 + 20 + (showsRunMarks ? runColumn : 0)
     }
+
+    /// The extra width the run column takes, and where each marker sits inside the gutter.
+    ///
+    /// Two columns rather than one because a statement's first line is often also a fold header —
+    /// `WITH x AS (` is both — and a marker that hid the other would take away a control the user
+    /// can see.
+    static let runColumn: CGFloat = 14
+    private static let runMarkerX: CGFloat = 5
+    private static let foldMarkerX: CGFloat = 5
+    private static let foldMarkerShiftedX: CGFloat = 19
 
     /// The gutter draws **no background of its own**.
     ///
@@ -1148,12 +1224,18 @@ final class LineNumberRulerView: NSRulerView {
         ]
 
         for entry in numberedLines(in: scrollView.contentView.bounds) {
-            // The fold marker, when this line opens a region. It sits at the gutter's leading edge,
-            // out of the number's way: the number is right-aligned against the text, and the digits
-            // never reach this far left except at three digits, where the marker is still clear of
-            // them by the width `gutterWidth` reserves.
-            if let mark = foldMarks.first(where: { $0.headerLine == entry.number - 1 }) {
-                drawFoldMarker(mark, midY: origin.y + inset.height + entry.minY + entry.height / 2)
+            let midY = origin.y + inset.height + entry.minY + entry.height / 2
+            let line = entry.number - 1
+            let hasRun = runMarks.contains { $0.headerLine == line }
+            // The run marker, at the gutter's leading edge. The fold marker moves over when both are
+            // on this line, because a statement's first line is often also a fold header.
+            if hasRun { drawRunMarker(midY: midY) }
+            if let mark = foldMarks.first(where: { $0.headerLine == line }) {
+                // Always in the fold column when the run column is reserved, whether or not this
+                // line has a run marker: a marker drawn inside the run column would be read as a
+                // click on the other control and could not be hit at all.
+                drawFoldMarker(mark, midY: midY,
+                               x: showsRunMarks ? Self.foldMarkerShiftedX : Self.foldMarkerX)
             }
 
             let label = "\(entry.number)" as NSString
@@ -1165,53 +1247,82 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
+    /// A small right-pointing triangle: the mark that this statement can be run from here.
+    private func drawRunMarker(midY: CGFloat) {
+        let path = NSBezierPath()
+        let x = Self.runMarkerX
+        path.move(to: NSPoint(x: x, y: midY - 4.5))
+        path.line(to: NSPoint(x: x, y: midY + 4.5))
+        path.line(to: NSPoint(x: x + 6.5, y: midY))
+        path.close()
+        NSColor(Tone.accent).setFill()
+        path.fill()
+    }
+
     /// A small triangle: pointing right when the region is folded, down when it is open.
-    private func drawFoldMarker(_ mark: FoldMark, midY: CGFloat) {
+    private func drawFoldMarker(_ mark: FoldMark, midY: CGFloat, x: CGFloat) {
         let size: CGFloat = 4.5
         let path = NSBezierPath()
         if mark.folded {
-            path.move(to: NSPoint(x: 5, y: midY - size))
-            path.line(to: NSPoint(x: 5, y: midY + size))
-            path.line(to: NSPoint(x: 5 + size * 1.5, y: midY))
+            path.move(to: NSPoint(x: x, y: midY - size))
+            path.line(to: NSPoint(x: x, y: midY + size))
+            path.line(to: NSPoint(x: x + size * 1.5, y: midY))
         } else {
-            path.move(to: NSPoint(x: 5, y: midY + size))
-            path.line(to: NSPoint(x: 5 + size * 2, y: midY + size))
-            path.line(to: NSPoint(x: 5 + size, y: midY - size))
+            path.move(to: NSPoint(x: x, y: midY + size))
+            path.line(to: NSPoint(x: x + size * 2, y: midY + size))
+            path.line(to: NSPoint(x: x + size, y: midY - size))
         }
         path.close()
         (mark.folded ? Tone.inkNS(0.80) : Tone.readoutNS).setFill()
         path.fill()
     }
 
-    /// Clicking a marker folds or unfolds its region.
+    /// Clicking a marker runs the statement, or folds or unfolds its region.
     ///
     /// A ruler has no notion of rows, so the click is mapped through the layout manager to a
-    /// character and then to a line. A click anywhere on a foldable line's gutter counts: the marker
-    /// is small, and a user aiming at it should not have to hit it exactly.
+    /// character and then to a line. The run column is the leading strip and the fold column is
+    /// everything after it; a click anywhere on a line's own column counts, because the markers are
+    /// small and a user aiming at one should not have to hit it exactly.
     override func mouseDown(with event: NSEvent) {
-        if let offset = foldHeader(at: event) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let offset = runHeader(at: point) {
+            onRun?(offset)
+            return
+        }
+        if let offset = foldHeader(at: point) {
             onToggleFold?(offset)
             return
         }
         super.mouseDown(with: event)
     }
 
-    private func foldHeader(at event: NSEvent) -> Int? {
+    /// The statement a click in the run column names, or nil.
+    private func runHeader(at point: NSPoint) -> Int? {
+        guard showsRunMarks, point.x < Self.runColumn, let line = line(at: point) else { return nil }
+        return runMarks.first { $0.headerLine == line }?.headerOffset
+    }
+
+    private func foldHeader(at point: NSPoint) -> Int? {
+        // With the run column reserved, the leading strip belongs to the run marker.
+        if showsRunMarks, point.x < Self.runColumn { return nil }
+        guard let line = line(at: point) else { return nil }
+        return foldMarks.first { $0.headerLine == line }?.headerOffset
+    }
+
+    /// The 0-based line under a point in the ruler.
+    private func line(at point: NSPoint) -> Int? {
         guard let textView,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer,
               (textView.string as NSString).length > 0
         else { return nil }
-
-        let point = convert(event.locationInWindow, from: nil)
         let origin = convert(NSPoint.zero, from: textView)
         let containerPoint = NSPoint(x: 0, y: point.y - origin.y - textView.textContainerInset.height)
         let string = textView.string as NSString
         let index = min(max(0, layoutManager.characterIndex(for: containerPoint, in: container,
                                                             fractionOfDistanceBetweenInsertionPoints: nil)),
                          string.length - 1)
-        let line = SQLFolding.line(containing: index, lineStarts: SQLFolding.lineStarts(in: string))
-        return foldMarks.first(where: { $0.headerLine == line })?.headerOffset
+        return SQLFolding.line(containing: index, lineStarts: SQLFolding.lineStarts(in: string))
     }
 
     /// One number to draw: which line it is, and where its line fragment sits in the text

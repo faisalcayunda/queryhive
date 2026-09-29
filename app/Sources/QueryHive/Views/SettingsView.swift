@@ -935,6 +935,8 @@ struct EditorSettings: View {
                 RowDivider()
                 editorToggle("Auto-uppercase keywords", isOn: $prefs.autoUppercaseKeywords)
                 RowDivider()
+                editorToggle("Run button beside each statement", isOn: $prefs.runButtonPerStatement)
+                RowDivider()
                 HStack(spacing: 8) {
                     Text("Tab width")
                         .font(.ui(11.5))

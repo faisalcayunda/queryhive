@@ -162,7 +162,7 @@ private enum SQLFindBarTestsEditor {
                                selection: .constant(NSRange(location: 0, length: 0)),
                                completion: EditorCompletion(),
                                candidates: { _, _ in [] },
-                               layout: .standard)
+                               layout: .standard, onRunStatement: nil)
         return editor.makeCoordinator()
     }
 }

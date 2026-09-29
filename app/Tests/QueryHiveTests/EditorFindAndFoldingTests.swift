@@ -346,7 +346,7 @@ final class EditorFindAndFoldingTests: XCTestCase {
                   selection: .constant(NSRange(location: 0, length: 0)),
                   completion: EditorCompletion(),
                   candidates: { _, _ in [] },
-                  layout: .standard)
+                  layout: .standard, onRunStatement: nil)
     }
 
     private func editor(_ sql: String, width: CGFloat = 420, asSQLTextView: Bool = false)

@@ -342,7 +342,14 @@ struct EditorPane: View {
                   },
                   // Read here rather than inside the editor so this body depends on the switches:
                   // that is what makes flipping one in Settings re-apply the editor.
-                  layout: EditorLayout.current)
+                  layout: EditorLayout.current,
+                  onRunStatement: { offset in
+                      // The statement's own start, so `run(from: .statement)` reads the same
+                      // statement the marker was drawn beside.
+                      tab.selection = NSRange(location: offset, length: 0)
+                      tab.caret = offset
+                      model.run(tab, from: .statement)
+                  })
             .editorBox(focused: focused)
             // NSTextView has no placeholder of its own, so it is drawn over the text
             // container's own inset (8 wide, 9 tall) plus its line fragment padding.
@@ -359,7 +366,9 @@ struct EditorPane: View {
                     // Starts where the text starts: past the gutter, then past the text view's
                     // own inset. A fixed 13 put the first line *under* the line numbers, so an
                     // empty editor read as "S1ELECT".
-                    .padding(.leading, LineNumberRulerView.textOriginX(forLines: lineCount))
+                    .padding(.leading, LineNumberRulerView.textOriginX(
+                        forLines: lineCount,
+                        showsRunMarks: EditorLayout.current.runButtonPerStatement))
                     .padding(.top, 10)
                     .allowsHitTesting(false)
                 }

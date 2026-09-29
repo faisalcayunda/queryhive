@@ -22,6 +22,7 @@ final class EditorPreferences {
     private static let codeFoldingKey = "editorCodeFolding"
     private static let showInvisiblesKey = "editorShowInvisibles"
     private static let autoUppercaseKey = "editorAutoUppercaseKeywords"
+    private static let runButtonKey = "editorRunButtonPerStatement"
     private static let tabWidthKey = "editorTabWidth"
 
     /// The store these switches are read from and written to.
@@ -38,6 +39,7 @@ final class EditorPreferences {
     private var storedCodeFolding: Bool
     private var storedShowInvisibles: Bool
     private var storedAutoUppercase: Bool
+    private var storedRunButton: Bool
     private var storedTabWidth: Int
 
     init(defaults: UserDefaults = .standard) {
@@ -49,6 +51,7 @@ final class EditorPreferences {
         storedCodeFolding = Self.on(defaults, Self.codeFoldingKey, default: true)
         storedShowInvisibles = Self.on(defaults, Self.showInvisiblesKey, default: false)
         storedAutoUppercase = Self.on(defaults, Self.autoUppercaseKey, default: false)
+        storedRunButton = Self.on(defaults, Self.runButtonKey, default: true)
         let tabWidth = defaults.integer(forKey: Self.tabWidthKey)
         storedTabWidth = tabWidth > 0 ? tabWidth : 4
     }
@@ -107,6 +110,13 @@ final class EditorPreferences {
         set { storedAutoUppercase = newValue; persist() }
     }
 
+    /// Whether the gutter offers a run marker beside each statement. On by default: it is the one
+    /// control here that adds something rather than changing what is drawn.
+    var runButtonPerStatement: Bool {
+        get { storedRunButton }
+        set { storedRunButton = newValue; persist() }
+    }
+
     /// How wide a tab is, in spaces. Clamped, because the value comes from a control and a zero
     /// would put every tab stop on top of the last.
     var tabWidth: Int {
@@ -122,6 +132,7 @@ final class EditorPreferences {
         defaults.set(storedCodeFolding, forKey: Self.codeFoldingKey)
         defaults.set(storedShowInvisibles, forKey: Self.showInvisiblesKey)
         defaults.set(storedAutoUppercase, forKey: Self.autoUppercaseKey)
+        defaults.set(storedRunButton, forKey: Self.runButtonKey)
         defaults.set(storedTabWidth, forKey: Self.tabWidthKey)
     }
 }
@@ -140,13 +151,15 @@ struct EditorLayout: Equatable {
     var codeFolding: Bool
     var showInvisibles: Bool
     var autoUppercaseKeywords: Bool
+    var runButtonPerStatement: Bool
     var tabWidth: Int
 
     /// What an untouched install has, for anything that needs a layout without a store behind it.
     static let standard = EditorLayout(showLineNumbers: true, highlightCurrentLine: true,
                                        highlightCurrentStatement: true, wordWrap: true,
                                        codeFolding: true, showInvisibles: false,
-                                       autoUppercaseKeywords: false, tabWidth: 4)
+                                       autoUppercaseKeywords: false, runButtonPerStatement: true,
+                                       tabWidth: 4)
 
     static var current: EditorLayout {
         let prefs = EditorPreferences.shared
@@ -157,6 +170,7 @@ struct EditorLayout: Equatable {
                             codeFolding: prefs.codeFolding,
                             showInvisibles: prefs.showInvisibles,
                             autoUppercaseKeywords: prefs.autoUppercaseKeywords,
+                            runButtonPerStatement: prefs.runButtonPerStatement,
                             tabWidth: prefs.tabWidth)
     }
 }
