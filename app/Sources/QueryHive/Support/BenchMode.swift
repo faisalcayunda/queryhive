@@ -700,6 +700,10 @@ enum BenchMode {
         }
         tab.sql = sql
         tab.rowLimit = max(1_000, rows)
+        // Bench-only: the product clamps a Run to 200,000 rows, which would turn rows-wide-500k and
+        // mem-500k into 200k runs under 500k names. Raised here to what the scenario asks for and
+        // reported as `row_limit_cap` in every line, so a number can never hide its cap.
+        AppModel.rowLimitCeiling = max(AppModel.productRowLimitCeiling, tab.rowLimit)
 
         for pass in 0..<repeats {
             log("repeat \(pass + 1)/\(repeats)")
@@ -727,7 +731,7 @@ enum BenchMode {
                 }
                 var metrics = ["cancel_ms": (ended - began) * 1000]
                 if let engine = PerfSignposts.time(of: "engine.done") { metrics["cancel_engine_done_ms"] = (engine - began) * 1000 }
-                emit(scenario, metrics)
+                emit(scenario, metrics, extra: ["row_limit_cap": AppModel.rowLimitCeiling])
                 continue
             }
 
@@ -745,7 +749,7 @@ enum BenchMode {
                                              "peak_footprint_delta_bytes": Double(Int64(peak) - Int64(baseline))]
             if let painted = PerfSignposts.time(of: "firstPaint") { metrics["ttfr_ms"] = (painted - started) * 1000 }
             metrics["rows_per_s"] = Double(tab.preview?.rows.count ?? 0) / max(done - started, 0.001)
-            emit(scenario, metrics, extra: ["display_hz": hz])
+            emit(scenario, metrics, extra: ["display_hz": hz, "row_limit_cap": AppModel.rowLimitCeiling])
         }
     }
 }

@@ -51,6 +51,11 @@ import QueryHiveFFI
 /// same keys the CLI reads, so the app's existing environment is already the FFI's input. That is
 /// the one part of this engine that needed no decision.
 struct RustEngine: DatabaseEngine {
+    /// Where the blocking FFI calls run: concurrent, so two tabs can run at once, and
+    /// `.userInitiated` because the user is waiting on the result.
+    private static let runQueue = DispatchQueue(label: "queryhive.engine.run", qos: .userInitiated,
+                                                attributes: .concurrent)
+
     /// The runs this engine has started and not yet finished, so `terminateAll()` can stop them
     /// all. Static, not per-instance: the app delegate holds no engine, it asks
     /// `Engine.current`, and one instance may not be the one that started a run. Mutated on the
@@ -129,12 +134,14 @@ struct RustEngine: DatabaseEngine {
         handle.attach(cancel: cancel)
         let sink = Sink(handle: handle, onEvent: onEvent)
 
-        DispatchQueue.global().async {
+        Self.runQueue.async {
             // One FFI call, and it is a blocking one by design (`uniffi_api.rs`, "The call blocks
             // until the command has ended, so it belongs off the main thread"): it must not run on
-            // the main thread, and a concurrent queue is not the main thread. The call also builds
-            // its own tokio runtime and drops it, which is why a run costs a thread pool rather
-            // than reusing one.
+            // the main thread, and a concurrent queue is not the main thread. It runs on the engine's
+            // own queue at `.userInitiated` (see `runQueue`), not on the shared global one: a run
+            // is something the user is waiting on, so its start should not queue behind unrelated
+            // background work. Stop does not go through this queue: `terminate()` calls
+            // `requestCancel()` from the main queue while this call is blocked.
             //
             // No `do`/`catch`: the FFI has no failure to throw. A command that fails emits one
             // `error` event through the sink, so there is exactly one failure path for the caller
@@ -246,7 +253,11 @@ final class Sink: EventSink, @unchecked Sendable {
         // queue is what makes that ordering survive the hop, and what makes them all land before
         // the exit that `finish` hops to after this call returns.
         DispatchQueue.main.async { [handle, deliver] in
-            guard !handle.isStopped else { return }
+            // A stopped `preview`/`explain` still owes the app its rows and the `done{cancelled}`
+            // that says it was stopped: `terminate()` sets `isStopped` before the engine has
+            // answered, so dropping here threw the partial result away. Their call sites already
+            // discard a superseded run by token. Every other command keeps the drop.
+            guard !handle.isStopped || handle.deliversAfterStop else { return }
             deliver(event)
         }
     }
@@ -294,6 +305,10 @@ final class RustRun: EngineRun, Hashable {
         defer { lock.unlock() }
         self.cancelHandle = cancel
     }
+
+    /// Whether the events that arrive after `terminate()` still matter: the two commands whose Stop
+    /// ends in a `done{cancelled}` with the rows fetched so far.
+    var deliversAfterStop: Bool { command == "preview" || command == "explain" }
 
     /// Whether the caller has stopped waiting for this run.
     var isStopped: Bool {

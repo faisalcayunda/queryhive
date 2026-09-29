@@ -814,7 +814,17 @@ final class AppModel {
             guard self.tabs.count == 1, let only = self.tabs.first,
                   !only.hasSQL, only.stage == .idle, only.preview == nil,
                   only.objectScope == nil else { return }
-            self.tabs = restored.map { $0.tab() }
+            self.tabs = restored.map { snapshot in
+                let tab = snapshot.tab()
+                // A session saved before the ceiling existed may hold a bigger number: show the
+                // clamped one, and say so in that tab's log.
+                let limit = Self.clampedRowLimit(tab.rowLimit)
+                if limit != tab.rowLimit {
+                    tab.note(.warning, Self.rowLimitClampMessage(tab.rowLimit))
+                    tab.rowLimit = limit
+                }
+                return tab
+            }
             self.tabCounter = max(self.tabCounter, self.tabs.count)
             if let active, let front = self.tabs.first(where: {
                 $0.id.uuidString.caseInsensitiveCompare(active) == .orderedSame
@@ -2312,12 +2322,12 @@ final class AppModel {
         var message: String?
         var columns: [Event.Column] = []
         var rows: [[String?]] = []
-        var truncated = false
+        var stopped = false
         var finished = false
         // When the grid last got the rows, so `previewPaintInterval` is measured from a paint
         // rather than from the start of the run.
         var paintedAt = Date.distantPast
-        tab.previewProcess = Engine.current.run("preview", env: env, onEvent: { event in
+        tab.previewProcess = engine.run("preview", env: env, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
@@ -2342,11 +2352,8 @@ final class AppModel {
                 }
             case "done":
                 PerfSignposts.runDone()
-                truncated = event.truncated ?? false
                 finished = true
-                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
-                                            queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0)
-                tab.note(.success, "\(pluralized(rows.count, "row")) returned\(truncated ? " (limit reached)" : "")")
+                stopped = Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab)
             default:
                 break
             }
@@ -2368,18 +2375,43 @@ final class AppModel {
                 Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
                                    outcome: tab.cancelled ? "cancelled" : "error",
                                    elapsedMS: elapsed, rowCount: rows.count,
-                                   error: tab.previewError, recording: self.recordsHistory)
+                                   error: tab.previewError, recording: self.recordsHistory, engine: self.engine)
                 // Re-read, so a History panel that is already on screen counts this run without
                 // the user having to switch panels. `onAppear` only fires once per appearance.
                 self.loadHistory(search: self.historySearch)
                 return
             }
             Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
-                               outcome: "ok", elapsedMS: tab.preview?.elapsedMS,
+                               outcome: stopped ? "cancelled" : "ok", elapsedMS: tab.preview?.elapsedMS,
                                rowCount: rows.count, error: nil,
-                               recording: self.recordsHistory)
+                               recording: self.recordsHistory, engine: self.engine)
             self.loadHistory(search: self.historySearch)
         })
+    }
+
+    /// What a preview's `done` event does to the tab; returns whether the run was stopped.
+    ///
+    /// A method of its own so it can be tested without an engine (`Engine.current` is a `static
+    /// let`). `done.cancelled` is the engine's verdict that Stop reached it: the rows are whatever
+    /// arrived first, and an empty one is not "no rows matched". A stopped result with rows is
+    /// partial, so it counts as truncated too: Sort on Server and the partial-order banner stay
+    /// honest. `done.warnings` (for instance "the server did not confirm the stop") go to the log.
+    @discardableResult
+    static func applyPreviewDone(_ event: Event, columns: [Event.Column], rows: [[String?]],
+                                 to tab: QueryTab) -> Bool {
+        let stopped = event.cancelled ?? false
+        let truncated = (event.truncated ?? false) || (stopped && !rows.isEmpty)
+        tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
+                                    queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0,
+                                    stopped: stopped)
+        if stopped {
+            tab.note(.warning, rows.isEmpty ? "Stopped before any rows arrived"
+                                            : "Stopped · \(pluralized(rows.count, "row")) fetched")
+        } else {
+            tab.note(.success, "\(pluralized(rows.count, "row")) returned\(truncated ? " (limit reached)" : "")")
+        }
+        for warning in event.warnings ?? [] { tab.note(.warning, warning) }
+        return stopped
     }
 
     /// Leaves one row in the engine's history for a Run that has finished.
@@ -2398,7 +2430,8 @@ final class AppModel {
     /// inside a closure that outlives this call for no reason.
     private static func recordHistory(connection: Connection, sql: String, startedAt: Date,
                                       outcome: String, elapsedMS: Int?, rowCount: Int?,
-                                      error: String?, recording: Bool) {
+                                      error: String?, recording: Bool,
+                                      engine: any DatabaseEngine) {
         // The switch in Settings reaches the history here and nowhere else, so there is one place to
         // look when a user asks why a run was not written down. Passed in rather than read from
         // `UserDefaults` here, because the default-inversion that makes it on-by-default is the
@@ -2416,7 +2449,7 @@ final class AppModel {
         if let elapsedMS = elapsedMS { env["ELAPSED_MS"] = String(elapsedMS) }
         if let rowCount = rowCount { env["ROW_COUNT"] = String(rowCount) }
         if let error = error { env["ERROR_TEXT"] = error }
-        _ = Engine.current.run("history_add", env: Self.localEnvironment(env), onEvent: { _ in }, onExit: { _, _ in })
+        _ = engine.run("history_add", env: Self.localEnvironment(env), onEvent: { _ in }, onExit: { _, _ in })
     }
 
     /// How many history rows one read asks for, and whether a Run is recorded at all.
@@ -2463,6 +2496,10 @@ final class AppModel {
         didSet { UserDefaults.standard.set(statementTimeoutMS, forKey: "statementTimeoutMS") }
     }
 
+    /// The engine Run and History talk to. A property so a test can hand the model a scripted one;
+    /// everything else still reads `Engine.current`.
+    var engine: any DatabaseEngine = Engine.current
+
     /// How many rows a Run fetches by default, for a tab that has not chosen its own.
     ///
     /// The engine's `LIMIT`. It is a property of looking rather than of the query, which is why it
@@ -2471,9 +2508,50 @@ final class AppModel {
     /// with. `object(forKey:)` rather than `integer(forKey:)`, so a stored zero is distinguishable
     /// from a key nobody has written.
     var defaultRowLimit: Int = {
-        UserDefaults.standard.object(forKey: "defaultRowLimit") as? Int ?? 1000
+        AppModel.clampedRowLimit(UserDefaults.standard.object(forKey: "defaultRowLimit") as? Int ?? 1000)
     }() {
-        didSet { UserDefaults.standard.set(defaultRowLimit, forKey: "defaultRowLimit") }
+        didSet {
+            let asked = defaultRowLimit
+            let clamped = Self.clampedRowLimit(asked)
+            if clamped != asked {
+                // Re-enters this observer (the property is macro-rewritten), so the note is set
+                // after, or the in-range pass would clear it.
+                defaultRowLimit = clamped
+                // Said, not silent: a typed 5,000,000 that quietly became 200,000 would read as a bug.
+                rowLimitClampNote = Self.rowLimitClampMessage(asked)
+                return
+            }
+            rowLimitClampNote = nil
+            UserDefaults.standard.set(defaultRowLimit, forKey: "defaultRowLimit")
+        }
+    }
+
+    /// Set when the last edit to `defaultRowLimit` was out of range; Settings shows it under the field.
+    var rowLimitClampNote: String? = {
+        // The stored value was above the ceiling when the app started: say so, or Settings shows a
+        // number the user never typed with no reason.
+        guard let stored = UserDefaults.standard.object(forKey: "defaultRowLimit") as? Int,
+              AppModel.clampedRowLimit(stored) != stored else { return nil }
+        return AppModel.rowLimitClampMessage(stored)
+    }()
+
+    /// The rows one Run may fetch. The whole result is held in memory and painted, so an unbounded
+    /// field is a way to freeze the app. 200,000 until the streaming grid lands (owner decision
+    /// O-12), then 5,000,000.
+    static let productRowLimitCeiling = 200_000
+    /// The effective ceiling. Only `--bench` writes it (BenchMode raises it so the 500k scenarios
+    /// keep measuring 500k, comparable with Fase 0); the product never does.
+    nonisolated(unsafe) static var rowLimitCeiling = productRowLimitCeiling
+    static var rowLimitRange: ClosedRange<Int> { 1...rowLimitCeiling }
+
+    static func clampedRowLimit(_ value: Int) -> Int {
+        min(max(value, rowLimitRange.lowerBound), rowLimitRange.upperBound)
+    }
+
+    static func rowLimitClampMessage(_ asked: Int) -> String {
+        "\(asked.formatted()) is outside \(rowLimitRange.lowerBound.formatted()) to "
+            + "\(rowLimitRange.upperBound.formatted()) rows, so the limit was set to "
+            + "\(clampedRowLimit(asked).formatted())."
     }
 
     /// Reads the engine's history into `historyEntries`, optionally narrowed to `search`.
@@ -2498,7 +2576,7 @@ final class AppModel {
         if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             env["HISTORY_SEARCH"] = search
         }
-        _ = Engine.current.run("history", env: Self.localEnvironment(env), onEvent: { event in
+        _ = engine.run("history", env: Self.localEnvironment(env), onEvent: { event in
             switch event.event {
             case "history": entries = event.entries ?? []
             case "error": failure = event.message
@@ -2843,7 +2921,12 @@ final class AppModel {
         env["DB_DATABASE"] = database(for: tab)
         env["DB_SCHEMA"] = schema(for: tab)
         env["SQL"] = sql
-        env["LIMIT"] = String(max(1, tab.rowLimit))
+        let limit = Self.clampedRowLimit(tab.rowLimit)
+        if limit != tab.rowLimit {
+            tab.note(.warning, Self.rowLimitClampMessage(tab.rowLimit))
+            tab.rowLimit = limit
+        }
+        env["LIMIT"] = String(limit)
         env["RETRIES"] = String(tab.retries)
         return env
     }

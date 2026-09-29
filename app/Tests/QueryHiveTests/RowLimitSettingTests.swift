@@ -72,3 +72,49 @@ final class RowLimitSettingTests: XCTestCase {
         }
     }
 }
+
+/// The ceiling on how many rows a Run may fetch, and how a value above it is reported.
+@MainActor
+final class RowLimitClampTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        isolateConnectionStore()
+    }
+
+    func testClampedRowLimitKeepsOneToTwoHundredThousand() {
+        XCTAssertEqual(AppModel.clampedRowLimit(0), 1)
+        XCTAssertEqual(AppModel.clampedRowLimit(-5), 1)
+        XCTAssertEqual(AppModel.clampedRowLimit(1000), 1000)
+        XCTAssertEqual(AppModel.clampedRowLimit(200_000), 200_000)
+        XCTAssertEqual(AppModel.clampedRowLimit(5_000_000), 200_000)
+    }
+
+    func testTheDefaultIsClampedWithAVisibleNote() {
+        let key = "defaultRowLimit"
+        let original = UserDefaults.standard.object(forKey: key)
+        addTeardownBlock {
+            if let original { UserDefaults.standard.set(original, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        let model = AppModel()
+        model.defaultRowLimit = 5_000_000
+        XCTAssertEqual(model.defaultRowLimit, 200_000)
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: key), 200_000)
+        XCTAssertNotNil(model.rowLimitClampNote, "the clamp was silent")
+        model.defaultRowLimit = 500
+        XCTAssertNil(model.rowLimitClampNote)
+    }
+
+    func testAStoredValueAboveTheCeilingIsClampedOnLoad() {
+        let key = "defaultRowLimit"
+        let original = UserDefaults.standard.object(forKey: key)
+        addTeardownBlock {
+            if let original { UserDefaults.standard.set(original, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.set(9_999_999, forKey: key)
+        let model = AppModel()
+        XCTAssertEqual(model.defaultRowLimit, 200_000)
+        XCTAssertNotNil(model.rowLimitClampNote, "the load-time clamp was silent")
+    }
+}

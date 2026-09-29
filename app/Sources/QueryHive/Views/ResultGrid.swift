@@ -178,6 +178,9 @@ struct ResultGrid: View {
             status(error, symbol: "exclamationmark.triangle.fill", tint: Tone.coral)
         } else if let preview = tab.preview, !preview.columns.isEmpty {
             grid(preview)
+        } else if tab.preview?.stopped == true {
+            // Stop landed before the first page: no columns, so no grid, and it is not "Press Run".
+            status("Stopped before any rows arrived.", symbol: "stop.circle")
         } else {
             status("Press Run to see the rows. Run fetches the first \(tab.rowLimit.formatted()) and stops — it writes nothing.",
                    symbol: "play.circle")
@@ -219,6 +222,8 @@ struct ResultGrid: View {
                     .foregroundStyle(Tone.secondary)
                 Text(tab.showingPlan
                      ? "No plan. The engine explained the statement and sent nothing back."
+                     : tab.preview?.stopped == true
+                     ? "Stopped before any rows arrived."
                      : "No rows. The statement ran to the end and matched nothing.")
                     .font(.ui(11.5))
                     .foregroundStyle(Tone.secondary)
@@ -1193,7 +1198,7 @@ struct ResultGrid: View {
                 // says which it is, and a fetched total makes the two one sentence.
                 Text(summaryText(preview))
                     .font(.ui(11))
-                    .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty || tab.hasGridSearch
+                    .foregroundStyle(preview.truncated || preview.stopped || !tab.columnFilters.isEmpty || tab.hasGridSearch
                                      ? Tone.amber : Tone.secondary)
                 countControl
                 // The commit pair, beside the count button: the grid's two ways of asking the server

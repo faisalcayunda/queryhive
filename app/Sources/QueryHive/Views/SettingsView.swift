@@ -1245,8 +1245,11 @@ struct DataSettings: View {
                     Text("rows")
                         .font(.ui(11))
                         .foregroundStyle(Tone.secondary)
-                    Stepper("", value: $model.defaultRowLimit, in: 1...1_000_000, step: 100)
+                    Stepper("", value: $model.defaultRowLimit, in: AppModel.rowLimitRange, step: 100)
                         .labelsHidden()
+                }
+                if let note = model.rowLimitClampNote {
+                    Text(note).font(.ui(11)).foregroundStyle(Tone.amber)
                 }
             }
         }

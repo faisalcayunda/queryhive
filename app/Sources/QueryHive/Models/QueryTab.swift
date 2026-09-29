@@ -296,10 +296,15 @@ struct PreviewResult {
     var truncated: Bool
     var queryID: String?
     var elapsedMS: Int
+    /// Stop reached the engine (`done.cancelled`): these are the rows that arrived first, possibly none.
+    var stopped = false
 
     /// What the grid's footer says it is showing. It must never imply the grid holds everything.
     var summary: String {
-        truncated
+        if stopped {
+            return rows.isEmpty ? "Stopped before any rows arrived" : "Stopped · \(pluralized(rows.count, "row"))"
+        }
+        return truncated
             ? "First \(rows.count.formatted()) rows · limit reached"
             : pluralized(rows.count, "row")
     }
