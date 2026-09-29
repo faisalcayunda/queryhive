@@ -30,7 +30,9 @@ use qh_driver::{
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
-use qh_sql::{Decision, FloorSource, SafeMode, SafeModeFloor, SAFE_MODES};
+use qh_sql::{
+    Decision, FloorSource, SafeMode, SafeModeFloor, StatementDecision, StatementKind, SAFE_MODES,
+};
 use serde_json::{json, Value as Json};
 
 use crate::config;
@@ -186,29 +188,62 @@ pub(crate) fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
 /// a failure: an audit record that could not be written is not quietly skipped.
 pub(crate) fn guard_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Result<(), CliError> {
     for statement in qh_sql::decisions(mode, sql) {
-        let error = statement.refusal_error(mode, confirmed);
-        let decision = match (&error, statement.decision) {
-            (None, Decision::Confirm) => LogDecision::Confirmed,
-            (None, _) => LogDecision::Allowed,
-            (Some(_), Decision::Confirm) => LogDecision::NeedsConfirmation,
-            (Some(_), _) => LogDecision::Refused,
-        };
-        execution_log::record(&DecisionEntry {
-            safe_mode: mode,
-            index: statement.index,
-            kind: statement.kind,
-            statement: statement.statement,
-            decision,
-            // The reason is why the statement did not run as-is. A row that ran — allowed,
-            // or allowed after a confirmation — has no failing reason to record, and the
-            // confirmation sentence belongs to the question, not to the answer.
-            reason: error.as_ref().and(statement.reason),
-        })?;
-        if let Some(error) = error {
+        if let Some(error) = record_decision(
+            mode,
+            confirmed,
+            statement.index,
+            statement.kind,
+            statement.statement,
+            statement.decision,
+            statement.reason,
+        )? {
             return Err(CliError::Usage(error.to_string()));
         }
     }
     Ok(())
+}
+
+/// Record one decision and say the error it raises, if any.
+///
+/// The one place the log's vocabulary ([`LogDecision`]) and the classifier's own error are
+/// applied to a decision, shared by [`guard_confirmed`], [`guard_destructive`] and the
+/// whole-operation check [`record_kind`]. Keeping it in one function is what makes a
+/// confirmation recorded by one path read exactly like one recorded by another.
+fn record_decision(
+    mode: SafeMode,
+    confirmed: bool,
+    index: usize,
+    kind: StatementKind,
+    statement: &str,
+    decision: Decision,
+    reason: Option<&'static str>,
+) -> Result<Option<qh_sql::SafeModeError>, CliError> {
+    let evaluated = StatementDecision {
+        index,
+        kind,
+        statement,
+        decision,
+        reason,
+    };
+    let error = evaluated.refusal_error(mode, confirmed);
+    let logged = match (&error, decision) {
+        (None, Decision::Confirm) => LogDecision::Confirmed,
+        (None, _) => LogDecision::Allowed,
+        (Some(_), Decision::Confirm) => LogDecision::NeedsConfirmation,
+        (Some(_), _) => LogDecision::Refused,
+    };
+    execution_log::record(&DecisionEntry {
+        safe_mode: mode,
+        index,
+        kind,
+        statement,
+        decision: logged,
+        // The reason is why the statement did not run as-is. A row that ran — allowed,
+        // or allowed after a confirmation — has no failing reason to record, and the
+        // confirmation sentence belongs to the question, not to the answer.
+        reason: error.as_ref().and(reason),
+    })?;
+    Ok(error)
 }
 
 /// [`guard_confirmed`] with the confirmation taken from the run's own settings.
@@ -218,6 +253,70 @@ pub(crate) fn guard_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Res
 /// unconfirmed [`guard`] deliberately: one confirmation does not cover a plan.
 pub(crate) fn guard_for(settings: &Settings, mode: SafeMode, sql: &str) -> Result<(), CliError> {
     guard_confirmed(mode, safe_mode_confirmed(settings), sql)
+}
+
+/// Why a destructive table operation is a question on a `confirm` connection.
+///
+/// The classifier refuses DDL under `confirm` (ADR-0026), so the ordinary guard would make
+/// `TRUNCATE`/`DROP` impossible on the one level that exists to ask before a write. The plan
+/// asks for these two operations "lewat konfirmasi" (§13), so [`guard_destructive`] asks
+/// instead. The exception is the command's own; the sentence says what it is asking.
+pub(crate) const DESTRUCTIVE_CONFIRM_REASON: &str =
+    "a destructive table operation runs on a confirm connection only after an explicit \
+     confirmation (SAFE_MODE_CONFIRMED=1)";
+
+/// The Safe Mode gate for a destructive table operation (`table_op`).
+///
+/// `DROP` and `TRUNCATE` are DDL, so `no_ddl` and `read_only` refuse them exactly as
+/// [`guard_for`] refuses any other DDL — with the classifier's own sentence and through the
+/// same [`record_decision`], so the log cannot read differently from the path that would have
+/// written it. `confirm` is the one difference, and it is deliberate: ADR-0026 makes the
+/// classifier refuse DDL there, which would leave the two operations the plan asks for
+/// ("truncate/drop tabel lewat konfirmasi") unrunnable at the level built to ask about them.
+/// ADR-0027 records the exception and its one cost.
+pub(crate) fn guard_destructive(
+    settings: &Settings,
+    mode: SafeMode,
+    statement: &str,
+) -> Result<(), CliError> {
+    let kind = qh_sql::classify(statement);
+    let (decision, reason) = match mode {
+        SafeMode::Full => (Decision::Allow, None),
+        // Both refusals reuse the classifier's sentence, so a `no_ddl` connection is told
+        // exactly what it is told about any other DDL.
+        SafeMode::NoDdl | SafeMode::ReadOnly => (Decision::Refuse, mode.refusal(kind)),
+        SafeMode::Confirm => (Decision::Confirm, Some(DESTRUCTIVE_CONFIRM_REASON)),
+    };
+    if let Some(error) = record_decision(
+        mode,
+        safe_mode_confirmed(settings),
+        1,
+        kind,
+        statement,
+        decision,
+        reason,
+    )? {
+        return Err(CliError::Usage(error.to_string()));
+    }
+    Ok(())
+}
+
+/// Record the decision a mode makes about a whole operation, before its own error is raised.
+///
+/// `import_data` refuses a DML import before it opens a connection, so at that point there is
+/// no statement to classify. This writes the row [`guard_confirmed`] would write for a
+/// one-statement script, which is what keeps the one refusal that path makes from being the
+/// engine's only unlogged decision. `confirmed` is deliberately `false`: the bulk paths never
+/// carry a confirmation, because one confirmation cannot cover a plan (ADR-0026).
+pub(crate) fn record_kind(
+    mode: SafeMode,
+    kind: StatementKind,
+    subject: &str,
+) -> Result<(), CliError> {
+    let decision = mode.decision(kind);
+    let reason = mode.refusal(kind);
+    let _ = record_decision(mode, false, 1, kind, subject, decision, reason)?;
+    Ok(())
 }
 
 /// Where a browse or objects call is aimed.
@@ -1032,6 +1131,159 @@ pub async fn to_table(
             .field("table", name)
             .field("mode", mode)
             .field("query_id", query_id)
+            .field("cancelled", cancelled)
+            .field("warnings", warnings)
+            .build(),
+    )?;
+    let _ = session.close().await;
+    Ok(())
+}
+
+/// `table_op`: drop or truncate one table, through a confirmation.
+///
+/// The one command whose whole body is a single destructive statement the caller named:
+/// `TABLE_OP=drop` sends `DROP TABLE <target>` and `TABLE_OP=truncate` sends
+/// `TRUNCATE TABLE <target>`. The target is the same `TARGET_CATALOG` / `TARGET_SCHEMA` /
+/// `TARGET_TABLE` triple `to_table` takes, resolved through the same slot rules, so a driver
+/// is only asked for the parts it has (PostgreSQL has no catalog slot here, MySQL no schema).
+///
+/// The Safe Mode is checked **before** the connect step, against the statement this command
+/// will actually send, through [`guard_destructive`] — the ordinary guard with one difference,
+/// recorded in ADR-0027. A `read_only` or `no_ddl` connection therefore refuses without
+/// opening one, and a `confirm` connection asks for `SAFE_MODE_CONFIRMED=1` first.
+///
+/// `rows` in `done` is the server's own affected count, or `-1` for a server that reported
+/// none — never a fabricated zero, the rule [`to_table`] follows.
+pub async fn table_op(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    engine: &dyn Engine,
+    cancel: &CancelFlag,
+) -> Result<(), CliError> {
+    // The operation is read and refused by name before anything else: a command whose whole
+    // body is one statement cannot guess which one the caller meant.
+    let operation = settings.text("TABLE_OP", "");
+    let operation = operation.trim().to_ascii_lowercase();
+    let verb = match operation.as_str() {
+        "drop" => "DROP TABLE",
+        "truncate" => "TRUNCATE TABLE",
+        "" => {
+            return Err(CliError::Usage(
+                "TABLE_OP is required: drop or truncate".to_owned(),
+            ))
+        }
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown TABLE_OP '{other}'; expected drop or truncate"
+            )))
+        }
+    };
+    let mode = safe_mode(settings)?;
+    let timeout = statement_timeout(settings)?;
+    let config = connection(settings, engine)?;
+    let style = SlotStyle::of(config.kind);
+
+    let targets = [
+        ("TARGET_CATALOG", settings.text("TARGET_CATALOG", "")),
+        ("TARGET_SCHEMA", settings.text("TARGET_SCHEMA", "")),
+        ("TARGET_TABLE", settings.text("TARGET_TABLE", "")),
+    ];
+    // A part the driver has no level for is not required: `slots` is the list of the parts
+    // this driver can actually use, exactly as `to_table` reads it.
+    let target_of = |name: &str| -> String {
+        targets
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    let missing: Vec<&str> = slots(style)
+        .iter()
+        .map(|slot| slot.target)
+        .filter(|target| target_of(target).is_empty())
+        .collect();
+    if !missing.is_empty() {
+        return Err(CliError::Usage(format!(
+            "{} required to name the table",
+            missing.join(" and ")
+        )));
+    }
+
+    let target = qualified(
+        style,
+        &target_of("TARGET_CATALOG"),
+        &target_of("TARGET_SCHEMA"),
+        &target_of("TARGET_TABLE"),
+    );
+    let name = reference(
+        style,
+        &target_of("TARGET_CATALOG"),
+        &target_of("TARGET_SCHEMA"),
+        &target_of("TARGET_TABLE"),
+    );
+    let sql = format!("{verb} {target}");
+
+    // The gate reads the statement this command will send, before the connect step, so a
+    // read-only connection refuses without opening one.
+    guard_destructive(settings, mode, &sql)?;
+
+    out.emit(event("step").field("step", "connect").build())?;
+    let (mut session, _policy) = open(settings, engine, &config).await?;
+    out.emit(event("step").field("step", "write").build())?;
+
+    let mut cancelled = false;
+    let mut affected: Option<u64> = None;
+    if cancel.is_cancelled() {
+        cancelled = true;
+        let _ = session.cancel().await;
+    } else {
+        // Not `retry::execute`: a `DROP`/`TRUNCATE` is not safe to re-issue blind, the same
+        // rule `to_table` follows.
+        let mut cursor = session
+            .execute(
+                &sql,
+                &ExecuteOptions {
+                    statement_timeout: timeout,
+                    ..ExecuteOptions::default()
+                },
+            )
+            .await?;
+        // A DDL statement has no rows to read, but it is not finished when `execute`
+        // returns: driving the cursor to its end is what waits for the server, and what the
+        // count arrives with.
+        while cursor.next_batch(1_000).await?.is_some() {}
+        if let Some(count) = cursor.affected_rows() {
+            affected = Some(count);
+        }
+    }
+    let warnings: Vec<String> = if cancelled {
+        vec![CANCEL_WARNING.to_owned()]
+    } else {
+        Vec::new()
+    };
+
+    let rows: i64 = match affected {
+        Some(count) => i64::try_from(count).unwrap_or(i64::MAX),
+        None => -1,
+    };
+    let progress = Progress::new(settings.number("PROGRESS_MS", PROGRESS_MS_DEFAULT)?);
+    // The same condition `to_table` reports by: an unreported count (`-1`) stays silent
+    // rather than becoming a `progress` that reads as a count of minus one row.
+    if rows >= 0 && progress.last() != Some(rows as u64) {
+        out.emit(
+            event("progress")
+                .field("rows", rows)
+                .field("state", Json::Null)
+                .build(),
+        )?;
+    }
+
+    out.emit(
+        event("done")
+            .field("rows", rows)
+            .field("table", name)
+            .field("operation", operation)
+            .field("query_id", session.query_id())
             .field("cancelled", cancelled)
             .field("warnings", warnings)
             .build(),

@@ -1030,6 +1030,7 @@ public enum EngineCommand: Equatable, Hashable {
     case session
     case importData
     case applyChanges
+    case tableOp
     case objects
     case test
     case catalogs
@@ -1083,25 +1084,27 @@ public struct FfiConverterTypeEngineCommand: FfiConverterRustBuffer {
         
         case 11: return .applyChanges
         
-        case 12: return .objects
+        case 12: return .tableOp
         
-        case 13: return .test
+        case 13: return .objects
         
-        case 14: return .catalogs
+        case 14: return .test
         
-        case 15: return .schemas
+        case 15: return .catalogs
         
-        case 16: return .tables
+        case 16: return .schemas
         
-        case 17: return .export
+        case 17: return .tables
         
-        case 18: return .toTable
+        case 18: return .export
         
-        case 19: return .preview
+        case 19: return .toTable
         
-        case 20: return .count
+        case 20: return .preview
         
-        case 21: return .explain
+        case 21: return .count
+        
+        case 22: return .explain
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1155,44 +1158,48 @@ public struct FfiConverterTypeEngineCommand: FfiConverterRustBuffer {
             writeInt(&buf, Int32(11))
         
         
-        case .objects:
+        case .tableOp:
             writeInt(&buf, Int32(12))
         
         
-        case .test:
+        case .objects:
             writeInt(&buf, Int32(13))
         
         
-        case .catalogs:
+        case .test:
             writeInt(&buf, Int32(14))
         
         
-        case .schemas:
+        case .catalogs:
             writeInt(&buf, Int32(15))
         
         
-        case .tables:
+        case .schemas:
             writeInt(&buf, Int32(16))
         
         
-        case .export:
+        case .tables:
             writeInt(&buf, Int32(17))
         
         
-        case .toTable:
+        case .export:
             writeInt(&buf, Int32(18))
         
         
-        case .preview:
+        case .toTable:
             writeInt(&buf, Int32(19))
         
         
-        case .count:
+        case .preview:
             writeInt(&buf, Int32(20))
         
         
-        case .explain:
+        case .count:
             writeInt(&buf, Int32(21))
+        
+        
+        case .explain:
+            writeInt(&buf, Int32(22))
         
         }
     }

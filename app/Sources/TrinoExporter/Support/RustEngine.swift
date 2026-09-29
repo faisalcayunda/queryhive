@@ -80,6 +80,7 @@ struct RustEngine: DatabaseEngine {
         "session": .session,
         "import_data": .importData,
         "apply_changes": .applyChanges,
+        "table_op": .tableOp,
         "objects": .objects,
         "test": .test,
         "catalogs": .catalogs,
