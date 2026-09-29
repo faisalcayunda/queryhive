@@ -1449,7 +1449,8 @@ fn stop_session_in_background(session: Box<dyn Session>, cursor: Option<Box<dyn 
     drop(spawn_stop(session, cursor, true));
 }
 
-/// Cancel, then drop the cursor, then close, on a detached task; the receiver gets the cancel's outcome.
+/// Cancel, then drop the cursor, then close, on a detached task; the receiver gets the
+/// cancel's outcome.
 fn spawn_stop(
     session: Box<dyn Session>,
     cursor: Option<Box<dyn Cursor>>,

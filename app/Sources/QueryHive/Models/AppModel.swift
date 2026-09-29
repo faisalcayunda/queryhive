@@ -2849,6 +2849,10 @@ final class AppModel {
                                             queryID: tab.preview?.queryID, elapsedMS: 0)
             case "done":
                 finished = true
+                if event.cancelled == true {
+                    Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab)
+                    break
+                }
                 tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
                                             queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0)
                 tab.note(.success, "Plan returned \(pluralized(rows.count, "line"))")

@@ -197,9 +197,8 @@ enum SQLSyntax {
         return [.foregroundColor: adaptive]
     }
 
-    /// Every character carries the default paragraph style explicitly. The fold styler used to stamp
-    /// it over the whole document after each pass; folding no longer touches attributes, so the base
-    /// says it once and a typed character inherits it through the typing attributes.
+    /// Every character carries the default paragraph style explicitly, so a typed character inherits
+    /// it through the typing attributes and folding never has to touch attributes.
     static let base = colour(0xE8EAF2, 0x1C1F26).merging([.paragraphStyle: NSParagraphStyle.default]) { _, new in new }
     static let keyword = colour(0x8B7BFF, 0x5B3FD6)
     static let function = colour(0x4FD8FF, 0x0B6E8F)

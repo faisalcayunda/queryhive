@@ -1409,11 +1409,6 @@ struct SQLEditor: NSViewRepresentable {
             return CharacterSet.alphanumerics.contains(scalar) || character == 0x5F  // _
         }
 
-        /// A `.` between two name segments.
-        private static func isQualifierSeparator(_ character: unichar) -> Bool {
-            character == 0x2E
-        }
-
         /// The quote characters the three drivers use for identifiers: `"` for Trino and Postgres,
         /// a backtick for MySQL.
         private static func isQuote(_ character: unichar) -> Bool {

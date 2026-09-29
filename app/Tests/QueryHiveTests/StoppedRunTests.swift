@@ -125,7 +125,7 @@ final class StopDeliveryTests: XCTestCase {
             if !tab.previewing, engine.calls.contains(where: { $0.command == "history_add" }) {
                 finished.fulfill()
             } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: poll)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
             }
         }
         poll()
