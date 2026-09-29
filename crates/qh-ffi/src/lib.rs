@@ -238,8 +238,17 @@ impl From<EngineError> for CliError {
 ///
 /// One process runs one command, so one flag is enough. It is shared with the signal
 /// handlers, which is why it is behind an `Arc` rather than a plain `AtomicBool`.
+///
+/// The flag can also be *awaited* ([`CancelFlag::cancelled`]): a Stop pressed while the server
+/// is still working has to end the wait, not be noticed the next time a page happens to arrive.
 #[derive(Debug, Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(Arc<CancelState>);
+
+#[derive(Debug, Default)]
+struct CancelState {
+    requested: AtomicBool,
+    raised: tokio::sync::Notify,
+}
 
 impl CancelFlag {
     pub fn new() -> Self {
@@ -249,11 +258,25 @@ impl CancelFlag {
     /// Route SIGTERM or SIGINT here instead of killing the process: a cancelled
     /// export still gets to emit its `done` and close the files it already wrote.
     pub fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.requested.store(true, Ordering::SeqCst);
+        self.0.raised.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.requested.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once a stop has been requested, immediately if it already was.
+    pub async fn cancelled(&self) {
+        loop {
+            // Created before the flag is read, so a `request` between the read and the
+            // await still wakes it.
+            let raised = self.0.raised.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            raised.await;
+        }
     }
 }
 
@@ -648,7 +671,7 @@ pub async fn run(
         Command::Export => commands::export(settings, out, engine, cancel).await,
         Command::ToTable => commands::to_table(settings, out, engine, cancel).await,
         Command::Preview => commands::preview(settings, out, engine, cancel).await,
-        Command::Count => commands::count(settings, out, engine).await,
+        Command::Count => commands::count(settings, out, engine, cancel).await,
         Command::Explain => commands::explain(settings, out, engine, cancel).await,
     }
 }

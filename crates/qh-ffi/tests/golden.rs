@@ -27,6 +27,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -173,6 +174,35 @@ struct FakeSession {
     /// How many pages to hand out before pulling that handle. `None` means the last
     /// page, which is what a drained `cancel_when_drained` asks for.
     cancel_after: Option<usize>,
+    /// Where the fake server never answers, for a Stop that lands while a call is in flight.
+    hang: Option<Hang>,
+    /// How many times the engine asked this session to cancel server-side.
+    cancels: Arc<AtomicUsize>,
+    cancel_answer: CancelAnswer,
+    /// `execute` takes this long to return, then marks the statement `running`, the way Trino
+    /// learns its query id only once the POST has been answered.
+    execute_delay: Option<std::time::Duration>,
+    running: Arc<AtomicBool>,
+    /// Whether a cancel arrived when the statement was already `running`.
+    cancel_saw_running: Arc<AtomicBool>,
+}
+
+/// The call a hanging fake never returns from.
+#[derive(Clone, Copy)]
+enum Hang {
+    Execute,
+    FirstBatch,
+    /// The fetch after the first page, which is the verdict probe when the cap lands on it.
+    SecondBatch,
+}
+
+/// How the fake server answers a server-side cancel.
+#[derive(Clone, Copy)]
+enum CancelAnswer {
+    Ok,
+    Fails,
+    /// Longer than any budget the engine waits for.
+    Slow,
 }
 
 impl FakeSession {
@@ -191,7 +221,29 @@ impl FakeSession {
             batches_of: None,
             cancel: None,
             cancel_after: None,
+            hang: None,
+            cancels: Arc::new(AtomicUsize::new(0)),
+            cancel_answer: CancelAnswer::Ok,
+            execute_delay: None,
+            running: Arc::new(AtomicBool::new(false)),
+            cancel_saw_running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn cancel_answers(mut self, answer: CancelAnswer) -> Self {
+        self.cancel_answer = answer;
+        self
+    }
+
+    fn slow_execute(mut self, delay: std::time::Duration) -> Self {
+        self.execute_delay = Some(delay);
+        self
+    }
+
+    /// Never answer `at`, the way `SELECT pg_sleep(30)` never answers.
+    fn hanging_at(mut self, at: Hang) -> Self {
+        self.hang = Some(at);
+        self
     }
 
     /// Hand the rows out `size` at a time, so there is a page boundary in the run.
@@ -288,7 +340,19 @@ impl Session for FakeSession {
             .lock()
             .expect("executed statements")
             .push(sql.to_owned());
+        if matches!(self.hang, Some(Hang::Execute)) {
+            std::future::pending::<()>().await;
+        }
+        if let Some(delay) = self.execute_delay {
+            tokio::time::sleep(delay).await;
+            self.running.store(true, Ordering::SeqCst);
+        }
         Ok(Box::new(FakeCursor {
+            hang_after: match self.hang {
+                Some(Hang::FirstBatch) => Some(0),
+                Some(Hang::SecondBatch) => Some(1),
+                _ => None,
+            },
             columns: self.columns.clone(),
             affected: self.affected,
             batches: batches_of(
@@ -325,7 +389,20 @@ impl Session for FakeSession {
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
-        Ok(())
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+        if self.running.load(Ordering::SeqCst) {
+            self.cancel_saw_running.store(true, Ordering::SeqCst);
+        }
+        match self.cancel_answer {
+            CancelAnswer::Ok => Ok(()),
+            CancelAnswer::Fails => Err(EngineError::Internal {
+                message: "kill refused".to_owned(),
+            }),
+            CancelAnswer::Slow => {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                Ok(())
+            }
+        }
     }
 
     async fn close(self: Box<Self>) -> Result<(), EngineError> {
@@ -342,6 +419,8 @@ struct FakeCursor {
     cancel_after: Option<usize>,
     /// Pages handed out so far, counted for `cancel_after`.
     served: usize,
+    /// Never hand out the page fetched after this many: the server is still running.
+    hang_after: Option<usize>,
 }
 
 #[async_trait]
@@ -355,6 +434,9 @@ impl Cursor for FakeCursor {
     }
 
     async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
+        if self.hang_after.is_some_and(|after| self.served >= after) {
+            std::future::pending::<()>().await;
+        }
         let next = self.batches.pop_front();
         self.served += 1;
         // The stop lands once the server is done answering, so the page after this one
@@ -1639,4 +1721,234 @@ fn lines(events: &[Json]) -> String {
         .map(|event| serde_json::to_string(event).expect("serialisable"))
         .collect::<Vec<_>>()
         .join("\n  ")
+}
+
+/// A Stop pressed while the server is still working -- before the first page, or before the
+/// statement has even returned a cursor -- ends the run at once instead of waiting for the
+/// server, tells the server to stop, and reports the same `done` with `cancelled: true`.
+async fn stop_a_hanging_run(
+    command: Command,
+    hang: Hang,
+) -> (Vec<Json>, usize, std::time::Duration) {
+    let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    pairs.push(("SQL".to_owned(), "SELECT slow FROM t".to_owned()));
+    let session = FakeSession::new(DriverKind::Trino)
+        .columns(&[("id", "integer")])
+        .rows(vec![vec![Value::Int(1)]])
+        .hanging_at(hang);
+    let cancels = session.cancels.clone();
+    let engine = FakeEngine {
+        session,
+        refuse: false,
+    };
+    let cancel = CancelFlag::new();
+    let presser = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        presser.request();
+    });
+    let mut events = Capture::new();
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run(
+            command,
+            &Settings::from_pairs(pairs),
+            &mut events,
+            &engine,
+            &cancel,
+        ),
+    )
+    .await
+    .expect("a Stop must not wait for the server")
+    .expect("a stopped run is not a failed run");
+    (
+        events.lines,
+        cancels.load(Ordering::SeqCst),
+        started.elapsed(),
+    )
+}
+
+#[tokio::test]
+async fn a_stop_before_the_first_batch_ends_promptly_with_done_cancelled() {
+    for command in [Command::Preview, Command::Explain, Command::Count] {
+        for hang in [Hang::FirstBatch, Hang::Execute] {
+            let (events, cancels, elapsed) = stop_a_hanging_run(command, hang).await;
+            let done = events.last().expect("the run always reports its end");
+            assert_eq!(done["event"], "done", "{events:?}");
+            assert_eq!(done["cancelled"], true, "{events:?}");
+            assert!(
+                events
+                    .iter()
+                    .all(|e| e["event"] != "count" && e["event"] != "rows"),
+                "a stopped run hands out no result: {events:?}"
+            );
+            assert_eq!(cancels, 1, "the server is told to stop: {events:?}");
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "took {elapsed:?}"
+            );
+        }
+    }
+}
+
+/// Run `command` against `session`, pressing Stop `after_ms` in, and return the events.
+async fn run_and_stop(
+    command: Command,
+    session: FakeSession,
+    extra: &[(&str, &str)],
+    after_ms: u64,
+) -> (Vec<Json>, std::time::Duration) {
+    let mut pairs: Vec<(String, String)> = base("TRINO_HOST", "trino.internal")
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    pairs.push(("SQL".to_owned(), "SELECT slow FROM t".to_owned()));
+    let engine = FakeEngine {
+        session,
+        refuse: false,
+    };
+    let cancel = CancelFlag::new();
+    let presser = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(after_ms)).await;
+        presser.request();
+    });
+    let mut events = Capture::new();
+    let started = std::time::Instant::now();
+    run(
+        command,
+        &Settings::from_pairs(pairs),
+        &mut events,
+        &engine,
+        &cancel,
+    )
+    .await
+    .expect("a stopped run is not a failed run");
+    (events.lines, started.elapsed())
+}
+
+const UNCONFIRMED: &str = "the server did not confirm the stop; the statement may still be running";
+
+#[tokio::test]
+async fn a_stop_the_server_did_not_confirm_is_reported_on_done_not_hidden() {
+    for answer in [CancelAnswer::Fails, CancelAnswer::Slow] {
+        for command in [Command::Preview, Command::Explain, Command::Count] {
+            let session = FakeSession::new(DriverKind::Postgres)
+                .columns(&[("id", "integer")])
+                .rows(vec![vec![Value::Int(1)]])
+                .hanging_at(Hang::FirstBatch)
+                .cancel_answers(answer);
+            let (events, elapsed) = run_and_stop(command, session, &[], 20).await;
+            let done = events.last().expect("the run always reports its end");
+            assert_eq!(done["cancelled"], true, "{events:?}");
+            assert_eq!(done["warnings"][0], UNCONFIRMED, "{events:?}");
+            // The wait before `done` is bounded, so a slow KILL does not hold the run.
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "took {elapsed:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_confirmed_stop_carries_no_warning() {
+    let session = FakeSession::new(DriverKind::Postgres)
+        .columns(&[("id", "integer")])
+        .rows(vec![vec![Value::Int(1)]])
+        .hanging_at(Hang::FirstBatch);
+    let (events, _) = run_and_stop(Command::Preview, session, &[], 20).await;
+    let done = events.last().expect("the run always reports its end");
+    assert!(done.get("warnings").is_none(), "{events:?}");
+}
+
+#[tokio::test]
+async fn a_stop_during_trinos_post_still_reaches_the_query_it_started() {
+    // `execute` returns 150 ms in, and only then does the session know what to cancel. A stop
+    // at 20 ms must not drop the call before that, or the query is orphaned with no id.
+    for command in [Command::Preview, Command::Explain, Command::Count] {
+        let session = FakeSession::new(DriverKind::Trino)
+            .columns(&[("id", "integer")])
+            .rows(vec![vec![Value::Int(1)]])
+            .slow_execute(std::time::Duration::from_millis(150));
+        let saw_running = session.cancel_saw_running.clone();
+        let (events, _) = run_and_stop(command, session, &[], 20).await;
+        let done = events.last().expect("the run always reports its end");
+        assert_eq!(done["cancelled"], true, "{events:?}");
+        assert!(
+            saw_running.load(Ordering::SeqCst),
+            "the cancel ran before the query id existed: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stop_that_cuts_the_verdict_probe_short_still_says_truncated() {
+    // 200 rows in one page and a cap of 200: the cap is reached without a row to spare, so the
+    // engine asks for one more, and that fetch never answers.
+    let rows: Vec<Vec<Value>> = (0..PREVIEW_BATCH as i64)
+        .map(|n| vec![Value::Int(n)])
+        .collect();
+    let session = FakeSession::new(DriverKind::Postgres)
+        .columns(&[("id", "integer")])
+        .rows(rows)
+        .hanging_at(Hang::SecondBatch);
+    let limit = PREVIEW_BATCH.to_string();
+    let (events, _) = run_and_stop(Command::Preview, session, &[("LIMIT", &limit)], 50).await;
+    let done = events.last().expect("the run always reports its end");
+    assert_eq!(done["cancelled"], true, "{events:?}");
+    assert_eq!(done["rows"], PREVIEW_BATCH, "{events:?}");
+    assert_eq!(done["truncated"], true, "{events:?}");
+}
+
+#[tokio::test]
+async fn a_capped_preview_reports_done_without_waiting_for_the_server_to_stop() {
+    // 300 rows, a cap of 10: the cap cuts the result short and the statement is stopped in
+    // the background. The fake's cancel takes 3 s, and `done` must not wait for it.
+    let rows: Vec<Vec<Value>> = (0..300i64).map(|n| vec![Value::Int(n)]).collect();
+    let session = FakeSession::new(DriverKind::Postgres)
+        .columns(&[("id", "integer")])
+        .rows(rows)
+        .cancel_answers(CancelAnswer::Slow);
+    let cancels = session.cancels.clone();
+    let engine = FakeEngine {
+        session,
+        refuse: false,
+    };
+    let mut events = Capture::new();
+    let started = std::time::Instant::now();
+    run(
+        Command::Preview,
+        &Settings::from_pairs(
+            [
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "h"),
+                ("RETRIES", "0"),
+                ("SQL", "SELECT 1"),
+                ("LIMIT", "10"),
+            ]
+            .map(|(key, value)| (key.to_owned(), value.to_owned())),
+        ),
+        &mut events,
+        &engine,
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("a capped preview succeeds");
+    let elapsed = started.elapsed();
+    let done = events.lines.last().expect("the run always reports its end");
+    assert_eq!(done["truncated"], true, "{:?}", events.lines);
+    assert!(done.get("warnings").is_none(), "{:?}", events.lines);
+    assert!(
+        elapsed < std::time::Duration::from_millis(50),
+        "took {elapsed:?}"
+    );
+    // The stop is still issued, just not waited for.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(cancels.load(Ordering::SeqCst), 1);
 }

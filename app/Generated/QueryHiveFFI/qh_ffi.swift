@@ -773,10 +773,13 @@ public func FfiConverterTypeEventSink_lower(_ value: EventSink) -> UInt64 {
  * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
  * queue while the FFI call blocks on another.
  *
- * Setting the flag is all it does. The engine reads it between rows and between statements, so
- * a stopped `export` finishes the statement it is on, keeps the bytes already written and
- * reports `done` with `cancelled: true` — a stop that loses what was written would be worse
- * than no stop button.
+ * Setting the flag is all it does, and the engine reacts at once: every wait on the server
+ * (connect, the statement, a page) is raced against it, so a stop pressed on a slow query
+ * ends the run without waiting for the first row. The engine then asks the server to stop the
+ * statement, bounded to 250 ms, and reports `done` with `cancelled: true`; if the server did
+ * not confirm in that time the same `done` carries a `warnings` entry saying so. A stopped
+ * `export` keeps the bytes already written -- a stop that loses what was written would be
+ * worse than no stop button.
  */
 public protocol RunCancelProtocol: AnyObject, Sendable {
     
@@ -805,10 +808,13 @@ public protocol RunCancelProtocol: AnyObject, Sendable {
  * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
  * queue while the FFI call blocks on another.
  *
- * Setting the flag is all it does. The engine reads it between rows and between statements, so
- * a stopped `export` finishes the statement it is on, keeps the bytes already written and
- * reports `done` with `cancelled: true` — a stop that loses what was written would be worse
- * than no stop button.
+ * Setting the flag is all it does, and the engine reacts at once: every wait on the server
+ * (connect, the statement, a page) is raced against it, so a stop pressed on a slow query
+ * ends the run without waiting for the first row. The engine then asks the server to stop the
+ * statement, bounded to 250 ms, and reports `done` with `cancelled: true`; if the server did
+ * not confirm in that time the same `done` carries a `warnings` entry saying so. A stopped
+ * `export` keeps the bytes already written -- a stop that loses what was written would be
+ * worse than no stop button.
  */
 open class RunCancel: RunCancelProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64

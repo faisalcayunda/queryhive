@@ -31,21 +31,25 @@
 //!
 //! # What a Stop cannot do, and why the query below is shaped for that
 //!
-//! `stream_rows` pulls the page that carries `columns` before any event is emitted, and
-//! neither `preview` nor `explain` calls `session.cancel()`. A Stop therefore has a
-//! granularity of one page: it stops the *next* fetch, and it cannot cut short a fetch
-//! already in flight. The measurement that establishes this: with
-//! `pg_sleep(0.4) IS NULL` per row over 400 rows, a stop raised 400 ms into the run did
-//! not return until 160.6 s, which is the whole statement -- the priming page and the
-//! five after it, at 400 rows of 0.4 s. The query below keeps the row count over the
-//! page size and no sleep at all, because the assertion is about *which* pages are
-//! fetched, not about how long they took.
+//! A Stop raised *between* pages is seen at the check before the next fetch, and the
+//! test below keeps the row count over the page size and no sleep at all, because that
+//! assertion is about *which* pages are fetched, not about how long they took. A Stop
+//! raised while a fetch or the `execute` is *in flight* is a different case: the wait
+//! itself is raced against the flag and `session.cancel()` reaches the server, which the
+//! two `pg_sleep(30)` tests at the bottom time from outside, through `pg_stat_activity`.
+//! (An earlier version of this engine could not do that: a stop 400 ms into a
+//! `pg_sleep(0.4)`-per-row statement did not return for 160.6 s.)
 
 use std::io;
 
 use qh_ffi::events::{Capture, Emitter};
 use qh_ffi::{run, CancelFlag, Command, RealEngine, Settings};
 use serde_json::Value as Json;
+
+/// The timing tests measure a server's answer to a Stop in milliseconds, and the mid-stream
+/// MySQL tests keep a core busy for seconds: taking turns keeps the first from measuring the
+/// second.
+static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const SKIP_HINT: &str = "skipped: set QH_TEST_POSTGRES=1 with deploy/dev/up.sh postgres running";
 
@@ -304,4 +308,419 @@ async fn a_count_that_times_out_names_the_bound_and_invents_no_number() {
         "a timeout must not emit a count: {}",
         lines(&out.lines)
     );
+}
+
+/// How many backends are still running a statement that carries `marker`.
+///
+/// Asked through the engine's own `preview` on a second connection, so this file needs no
+/// driver of its own. The checker excludes itself by pid, since its text carries the marker.
+async fn active_with(marker: &str) -> i64 {
+    let mut pairs = pairs(&settings().expect("checked by the caller"));
+    pairs.retain(|(key, _)| key != "SQL" && key != "LIMIT");
+    pairs.push((
+        "SQL".to_owned(),
+        format!(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE state = 'active' AND pid <> pg_backend_pid() AND query LIKE '%{marker}%'"
+        ),
+    ));
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("the checker runs");
+    data(&out.lines)[0][0]
+        .as_str()
+        .expect("a count is text")
+        .parse()
+        .expect("an integer")
+}
+
+/// Start `command` on `sql`, wait until the server is running it, press Stop, and return how
+/// long the server took to stop running it.
+async fn stop_and_time(command: Command, sql: &str) -> (std::time::Duration, Vec<Json>) {
+    use std::time::{Duration, Instant};
+    let marker = format!(
+        "qh-cancel-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let mut pairs = pairs(&settings().expect("checked by the caller"));
+    pairs.retain(|(key, _)| key != "SQL" && key != "LIMIT");
+    pairs.push(("SQL".to_owned(), format!("{sql} /* {marker} */")));
+
+    let cancel = CancelFlag::new();
+    let stop = cancel.clone();
+    // Joined rather than spawned: a run is not `Send`, and the two halves only need to
+    // interleave.
+    let running = async {
+        let mut out = Capture::new();
+        let result = run(
+            command,
+            &Settings::from_pairs(pairs),
+            &mut out,
+            &RealEngine::new(),
+            &stop,
+        )
+        .await;
+        (
+            result.map_err(|error| error.message().to_owned()),
+            out.lines,
+        )
+    };
+    let watching = async {
+        let waiting = Instant::now();
+        while active_with(&marker).await == 0 {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(10),
+                "the server never started the statement"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pressed = Instant::now();
+        cancel.request();
+        while active_with(&marker).await != 0 {
+            assert!(
+                pressed.elapsed() < Duration::from_secs(5),
+                "the server is still running the statement"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        pressed.elapsed()
+    };
+    let ((result, events), stopped) = tokio::join!(running, watching);
+    result.unwrap_or_else(|error| panic!("a stopped run is not a failed run: {error}"));
+    (stopped, events)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_on_a_sleeping_preview_is_confirmed_by_the_server_within_250_ms() {
+    let _turn = TURN.lock().await;
+    if settings().is_none() {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let (stopped, events) = stop_and_time(Command::Preview, "SELECT pg_sleep(30)").await;
+    let done = events.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done", "{}", lines(&events));
+    assert_eq!(done["cancelled"], true, "{}", lines(&events));
+    assert!(
+        stopped < std::time::Duration::from_millis(250),
+        "the server took {stopped:?} to stop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_on_a_sleeping_count_is_confirmed_by_the_server_within_250_ms() {
+    let _turn = TURN.lock().await;
+    // `explain` has no such test: EXPLAIN without ANALYZE plans the statement and never runs
+    // it, so there is nothing for a Stop to interrupt on PostgreSQL.
+    if settings().is_none() {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let (stopped, events) = stop_and_time(Command::Count, "SELECT pg_sleep(30)").await;
+    let done = events.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done", "{}", lines(&events));
+    assert_eq!(done["cancelled"], true, "{}", lines(&events));
+    assert!(
+        stopped < std::time::Duration::from_millis(250),
+        "the server took {stopped:?} to stop"
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// a capped preview leaves nothing running on any of the three servers
+// --------------------------------------------------------------------------- //
+
+/// One server's dev container, and how to ask it what is still running.
+struct Server {
+    flag: &'static str,
+    env: &'static [(&'static str, &'static str)],
+    /// The statement to cap; `{m}` is replaced with a unique marker comment.
+    slow_sql: &'static str,
+    /// Counts the statements still running that carry the marker; `{m}` as above.
+    running_sql: &'static str,
+}
+
+fn env_pairs(env: &[(&str, &str)], sql: &str, limit: Option<&str>) -> Settings {
+    let mut pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SQL".to_owned(), sql.to_owned()));
+    if let Some(limit) = limit {
+        pairs.push(("LIMIT".to_owned(), limit.to_owned()));
+    }
+    Settings::from_pairs(pairs)
+}
+
+async fn running_on(server: &Server, marker: &str) -> i64 {
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &env_pairs(server.env, &server.running_sql.replace("{m}", marker), None),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("the checker runs");
+    data(&out.lines)[0][0]
+        .as_str()
+        .expect("a count is text")
+        .parse()
+        .expect("an integer")
+}
+
+/// Cap a long statement at ten rows and require the server to stop running it soon after the
+/// run reports `done`: an unfinished cursor left to its connection task would keep the server
+/// busy (and a core at 100 %) for the rest of the statement.
+async fn a_capped_preview_leaves_nothing_running(server: Server) {
+    use std::time::{Duration, Instant};
+    if std::env::var(server.flag).as_deref() != Ok("1") {
+        eprintln!(
+            "skipped: set {}=1 with deploy/dev/up.sh running",
+            server.flag
+        );
+        return;
+    }
+    let marker = format!(
+        "qh-capped-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let sql = format!("{} /* {marker} */", server.slow_sql);
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &env_pairs(server.env, &sql, Some("10")),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("a capped preview succeeds");
+    let done = out.lines.last().expect("the run always reports its end");
+    assert_eq!(done["truncated"], true, "{}", lines(&out.lines));
+    assert_eq!(done["rows"], 10, "{}", lines(&out.lines));
+
+    let waiting = Instant::now();
+    while running_on(&server, &marker).await != 0 {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(1),
+            "the server is still running the capped statement"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_postgres_preview_leaves_nothing_running() {
+    a_capped_preview_leaves_nothing_running(Server {
+        flag: "QH_TEST_POSTGRES",
+        env: &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "127.0.0.1"),
+            ("DB_PORT", "55432"),
+            ("DB_USER", "qh"),
+            ("DB_PASSWORD", "qh-dev-only"),
+            ("DB_DATABASE", "qh"),
+            ("DB_SCHEMA", "public"),
+            ("DB_SSLMODE", "disable"),
+        ],
+        slow_sql: "SELECT g, pg_sleep(0.002) FROM generate_series(1, 4000) AS g",
+        running_sql: "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' \
+                      AND pid <> pg_backend_pid() AND query LIKE '%{m}%'",
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_mysql_preview_leaves_nothing_running() {
+    a_capped_preview_leaves_nothing_running(Server {
+        flag: "QH_TEST_MYSQL",
+        env: &[
+            ("DB_KIND", "mysql"),
+            ("DB_HOST", "127.0.0.1"),
+            ("DB_PORT", "53306"),
+            ("DB_USER", "qh"),
+            ("DB_PASSWORD", "qh-dev-only"),
+            ("DB_DATABASE", "qh"),
+        ],
+        // A billion rows from a three-way cross join: more than a second of sending.
+        slow_sql:
+            "WITH RECURSIVE n AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM n WHERE x < 1000) \
+                   SELECT a.x AS ax, b.x AS bx, c.x AS cx FROM n a, n b, n c",
+        running_sql: "SELECT COUNT(*) FROM information_schema.processlist WHERE command = 'Query' \
+                      AND id <> CONNECTION_ID() AND info LIKE '%{m}%'",
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_trino_preview_deletes_its_query() {
+    a_capped_preview_leaves_nothing_running(Server {
+        flag: "QH_TEST_TRINO",
+        env: &[
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "127.0.0.1"),
+            ("DB_PORT", "58080"),
+            ("DB_USER", "queryhive"),
+            ("DB_DATABASE", "tpch"),
+            ("DB_SCHEMA", "sf1"),
+        ],
+        slow_sql: "SELECT * FROM lineitem",
+        running_sql: "SELECT count(*) FROM system.runtime.queries WHERE state = 'RUNNING' \
+                      AND query LIKE '%{m}%' AND query NOT LIKE '%system.runtime.queries%'",
+    })
+    .await;
+}
+
+// --------------------------------------------------------------------------- //
+// a Stop in the middle of a MySQL result reaches the server
+// --------------------------------------------------------------------------- //
+
+const MYSQL_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "mysql"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "53306"),
+    ("DB_USER", "qh"),
+    ("DB_PASSWORD", "qh-dev-only"),
+    ("DB_DATABASE", "qh"),
+];
+
+/// A billion rows, streaming from the first second on.
+const MYSQL_BIG: &str =
+    "WITH RECURSIVE n AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM n WHERE x < 1000) \
+                         SELECT a.x AS ax, b.x AS bx, c.x AS cx FROM n a, n b, n c";
+
+async fn mysql_scalar(sql: &str) -> i64 {
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &env_pairs(MYSQL_ENV, sql, None),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("the checker runs");
+    data(&out.lines)[0]
+        .as_array()
+        .and_then(|row| row.last())
+        .and_then(Json::as_str)
+        .expect("text")
+        .parse()
+        .expect("an integer")
+}
+
+const COM_KILL: &str = "SHOW GLOBAL STATUS LIKE 'Com_kill'";
+
+/// Run `command` over the big result, press Stop 1.5 s in, and require that the server saw a
+/// `KILL` and stopped running the statement within a second of `done`.
+async fn a_mid_stream_stop_kills_the_mysql_statement(command: Command, extra: &[(&str, String)]) {
+    let _turn = TURN.lock().await;
+    use std::time::{Duration, Instant};
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_MYSQL=1 with deploy/dev/up.sh running");
+        return;
+    }
+    let marker = format!(
+        "qh-midstream-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let sql = format!("{MYSQL_BIG} /* {marker} */");
+    let mut pairs: Vec<(String, String)> = MYSQL_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SQL".to_owned(), sql));
+    pairs.push(("LIMIT".to_owned(), "1000000000".to_owned()));
+    pairs.extend(
+        extra
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone())),
+    );
+    let settings = Settings::from_pairs(pairs);
+    let kills_before = mysql_scalar(COM_KILL).await;
+
+    let cancel = CancelFlag::new();
+    let stop = cancel.clone();
+    let mut out = Capture::new();
+    let engine = RealEngine::new();
+    let (result, ()) = tokio::join!(
+        run(command, &settings, &mut out, &engine, &cancel),
+        async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            stop.request();
+        }
+    );
+    result.expect("a stopped run is not a failed run");
+    let done = out.lines.last().expect("the run always reports its end");
+    assert_eq!(done["event"], "done", "{}", lines(&out.lines));
+    assert_eq!(done["cancelled"], true, "{}", lines(&out.lines));
+    if command != Command::Count {
+        assert!(done["query_id"].is_string(), "{}", lines(&out.lines));
+    }
+    assert!(
+        done.get("warnings")
+            .is_none_or(|w| w.as_array().is_some_and(|w| w.is_empty())),
+        "the stop was confirmed: {}",
+        lines(&out.lines)
+    );
+    assert!(
+        mysql_scalar(COM_KILL).await > kills_before,
+        "no KILL reached the server"
+    );
+
+    let running = "SELECT COUNT(*) FROM information_schema.processlist WHERE command = 'Query' \
+                   AND id <> CONNECTION_ID() AND info LIKE '%{m}%'"
+        .replace("{m}", &marker);
+    let waiting = Instant::now();
+    while mysql_scalar(&running).await != 0 {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(1),
+            "the server is still running the statement"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_in_the_middle_of_a_mysql_preview_kills_the_statement() {
+    a_mid_stream_stop_kills_the_mysql_statement(Command::Preview, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_in_the_middle_of_a_mysql_count_kills_the_statement() {
+    a_mid_stream_stop_kills_the_mysql_statement(Command::Count, &[]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_in_the_middle_of_a_mysql_export_kills_the_statement() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    a_mid_stream_stop_kills_the_mysql_statement(
+        Command::Export,
+        &[
+            ("OUT_DIR", dir.path().to_string_lossy().into_owned()),
+            ("FORMAT", "csv".to_owned()),
+            ("NAME", "big".to_owned()),
+        ],
+    )
+    .await;
 }

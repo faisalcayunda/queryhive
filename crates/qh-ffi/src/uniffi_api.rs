@@ -50,9 +50,10 @@
 //!   with `cancelled: true` — the same outcome SIGTERM produces in the CLI, which is the other
 //!   thing the flag exists for.
 //!
-//! Both are synchronous, and that is deliberate: the commands are async, so each call runs one on
-//! a runtime of its own, and what matters to the caller is that one FFI call must not run on the
-//! main thread. The app decides that, and it is also why the handle is a separate object: the
+//! Both are synchronous, and that is deliberate: the commands are async, so each call blocks on the
+//! process's one runtime ([`qh_rt::build_main`], built on first use), and what matters to the
+//! caller is that one FFI call must not run on the main thread. The app decides that, and it is
+//! also why the handle is a separate object: the
 //! thread that is blocked in [`run`] cannot be the thread that presses Stop.
 //!
 //! # The events are the same events, and the order is the same order
@@ -63,12 +64,13 @@
 //! this path ([`SinkEmitter`] hands on the same [`serde_json::Value`] both of them serialise).
 
 use std::io;
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value as Json;
 
 use crate::events::{event, Emitter};
-use crate::{run as run_command, CancelFlag, CliError, Command, RealEngine, Settings};
+use crate::{run as run_command, CancelFlag, CliError, Command, Engine, RealEngine, Settings};
 
 /// One setting, as the environment would have carried it.
 ///
@@ -248,10 +250,13 @@ impl Emitter for SinkEmitter {
 /// `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
 /// queue while the FFI call blocks on another.
 ///
-/// Setting the flag is all it does. The engine reads it between rows and between statements, so
-/// a stopped `export` finishes the statement it is on, keeps the bytes already written and
-/// reports `done` with `cancelled: true` — a stop that loses what was written would be worse
-/// than no stop button.
+/// Setting the flag is all it does, and the engine reacts at once: every wait on the server
+/// (connect, the statement, a page) is raced against it, so a stop pressed on a slow query
+/// ends the run without waiting for the first row. The engine then asks the server to stop the
+/// statement, bounded to 250 ms, and reports `done` with `cancelled: true`; if the server did
+/// not confirm in that time the same `done` carries a `warnings` entry saying so. A stopped
+/// `export` keeps the bytes already written -- a stop that loses what was written would be
+/// worse than no stop button.
 #[derive(Debug, Clone, Default, uniffi::Object)]
 pub struct RunCancel {
     flag: CancelFlag,
@@ -305,37 +310,66 @@ pub fn run(
     );
 
     let mut out = SinkEmitter { sink };
+    let engine = RealEngine::with_settings(settings.clone());
+    run_with(
+        command.as_command(),
+        &settings,
+        &mut out,
+        &engine,
+        &cancel.flag,
+    );
+}
 
-    // A runtime per call: the commands are async and the caller is not, and a shared runtime
-    // would be a piece of global state whose shutdown the app cannot reason about. The call is
-    // already off the main thread by the caller's own decision — see the module note.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+/// [`run`] with the engine handed in, so a test can put a misbehaving one behind the same
+/// guard the app gets.
+fn run_with(
+    command: Command,
+    settings: &Settings,
+    out: &mut SinkEmitter,
+    engine: &dyn Engine,
+    cancel: &CancelFlag,
+) {
+    // One runtime for the process, entered from whichever dispatch thread the caller runs on.
+    // Blocking on it from one of its own workers would deadlock, so that is a bug, not a case.
+    debug_assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "`run` blocks its thread and must not be called from inside a runtime"
+    );
+    let runtime = match runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             // Nothing was started, so there is no `error` line to write: the sink is the only
             // place this failure can be reported, and it is reported the way a command's failure
             // is, so the app has one shape to decode.
             fail(
-                &mut out,
+                out,
                 &CliError::Internal(format!("could not start a runtime: {error}")),
             );
             return;
         }
     };
 
-    let engine = RealEngine::with_settings(settings.clone());
-    match runtime.block_on(run_command(
-        command.as_command(),
-        &settings,
-        &mut out,
-        &engine,
-        &cancel.flag,
-    )) {
-        Ok(()) => {}
-        Err(error) => fail(&mut out, &error),
+    // A panic is caught here rather than allowed across the FFI boundary, where it would end
+    // the app's process (ADR-0009) and leave the sink with a truncated protocol; `main.rs`
+    // makes the same catch for the CLI.
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime.block_on(run_command(command, settings, &mut *out, engine, cancel))
+    }));
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => fail(out, &error),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked".to_owned());
+            let _ = out.emit(
+                event("error")
+                    .field("message", format!("internal error: {message}"))
+                    .build(),
+            );
+        }
     }
 }
 
@@ -356,6 +390,21 @@ fn fail(out: &mut dyn Emitter, error: &CliError) {
             )
             .build(),
     );
+}
+
+/// The process-wide runtime, built by [`qh_rt::build_main`] the first time a run needs it and
+/// never shut down, so a `run` costs a `block_on` and not a thread pool.
+///
+/// Only a success is kept: a build that failed (out of threads, say) is tried again on the
+/// next call rather than failing every run for the rest of the process.
+fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    if let Some(runtime) = RUNTIME.get() {
+        return Ok(runtime);
+    }
+    let built = qh_rt::build_main().map_err(|error| error.to_string())?;
+    // Two first callers can both build; one wins and the other's runtime is dropped unused.
+    Ok(RUNTIME.get_or_init(|| built))
 }
 
 /// The version of this engine, for a caller that has to say what it is talking to.
@@ -610,6 +659,91 @@ mod tests {
             events[0].get("warnings").is_none(),
             "a failure with no warnings omits the field: {}",
             events[0]
+        );
+    }
+
+    #[test]
+    fn many_runs_share_one_runtime_and_a_task_lands_on_its_workers() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("t.db").to_string_lossy().into_owned();
+        let legacy = dir.path().join("legacy").to_string_lossy().into_owned();
+        for _ in 0..20 {
+            let sink = Recorder::default();
+            run(
+                EngineCommand::Connections,
+                vec![setting("DB_PATH", &db), setting("LEGACY_PATH", &legacy)],
+                Arc::new(sink.clone()),
+                RunCancel::new(),
+            );
+            assert_ne!(sink.events()[0]["event"], "error", "{:?}", sink.lines());
+        }
+        // The same runtime from every thread that asks, and it is the `qh-main` pool that
+        // `qh_rt::build_main` builds, not a per-call one.
+        let first = runtime().expect("the runtime builds") as *const _;
+        let elsewhere =
+            std::thread::spawn(|| runtime().expect("the runtime builds") as *const _ as usize)
+                .join()
+                .expect("thread");
+        assert_eq!(first as usize, elsewhere);
+        let name = runtime()
+            .expect("the runtime builds")
+            .block_on(async {
+                tokio::spawn(async { std::thread::current().name().map(str::to_owned) }).await
+            })
+            .expect("task");
+        assert_eq!(name.as_deref(), Some("qh-main"));
+    }
+
+    /// An engine whose connect panics, standing in for any bug that unwinds inside a command.
+    struct PanickingEngine;
+
+    #[async_trait::async_trait]
+    impl Engine for PanickingEngine {
+        fn kinds(&self) -> Vec<qh_driver::DriverKind> {
+            qh_driver::DriverKind::ALL.to_vec()
+        }
+
+        fn driver(&self, _kind: qh_driver::DriverKind) -> &dyn qh_driver::Driver {
+            static POSTGRES: qh_driver_postgres::PostgresDriver =
+                qh_driver_postgres::PostgresDriver;
+            &POSTGRES
+        }
+
+        async fn connect(
+            &self,
+            _config: &qh_driver::ConnectionConfig,
+        ) -> Result<Box<dyn qh_driver::Session>, qh_core::EngineError> {
+            panic!("boom in connect")
+        }
+    }
+
+    #[test]
+    fn a_panic_inside_a_run_becomes_an_error_event_not_an_unwind() {
+        let sink = Recorder::default();
+        let settings = Settings::from_pairs(
+            [
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "127.0.0.1"),
+                ("RETRIES", "0"),
+                ("SQL", "SELECT 1"),
+            ]
+            .map(|(key, value)| (key.to_owned(), value.to_owned())),
+        );
+        run_with(
+            Command::Preview,
+            &settings,
+            &mut SinkEmitter {
+                sink: Arc::new(sink.clone()),
+            },
+            &PanickingEngine,
+            &CancelFlag::new(),
+        );
+        let events = sink.events();
+        let last = events.last().expect("something was reported");
+        assert_eq!(last["event"], "error", "{events:?}");
+        assert_eq!(
+            last["message"], "internal error: boom in connect",
+            "{events:?}"
         );
     }
 }

@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use qh_core::{ColumnBatch, ColumnMeta, Value};
+use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath, Session,
 };
@@ -911,16 +911,23 @@ pub async fn export(
         })
         .collect();
 
+    let query_id = session.query_id();
+    let mut warnings = outcome.warnings;
+    if outcome.cancelled {
+        // `pump` stopped mid-result: the statement is still running on the server.
+        warnings.extend(stop_session(session, Some(cursor)).await);
+    } else {
+        let _ = session.close().await;
+    }
     out.emit(
         event("done")
             .field("rows", outcome.rows)
             .field("files", entries)
-            .field("warnings", outcome.warnings)
-            .field("query_id", session.query_id())
+            .field("warnings", warnings)
+            .field("query_id", query_id)
             .field("cancelled", outcome.cancelled)
             .build(),
     )?;
-    let _ = session.close().await;
     Ok(())
 }
 
@@ -1344,6 +1351,128 @@ struct PageBounds {
     timeout: Option<Duration>,
 }
 
+/// How long a Stop waits for the server to acknowledge a server-side cancel, and again for the
+/// session to close. A server that cannot answer in that time is left to notice the dropped
+/// socket on its own.
+const STOP_BUDGET: Duration = Duration::from_millis(250);
+
+/// Race `work` against a Stop: `None` when the stop won.
+///
+/// `work` is polled first, so a call that is already answered is never thrown away for a stop
+/// that arrived at the same moment -- the page in hand is kept, as it always was.
+async fn until_stopped<T>(
+    cancel: &CancelFlag,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        out = work => Some(out),
+        () = cancel.cancelled() => None,
+    }
+}
+
+/// Run `sql` like [`retry::execute`], but end the wait at a Stop: `None` when the stop won.
+///
+/// `grace` is how long a stop keeps waiting for the call to finish anyway. Trino's `execute`
+/// returns once the coordinator has queued the statement, and only then does the session know
+/// the query id its `cancel` needs; dropping the call earlier would orphan a query nothing
+/// can name. The other drivers cancel by something they already hold, so they pass zero.
+async fn execute_until_stopped(
+    cancel: &CancelFlag,
+    session: &mut Box<dyn Session>,
+    policy: &RetryPolicy,
+    sql: &str,
+    options: &ExecuteOptions,
+    grace: Duration,
+) -> Option<Result<Box<dyn Cursor>, EngineError>> {
+    let mut work = std::pin::pin!(retry::execute(session, policy, sql, options));
+    tokio::select! {
+        biased;
+        out = &mut work => Some(out),
+        () = cancel.cancelled() => {
+            if !grace.is_zero() {
+                let _ = tokio::time::timeout(grace, &mut work).await;
+            }
+            None
+        }
+    }
+}
+
+/// The grace a stop gives `execute` on this driver, see [`execute_until_stopped`].
+///
+/// MySQL needs none: its session publishes the connection id when it connects, the producer
+/// publishes it again when a statement starts, and the id is never cleared, so `KILL QUERY`
+/// always has an id to name.
+fn stop_grace(config: &ConnectionConfig) -> Duration {
+    if config.kind == DriverKind::Trino {
+        STOP_BUDGET
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// What a `done` says when the server did not confirm a stop.
+const STOP_UNCONFIRMED: &str =
+    "the server did not confirm the stop; the statement may still be running";
+
+/// How long the detached cancel and close may take before they are abandoned.
+const STOP_CEILING: Duration = Duration::from_secs(10);
+
+/// Tell the server to stop what this session is running, then close it.
+///
+/// Every path that leaves a cursor unfinished goes through here rather than through a bare
+/// `close`: PostgreSQL's connection task would keep draining the pending response, MySQL's
+/// dropped connection reads the rest of the result on the shared runtime, and a Trino query
+/// would keep holding the coordinator. The cancel and the close run as a detached task, so a
+/// slow `KILL` connection still completes; only the wait before the caller emits its `done` is
+/// bounded by [`STOP_BUDGET`]. Returns the warning to put on that `done` when the server did
+/// not confirm in time, or the cancel failed.
+async fn stop_session(
+    session: Box<dyn Session>,
+    cursor: Option<Box<dyn Cursor>>,
+) -> Option<String> {
+    let confirmed = spawn_stop(session, cursor, false);
+    let reason = match tokio::time::timeout(STOP_BUDGET, confirmed).await {
+        Ok(Ok(Ok(()))) => return None,
+        Ok(Ok(Err(error))) => format!("the cancel failed: {error}"),
+        Ok(Err(_)) => "the cancel task ended without an answer".to_owned(),
+        Err(_) => format!("no answer within {} ms", STOP_BUDGET.as_millis()),
+    };
+    eprintln!("queryhive-engine: {STOP_UNCONFIRMED} ({reason})");
+    Some(STOP_UNCONFIRMED.to_owned())
+}
+
+/// [`stop_session`] for a result the cap cut short: nobody asked for a stop, so nothing waits
+/// for it. The `done` goes out at once and a failure is only logged, because the app keeps the
+/// tab running until the run returns and a cancel round trip would delay every capped Run.
+fn stop_session_in_background(session: Box<dyn Session>, cursor: Option<Box<dyn Cursor>>) {
+    drop(spawn_stop(session, cursor, true));
+}
+
+/// Cancel, then drop the cursor, then close, on a detached task; the receiver gets the cancel's outcome.
+fn spawn_stop(
+    session: Box<dyn Session>,
+    cursor: Option<Box<dyn Cursor>>,
+    log_failure: bool,
+) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+    let (answer, confirmed) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let cancelled = match tokio::time::timeout(STOP_CEILING, session.cancel()).await {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err(format!("no answer within {} s", STOP_CEILING.as_secs())),
+        };
+        if let (true, Err(reason)) = (log_failure, &cancelled) {
+            eprintln!("queryhive-engine: stopping a capped result failed ({reason})");
+        }
+        let _ = answer.send(cancelled);
+        // Only now: MySQL's producer ends when its cursor is dropped, and a cancel sent after
+        // that has nothing left to name.
+        drop(cursor);
+        let _ = tokio::time::timeout(STOP_CEILING, session.close()).await;
+    });
+    confirmed
+}
+
 /// `preview`: the first `LIMIT` rows of the caller's statement, as written.
 ///
 /// The cap is enforced while pulling and never by rewriting the SQL: the statement
@@ -1376,13 +1505,14 @@ pub async fn preview(
         limit: Some(limit),
         timeout,
     };
-    let (rows, truncated, query_id, cancelled) =
-        stream_rows(settings, out, engine, &config, &sql, bounds, cancel).await?;
+    let streamed = stream_rows(settings, out, engine, &config, &sql, bounds, cancel).await?;
+    let cancelled = streamed.cancelled;
     let done = event("done")
-        .field("rows", rows)
-        .field("truncated", truncated)
-        .field("query_id", query_id)
-        .field("elapsed_ms", started.elapsed().as_millis() as u64);
+        .field("rows", streamed.rows)
+        .field("truncated", streamed.truncated)
+        .field("query_id", streamed.query_id)
+        .field("elapsed_ms", started.elapsed().as_millis() as u64)
+        .maybe("warnings", streamed.warning.map(|text| json!([text])));
     out.emit(if cancelled {
         done.field("cancelled", true).build()
     } else {
@@ -1413,9 +1543,13 @@ pub async fn explain(
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
 
-    let (mut session, policy) = open(settings, engine, &config).await?;
+    let Some(opened) = until_stopped(cancel, open(settings, engine, &config)).await else {
+        return stopped_run(out, 0, None, None, None, started);
+    };
+    let (mut session, policy) = opened?;
     let statement = session.explain_statement(&sql);
-    let mut cursor = retry::execute(
+    let executed = execute_until_stopped(
+        cancel,
         &mut session,
         &policy,
         &statement,
@@ -1424,23 +1558,65 @@ pub async fn explain(
             row_limit: None,
             statement_timeout: timeout,
         },
+        stop_grace(&config),
     )
-    .await?;
-    let primed = cursor.next_batch(PREVIEW_BATCH).await?;
+    .await;
+    let Some(cursor) = executed else {
+        let query_id = session.query_id();
+        let warning = stop_session(session, None).await;
+        return stopped_run(out, 0, query_id, None, warning, started);
+    };
+    let mut cursor = cursor?;
+    let Some(primed) = until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH)).await else {
+        let query_id = session.query_id();
+        let warning = stop_session(session, Some(cursor)).await;
+        return stopped_run(out, 0, query_id, None, warning, started);
+    };
+    let primed = primed?;
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
     // branch on it.
-    let (rows, _, cancelled) = emit_batches(out, cursor, primed, None, Some(cancel)).await?;
+    let (rows, _, cancelled) = emit_batches(out, &mut cursor, primed, None, Some(cancel)).await?;
+    let query_id = session.query_id();
+    let warning = if cancelled {
+        stop_session(session, Some(cursor)).await
+    } else {
+        drop(cursor);
+        let _ = session.close().await;
+        None
+    };
     let done = event("done")
         .field("rows", rows)
-        .field("query_id", session.query_id())
-        .field("elapsed_ms", started.elapsed().as_millis() as u64);
+        .field("query_id", query_id)
+        .field("elapsed_ms", started.elapsed().as_millis() as u64)
+        .maybe("warnings", warning.map(|text| json!([text])));
     out.emit(if cancelled {
         done.field("cancelled", true).build()
     } else {
         done.build()
     })?;
-    let _ = session.close().await;
+    Ok(())
+}
+
+/// The `done` of a run that was stopped before it had anything to show.
+fn stopped_run(
+    out: &mut dyn Emitter,
+    rows: u64,
+    query_id: Option<String>,
+    truncated: Option<bool>,
+    warning: Option<String>,
+    started: Instant,
+) -> Result<(), CliError> {
+    out.emit(
+        event("done")
+            .field("rows", rows)
+            .maybe("truncated", truncated.map(Json::from))
+            .field("query_id", query_id)
+            .field("elapsed_ms", started.elapsed().as_millis() as u64)
+            .maybe("warnings", warning.map(|text| json!([text])))
+            .field("cancelled", true)
+            .build(),
+    )?;
     Ok(())
 }
 
@@ -1457,9 +1633,20 @@ async fn stream_rows(
     sql: &str,
     bounds: PageBounds,
     cancel: &CancelFlag,
-) -> Result<(u64, bool, Option<String>, bool), CliError> {
-    let (mut session, policy) = open(settings, engine, config).await?;
-    let mut cursor = retry::execute(
+) -> Result<Streamed, CliError> {
+    let stopped = |query_id, warning| Streamed {
+        rows: 0,
+        truncated: false,
+        query_id,
+        cancelled: true,
+        warning,
+    };
+    let Some(opened) = until_stopped(cancel, open(settings, engine, config)).await else {
+        return Ok(stopped(None, None));
+    };
+    let (mut session, policy) = opened?;
+    let executed = execute_until_stopped(
+        cancel,
         &mut session,
         &policy,
         sql,
@@ -1470,19 +1657,57 @@ async fn stream_rows(
             row_limit: None,
             statement_timeout: bounds.timeout,
         },
+        stop_grace(config),
     )
-    .await?;
+    .await;
+    let Some(cursor) = executed else {
+        let query_id = session.query_id();
+        return Ok(stopped(query_id, stop_session(session, None).await));
+    };
+    let mut cursor = cursor?;
     // The first batch is taken before anything is sent, because `columns` is the one
     // event the grid cannot do without and a Trino cursor has none until a page
     // carrying them has arrived. This is the same wait the Python engine did before
     // it emitted the same event, and it is why the primed batch is handed on rather
-    // than dropped: those rows are already fetched.
-    let primed = cursor.next_batch(PREVIEW_BATCH).await?;
+    // than dropped: those rows are already fetched. A Stop ends this wait too: with
+    // no page there is no `columns`, and the run reports only its `done`.
+    let Some(primed) = until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH)).await else {
+        let query_id = session.query_id();
+        return Ok(stopped(query_id, stop_session(session, Some(cursor)).await));
+    };
+    let primed = primed?;
     let (rows, truncated, cancelled) =
-        emit_batches(out, cursor, primed, bounds.limit, Some(cancel)).await?;
+        emit_batches(out, &mut cursor, primed, bounds.limit, Some(cancel)).await?;
     let query_id = session.query_id();
-    let _ = session.close().await;
-    Ok((rows, truncated, query_id, cancelled))
+    // A capped or stopped result leaves the statement unfinished on the server, so the
+    // session is stopped rather than merely closed, see [`stop_session`].
+    let warning = if cancelled {
+        stop_session(session, Some(cursor)).await
+    } else if truncated {
+        stop_session_in_background(session, Some(cursor));
+        None
+    } else {
+        drop(cursor);
+        let _ = session.close().await;
+        None
+    };
+    Ok(Streamed {
+        rows,
+        truncated,
+        query_id,
+        cancelled,
+        warning,
+    })
+}
+
+/// What [`stream_rows`] reports back for the `done` event.
+struct Streamed {
+    rows: u64,
+    truncated: bool,
+    query_id: Option<String>,
+    cancelled: bool,
+    /// Set when a stop was needed and the server did not confirm it.
+    warning: Option<String>,
 }
 
 /// Send `columns`, then `rows` in `PREVIEW_BATCH` batches, honouring an optional cap.
@@ -1508,7 +1733,7 @@ async fn stream_rows(
 /// this process already holds is not the expensive part of the wait.
 async fn emit_batches(
     out: &mut dyn Emitter,
-    mut cursor: Box<dyn Cursor>,
+    cursor: &mut Box<dyn Cursor>,
     primed: Option<ColumnBatch>,
     limit: Option<u64>,
     cancel: Option<&CancelFlag>,
@@ -1535,9 +1760,24 @@ async fn emit_batches(
                 // the cap cut short. One row, not a page: a cap that is a multiple of the
                 // page size — the default `LIMIT=1000` against `PREVIEW_BATCH=200` — would
                 // otherwise fetch a whole page to discard all but this row.
-                truncated = match cursor.next_batch(VERDICT_FETCH).await? {
-                    Some(batch) => batch.rows() > 0,
-                    None => false,
+                truncated = match cancel {
+                    Some(cancel) => {
+                        match until_stopped(cancel, cursor.next_batch(VERDICT_FETCH)).await {
+                            Some(fetched) => matches!(fetched?, Some(batch) if batch.rows() > 0),
+                            // The probe for one more row was cut short after the cap was
+                            // reached: the result was not shown to its end, so it is capped.
+                            None => {
+                                cancelled = true;
+                                true
+                            }
+                        }
+                    }
+                    None => {
+                        matches!(
+                            cursor.next_batch(VERDICT_FETCH).await?,
+                            Some(batch) if batch.rows() > 0
+                        )
+                    }
                 };
                 break;
             }
@@ -1557,7 +1797,19 @@ async fn emit_batches(
                         break 'outer;
                     }
                 }
-                match cursor.next_batch(PREVIEW_BATCH).await? {
+                let fetched = match cancel {
+                    Some(cancel) => {
+                        match until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH)).await {
+                            Some(fetched) => fetched?,
+                            None => {
+                                cancelled = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    None => cursor.next_batch(PREVIEW_BATCH).await?,
+                };
+                match fetched {
                     Some(batch) => batch,
                     None => break,
                 }
@@ -1615,6 +1867,7 @@ pub async fn count(
     settings: &Settings,
     out: &mut dyn Emitter,
     engine: &dyn Engine,
+    cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
     // Checked before the connect step. The caller's statement is the one classified:
@@ -1628,8 +1881,22 @@ pub async fn count(
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
 
-    let (mut session, policy) = open(settings, engine, &config).await?;
-    let mut cursor = retry::execute(
+    let stopped = |out: &mut dyn Emitter, warning: Option<String>| -> Result<(), CliError> {
+        out.emit(
+            event("done")
+                .field("elapsed_ms", started.elapsed().as_millis() as u64)
+                .maybe("warnings", warning.map(|text| json!([text])))
+                .field("cancelled", true)
+                .build(),
+        )?;
+        Ok(())
+    };
+    let Some(opened) = until_stopped(cancel, open(settings, engine, &config)).await else {
+        return stopped(out, None);
+    };
+    let (mut session, policy) = opened?;
+    let executed = execute_until_stopped(
+        cancel,
         &mut session,
         &policy,
         &statement,
@@ -1637,8 +1904,13 @@ pub async fn count(
             statement_timeout: timeout,
             ..ExecuteOptions::default()
         },
+        stop_grace(&config),
     )
-    .await?;
+    .await;
+    let Some(cursor) = executed else {
+        return stopped(out, stop_session(session, None).await);
+    };
+    let mut cursor = cursor?;
     let mut rows: Vec<Value> = Vec::new();
     // The count is one row; reading to the end anyway would be a second statement's
     // worth of waiting for a number that is already in hand.
@@ -1649,7 +1921,10 @@ pub async fn count(
     // a *table* and not for an arbitrary statement, and this command counts a
     // statement — so the honest answer is that an estimate is not available and the
     // run failed. A fabricated number would be read as the count.
-    if let Some(batch) = cursor.next_batch(PREVIEW_BATCH).await? {
+    let Some(first) = until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH)).await else {
+        return stopped(out, stop_session(session, Some(cursor)).await);
+    };
+    if let Some(batch) = first? {
         if batch.rows() > 0 {
             rows = row_of(&batch, 0);
         }

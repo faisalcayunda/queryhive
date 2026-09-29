@@ -225,8 +225,11 @@ fn build_opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
 /// A MySQL session.
 struct MysqlSession {
     opts: Opts,
-    /// The id `KILL QUERY` needs, published by whichever connection is running a
-    /// statement. Zero means nothing is running.
+    /// The id `KILL QUERY` needs, published when the session connects and again by whichever
+    /// connection runs a statement. It is never cleared when a statement ends: a cursor
+    /// dropped mid-stream ends the producer before a Stop can reach the server, and a cancel
+    /// that found zero would report "nothing running" for a statement still draining. Zero
+    /// only means no connection was ever made.
     connection_id: Arc<AtomicU32>,
     /// The connection kept for the next statement, so an idle session is one
     /// connection rather than a new handshake per query.
@@ -495,8 +498,7 @@ impl Session for MysqlSession {
     async fn cancel(&self) -> Result<(), EngineError> {
         let id = self.connection_id.load(Ordering::SeqCst);
         if id == 0 {
-            // Nothing has run on this session yet, so there is nothing to stop.
-            // Idempotent by design: a user can press stop after the query ended.
+            // No connection was ever made, so there is nothing to stop.
             return Ok(());
         }
 
@@ -516,7 +518,15 @@ impl Session for MysqlSession {
             .await
             .map_err(|error| map_query_error(error, &statement, None));
         let _ = killer.disconnect().await;
-        outcome
+        match outcome {
+            // 1094 is `ER_NO_SUCH_THREAD`: the connection is already gone, so the
+            // statement is too. Idempotent by design: a user can press stop after the
+            // query ended.
+            Err(EngineError::Query {
+                code: Some(code), ..
+            }) if code == "1094" => Ok(()),
+            other => other,
+        }
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), EngineError> {
@@ -602,17 +612,16 @@ struct Producer {
 
 impl Producer {
     async fn run(self) {
-        // Captured before `produce` consumes the producer: the sender so a
-        // failure can still be reported, the id so it can be cleared once the
-        // statement is over.
-        let connection_id = Arc::clone(&self.connection_id);
+        // Captured before `produce` consumes the producer, so a failure can still be
+        // reported.
         let sender = self.sender.clone();
         if let Err(error) = self.produce().await {
             // A closed receiver means the cursor was dropped, which is a user
             // cancelling a scroll rather than a failure. Sending is best effort.
             let _ = sender.send(Message::Failed(error)).await;
         }
-        connection_id.store(0, Ordering::SeqCst);
+        // The id is left in place, see `MysqlSession::connection_id`.
+        //
         // Dropping the connection closes the socket; `disconnect` is the tidy
         // path but it consumes the value, and there is nothing to report if it
         // fails while the statement is already over.
