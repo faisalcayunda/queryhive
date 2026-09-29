@@ -64,6 +64,8 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | postgres | rust-release-20260923 | release | 3 | 500,000 | 11 ms [9 ms–13 ms] | 16 ms [15 ms–22 ms] | 2,637 ms [2,618 ms–2,644 ms] | 2,626 ms [2,610 ms–2,637 ms] | 2,614 ms [2,602 ms–2,627 ms] | 191,251 [190,341–192,173] baris/s | 9 MB [9 MB–9 MB] | 3.26 [3.05–3.42] |
 | mysql | rust-release-20260923 | release | 3 | 500,000 | 20 ms [12 ms–26 ms] | 26 ms [18 ms–32 ms] | 2,838 ms [2,790 ms–2,847 ms] | 2,830 ms [2,782 ms–2,840 ms] | 2,811 ms [2,771 ms–2,815 ms] | 177,849 [177,639–180,430] baris/s | 38 MB [35 MB–39 MB] | 3.26 [3.13–3.39] |
+| postgres | f0-20260930 | release | 1 | 500,000 | 7 ms | 443 ms | 2,703 ms | 2,266 ms | 2,259 ms | 221,335 baris/s | 11 MB | 1.31 |
+| mysql | f0-20260930 | release | 1 | 500,000 | 31 ms | 37 ms | 2,347 ms | 2,339 ms | 2,309 ms | 216,560 baris/s | 33 MB | 1.28 |
 
 Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti semua repeat sepakat. Statistik yang dipakai median, bukan yang tercepat: pada mesin yang dipakai bersama, satu run yang kebetulan sepi bukan kecepatan engine.
 
@@ -71,87 +73,87 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Metrik | Target | Baseline Python | Rust | Status |
 |---|---|---|---|---|
-| Throughput fetch | ≥ 5× baseline Python | 138,405 [136,087–139,445] baris/s | 191,251 baris/s (median) | Belum memenuhi — 1.38× baseline Python |
-| Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | 624 ms [602 ms–632 ms] | 11 ms | Memenuhi — 11 ms |
-| Memori proses (500k × 30) | < 800 MB | 545 MB [545 MB–545 MB] | 9 MB | Memenuhi — 9 MB |
-| Scroll grid 60 fps | — | — | — | [belum diukur] |
+| Throughput fetch | ≥ 5× baseline Python | 138,405 [136,087–139,445] baris/s | 221,335 baris/s (median) | Belum memenuhi — 1.60× baseline Python |
+| Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | 624 ms [602 ms–632 ms] | 7 ms | Memenuhi — 7 ms |
+| Memori proses (500k × 30) | < 800 MB | 545 MB [545 MB–545 MB] | 11 MB | Memenuhi — 11 MB |
+| Scroll grid 60 fps | p99 frame ≤ 16,7 ms (60 fps) | — | 262.7 ms | Belum memenuhi — 262.7 ms |
 | Cold start < 1 dtk | — | — | — | [belum diukur] |
-| Introspeksi 5.000 tabel < 1 dtk | — | — | — | [belum diukur] |
-| Pembatalan < 500 ms | — | — | — | [belum diukur] |
+| Introspeksi 5.000 tabel < 1 dtk | < 1 dtk | — | 14.6 ms | Memenuhi — 14.6 ms |
+| Pembatalan < 500 ms | p95 < 500 ms | — | 28,530.9 ms | Belum memenuhi — 28,530.9 ms |
 | Nol leak lintas FFI | — | — | — | [belum diukur] |
 
 ## Sumbu 1: TTFR sampai baris pertama tergambar
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `ttfr-s2-500k` — S2 cap 500.000 | p95 ≤ 50 ms (progresif); vs TablePro ≤ 0,1× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `ttfr-s3-rtt30` — S3 RTT 30 ms (toxiproxy) | hangat ≤ 1 RTT + 20 ms (50 ms); vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `ttfr-s4-first-run` — S4 Run pertama setelah app dibuka | vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 63.8 ms (n=10); ttfr_ms p95 76.4 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 63.8 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 76.4 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 64.0 ms (n=10); ttfr_ms p95 81.5 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 64.0 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 81.5 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s2-500k` — S2 cap 500.000 | p95 ≤ 50 ms (progresif); vs TablePro ≤ 0,1× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
+| `ttfr-s3-rtt30` — S3 RTT 30 ms (toxiproxy) | hangat ≤ 1 RTT + 20 ms (50 ms); vs TablePro ≤ 1,0× | ttfr_ms median 283.0 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 283.0 ms di atas batas ≤ 50.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s4-first-run` — S4 Run pertama setelah app dibuka | vs TablePro ≤ 1,0× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 2: Baris/s ke grid
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `rows-lineitem-1m` — Trino `tpch.sf1.lineitem`, cap 1M | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | rows_per_s median 79,506 baris/s (n=5) | tidak diukur (izin OS) | Belum memenuhi — rows_per_s median 79,506 baris/s di bawah batas ≥ 575,000 baris/s; vs TablePro tanpa pembanding |
+| `rows-lineitem-1m` — Trino `tpch.sf1.lineitem`, cap 1M | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 3: Memori puncak
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `mem-5m` — 5M baris | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | footprint_delta_bytes median 21.6 MB (n=5) | tidak diukur (izin OS) | Terukur — anggaran store belum dicatat (`budget_bytes`); vs TablePro tanpa pembanding |
+| `mem-5m` — 5M baris | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 4: Frame saat scroll
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 910.37 ms/s (n=5); frame_p99_ms median 262.7 ms (n=5) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 910.37 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 262.7 ms di atas batas ≤ 8.3 ms; vs TablePro tanpa pembanding |
+| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 2,952.93 ms/s (n=5); frame_p99_ms median 8,468.1 ms (n=5); render_ms median 2,017.4 ms (n=1) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 2,952.93 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 8,468.1 ms di atas batas ≤ 8.3 ms; render_ms median 2,017.4 ms di atas batas ≤ 30.0 ms; vs TablePro tanpa pembanding |
 
 ## Sumbu 5: Latensi ketikan
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `type-10k` — berkas 10k baris, mengetik di tengah | main thread p99 ≤ 4 ms; vs TablePro photon p95 ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `type-2m` — berkas 2M karakter, mengetik di tengah | main thread p99 ≤ 8 ms; vs TablePro photon p95 ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `type-10k` — berkas 10k baris, mengetik di tengah | main thread p99 ≤ 4 ms; vs TablePro photon p95 ≤ 1,0× | keystroke_main_p99_ms median 669.0 ms (n=4) | tidak diukur (izin OS) | Belum memenuhi — keystroke_main_p99_ms median 669.0 ms di atas batas ≤ 4.0 ms; vs TablePro tanpa pembanding |
+| `type-2m` — berkas 2M karakter, mengetik di tengah | main thread p99 ≤ 8 ms; vs TablePro photon p95 ≤ 1,0× | keystroke_main_p99_ms median 1,353.1 ms (n=2) | tidak diukur (izin OS) | Belum memenuhi — keystroke_main_p99_ms median 1,353.1 ms di atas batas ≤ 8.0 ms; vs TablePro tanpa pembanding |
 
 ## Sumbu 6: Latensi cancel
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `cancel-pg-sleep` — `pg_sleep(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `cancel-mysql-sleep` — `SLEEP(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `cancel-stream-wide` — stream `wide_500k` di tengah | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `cancel-trino-heavy` — agregasi berat Trino | p95 ≤ 300 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `cancel-pg-sleep` — `pg_sleep(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | cancel_ms p95 28,530.9 ms (n=5) | tidak diukur (izin OS) | Belum memenuhi — cancel_ms p95 28,530.9 ms di atas batas ≤ 100.0 ms; vs TablePro tanpa pembanding |
+| `cancel-mysql-sleep` — `SLEEP(30)` | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
+| `cancel-stream-wide` — stream `wide_500k` di tengah | p95 ≤ 100 ms; vs TablePro ≤ 1,0× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
+| `cancel-trino-heavy` — agregasi berat Trino | p95 ≤ 300 ms; vs TablePro ≤ 1,0× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 7: Cold start
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `launch-warm` — launch sampai frame interaktif, hangat | ≤ 400 ms; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
-| `launch-cold` — launch sampai frame interaktif, dingin (setelah `purge`) | ≤ 1 dtk; vs TablePro ≤ 1,0× | [belum diukur] | [belum diukur] | [belum diukur] |
+| `launch-warm` — launch sampai frame interaktif, hangat | ≤ 400 ms; vs TablePro ≤ 1,0× | launch_ms median 229.3 ms (n=5) | tidak diukur (izin OS) | Memenuhi target absolut; vs TablePro tanpa pembanding |
+| `launch-cold` — launch sampai frame interaktif, dingin (setelah `purge`) | ≤ 1 dtk; vs TablePro ≤ 1,0× | tidak diukur (butuh sudo) | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sekunder: sort dan search
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `sort-numeric-500k` — sort numerik in-memory, 500k | ≤ 100 ms, off-main | [belum diukur] | — | [belum diukur] |
-| `sort-text-500k` — sort teks in-memory, 500k | ≤ 300 ms, off-main | [belum diukur] | — | [belum diukur] |
+| `sort-numeric-500k` — sort numerik in-memory, 500k | ≤ 100 ms, off-main | sort_ms median 14,126.0 ms (n=5) | — | Belum memenuhi — sort_ms median 14,126.0 ms di atas batas ≤ 100.0 ms |
+| `sort-text-500k` — sort teks in-memory, 500k | ≤ 300 ms, off-main | sort_ms median 4,310.7 ms (n=5) | — | Belum memenuhi — sort_ms median 4,310.7 ms di atas batas ≤ 300.0 ms |
 
 ## Sekunder: introspeksi 5.000 tabel
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `introspect-5000` — introspeksi 5.000 tabel | < 1 dtk | [belum diukur] | — | [belum diukur] |
+| `introspect-5000` — introspeksi 5.000 tabel | < 1 dtk | duration_ms median 14.6 ms (n=5) | — | Memenuhi target absolut |
 
 ## Sekunder: leak lintas FFI
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `ffi-leak` — 100× buka/tutup tab, `leaks` | nol leak | [belum diukur] | — | [belum diukur] |
+| `ffi-leak` — 100× buka/tutup tab, `leaks` | nol leak | tidak mendukung | — | [belum diukur] |
 
 ## Ongkos `panic = "unwind"` pada ukuran artefak
 
@@ -190,4 +192,6 @@ dengan profil yang berlaku.
 - python/mysql (py-20260923, n=3): 137,177 baris/s (median); target §6 berarti ≥ 685,885 baris/s.
 - rust/postgres (rust-release-20260923, release, n=3): 191,251 baris/s (median); target §6 berarti ≥ 956,255 baris/s.
 - rust/mysql (rust-release-20260923, release, n=3): 177,849 baris/s (median); target §6 berarti ≥ 889,245 baris/s.
+- rust/postgres (f0-20260930, release, n=1): 221,335 baris/s (median); target §6 berarti ≥ 1,106,675 baris/s.
+- rust/mysql (f0-20260930, release, n=1): 216,560 baris/s (median); target §6 berarti ≥ 1,082,800 baris/s.
 
