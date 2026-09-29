@@ -45,7 +45,9 @@ tentang rotasi key, Apple Developer ID, serta riset web bukan pekerjaan agen.
 > master-detail, `swift test` 395/0), dan keempat keputusan Batch 2 dicatat di `2dbe952`.
 > Batch 3 selesai: command akun dan profil sebagai `581ece6` (`cargo test` 773/0), dan Open Quickly
 > sebagai `551b13a` (`swift test` 401/0). Batch 4, sign-in Google dan pane Account, mendarat sebagai
-> `0ad767e` (`swift test` 411/0); addendum ADR-0029 mencatat bentuknya.
+> `0ad767e` (`swift test` 411/0); addendum ADR-0029 mencatat bentuknya. Batch 5, pane Editor,
+> mendarat sebagai `84cbe71` (`swift test` 424/0): tujuh setelan editor dengan store sendiri, dan
+> pane Account disembunyikan dari bar sebagai `6c546dd` sampai client ID ada.
 >
 > **Yang tersisa bukan pekerjaan, melainkan konfigurasi.** Sign-in butuh OAuth client ID tipe
 > *Desktop app* dari Google Cloud Console milik pemilik proyek, diberikan saat build sebagai
