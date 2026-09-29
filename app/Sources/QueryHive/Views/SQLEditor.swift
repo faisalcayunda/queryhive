@@ -23,6 +23,9 @@ struct SQLEditor: NSViewRepresentable {
     /// is what decides whether the answer is a table in that schema, a schema in that catalog, or
     /// a catalog in that connection. Without it the list is every object in the tree.
     let candidates: (_ prefix: String, _ path: [String]) -> [SQLSuggestion]
+    /// The editor's own switches, passed as a value: SwiftUI re-applies a representable when the
+    /// value it was given changes, and a reference to the store would never change.
+    let layout: EditorLayout
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -61,6 +64,15 @@ struct SQLEditor: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.string = text
         textView.delegate = context.coordinator
+        // The caret and selection the tab is already holding. A tab keeps them for Run Current
+        // Statement, so an editor built for a tab the user was in the middle of should start where
+        // they left off rather than at the top of the file.
+        let textLength = (text as NSString).length
+        if selection.location <= textLength {
+            let location = selection.location
+            let selected = min(selection.length, textLength - location)
+            textView.setSelectedRange(NSRange(location: location, length: selected))
+        }
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -91,7 +103,11 @@ struct SQLEditor: NSViewRepresentable {
         context.coordinator.textView = textView
         context.coordinator.container = container
         context.coordinator.ruler = ruler
+        context.coordinator.scrollView = scrollView
         ruler.update(for: textView.string)
+        // The layout switches, before anything is drawn: the gutter's visibility, the wrapping, the
+        // tab stops and the invisible characters are all properties of the text view.
+        context.coordinator.applyLayout()
         ruler.onToggleFold = { [weak coordinator = context.coordinator] offset in
             coordinator?.toggleFold(headerOffset: offset)
         }
@@ -113,6 +129,9 @@ struct SQLEditor: NSViewRepresentable {
         // Before the early return below: the gutter's font follows the code-font setting, and a
         // setting change does not alter the text, so it would otherwise never reach the ruler.
         context.coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)
+        // The same reason: a switch flipped in Settings changes nothing about the text, so the
+        // editor has to be told to re-read the layout rather than waiting for an edit.
+        context.coordinator.applyLayout()
         guard let textView = context.coordinator.textView else { return }
         guard textView.string != text else { return }
         let previous = textView.string
@@ -137,6 +156,15 @@ struct SQLEditor: NSViewRepresentable {
         weak var container: FlippedContainerView?
         weak var ruler: LineNumberRulerView?
         weak var findBar: SQLFindBar?
+        weak var scrollView: NSScrollView?
+
+        /// The layout the text view is currently wearing, so a switch is applied when it moves and
+        /// not on every SwiftUI update. Re-setting the tab stops rewrites every attribute in the
+        /// text storage, which is not something to do on every keystroke.
+        private var appliedLayout: EditorLayout?
+        /// The statement ranges of the current text, for the caret's own highlight. Recomputed when
+        /// the text changes, never when the caret moves.
+        private var statementBounds: [NSRange] = []
 
         private var debounce: DispatchWorkItem?
         private var suppressAutoTrigger = false
@@ -157,6 +185,82 @@ struct SQLEditor: NSViewRepresentable {
 
         init(_ parent: SQLEditor) {
             self.parent = parent
+        }
+
+        // MARK: Layout switches
+
+        /// Put the editor's switches into the text view, and only the ones that moved.
+        ///
+        /// Called from both `makeNSView` and `updateNSView`, because a switch flipped in Settings
+        /// changes nothing about the text and would otherwise never reach the editor.
+        func applyLayout() {
+            guard let textView else { return }
+            let layout = parent.layout
+            guard layout != appliedLayout else {
+                updateHighlight(textView)
+                return
+            }
+            let previous = appliedLayout
+            appliedLayout = layout
+            scrollView?.hasVerticalRuler = layout.showLineNumbers
+            scrollView?.rulersVisible = layout.showLineNumbers
+            applyWrap(layout)
+            textView.layoutManager?.showsInvisibleCharacters = layout.showInvisibles
+            if previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
+            if previous?.codeFolding != layout.codeFolding {
+                refreshFolds(previous: textView.string)
+            }
+            updateHighlight(textView)
+        }
+
+        /// Wrap, or run off the right edge. In AppKit these are one decision: a container that
+        /// tracks the text view's width wraps, and one with an unbounded width scrolls.
+        private func applyWrap(_ layout: EditorLayout) {
+            guard let textView, let container = textView.textContainer else { return }
+            textView.isHorizontallyResizable = !layout.wordWrap
+            container.widthTracksTextView = layout.wordWrap
+            container.containerSize = NSSize(width: layout.wordWrap ? 0 : CGFloat.greatestFiniteMagnitude,
+                                             height: CGFloat.greatestFiniteMagnitude)
+            textView.autoresizingMask = layout.wordWrap ? [.width] : []
+            scrollView?.hasHorizontalScroller = !layout.wordWrap
+        }
+
+        /// Tab stops at the chosen width. A paragraph style is an attribute, so the text already
+        /// there has to be given it as well as the default for what comes next — and the syntax
+        /// pass has to run again, because it is what re-applies the colours the attribute change
+        /// would otherwise leave stale.
+        private func applyTabWidth(_ layout: EditorLayout) {
+            guard let textView else { return }
+            let font = textView.font ?? FontChoice.codeNSFont(size: 13, weight: .regular)
+            let space = (" " as NSString).size(withAttributes: [.font: font]).width
+            let style = NSMutableParagraphStyle()
+            style.defaultTabInterval = space * CGFloat(layout.tabWidth)
+            style.tabStops = []
+            textView.defaultParagraphStyle = style
+            let whole = NSRange(location: 0, length: (textView.string as NSString).length)
+            textView.textStorage?.addAttribute(.paragraphStyle, value: style, range: whole)
+            colour(textView)
+        }
+
+        /// The bands behind the text: the caret's statement first, then its line over it.
+        private func updateHighlight(_ textView: SQLTextView) {
+            let layout = parent.layout
+            guard layout.highlightCurrentLine || layout.highlightCurrentStatement else {
+                textView.highlightRanges = []
+                return
+            }
+            let text = textView.string as NSString
+            let caret = min(textView.selectedRange().location, text.length)
+            var ranges: [NSRange] = []
+            if layout.highlightCurrentStatement, text.length > 0,
+               let statement = statementBounds.first(where: { NSLocationInRange(caret, $0) }) {
+                ranges.append(statement)
+            }
+            if layout.highlightCurrentLine, text.length > 0 {
+                ranges.append(text.lineRange(for: NSRange(location: caret, length: 0)))
+            }
+            textView.highlightColour = NSColor(Tone.accent.opacity(0.15))
+            textView.highlightRanges = ranges
         }
 
         // MARK: Text changes
@@ -221,6 +325,8 @@ struct SQLEditor: NSViewRepresentable {
             // Run needs both: which statement the caret is in, and what is highlighted.
             parent.caret = textView.selectedRange().location
             parent.selection = textView.selectedRange()
+            // The bands follow the caret, which is the whole point of them.
+            updateHighlight(textView)
             // A caret moving into a collapsed body would be invisible, and the next keystroke would
             // land somewhere the user cannot see. Opening the fold is the honest answer.
             if !foldedHeaders.isEmpty {
@@ -479,6 +585,21 @@ struct SQLEditor: NSViewRepresentable {
         private func refreshFolds(previous: String) {
             guard let textView else { return }
             let text = textView.string
+            // The caret's statement is what the highlight needs, and it is computed here rather
+            // than on every caret move: this runs when the text changes, which is when the ranges
+            // can have changed. Off, nothing pays for it.
+            statementBounds = parent.layout.highlightCurrentStatement
+                ? SQLFolding.statementRanges(in: text)
+                : []
+            // Folding off means no regions and no markers. The offsets are dropped with them: a
+            // fold that was collapsed when the switch went off would otherwise come back somewhere
+            // else when it went on again, because the text may have changed in between.
+            guard parent.layout.codeFolding else {
+                foldRegions = []
+                foldedHeaders = []
+                updateFoldMarks()
+                return
+            }
             foldedHeaders = SQLFolding.shift(foldedHeaders,
                                              from: previous as NSString, to: text as NSString)
             foldRegions = SQLFolding.regions(in: text)
@@ -739,9 +860,46 @@ enum SQLFoldStyler {
 final class SQLTextView: NSTextView {
     var interceptKey: ((NSEvent) -> Bool)?
 
+    /// The bands drawn behind the text, painted in order: the caret's statement first, its line
+    /// over it. Behind the text rather than over it, which is what keeps the selection, the syntax
+    /// colours and the caret readable through them.
+    var highlightRanges: [NSRange] = [] {
+        didSet {
+            if highlightRanges != oldValue { needsDisplay = true }
+        }
+    }
+
+    /// The colour those bands are painted in. From the palette rather than a constant, so a light
+    /// canvas does not get a light band on it.
+    var highlightColour: NSColor = .clear
+
     override func keyDown(with event: NSEvent) {
         if let interceptKey, interceptKey(event) { return }
         super.keyDown(with: event)
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard !highlightRanges.isEmpty, let layoutManager, let textContainer else { return }
+        let length = (string as NSString).length
+        highlightColour.setFill()
+        for range in highlightRanges {
+            let clamped = NSIntersectionRange(range, NSRange(location: 0, length: length))
+            guard clamped.length > 0 else { continue }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: clamped,
+                                                  actualCharacterRange: nil)
+            layoutManager.enumerateEnclosingRects(
+                forGlyphRange: glyphs,
+                withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                in: textContainer
+            ) { band, _ in
+                // Full width rather than the glyphs' own, so the band reads as a line of the editor
+                // and not as a highlight of the text that happens to be on it.
+                let line = NSRect(x: 0, y: band.minY,
+                                  width: max(self.bounds.width, band.maxX), height: band.height)
+                NSBezierPath(rect: line).fill()
+            }
+        }
     }
 }
 

@@ -695,6 +695,14 @@ enum Snapshot {
             LIMIT 1000;
             """
             tab.panel = .log
+            // The caret in the second statement, so the statement band is visibly on a range other
+            // than the first: a render that only ever shows the top of a file cannot tell the two
+            // highlights apart.
+            let offset = (tab.sql as NSString).range(of: "b.jiwa >= 3.5").location
+            if offset != NSNotFound {
+                tab.caret = offset
+                tab.selection = NSRange(location: offset, length: 0)
+            }
         case "table-opened":
             // What double-clicking a table in the tree now does. There is no server here, so the
             // rows are seeded the way the real reply would arrive — the tab, its name, the SQL and

@@ -339,7 +339,10 @@ struct EditorPane: View {
                   completion: model.completion,
                   candidates: { prefix, path in
                       model.suggestions(for: tab, prefix: prefix, path: path)
-                  })
+                  },
+                  // Read here rather than inside the editor so this body depends on the switches:
+                  // that is what makes flipping one in Settings re-apply the editor.
+                  layout: EditorLayout.current)
             .editorBox(focused: focused)
             // NSTextView has no placeholder of its own, so it is drawn over the text
             // container's own inset (8 wide, 9 tall) plus its line fragment padding.

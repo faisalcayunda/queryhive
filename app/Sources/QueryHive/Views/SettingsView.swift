@@ -913,9 +913,40 @@ struct AppearanceSettings: View {
 /// app grows any, this is where they go.
 struct EditorSettings: View {
     @Bindable private var store = ThemeStore.shared
+    /// The editor's own switches. Not appearance, which is why they are not on `ThemeStore`: they
+    /// change how the text view lays out and what it draws over the text.
+    @Bindable private var prefs = EditorPreferences.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "SQL Editor",
+                         detail: "What the editor does with the text: the gutter, the bands behind the caret, wrapping and folding. These are not the palette — the fonts below are — so they change nothing outside the text view.") {
+                editorToggle("Show line numbers", isOn: $prefs.showLineNumbers)
+                RowDivider()
+                editorToggle("Highlight current line", isOn: $prefs.highlightCurrentLine)
+                RowDivider()
+                editorToggle("Highlight current statement", isOn: $prefs.highlightCurrentStatement)
+                RowDivider()
+                editorToggle("Word wrap", isOn: $prefs.wordWrap)
+                RowDivider()
+                editorToggle("Code folding", isOn: $prefs.codeFolding)
+                RowDivider()
+                editorToggle("Show invisible characters", isOn: $prefs.showInvisibles)
+                RowDivider()
+                HStack(spacing: 8) {
+                    Text("Tab width")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                    Spacer(minLength: 12)
+                    Text("\(prefs.tabWidth) spaces")
+                        .font(.code(11))
+                        .foregroundStyle(Tone.secondary)
+                    Stepper("", value: $prefs.tabWidth, in: 1...8)
+                        .labelsHidden()
+                }
+                .padding(.vertical, 6)
+            }
+
             SettingsCard(title: "Interface",
                          detail: "The family the chrome draws in: labels, tabs, buttons and every panel. System means the macOS system font, which is what the app ships with.") {
                 SettingsRow(label: "Family", trailing: uiLabel) {
@@ -999,6 +1030,22 @@ struct EditorSettings: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// One switch on a card, in the shape the other panes use: the label at the leading edge and
+    /// the switch at the trailing one, which is where TablePro puts it and where the eye looks.
+    private func editorToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+            Spacer(minLength: 12)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+        }
+        .padding(.vertical, 6)
     }
 }
 

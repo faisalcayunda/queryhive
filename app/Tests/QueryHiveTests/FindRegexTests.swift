@@ -161,7 +161,8 @@ private enum SQLFindBarTestsEditor {
                                caret: .constant(0),
                                selection: .constant(NSRange(location: 0, length: 0)),
                                completion: EditorCompletion(),
-                               candidates: { _, _ in [] })
+                               candidates: { _, _ in [] },
+                               layout: .standard)
         return editor.makeCoordinator()
     }
 }
