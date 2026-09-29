@@ -61,15 +61,56 @@ final class WritePlanTests: XCTestCase {
 
         let plan = build(edits)
         let reviewed = plan.sql
+        let bound = plan.statements.map(\.boundSQL)
 
-        // The payload is the only encoder of the plan, and it is what `apply_changes` reads. If it
-        // ever grows a second code path, this fails.
+        // The payload is the only encoder of the plan, and it is what `apply_changes` reads. The
+        // review and the run are two renderings of the one build: the payload carries the bound
+        // form, and the placeholders are the only difference from the reviewed literals.
         let data = try XCTUnwrap(plan.payload.data(using: .utf8))
         let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         let ran = decoded.compactMap { $0["sql"] as? String }
 
-        XCTAssertEqual(ran, reviewed)
+        XCTAssertEqual(ran, bound)
+        XCTAssertEqual(ran.count, reviewed.count)
         XCTAssertEqual(ran.count, 3)
+        XCTAssertTrue(ran.contains { $0.contains("$1") }, "\(ran)")
+    }
+
+    func testBoundValuesTravelInThePayloadWhileTheReviewShowsTheLiterals() throws {
+        var edits = CellEdits()
+        edits.edit("O'Brien", at: CellKey(row: 0, column: 1), original: "KPM Sukamaju")
+
+        let plan = build(edits)
+        let statement = try XCTUnwrap(plan.statements.first)
+
+        // The review shows the value, escaped for a human and a copy-paste; the run
+        // binds it, so escaping is no longer anyone's job on the write path.
+        XCTAssertTrue(statement.sql.contains("'O''Brien'"), statement.sql)
+        XCTAssertTrue(statement.boundSQL.contains("$1"), statement.boundSQL)
+        XCTAssertEqual(statement.parameters.first, .text("O'Brien"))
+
+        let data = try XCTUnwrap(plan.payload.data(using: .utf8))
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        let params = decoded.first?["params"] as? [[String: String]]
+        XCTAssertEqual(params?.first?["type"], "text")
+        XCTAssertEqual(params?.first?["value"], "O'Brien")
+    }
+
+    func testTrinoGetsTheInlineStatementBecauseItCannotBind() throws {
+        var edits = CellEdits()
+        let inserted = edits.insertRow()
+        edits.setInserted("Nia", row: inserted, column: 1)
+
+        let plan = WritePlan.build(edits: edits, rows: rows, columns: columns,
+                                   table: "public.penerima", kind: .trino)
+        let statement = try XCTUnwrap(plan.statements.first)
+
+        // No placeholders exist on Trino's wire, so the statement is the inline one it always was
+        // and there is nothing to bind.
+        XCTAssertTrue(statement.parameters.isEmpty)
+        XCTAssertEqual(statement.boundSQL, statement.sql)
+        XCTAssertFalse(statement.boundSQL.contains("?"))
+        XCTAssertFalse(statement.boundSQL.contains("$1"))
     }
 
     func testBuildingFromTheSameQueueTwiceGivesTheSameStatements() {

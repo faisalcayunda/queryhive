@@ -139,6 +139,8 @@ impl Session for ScriptedSession {
             objects_columns: Vec::new(),
             persistent_connection: self.persistent,
             statement_timeout: true,
+            parameters: None,
+            read_only: false,
         }
     }
 
@@ -216,6 +218,8 @@ impl Driver for FakeDriver {
             objects_columns: Vec::new(),
             persistent_connection: false,
             statement_timeout: true,
+            parameters: None,
+            read_only: false,
         }
     }
 

@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Session,
+    ObjectPath, ObjectsPage, Parameter, Session,
 };
 use qh_ffi::events::Capture;
 use qh_ffi::{run, CancelFlag, Command, Engine, Settings};
@@ -27,6 +27,9 @@ use qh_ffi::{run, CancelFlag, Command, Engine, Settings};
 #[derive(Clone, Default)]
 struct Recording {
     statements: Arc<Mutex<Vec<String>>>,
+    /// The values each `execute_bound` call carried, in call order. Empty for the
+    /// calls that were not parameterized (transaction control).
+    parameters: Arc<Mutex<Vec<Vec<Parameter>>>>,
     /// The affected-row count each `execute` reports, in order. Empty means
     /// `Some(1)` for every statement, which is a plan that agrees with itself.
     counts: Arc<Mutex<VecDeque<Option<u64>>>>,
@@ -89,6 +92,8 @@ impl Driver for FakeDriver {
             objects_columns: vec![],
             persistent_connection: true,
             statement_timeout: true,
+            parameters: None,
+            read_only: false,
         }
     }
 
@@ -152,6 +157,25 @@ impl Session for RecordingSession {
                 .or(Some(1))
         };
         Ok(Box::new(RecordingCursor { affected }))
+    }
+
+    /// A driver that records binding, so the test can prove the values reached the
+    /// session rather than being re-inlined. It forwards to `execute` after
+    /// recording, so the rest of the plan's behaviour is the text-path one.
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        if !parameters.is_empty() {
+            self.recording
+                .parameters
+                .lock()
+                .expect("record parameters")
+                .push(parameters.to_vec());
+        }
+        self.execute(sql, options).await
     }
 
     async fn browse(
@@ -279,6 +303,33 @@ async fn the_statements_that_ran_are_the_statements_that_were_reviewed() {
         .expect("a done event");
     assert_eq!(done["applied"], 2);
     assert_eq!(done["transaction"], true);
+}
+
+#[tokio::test]
+async fn a_plan_with_bound_values_hands_them_to_the_session_in_order() {
+    // The point of the slice: the plan carries placeholders and typed values, the
+    // engine forwards them, and nothing re-inlines them on the way.
+    let recording = Recording::default();
+    let changes = r#"[
+        {"sql":"UPDATE \"public\".\"people\" SET \"name\" = $1 WHERE \"id\" = $2",
+         "expected":1,"keyed":true,
+         "params":[{"type":"text","value":"O'Brien"},{"type":"int","value":"3"}]}
+    ]"#;
+    apply(&recording, changes).await.expect("the plan applies");
+
+    let parameters = recording.parameters.lock().expect("parameters").clone();
+    assert_eq!(parameters.len(), 1, "one parameterized statement");
+    assert_eq!(
+        parameters[0],
+        vec![Parameter::Text("O'Brien".to_owned()), Parameter::Int(3)]
+    );
+    // The statement the session ran is the bound one; the transaction control
+    // statements carried no values and were not recorded.
+    let ran = recording.statements();
+    assert!(
+        ran.iter().any(|sql| sql.contains("$1")),
+        "the session ran the bound statement: {ran:?}"
+    );
 }
 
 #[tokio::test]

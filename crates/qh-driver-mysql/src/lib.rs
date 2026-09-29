@@ -83,7 +83,7 @@ use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Session,
+    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
 };
 use qh_sql::strip_terminator;
 use tokio::sync::mpsc;
@@ -152,6 +152,11 @@ impl Driver for MysqlDriver {
             // `max_execution_time`, which the server enforces for a read-only
             // `SELECT`. See the module note: it does not cover a write.
             statement_timeout: true,
+            // `?`, one per value in order — the positional placeholders the
+            // prepared protocol takes. Values go as native `mysql_async::Value`s
+            // rather than their text, so the type is the client's too.
+            parameters: Some(ParameterStyle::Question),
+            read_only: false,
         }
     }
 
@@ -285,23 +290,17 @@ impl MysqlSession {
         self.idle = Some(conn);
         outcome
     }
-}
 
-#[async_trait]
-impl Session for MysqlSession {
-    fn capabilities(&self) -> Capabilities {
-        MysqlSession::capabilities(self)
-    }
-
-    fn query_id(&self) -> Option<String> {
-        let id = self.connection_id.load(Ordering::SeqCst);
-        (id != 0).then(|| id.to_string())
-    }
-
-    async fn execute(
+    /// Run one statement, with `params` bound when it is not empty.
+    ///
+    /// The one place a statement is described, dispatched and handed to the
+    /// streaming producer; `execute` calls it with no values and `execute_bound`
+    /// with them, so the two paths cannot drift.
+    async fn run_statement(
         &mut self,
         sql: &str,
         options: &ExecuteOptions,
+        params: Vec<mysql_async::Value>,
     ) -> Result<Box<dyn Cursor>, EngineError> {
         let mut conn = self.connection().await?;
 
@@ -332,8 +331,8 @@ impl Session for MysqlSession {
         // stop did nothing. Describing that same join first returns in 915 µs.
         let described = conn.prep(sql).await.ok();
         let (columns, column_types, binary) = describe(&described);
-        // The described statement is not the one that runs — the rows come from the
-        // text-protocol query in the producer — so it is closed rather than left
+        // This describe is not the statement that runs — the producer prepares its
+        // own, or runs the text it was given — so it is closed rather than left
         // occupying a slot in the connection's statement cache.
         if let Some(statement) = described {
             let _ = conn.close(statement).await;
@@ -346,14 +345,15 @@ impl Session for MysqlSession {
         let producer = Producer {
             conn,
             sql: sql.to_owned(),
+            params,
             row_limit: options.row_limit,
             batch_rows: DEFAULT_PRODUCER_BATCH,
             column_types,
             binary,
             // A statement the server declines to describe still has to run. Its
             // columns are then only known once the result set starts, so the
-            // producer announces them and `execute` waits — the old behaviour,
-            // kept for the cases that cannot do better.
+            // producer announces them and this waits — the old behaviour, kept
+            // for the cases that cannot do better.
             announce_columns: columns.is_empty(),
             sender,
             connection_id: Arc::clone(&self.connection_id),
@@ -387,6 +387,41 @@ impl Session for MysqlSession {
                 message: "the query task ended before describing its result".to_owned(),
             }),
         }
+    }
+}
+
+#[async_trait]
+impl Session for MysqlSession {
+    fn capabilities(&self) -> Capabilities {
+        MysqlSession::capabilities(self)
+    }
+
+    fn query_id(&self) -> Option<String> {
+        let id = self.connection_id.load(Ordering::SeqCst);
+        (id != 0).then(|| id.to_string())
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        self.run_statement(sql, options, Vec::new()).await
+    }
+
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        if parameters.is_empty() {
+            return self.execute(sql, options).await;
+        }
+        // Typed rather than stringly: the prepared protocol carries these as
+        // MySQL's own value shapes.
+        let params: Vec<mysql_async::Value> = parameters.iter().map(mysql_value).collect();
+        self.run_statement(sql, options, params).await
     }
 
     async fn browse(
@@ -546,6 +581,9 @@ enum Message {
 struct Producer {
     conn: Conn,
     sql: String,
+    /// Values to bind, in order. Empty takes the text protocol; non-empty takes
+    /// the prepared protocol, which is the only one that carries parameters.
+    params: Vec<mysql_async::Value>,
     row_limit: Option<usize>,
     batch_rows: usize,
     /// Known up front when the statement could be described.
@@ -563,99 +601,191 @@ struct Producer {
 }
 
 impl Producer {
-    async fn run(mut self) {
+    async fn run(self) {
+        // Captured before `produce` consumes the producer: the sender so a
+        // failure can still be reported, the id so it can be cleared once the
+        // statement is over.
+        let connection_id = Arc::clone(&self.connection_id);
+        let sender = self.sender.clone();
         if let Err(error) = self.produce().await {
             // A closed receiver means the cursor was dropped, which is a user
             // cancelling a scroll rather than a failure. Sending is best effort.
-            let _ = self.sender.send(Message::Failed(error)).await;
+            let _ = sender.send(Message::Failed(error)).await;
         }
-        self.connection_id.store(0, Ordering::SeqCst);
+        connection_id.store(0, Ordering::SeqCst);
         // Dropping the connection closes the socket; `disconnect` is the tidy
         // path but it consumes the value, and there is nothing to report if it
         // fails while the statement is already over.
     }
 
-    async fn produce(&mut self) -> Result<(), EngineError> {
-        // Read before the query, because `query_iter` takes the connection
-        // mutably for as long as the result lives.
-        self.connection_id.store(self.conn.id(), Ordering::SeqCst);
+    /// Read the statement and feed the cursor.
+    ///
+    /// Consumes the producer so the result set can borrow `conn` for its whole
+    /// life while the streaming loop borrows the other fields beside it. A
+    /// statement with no values keeps the text protocol it always used; one with
+    /// values takes the prepared protocol, which is where `?` exists.
+    async fn produce(self) -> Result<(), EngineError> {
+        let Producer {
+            mut conn,
+            sql,
+            params,
+            row_limit,
+            batch_rows,
+            column_types,
+            binary,
+            announce_columns,
+            sender,
+            connection_id,
+            affected,
+            timeout,
+        } = self;
+        // Read before the query, because the result set takes the connection
+        // mutably for as long as it lives.
+        connection_id.store(conn.id(), Ordering::SeqCst);
 
-        let mut result = self
-            .conn
-            .query_iter(&self.sql)
-            .await
-            .map_err(|error| map_query_error(error, &self.sql, self.timeout))?;
-
-        let (column_types, binary) = if self.announce_columns {
-            // Not described up front, so ask the result set. This is also where a
-            // statement with no result set becomes distinguishable from one that
-            // could not be described: an empty list here means there are no rows to
-            // come.
-            let columns: Vec<ColumnMeta> = result
-                .columns_ref()
-                .iter()
-                .map(|column| {
-                    ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column))
-                })
-                .collect();
-            let types = result
-                .columns_ref()
-                .iter()
-                .map(mysql_async::Column::column_type)
-                .collect();
-            let binary = result
-                .columns_ref()
-                .iter()
-                .map(normalize::is_binary)
-                .collect();
-            if self.sender.send(Message::Ready { columns }).await.is_err() {
-                return Ok(());
-            }
-            (types, binary)
-        } else {
-            (self.column_types.clone(), self.binary.clone())
+        let config = StreamConfig {
+            sql: &sql,
+            row_limit,
+            batch_rows,
+            column_types: &column_types,
+            binary: &binary,
+            announce_columns,
+            sender: &sender,
+            affected: &affected,
+            timeout,
         };
 
-        // A statement with no result set — DDL, or an UPDATE — has nothing to
-        // stream, and saying so now is better than sending empty batches. It does
-        // have a count: `CREATE TABLE ... AS SELECT` reports the rows it wrote in the
-        // OK packet that `query_iter` already read, and so does an `INSERT`.
-        if column_types.is_empty() {
-            record_affected(&self.affected, &result);
+        if params.is_empty() {
+            let mut result = conn
+                .query_iter(&sql)
+                .await
+                .map_err(|error| map_query_error(error, &sql, timeout))?;
+            consume(&mut result, &config).await
+        } else {
+            let mut result = conn
+                .exec_iter(&sql, params)
+                .await
+                .map_err(|error| map_query_error(error, &sql, timeout))?;
+            consume(&mut result, &config).await
+        }
+    }
+}
+
+/// The fields the streaming loop reads, borrowed beside the result set.
+struct StreamConfig<'a> {
+    sql: &'a str,
+    row_limit: Option<usize>,
+    batch_rows: usize,
+    column_types: &'a [mysql_async::consts::ColumnType],
+    binary: &'a [bool],
+    announce_columns: bool,
+    sender: &'a mpsc::Sender<Message>,
+    affected: &'a Arc<Mutex<Option<u64>>>,
+    timeout: Option<Duration>,
+}
+
+/// Drain a result set into batches, announcing columns first when they were not
+/// described up front.
+///
+/// Free rather than a method because the result set holds `conn` mutably for its
+/// whole life, and the loop still needs the fields beside it; they are passed as
+/// one borrow group instead.
+async fn consume<P: mysql_async::prelude::Protocol>(
+    result: &mut mysql_async::QueryResult<'_, '_, P>,
+    config: &StreamConfig<'_>,
+) -> Result<(), EngineError> {
+    let (column_types, binary) = if config.announce_columns {
+        // Not described up front, so ask the result set. This is also where a
+        // statement with no result set becomes distinguishable from one that
+        // could not be described: an empty list here means there are no rows to
+        // come.
+        let columns: Vec<ColumnMeta> = result
+            .columns_ref()
+            .iter()
+            .map(|column| {
+                ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column))
+            })
+            .collect();
+        let types = result
+            .columns_ref()
+            .iter()
+            .map(mysql_async::Column::column_type)
+            .collect();
+        let binary = result
+            .columns_ref()
+            .iter()
+            .map(normalize::is_binary)
+            .collect();
+        if config
+            .sender
+            .send(Message::Ready { columns })
+            .await
+            .is_err()
+        {
             return Ok(());
         }
+        (types, binary)
+    } else {
+        (config.column_types.to_vec(), config.binary.to_vec())
+    };
 
-        let mut batch = BatchBuilder::new(column_types, binary, self.batch_rows);
-        let mut emitted = 0usize;
+    // A statement with no result set — DDL, or an UPDATE — has nothing to
+    // stream, and saying so now is better than sending empty batches. It does
+    // have a count: `CREATE TABLE ... AS SELECT` reports the rows it wrote in the
+    // OK packet the result already read, and so does an `INSERT`.
+    if column_types.is_empty() {
+        record_affected(config.affected, result);
+        return Ok(());
+    }
 
-        while let Some(row) = result
-            .next()
-            .await
-            .map_err(|error| map_query_error(error, &self.sql, self.timeout))?
-        {
-            if let Some(limit) = self.row_limit {
-                if emitted + batch.rows >= limit {
-                    break;
-                }
-            }
-            batch.push_row(&row);
-            if batch.rows >= self.batch_rows {
-                let full = batch.take()?;
-                emitted += full.rows();
-                if self.sender.send(Message::Batch(full)).await.is_err() {
-                    return Ok(());
-                }
+    let mut batch = BatchBuilder::new(column_types, binary, config.batch_rows);
+    let mut emitted = 0usize;
+
+    while let Some(row) = result
+        .next()
+        .await
+        .map_err(|error| map_query_error(error, config.sql, config.timeout))?
+    {
+        if let Some(limit) = config.row_limit {
+            if emitted + batch.rows >= limit {
+                break;
             }
         }
-
-        if batch.rows > 0 {
-            let rest = batch.take()?;
-            let _ = self.sender.send(Message::Batch(rest)).await;
+        batch.push_row(&row);
+        if batch.rows >= config.batch_rows {
+            let full = batch.take()?;
+            emitted += full.rows();
+            if config.sender.send(Message::Batch(full)).await.is_err() {
+                return Ok(());
+            }
         }
-        // Read after the stream is exhausted: the OK packet that carries the count is
-        // the one that ends it.
-        record_affected(&self.affected, &result);
-        Ok(())
+    }
+
+    if batch.rows > 0 {
+        let rest = batch.take()?;
+        let _ = config.sender.send(Message::Batch(rest)).await;
+    }
+    // Read after the stream is exhausted: the OK packet that carries the count is
+    // the one that ends it.
+    record_affected(config.affected, result);
+    Ok(())
+}
+
+/// One bound value in MySQL's own value shapes.
+///
+/// Typed rather than stringly: the prepared protocol carries the variant, so a
+/// `BIGINT` goes as an integer and a `TEXT` as bytes, not as everything-is-a-string.
+fn mysql_value(value: &Parameter) -> mysql_async::Value {
+    match value {
+        Parameter::Null => mysql_async::Value::NULL,
+        // MySQL has no boolean type; a `BOOL` column is `TINYINT(1)`, and its
+        // literals are 1 and 0.
+        Parameter::Bool(true) => mysql_async::Value::Int(1),
+        Parameter::Bool(false) => mysql_async::Value::Int(0),
+        Parameter::Int(number) => mysql_async::Value::Int(*number),
+        Parameter::UInt(number) => mysql_async::Value::UInt(*number),
+        Parameter::Float(number) => mysql_async::Value::Double(*number),
+        Parameter::Text(text) => mysql_async::Value::Bytes(text.as_bytes().to_vec()),
     }
 }
 
@@ -1017,6 +1147,44 @@ mod tests {
         // `max_execution_time`, which MySQL enforces itself. A driver that could not
         // would say `false` rather than pretend.
         assert!(MysqlDriver.capabilities().statement_timeout);
+    }
+
+    #[test]
+    fn this_driver_binds_with_question_marks() {
+        let capabilities = MysqlDriver.capabilities();
+        assert_eq!(capabilities.parameters, Some(ParameterStyle::Question));
+        assert!(!capabilities.read_only);
+    }
+
+    #[test]
+    fn a_bound_value_keeps_its_native_shape() {
+        // The prepared protocol carries the variant, so this is typed rather than
+        // every-value-as-text.
+        assert_eq!(mysql_value(&Parameter::Null), mysql_async::Value::NULL);
+        assert_eq!(
+            mysql_value(&Parameter::Bool(true)),
+            mysql_async::Value::Int(1)
+        );
+        assert_eq!(
+            mysql_value(&Parameter::Bool(false)),
+            mysql_async::Value::Int(0)
+        );
+        assert_eq!(
+            mysql_value(&Parameter::Int(-7)),
+            mysql_async::Value::Int(-7)
+        );
+        assert_eq!(
+            mysql_value(&Parameter::UInt(u64::MAX)),
+            mysql_async::Value::UInt(u64::MAX)
+        );
+        assert_eq!(
+            mysql_value(&Parameter::Float(1.5)),
+            mysql_async::Value::Double(1.5)
+        );
+        assert_eq!(
+            mysql_value(&Parameter::Text("O'Brien".to_owned())),
+            mysql_async::Value::Bytes(b"O'Brien".to_vec())
+        );
     }
 
     #[test]

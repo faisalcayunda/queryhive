@@ -95,10 +95,12 @@ use futures_util::StreamExt;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Session, TlsMode,
+    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
 };
 use qh_sql::strip_terminator;
 use rustls::client::danger::ServerCertVerifier;
+use tokio_postgres::types::private::BytesMut;
+use tokio_postgres::types::{Format, IsNull, ToSql, Type};
 use tokio_postgres::{Client, NoTls, SimpleQueryStream, Statement};
 
 /// PostgreSQL.
@@ -156,6 +158,12 @@ impl Driver for PostgresDriver {
             persistent_connection: true,
             // The server's own `statement_timeout` session parameter.
             statement_timeout: true,
+            // `$1`, `$2`, … — the numbered placeholders the extended protocol
+            // takes. Bound values are sent in text format and parsed by the
+            // server according to the type it inferred, so one binder covers
+            // every type without mapping widths here.
+            parameters: Some(ParameterStyle::Dollar),
+            read_only: false,
         }
     }
 
@@ -328,6 +336,154 @@ impl PostgresSession {
         }
         Ok(rows)
     }
+
+    /// Run a statement that carries bound values, through the extended protocol.
+    ///
+    /// Only statements that return no rows are accepted, and that is a deliberate
+    /// limit rather than an oversight: the extended protocol returns result values
+    /// in PostgreSQL's **binary** form, while this driver's decoder is the text
+    /// path — the reason a type nobody has taught `normalize` about still cannot
+    /// fail a query. Decoding binary rows for an arbitrary type would either
+    /// duplicate that knowledge or quietly weaken the guarantee, so a
+    /// row-returning statement is refused by name instead.
+    async fn bind_statement(
+        &self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        let statement = self
+            .client
+            .prepare(sql)
+            .await
+            .map_err(|error| map_describe_error(error, sql, options.statement_timeout))?;
+        if !statement.columns().is_empty() {
+            return Err(EngineError::Usage {
+                message: format!(
+                    "PostgreSQL binds values only for a statement that returns no rows, and this \
+                     one returns {} column(s); write the values into the SQL for this statement \
+                     instead",
+                    statement.columns().len()
+                ),
+            });
+        }
+        if statement.params().len() != parameters.len() {
+            return Err(EngineError::Usage {
+                message: format!(
+                    "the statement has {} placeholder(s) but {} value(s) were supplied",
+                    statement.params().len(),
+                    parameters.len()
+                ),
+            });
+        }
+        let params: Vec<TextParam> = parameters
+            .iter()
+            .map(|value| TextParam(postgres_text(value)))
+            .collect();
+        let borrowed: Vec<&(dyn ToSql + Sync)> = params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let affected = self
+            .client
+            .execute(&statement, &borrowed)
+            .await
+            .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
+        Ok(Box::new(PostgresBindCursor {
+            affected: Some(affected),
+        }))
+    }
+}
+
+/// A bound value the server parses from text, in the type it inferred.
+///
+/// `accepts` is true for every type because the bytes are the server's own text
+/// form, and `encode_format` says text rather than PostgreSQL's default binary.
+/// That covers integer widths, `numeric` precision and timestamps without this
+/// crate mapping any of them: the type comes from the statement's own context
+/// (`col = $1`, `SET col = $1`, `VALUES ($1)`), and the server converts.
+#[derive(Debug)]
+struct TextParam(Option<String>);
+
+impl ToSql for TextParam {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match &self.0 {
+            Some(text) => {
+                out.extend_from_slice(text.as_bytes());
+                Ok(IsNull::No)
+            }
+            // A real SQL NULL, of whatever type the placeholder was inferred as.
+            None => Ok(IsNull::Yes),
+        }
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    fn encode_format(&self, _ty: &Type) -> Format {
+        Format::Text
+    }
+
+    /// `accepts` is total, so the check the default implementation would do is a
+    /// no-op; writing the text is the whole conversion.
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.to_sql(ty, out)
+    }
+}
+
+/// The value as PostgreSQL's text input, or `None` for a SQL NULL.
+///
+/// The non-finite floats get the server's own spelling rather than Rust's: a
+/// `float8` column receives `Infinity`, not `inf`.
+fn postgres_text(value: &Parameter) -> Option<String> {
+    match value {
+        Parameter::Null => None,
+        Parameter::Bool(true) => Some("true".to_owned()),
+        Parameter::Bool(false) => Some("false".to_owned()),
+        Parameter::Int(number) => Some(number.to_string()),
+        Parameter::UInt(number) => Some(number.to_string()),
+        Parameter::Float(number) if number.is_nan() => Some("NaN".to_owned()),
+        Parameter::Float(number) if number.is_infinite() => Some(if *number > 0.0 {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        }),
+        Parameter::Float(number) => Some(number.to_string()),
+        Parameter::Text(text) => Some(text.clone()),
+    }
+}
+
+/// The cursor for a statement that writes and returns no rows.
+///
+/// Its count is already the server's when it is built: `Client::execute` reads
+/// the `CommandComplete` tag before returning, so there is nothing left to
+/// drain.
+struct PostgresBindCursor {
+    affected: Option<u64>,
+}
+
+#[async_trait]
+impl Cursor for PostgresBindCursor {
+    fn columns(&self) -> &[ColumnMeta] {
+        &[]
+    }
+
+    async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
+        Ok(None)
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        self.affected
+    }
 }
 
 #[async_trait]
@@ -384,6 +540,27 @@ impl Session for PostgresSession {
             affected: None,
             timeout: options.statement_timeout,
         }))
+    }
+
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[Parameter],
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn Cursor>, EngineError> {
+        if parameters.is_empty() {
+            return self.execute(sql, options).await;
+        }
+        // The bound is a server setting, so it reaches the server before the
+        // statement does — the same rule `execute` follows, for the same reason.
+        apply_statement_timeout(
+            &self.client,
+            self.statement_timeout,
+            options.statement_timeout,
+        )
+        .await?;
+        self.statement_timeout = options.statement_timeout;
+        self.bind_statement(sql, parameters, options).await
     }
 
     async fn browse(
@@ -841,6 +1018,52 @@ mod tests {
         assert_eq!(driver.kind(), DriverKind::Postgres);
         assert_eq!(driver.label(), "PostgreSQL");
         assert_eq!(driver.default_port(), 5432);
+    }
+
+    #[test]
+    fn this_driver_binds_with_dollar_placeholders() {
+        // The caller reads this before connecting to build the statement for
+        // *this* driver rather than guess a dialect.
+        let capabilities = PostgresDriver.capabilities();
+        assert_eq!(capabilities.parameters, Some(ParameterStyle::Dollar));
+        assert!(!capabilities.read_only);
+    }
+
+    #[test]
+    fn a_bound_value_gets_the_servers_own_text() {
+        assert_eq!(postgres_text(&Parameter::Null), None);
+        assert_eq!(
+            postgres_text(&Parameter::Bool(true)).as_deref(),
+            Some("true")
+        );
+        assert_eq!(postgres_text(&Parameter::Int(-5)).as_deref(), Some("-5"));
+        assert_eq!(
+            postgres_text(&Parameter::UInt(u64::MAX)).as_deref(),
+            Some("18446744073709551615")
+        );
+        assert_eq!(
+            postgres_text(&Parameter::Float(1.5)).as_deref(),
+            Some("1.5")
+        );
+        // PostgreSQL's spelling, not Rust's `inf`/`NaN`.
+        assert_eq!(
+            postgres_text(&Parameter::Float(f64::INFINITY)).as_deref(),
+            Some("Infinity")
+        );
+        assert_eq!(
+            postgres_text(&Parameter::Float(f64::NEG_INFINITY)).as_deref(),
+            Some("-Infinity")
+        );
+        assert_eq!(
+            postgres_text(&Parameter::Float(f64::NAN)).as_deref(),
+            Some("NaN")
+        );
+        // Text is passed through, quote and all — the server parses it, this
+        // crate never escapes it.
+        assert_eq!(
+            postgres_text(&Parameter::Text("O'Brien".to_owned())).as_deref(),
+            Some("O'Brien")
+        );
     }
 
     #[test]

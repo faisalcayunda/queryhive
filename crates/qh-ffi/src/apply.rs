@@ -48,7 +48,7 @@
 
 use std::time::Duration;
 
-use qh_driver::{ExecuteOptions, Session};
+use qh_driver::{ExecuteOptions, Parameter, Session};
 use qh_sql::SafeMode;
 use serde_json::Value as Json;
 
@@ -58,9 +58,13 @@ use crate::events::{event, Emitter};
 use crate::{CancelFlag, CliError, Engine};
 
 /// One statement of the plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Change {
     sql: String,
+    /// Values bound into `sql`'s placeholders, in order. Empty when the plan was
+    /// inlined for a driver that cannot bind — Trino — in which case `sql` holds
+    /// the literals and this is nothing to send.
+    parameters: Vec<Parameter>,
     /// The rows the plan expects this statement to affect. `None` means the plan
     /// made no claim, so nothing is verified.
     expected: Option<i64>,
@@ -173,7 +177,8 @@ pub async fn apply_changes(
                 warnings: vec![],
             });
         }
-        let affected = match run(&mut session, &change.sql, timeout).await {
+        let affected = match run_bound(&mut session, &change.sql, &change.parameters, timeout).await
+        {
             Ok(affected) => affected,
             Err(error) => {
                 let rolled_back = rollback(&mut session, in_transaction, timeout).await;
@@ -331,9 +336,25 @@ async fn run(
     statement: &str,
     timeout: Option<Duration>,
 ) -> Result<Option<u64>, CliError> {
+    run_bound(session, statement, &[], timeout).await
+}
+
+/// [`run`], with values bound into the statement's placeholders.
+///
+/// `execute_bound` is the trait's binding entry point; a driver that cannot bind
+/// returns a usage error for a non-empty list rather than sending placeholders
+/// its server would read literally, and an empty list is the plain `execute`.
+/// The plan decided which shape it built for its driver, so this only forwards.
+async fn run_bound(
+    session: &mut Box<dyn Session>,
+    statement: &str,
+    parameters: &[Parameter],
+    timeout: Option<Duration>,
+) -> Result<Option<u64>, CliError> {
     let mut cursor = session
-        .execute(
+        .execute_bound(
             statement,
+            parameters,
             &ExecuteOptions {
                 statement_timeout: timeout,
                 ..ExecuteOptions::default()
@@ -389,13 +410,105 @@ fn parse_changes(settings: &Settings) -> Result<Vec<Change>, CliError> {
             })?),
         };
         let keyed = object.get("keyed").and_then(Json::as_bool).unwrap_or(true);
+        let parameters = parse_parameters(object.get("params"), index)?;
         changes.push(Change {
             sql: sql.to_owned(),
+            parameters,
             expected,
             keyed,
         });
     }
     Ok(changes)
+}
+
+/// The bound values of one statement, in placeholder order.
+///
+/// Each entry is `{"type": …, "value": …}`. The type is one of `null`, `bool`,
+/// `int`, `uint`, `float`, `text`; a value is absent only for a type that has
+/// none (`null`), and every other value is a JSON string so a `bigint` and a
+/// decimal-looking `text` are not confused by JSON's number handling. This is
+/// the wire shape [`WritePlan`](../../../app) emits, and it is additive: a plan
+/// with no `params` is the inline plan the engine ran before binding existed.
+fn parse_parameters(value: Option<&Json>, index: usize) -> Result<Vec<Parameter>, CliError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| CliError::Usage(format!("CHANGES[{index}].params must be an array")))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let object = item.as_object().ok_or_else(|| {
+                CliError::Usage(format!(
+                    "CHANGES[{index}].params[{position}] is not an object"
+                ))
+            })?;
+            let kind = object.get("type").and_then(Json::as_str).ok_or_else(|| {
+                CliError::Usage(format!("CHANGES[{index}].params[{position}] has no type"))
+            })?;
+            let text = match object.get("value") {
+                None | Some(Json::Null) => None,
+                Some(Json::String(text)) => Some(text.as_str()),
+                // A number or boolean is accepted rather than refused, so a caller
+                // that hands `42` instead of `"42"` is not punished for it.
+                Some(other) => {
+                    return Err(CliError::Usage(format!(
+                        "CHANGES[{index}].params[{position}].value must be a string, got {other}"
+                    )))
+                }
+            };
+            let value = match kind {
+                "null" => Parameter::Null,
+                "bool" => Parameter::Bool(match text {
+                    Some("true") => true,
+                    Some("false") => false,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                        "CHANGES[{index}].params[{position}] bool value must be true or false, \
+                         got {other:?}"
+                    )))
+                    }
+                }),
+                "int" => {
+                    Parameter::Int(text.and_then(|text| text.parse().ok()).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "CHANGES[{index}].params[{position}] int value is not an integer"
+                        ))
+                    })?)
+                }
+                "uint" => {
+                    Parameter::UInt(text.and_then(|text| text.parse().ok()).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "CHANGES[{index}].params[{position}] uint value is not an integer"
+                        ))
+                    })?)
+                }
+                "float" => {
+                    Parameter::Float(text.and_then(|text| text.parse().ok()).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "CHANGES[{index}].params[{position}] float value is not a number"
+                        ))
+                    })?)
+                }
+                "text" => Parameter::Text(
+                    text.ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "CHANGES[{index}].params[{position}] text value is missing"
+                        ))
+                    })?
+                    .to_owned(),
+                ),
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "CHANGES[{index}].params[{position}] has an unknown type {other}"
+                    )))
+                }
+            };
+            Ok(value)
+        })
+        .collect()
 }
 
 /// The safe mode is re-checked against each statement before it runs; this is
@@ -428,6 +541,41 @@ mod tests {
         // and therefore the caller has to say is false when it is.
         assert!(changes[1].keyed);
         assert_eq!(changes[2].expected, None);
+        assert!(changes[0].parameters.is_empty(), "no params means inline");
+    }
+
+    #[test]
+    fn a_plans_bound_values_are_read_in_order_and_typed() {
+        let json = r#"[{"sql":"UPDATE t SET a=$1 WHERE id=$2","expected":1,
+                       "params":[{"type":"text","value":"O'Brien"},{"type":"int","value":"2"}]}]"#;
+        let changes = parse_changes(&settings(&[("CHANGES", json)])).expect("a plan");
+        assert_eq!(
+            changes[0].parameters,
+            vec![Parameter::Text("O'Brien".to_owned()), Parameter::Int(2)]
+        );
+    }
+
+    #[test]
+    fn a_plans_unusable_parameters_are_refused_by_name() {
+        for bad in [
+            r#"[{"sql":"UPDATE t SET a=$1","params":{"type":"int"}}]"#,
+            r#"[{"sql":"UPDATE t SET a=$1","params":[{"value":"1"}]}]"#,
+            r#"[{"sql":"UPDATE t SET a=$1","params":[{"type":"int","value":"x"}]}]"#,
+            r#"[{"sql":"UPDATE t SET a=$1","params":[{"type":"blob","value":"x"}]}]"#,
+            r#"[{"sql":"UPDATE t SET a=$1","params":[{"type":"bool","value":"maybe"}]}]"#,
+        ] {
+            assert!(
+                parse_changes(&settings(&[("CHANGES", bad)])).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_parameter_needs_no_value() {
+        let json = r#"[{"sql":"UPDATE t SET a=$1","params":[{"type":"null"}]}]"#;
+        let changes = parse_changes(&settings(&[("CHANGES", json)])).expect("a plan");
+        assert_eq!(changes[0].parameters, vec![Parameter::Null]);
     }
 
     #[test]
@@ -470,6 +618,14 @@ mod tests {
     fn the_guard_refuses_a_write_on_a_read_only_connection() {
         assert!(!allows(SafeMode::ReadOnly, "UPDATE t SET a=1"));
         assert!(allows(SafeMode::ReadOnly, "SELECT 1"));
+        // A bound statement carries placeholders rather than literals, and the
+        // classifier still has to see the write behind them.
+        assert!(allows(SafeMode::Full, "UPDATE t SET a = $1 WHERE id = $2"));
+        assert!(!allows(
+            SafeMode::ReadOnly,
+            "UPDATE t SET a = $1 WHERE id = $2"
+        ));
+        assert!(!allows(SafeMode::ReadOnly, "DELETE FROM t WHERE id = ?"));
     }
 
     #[test]
