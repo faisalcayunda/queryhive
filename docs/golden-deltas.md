@@ -30,6 +30,11 @@
 > kasus MySQL dan Trino belum dijalankan sejak 24 Sep karena image-nya belum ada di mesin ini, jadi
 > `12/22` tetap milik larian parsial 29 Sep 2026 dan bukan angka hari ini. Catatan rencana adopsi
 > yang menyebut baris 43 ini "basi" karena itu keliru, dan sudah dikoreksi di sana.
+>
+> **Larian live penuh 29 Sep 2026 (W0-T3).** Dengan PostgreSQL, MySQL, dan Trino 483 (katalog `tpch`
+> ada) hidup bersamaan, `tools/golden/live_cases.py` menjalankan seluruh 22 kasus: **12/22 cocok,
+> 10 berbeda, 0 gagal dijalankan.** Kesepuluhnya sama dengan daftar di `tests/golden/RECORDED.md`
+> dan sudah terklasifikasi (D-1, D-2, D-4, D-8, D-9); tidak ada selisih baru.
 
 ## Aturan
 
@@ -191,6 +196,13 @@ dengan kutipnya.
 
 Rust akan merender `3 days, 4:05:06`, tanpa kutip. Isi teksnya sengaja **dipertahankan sama**
 supaya perbedaannya hanya pada kutip — perbedaan yang sekecil mungkin dan mudah diuji.
+
+Sel `a_time` pada `mysql_type_zoo_live` masuk entri ini juga (ditemukan pada larian live penuh 29
+Sep 2026). PyMySQL mengembalikan `datetime.timedelta`, yang bukan tipe JSON, jadi ia lewat jalur
+`default=str` yang sama dan direkam sebagai `"23:59:59.999999"` dengan kutipnya; Rust merender
+`23:59:59.999999`. Angka byte MySQL di D-9 (398 menjadi 399) adalah jumlah dua selisih ini, bukan
+efek array (MySQL tidak punya array): `tiny_negative` `-1E-10` menjadi `-0.0000000001` (+7 byte) dan
+kutip `a_time` yang dibuang (-6 byte, karena CSV menggandakan kutip dan membungkus selnya).
 
 Sel `a_uuid` di kasus yang sama kehilangan kutipnya lewat jalur yang sama, dan itu perlu disebut
 karena sel itu ikut menentukan angka byte di D-9. psycopg mengembalikan `uuid.UUID`, yang bukan tipe
