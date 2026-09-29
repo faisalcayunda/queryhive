@@ -43,8 +43,9 @@ tentang rotasi key, Apple Developer ID, serta riset web bukan pekerjaan agen.
 > **Status 29 Sep 2026.** Batch 1 selesai. Lane A mendarat sebagai `30aef13` (floor ADR-0027
 > ditutup, `cargo test` 770/0), Lane B sebagai `d502d0c` (default row limit dan Appearance
 > master-detail, `swift test` 395/0), dan keempat keputusan Batch 2 dicatat di `2dbe952`.
-> Berikutnya: lane command profil `preference` (menyentuh `lib.rs`, `tests/golden.rs`, dan
-> `EngineCommand` di app), lalu Open Quickly.
+> Batch 3 juga selesai: command akun dan profil sebagai `581ece6` (`cargo test` 773/0), dan Open
+> Quickly sebagai `551b13a` (`swift test` 401/0). Yang tersisa dari rencana ini hanyalah pane
+> Profiles sebagai UI, yang menunggu sign-in; rotasi key kenari tetap tugas pengguna.
 
 ### Batch 1, Lane A: floor Safe Mode (engine, serial)
 
