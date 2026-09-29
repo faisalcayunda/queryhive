@@ -99,8 +99,16 @@ enum SQLFolding {
         let statements = statementRanges(in: sql)
 
         for range in statements {
-            let headerLine = line(containing: range.location, lineStarts: starts)
-            let lastLine = line(containing: max(range.location, NSMaxRange(range) - 1), lineStarts: starts)
+            // The scanner's range starts where the previous `;` left off, so it can carry the
+            // whitespace between two statements — which may sit on the previous line. The header is
+            // the statement's own first line, so both ends are pulled in to non-whitespace.
+            var first = range.location
+            var last = NSMaxRange(range) - 1
+            while first <= last, isSpace(text.character(at: first)) { first += 1 }
+            while last >= first, isSpace(text.character(at: last)) { last -= 1 }
+            guard first <= last else { continue }
+            let headerLine = line(containing: first, lineStarts: starts)
+            let lastLine = line(containing: last, lineStarts: starts)
             guard lastLine > headerLine else { continue }
             regions.append(FoldRegion(
                 kind: .statement,
@@ -109,7 +117,7 @@ enum SQLFolding {
                 header: starts[headerLine],
                 bodyStart: starts[headerLine + 1],
                 bodyEnd: lineEnd(lastLine, starts: starts, length: text.length),
-                summary: leadingKeyword(text, from: range.location) ?? "statement"))
+                summary: leadingKeyword(text, from: first) ?? "statement"))
         }
 
         // A fold is identified by its header offset, so two regions must never share one. A CTE
@@ -127,27 +135,11 @@ enum SQLFolding {
 
     /// The scanner's statement boundaries as character ranges.
     ///
-    /// It reuses `sqlStatement(in:atUTF16Offset:)` rather than re-implementing the literal and
-    /// comment rules: the scanner is asked at the start of each statement, and the answer is located
-    /// forward from the cursor, which also settles two identical statements in a row. The cursor
-    /// only ever moves forward, so the loop terminates even on malformed SQL.
+    /// It comes from `sqlStatements`, the same single pass "Run Current Statement" uses, so a fold
+    /// and a run cannot disagree about where a statement ends — and the boundary list is computed
+    /// once for the whole document rather than once per statement.
     static func statementRanges(in sql: String) -> [NSRange] {
-        let text = sql as NSString
-        let length = text.length
-        var ranges: [NSRange] = []
-        var cursor = 0
-
-        while cursor < length {
-            while cursor < length, isTrivia(text.character(at: cursor)) { cursor += 1 }
-            guard cursor < length else { break }
-            guard let statement = sqlStatement(in: sql, atUTF16Offset: cursor) else { break }
-            let search = NSRange(location: cursor, length: length - cursor)
-            let found = text.range(of: statement, options: [.literal], range: search)
-            guard found.location != NSNotFound, found.length > 0 else { break }
-            ranges.append(found)
-            cursor = NSMaxRange(found)
-        }
-        return ranges
+        sqlStatements(in: sql).map { NSRange($0.range, in: sql) }
     }
 
     // MARK: CTEs
@@ -269,9 +261,10 @@ enum SQLFolding {
 
     // MARK: Lexing helpers
 
-    private static func isTrivia(_ character: unichar) -> Bool {
+    /// Whitespace and newlines only — not `;`, which is a separator and not spacing.
+    private static func isSpace(_ character: unichar) -> Bool {
         guard let scalar = Unicode.Scalar(character) else { return false }
-        return CharacterSet.whitespacesAndNewlines.contains(scalar) || character == 0x3B   // ;
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
     }
 
     private static func lineEnd(_ line: Int, starts: [Int], length: Int) -> Int {

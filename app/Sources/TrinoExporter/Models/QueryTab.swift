@@ -727,13 +727,22 @@ final class QueryTab: Identifiable {
     }
 }
 
-/// The statement the caret sits in.
+/// Every statement in a script, in one pass, with the range each one occupies.
+///
+/// The scanner "Run Current Statement" and the editor's folding both need statement boundaries, and
+/// this is the one place they come from — a second scanner with the same rules would be a second
+/// answer to the same question. It is a single pass on purpose: the previous shape ran the whole
+/// scan once per statement to find each boundary, which is quadratic on a file with many statements.
 ///
 /// A scanner, not a parser: it splits on a `;` that is outside a single-quoted string and outside
-/// a `--` or `/* */` comment, which is what a file of ordinary statements needs. A semicolon
-/// inside a Postgres dollar-quoted body would fool it, and that is a deliberate trade — such a
-/// script is rare, and refusing to guess beats splitting wrongly and running half a statement.
-func sqlStatement(in sql: String, atUTF16Offset caret: Int) -> String? {
+/// a `--` or `/* */` comment, which is what a file of ordinary statements needs. A semicolon inside
+/// a Postgres dollar-quoted body would fool it, and that is a deliberate trade — such a script is
+/// rare, and refusing to guess beats splitting wrongly and running half a statement.
+///
+/// The range starts where the previous `;` left off, so it can carry the whitespace between two
+/// statements; the text is trimmed. A caller that needs the statement's own first line steps over
+/// that whitespace itself (folding does).
+func sqlStatements(in sql: String) -> [(range: Range<String.Index>, text: String)] {
     var found: [(Range<String.Index>, String)] = []
     var start = sql.startIndex
     var index = sql.startIndex
@@ -774,6 +783,12 @@ func sqlStatement(in sql: String, atUTF16Offset caret: Int) -> String? {
     }
     let tail = sql[start...].trimmingCharacters(in: .whitespacesAndNewlines)
     if !tail.isEmpty { found.append((start..<sql.endIndex, tail)) }
+    return found
+}
+
+/// The statement the caret sits in.
+func sqlStatement(in sql: String, atUTF16Offset caret: Int) -> String? {
+    let found = sqlStatements(in: sql)
     guard !found.isEmpty else { return nil }
 
     let caretIndex = String.Index(utf16Offset: min(max(caret, 0), sql.utf16.count), in: sql)
