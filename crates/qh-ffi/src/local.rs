@@ -468,7 +468,7 @@ where
 /// migrates: every command that reaches this function wants a usable schema, so a caller
 /// who pointed `DB_PATH` at a fresh file meant "make it usable", not "tell me it has no
 /// tables".
-pub(crate) fn open_storage(settings: &Settings) -> Result<Storage, CliError> {
+pub fn open_storage(settings: &Settings) -> Result<Storage, CliError> {
     let raw = settings.text("DB_PATH", "");
     if raw.is_empty() {
         return Ok(qh_storage::open_default()?);

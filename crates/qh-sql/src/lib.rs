@@ -23,7 +23,8 @@ mod scan;
 mod wrap;
 
 pub use classify::{
-    check, classify, statements, statements_with_lines, SafeMode, SafeModeError, ScriptStatement,
+    check, check_confirmed, classify, decisions, statements, statements_with_lines, Decision,
+    FloorSource, SafeMode, SafeModeError, SafeModeFloor, ScriptStatement, StatementDecision,
     StatementKind, SAFE_MODES,
 };
 pub use ident::{quote_ident, IdentStyle};
