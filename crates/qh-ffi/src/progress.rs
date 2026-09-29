@@ -52,15 +52,25 @@ impl Progress {
 
     /// Emit a `progress` event, if the floor or the 1000-row rule says it is due.
     pub fn emit(&mut self, rows: u64, out: &mut dyn Emitter) -> io::Result<()> {
+        self.emit_count("rows", rows, out)
+    }
+
+    /// Emit a `progress` event under a named counter.
+    ///
+    /// The statement family of an import counts statements, not rows, and a
+    /// `progress` line that said `rows` while meaning statements would be the kind
+    /// of small lie the event protocol exists to avoid. Same throttle, same "is it
+    /// due" rule.
+    pub fn emit_count(&mut self, key: &str, count: u64, out: &mut dyn Emitter) -> io::Result<()> {
         let due = self.last.is_none() || self.at.elapsed() >= self.floor;
         if due
             || self
                 .last
-                .is_some_and(|last| rows.saturating_sub(last) >= PROGRESS_EVERY)
+                .is_some_and(|last| count.saturating_sub(last) >= PROGRESS_EVERY)
         {
-            self.last = Some(rows);
+            self.last = Some(count);
             self.at = Instant::now();
-            out.emit(event("progress").field("rows", rows).build())?;
+            out.emit(event("progress").field(key, count).build())?;
         }
         Ok(())
     }
@@ -91,5 +101,18 @@ mod tests {
         progress.emit(1_001, &mut capture).unwrap();
         assert_eq!(capture.lines().len(), 2, "{:?}", capture.lines());
         assert_eq!(progress.last(), Some(1_001));
+    }
+
+    #[test]
+    fn a_named_counter_reports_its_own_key() {
+        // The statement import counts statements; the event says so rather than
+        // calling them rows.
+        let mut capture = Capture::new();
+        let mut progress = Progress::new(60_000);
+        progress.emit_count("statements", 3, &mut capture).unwrap();
+        assert_eq!(
+            capture.lines(),
+            vec!["{\"event\":\"progress\",\"statements\":3}"]
+        );
     }
 }

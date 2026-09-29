@@ -23,7 +23,8 @@ mod scan;
 mod wrap;
 
 pub use classify::{
-    check, classify, statements, SafeMode, SafeModeError, StatementKind, SAFE_MODES,
+    check, classify, statements, statements_with_lines, SafeMode, SafeModeError, ScriptStatement,
+    StatementKind, SAFE_MODES,
 };
 pub use ident::{quote_ident, IdentStyle};
 pub use scan::{has_significant_text, scan, statement_count, Scan};
