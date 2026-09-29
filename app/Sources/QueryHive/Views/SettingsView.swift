@@ -513,7 +513,8 @@ private struct SoftwareUpdateControls: View {
 /// The palette: which canvas, which accent, and how hard the backdrop glows.
 struct AppearanceSettings: View {
     @Bindable private var store = ThemeStore.shared
-    /// What the list's `+` will call the appearance it keeps.
+    /// Whether the naming sheet is up, and what has been typed into it.
+    @State private var namingLook = false
     @State private var newLookName = ""
 
     var body: some View {
@@ -523,13 +524,24 @@ struct AppearanceSettings: View {
             // the right is the parts they are made of. Change any part and the list reads Custom,
             // which is the honest name for "this is yours and it is not one of these yet".
             SettingsCard(title: "Appearance",
-                         detail: "The list on the left is whole appearances: a preset names both canvases, the accent and the tone in one click. Change any part and it reads Custom, which is what you are on until the + keeps it under a name.") {
+                         detail: "The list on the left is whole appearances: a preset names both canvases, the accent and the tone in one click. Change any part and it reads Custom, which is what you are on until Save keeps it under a name.") {
                 SettingsRow(label: "Mode") {
                     Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
                 }
                 RowDivider()
                 lookMasterDetail
             }
+        }
+        // The name is asked for at the moment it is needed, not kept open beside the controls:
+        // nothing here has a name until the moment it is kept.
+        .alert("Save this appearance", isPresented: $namingLook) {
+            TextField("Name", text: $newLookName)
+            Button("Save") { store.saveLook(named: newLookName) }
+                .disabled(newLookName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) { newLookName = "" }
+        } message: {
+            Text("It joins the list on the left, and picking it later brings these canvases, this "
+                 + "accent, this tone and this glow back.")
         }
     }
 
@@ -635,54 +647,24 @@ struct AppearanceSettings: View {
         .frame(width: 168, alignment: .leading)
     }
 
-    /// The two actions the list cannot express as a row: keep the appearance you are on, and throw
-    /// away one you kept. Below the list, which is where TablePro puts the same pair.
+    /// Keeping the appearance, which is the whole point of the Custom state: a look you cannot keep
+    /// is a look you have to rebuild by hand next time.
+    ///
+    /// A button rather than a field: nothing here is named until the moment it is kept, so a name
+    /// box sitting open beside the controls is a question asked before it can be answered. The name
+    /// is asked for in a sheet when Save is pressed.
     private var lookToolbar: some View {
-        HStack(spacing: 2) {
-            Button { saveCurrentLook() } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(store.isCustomLook ? Tone.ink : Tone.secondary)
-                    .frame(width: 24, height: 22)
-                    .contentShape(Rectangle())
+        HStack(spacing: 8) {
+            PillButton(title: "Save", symbol: "bookmark") {
+                newLookName = ""
+                namingLook = true
             }
-            .buttonStyle(.plain)
-            .help(store.isCustomLook
-                  ? "Save this appearance under the name on the right"
-                  : "This appearance is already one of the rows above")
             .disabled(!store.isCustomLook)
-
-            Button { deleteSelectedLook() } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(selectedLook == nil ? Tone.secondary : Tone.ink)
-                    .frame(width: 24, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Delete the saved appearance this one is")
-            .disabled(selectedLook == nil)
-
+            .help(store.isCustomLook
+                  ? "Keep this appearance under a name"
+                  : "This appearance is already one of the rows above")
             Spacer(minLength: 0)
         }
-    }
-
-    /// The saved look the current appearance is exactly, which is what `−` deletes.
-    private var selectedLook: SavedLook? {
-        store.savedLooks.first { $0.look == store.currentLook }
-    }
-
-    /// Keep the current appearance. A blank name gets one, so the button is never a dead click:
-    /// a look nobody named is a look nobody can pick again.
-    private func saveCurrentLook() {
-        let trimmed = newLookName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty ? "Appearance \(store.savedLooks.count + 1)" : trimmed
-        if store.saveLook(named: name) != nil { newLookName = "" }
-    }
-
-    private func deleteSelectedLook() {
-        guard let selected = selectedLook else { return }
-        store.deleteLook(selected.id)
     }
 
     @ViewBuilder
@@ -801,15 +783,6 @@ struct AppearanceSettings: View {
                 Slider(value: $store.glow, in: 0...1.5)
                     .tint(Tone.accent)
                     .disabled(!store.tone.isLuminous)
-            }
-            RowDivider()
-            // The name the list's `+` saves under. Beside the appearance it names rather than in a
-            // dialog, so what is being saved and what it will be called are read together.
-            SettingsRow(label: "Name") {
-                TextField("Optional", text: $newLookName)
-                    .textFieldStyle(.plain)
-                    .font(.ui(11.5))
-                    .foregroundStyle(Tone.ink)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
