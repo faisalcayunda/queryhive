@@ -467,7 +467,13 @@ final class QueryTab: Identifiable {
     var caret = 0
 
     var previewing = false
-    var preview: PreviewResult?
+    /// The rows the grid is drawing. Assigning it means a new set of rows exists, so the order the
+    /// user asked for — which was an order over the old set — is dropped here rather than in
+    /// `AppModel.preview`, because Explain fills the same grid from a run of its own and has to be
+    /// covered too.
+    var preview: PreviewResult? {
+        didSet { gridSort = nil }
+    }
     var previewError: String?
 
     /// The plan Explain last fetched, and whether the grid is showing it instead of rows.
@@ -510,7 +516,28 @@ final class QueryTab: Identifiable {
         didSet {
             cellSelection = nil
             cellEdits.discard()
+            // A filter narrows the rows a sort was an order over, so the order is dropped with the
+            // selection and the edits. Kept here, beside them, because all three are the same kind
+            // of state: a claim about a specific set of rows that no longer exists.
+            gridSort = nil
         }
+    }
+
+    /// The order the grid is drawing the filtered rows in, or `nil` for the server's own order.
+    ///
+    /// Set through `setGridSort`, never directly from a view: changing it reorders the rows on
+    /// screen, and the selection and the queued edits are positions in that order.
+    private(set) var gridSort: GridSort?
+
+    /// Sort the grid by a column, dropping the positional state the new order invalidates.
+    ///
+    /// The selection and the edits are indices into the rows on screen — the same hazard a filter
+    /// has — so reordering those rows has to clear them for the same reason. This is the only way
+    /// `gridSort` changes.
+    func setGridSort(_ sort: GridSort?) {
+        gridSort = sort
+        cellSelection = nil
+        cellEdits.discard()
     }
 
     /// The block of cells the pointer has dragged out in the grid, if any. Indices are positions
