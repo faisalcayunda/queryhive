@@ -96,6 +96,34 @@ Command profil di `lib.rs` dikerjakan sebagai lane tersendiri karena menyentuh `
 `SAFE_MODE_FLOOR`, dan itulah alasan floor ditutup lebih dulu di Lane A: sebelum addendum ADR-0027,
 sebuah profil yang memaksa `no_ddl` masih bisa dilewati `SAFE_MODE_CONFIRMED`.
 
+### Batch 5: pane Editor
+
+**Setelan yang dikerjakan** (perilaku yang sudah ada, tinggal disakelar): line numbers, highlight
+current line, highlight current statement, word wrap, code folding, show invisible characters, dan
+tab width. Ketujuhnya mendarat sebagai store preferensi editor tersendiri.
+
+**Tugas yang belum dikerjakan.** Empat item pane Editor TablePro yang **bukan setelan** melainkan
+fitur. Masing-masing dicatat di sini dengan apa yang ia butuhkan, supaya tidak ada sakelar yang
+menjanjikan sesuatu yang tidak ada.
+
+1. **Run button beside each statement.** App sudah punya "Run Current Statement"; yang belum adalah
+   tombolnya di gutter. Butuh satu glyph per rentang statement di `LineNumberRulerView`, memakai
+   `SQLFolding.statementRanges` yang sudah ada, plus aksi ke jalur run yang sudah ada. Ukuran:
+   sedang. Risiko: ruler sudah menggambar fold mark, dan dua glyph di satu kolom harus tidak saling
+   menimpa.
+2. **Auto-uppercase keywords.** Butuh jalur edit yang sadar kata kunci pada commit: setelah spasi,
+   newline, atau tanda buka, kata sebelumnya diganti bentuk kanoniknya bila ia kata kunci. Ukuran:
+   sedang. Risiko: menulis ulang teks saat mengetik harus tidak merusak undo stack dan pewarnaan;
+   `SQLSyntax` sudah memegang daftar kata kuncinya.
+3. **Query parameters (`:name`).** Bukan sakelar melainkan alur: editor mengenali `:name`, menanyakan
+   nilainya, mengikatnya lewat `execute_bound` (ADR-0028), lalu menjalankan. Butuh pengenalan `:name`
+   di editor, sebuah dialog nilai, dan pemetaan ke `BoundSQL`. Ukuran: besar. **Keputusan lebih
+   dulu:** apakah nilai disimpan per tab, per koneksi, atau tidak disimpan sama sekali.
+4. **Vim mode.** Lapisan modal editing: mode normal/insert/visual, operator dan motion, register, dan
+   peta tombolnya. TablePro punya; pohon ini tidak punya satu pun bagiannya. Ukuran: proyek
+   tersendiri, dan ia bersinggungan dengan `interceptKey` yang sekarang dipakai completion dan
+   shortcut. **Keputusan lebih dulu:** apakah ini memang bagian dari produk.
+
 ### Di luar agen
 
 Rotasi key kenari, karena PROGRESS.md sudah menyatakannya bocor. Notarisasi dan kunci EdDSA Sparkle
