@@ -1101,7 +1101,7 @@ async fn an_unknown_command_is_one_error_event() {
     let usage = qh_ffi::usage("queryhive-engine");
     assert_eq!(
         usage,
-        "usage: queryhive-engine db_drivers|connections|import_connections|credential|history|history_add|history_clear|saved_queries|session|import_data|apply_changes|table_op|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
+        "usage: queryhive-engine db_drivers|connections|import_connections|credential|history|history_add|history_clear|saved_queries|session|account|profiles|profile_save|profile_delete|import_data|apply_changes|table_op|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
     );
     let golden = snapshot("unknown_command", "usage");
     assert_eq!(golden.len(), 1);

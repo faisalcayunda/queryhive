@@ -1065,3 +1065,208 @@ async fn a_session_save_refuses_what_it_cannot_store() {
         "{error:?}"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// account and profiles
+// --------------------------------------------------------------------------- //
+
+#[tokio::test]
+async fn an_account_is_created_on_first_read_and_filled_in_on_sign_in() {
+    let (_directory, database) = scratch();
+
+    // A first read makes the row, so a profile saved before anyone has signed in still has an
+    // owner. Nobody signed in yet is a row of nulls rather than an error.
+    let fresh = one(Command::Account, &[("DB_PATH", database.as_str())]).await;
+    let account = &fresh["account"];
+    assert_eq!(account["provider"], Json::Null);
+    assert_eq!(account["subject"], Json::Null);
+    assert_eq!(account["signed_in_at"], Json::Null);
+    let id = account["id"].as_str().expect("an id").to_owned();
+
+    let signed_in = one(
+        Command::Account,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("ACCOUNT_ACTION", "sign_in"),
+            ("PROVIDER", "google"),
+            ("SUBJECT", "10769150350006150715113082367"),
+            ("EMAIL", "faisal@example.com"),
+            ("DISPLAY_NAME", "Faisal"),
+        ],
+    )
+    .await;
+    let account = &signed_in["account"];
+    assert_eq!(account["provider"], "google");
+    assert_eq!(account["subject"], "10769150350006150715113082367");
+    assert_eq!(account["email"], "faisal@example.com");
+    assert!(account["signed_in_at"].is_i64(), "{account}");
+    // One account, one owner id: the row keeps its identity across the sign-in.
+    assert_eq!(account["id"], id);
+
+    // Signing out is a fact about the row rather than the absence of one, so the subject and the
+    // email stay and a reader can still say who used this application.
+    let signed_out = one(
+        Command::Account,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("ACCOUNT_ACTION", "sign_out"),
+        ],
+    )
+    .await;
+    let account = &signed_out["account"];
+    assert!(account["signed_out_at"].is_i64(), "{account}");
+    assert_eq!(account["subject"], "10769150350006150715113082367");
+    assert!(account["signed_in_at"].is_i64());
+}
+
+#[tokio::test]
+async fn a_profile_round_trips_and_belongs_to_the_account() {
+    let (_directory, database) = scratch();
+
+    let saved = one(
+        Command::ProfileSave,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("KIND", "preference"),
+            ("NAME", "editor"),
+            ("PAYLOAD_JSON", r#"{"uiFont":"system","wrap":true}"#),
+        ],
+    )
+    .await;
+    let profile = &saved["profile"];
+    assert_eq!(profile["kind"], "preference");
+    assert_eq!(profile["name"], "editor");
+    // The payload comes back parsed rather than as the string it was written as.
+    assert_eq!(profile["payload"]["uiFont"], "system");
+    assert_eq!(profile["payload"]["wrap"], true);
+    let id = profile["id"].as_str().expect("an id").to_owned();
+    let owner = profile["owner_id"].as_str().expect("an owner").to_owned();
+
+    // The owner is the account row's own identity, which is what makes a profile "theirs".
+    let account = one(Command::Account, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(account["account"]["id"], owner);
+
+    // Listing answers with it, and a kind filter that matches nothing answers empty.
+    let listed = one(Command::Profiles, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["profiles"].as_array().map(Vec::len), Some(1));
+    let filtered = one(
+        Command::Profiles,
+        &[("DB_PATH", database.as_str()), ("KIND", "connection")],
+    )
+    .await;
+    assert_eq!(filtered["profiles"].as_array().map(Vec::len), Some(0));
+
+    // A save that names the id updates that row rather than making a second one.
+    let updated = one(
+        Command::ProfileSave,
+        &[
+            ("DB_PATH", database.as_str()),
+            ("PROFILE_ID", id.as_str()),
+            ("KIND", "preference"),
+            ("NAME", "editor (dark)"),
+            ("PAYLOAD_JSON", r#"{"uiFont":"menlo"}"#),
+        ],
+    )
+    .await;
+    assert_eq!(updated["profile"]["id"], id);
+    assert_eq!(updated["profile"]["name"], "editor (dark)");
+    let listed = one(Command::Profiles, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["profiles"].as_array().map(Vec::len), Some(1));
+
+    // Deleting keeps the row as a tombstone and drops it from the listing.
+    let deleted = one(
+        Command::ProfileDelete,
+        &[("DB_PATH", database.as_str()), ("PROFILE_ID", id.as_str())],
+    )
+    .await;
+    assert_eq!(deleted["deleted"], true);
+    let listed = one(Command::Profiles, &[("DB_PATH", database.as_str())]).await;
+    assert_eq!(listed["profiles"].as_array().map(Vec::len), Some(0));
+
+    // Deleting a tombstone again is a no-op that still answers, rather than an error.
+    let again = one(
+        Command::ProfileDelete,
+        &[("DB_PATH", database.as_str()), ("PROFILE_ID", id.as_str())],
+    )
+    .await;
+    assert_eq!(again["deleted"], true);
+}
+
+#[tokio::test]
+async fn the_account_and_profile_commands_refuse_what_they_cannot_store() {
+    let (_directory, database) = scratch();
+    let base: [(&str, &str); 1] = [("DB_PATH", database.as_str())];
+
+    // A provider this build does not know, refused by name.
+    let error = events(
+        Command::Account,
+        &[
+            base[0],
+            ("ACCOUNT_ACTION", "sign_in"),
+            ("PROVIDER", "okta"),
+        ],
+    )
+    .await
+    .expect_err("an unknown provider is not a provider");
+    assert!(
+        error.message().contains("unknown PROVIDER 'okta'"),
+        "{error:?}"
+    );
+
+    // A sign-in that names no subject says which setting is missing.
+    let error = events(
+        Command::Account,
+        &[
+            base[0],
+            ("ACCOUNT_ACTION", "sign_in"),
+            ("PROVIDER", "google"),
+        ],
+    )
+    .await
+    .expect_err("a sign-in needs a subject");
+    assert!(error.message().contains("SUBJECT is required"), "{error:?}");
+
+    // A kind nobody offers.
+    let error = events(
+        Command::ProfileSave,
+        &[base[0], ("KIND", "theme"), ("NAME", "x")],
+    )
+    .await
+    .expect_err("an unknown kind is not a kind");
+    assert!(error.message().contains("unknown KIND 'theme'"), "{error:?}");
+
+    // A profile with no name.
+    let error = events(
+        Command::ProfileSave,
+        &[base[0], ("KIND", "preference")],
+    )
+    .await
+    .expect_err("a profile needs a name");
+    assert!(error.message().contains("NAME is required"), "{error:?}");
+
+    // A payload that will not parse is refused at the write, not discovered by the next reader.
+    let error = events(
+        Command::ProfileSave,
+        &[
+            base[0],
+            ("KIND", "preference"),
+            ("NAME", "x"),
+            ("PAYLOAD_JSON", "{not json"),
+        ],
+    )
+    .await
+    .expect_err("a payload that is not JSON cannot be stored");
+    assert!(
+        error.message().contains("PAYLOAD_JSON is not JSON"),
+        "{error:?}"
+    );
+
+    // Deleting needs something to delete.
+    let error = events(Command::ProfileDelete, &base)
+        .await
+        .expect_err("a delete needs an id");
+    assert!(
+        error.message().contains("PROFILE_ID is required"),
+        "{error:?}"
+    );
+}

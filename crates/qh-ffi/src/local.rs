@@ -34,7 +34,10 @@ use std::sync::OnceLock;
 
 use qh_credentials::{account_key, KeychainStore, MemoryStore, SecretStore};
 use qh_storage::import::{self, ImportReport};
-use qh_storage::{ConnectionRecord, Outcome, QueryHistoryRecord, SavedQueryRecord, Storage};
+use qh_storage::{
+    AppAccount, ConnectionRecord, Outcome, ProfileKind, ProfileRecord, Provider,
+    QueryHistoryRecord, SavedQueryRecord, Storage,
+};
 use qh_sync::SyncId;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value as Json};
@@ -445,6 +448,176 @@ pub async fn session(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
     Ok(())
 }
 
+/// `account`: the identity this application runs under.
+///
+/// `ACCOUNT_ACTION` names the action. `load` answers with the row, creating it on first use so
+/// that a profile saved before anyone has signed in still has an owner. `sign_in` fills in what
+/// the provider told us. `sign_out` stamps the sign-out and leaves the subject and the email in
+/// place, because signing out is a fact about the row rather than the absence of one.
+///
+/// Local, so there is no Safe Mode here, exactly as `connections` and `saved_queries` have none:
+/// Safe Mode governs what reaches a **database**, and this row never does. Whether an
+/// application identity is ever presented to a database is the decision ADR-0029 left open.
+pub async fn account(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let storage = open_storage(&settings)?;
+        let at = qh_storage::now_millis();
+        let action = settings.text("ACCOUNT_ACTION", "load").trim().to_ascii_lowercase();
+        let mut record = storage.app_account_or_create(at)?;
+        match action.as_str() {
+            "load" => {}
+            "sign_in" => {
+                record.provider = Some(provider_of(&settings)?);
+                record.subject = Some(required(&settings, "SUBJECT", "to sign in")?);
+                record.email = non_empty(&settings, "EMAIL");
+                record.display_name = non_empty(&settings, "DISPLAY_NAME");
+                record.signed_in_at = Some(at);
+                // A sign-in after a sign-out is a new session, so the old sign-out stops being
+                // the row's last fact.
+                record.signed_out_at = None;
+                record.meta.touch(at);
+                storage.save_app_account(&record)?;
+            }
+            "sign_out" => {
+                record.signed_out_at = Some(at);
+                record.meta.touch(at);
+                storage.save_app_account(&record)?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown ACCOUNT_ACTION '{other}'; expected load, sign_in or sign_out"
+                )))
+            }
+        }
+        Ok(event("account").field("account", account_json(&record)).build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `profiles`: what one account has saved.
+///
+/// `PROFILE_ACTION` names the action: `list` (the default) answers with every living profile,
+/// optionally narrowed by `KIND`, and `get` answers with the one `PROFILE_ID` names. The
+/// `PAYLOAD_JSON` a profile carries is per-kind and opaque to this layer, the same way
+/// `connection.options_json` is opaque to SQL: a new field in a kind is not a migration.
+pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let storage = open_storage(&settings)?;
+        let owner = storage.app_account_or_create(qh_storage::now_millis())?.meta.id;
+        let action = settings.text("PROFILE_ACTION", "list").trim().to_ascii_lowercase();
+        match action.as_str() {
+            "list" => {
+                let kind = non_empty(&settings, "KIND")
+                    .map(|text| profile_kind_of(&text))
+                    .transpose()?;
+                let records = storage
+                    .profiles(&owner)?
+                    .into_iter()
+                    .filter(|record| kind.map_or(true, |kind| record.kind == kind))
+                    .map(|record| profile_json(&record))
+                    .collect::<Vec<_>>();
+                Ok(event("profiles").field("profiles", records).build())
+            }
+            "get" => {
+                let id = profile_id(&settings)?;
+                let record = storage.profile(&id)?;
+                Ok(event("profile")
+                    .field("action", "get")
+                    .field("id", id.as_str())
+                    .maybe("profile", record.as_ref().map(profile_json))
+                    .build())
+            }
+            other => Err(CliError::Usage(format!(
+                "unknown PROFILE_ACTION '{other}'; expected list or get"
+            ))),
+        }
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `profile_save`: insert or update one profile for this account.
+///
+/// `PROFILE_ID` names the row to update; absent, a new one is made. `KIND`, `NAME` and
+/// `PAYLOAD_JSON` are the body. The payload must be JSON, and it is refused when it is not, for
+/// the same reason `session` refuses a `TABS_JSON` that will not parse: a profile that cannot be
+/// read back is better reported at the write than discovered by whoever reads it next.
+pub async fn profile_save(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let storage = open_storage(&settings)?;
+        let at = qh_storage::now_millis();
+        let owner = storage.app_account_or_create(at)?.meta.id;
+        let kind = profile_kind_of(&required(&settings, "KIND", "to save a profile")?)?;
+        let name = required(&settings, "NAME", "to save a profile")?;
+        let payload = match settings.text("PAYLOAD_JSON", "").trim() {
+            "" => "{}".to_owned(),
+            text => text.to_owned(),
+        };
+        serde_json::from_str::<Json>(&payload).map_err(|error| {
+            CliError::Usage(format!("PAYLOAD_JSON is not JSON: {error}"))
+        })?;
+
+        let named = non_empty(&settings, "PROFILE_ID");
+        let record = match named {
+            None => ProfileRecord::new(&owner, kind, name, payload, at),
+            Some(text) => {
+                let id = parse_id(&text, "PROFILE_ID")?;
+                match storage.profile(&id)? {
+                    Some(mut existing) => {
+                        existing.kind = kind;
+                        existing.name = name;
+                        existing.payload_json = payload;
+                        existing.meta.touch(at);
+                        existing
+                    }
+                    None => {
+                        return Err(CliError::Usage(format!(
+                            "no profile with id '{text}'"
+                        )))
+                    }
+                }
+            }
+        };
+        storage.save_profile(&record)?;
+        // The id is the one thing a caller cannot know before the first save, so it is returned.
+        Ok(event("profile")
+            .field("action", "save")
+            .field("profile", profile_json(&record))
+            .build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
+/// `profile_delete`: remove one profile, keeping the row as a tombstone.
+///
+/// A soft delete, like every other deletion in this database: the identity, the revision and the
+/// timestamp stay, so a future sync can carry the deletion and a restore is a revision like any
+/// other. Deleting what is not there is not an error, it is a no-op that answers `deleted:false`.
+pub async fn profile_delete(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+    let settings = settings.clone();
+    let built = on_blocking(move || {
+        let storage = open_storage(&settings)?;
+        let id = profile_id(&settings)?;
+        let deleted = storage.soft_delete_profile(&id, qh_storage::now_millis())?;
+        Ok(event("profile")
+            .field("action", "delete")
+            .field("id", id.as_str())
+            .field("deleted", deleted)
+            .build())
+    })
+    .await?;
+    out.emit(built)?;
+    Ok(())
+}
+
 /// Run the blocking half of a local command off the runtime's worker threads.
 ///
 /// The closure returns the whole event, so nothing but owned JSON crosses back and the
@@ -476,6 +649,87 @@ pub fn open_storage(settings: &Settings) -> Result<Storage, CliError> {
     let mut storage = Storage::open(expand_user(&raw))?;
     storage.migrate()?;
     Ok(storage)
+}
+
+/// The provider named by `PROVIDER`, refused by name when it is not one this build knows.
+fn provider_of(settings: &Settings) -> Result<Provider, CliError> {
+    match settings.text("PROVIDER", "").trim().to_ascii_lowercase().as_str() {
+        "google" => Ok(Provider::Google),
+        "apple" => Ok(Provider::Apple),
+        "github" => Ok(Provider::Github),
+        "microsoft" => Ok(Provider::Microsoft),
+        other => Err(CliError::Usage(format!(
+            "unknown PROVIDER '{other}'; expected google, apple, github or microsoft"
+        ))),
+    }
+}
+
+/// The profile kind named by `KIND`.
+fn profile_kind_of(text: &str) -> Result<ProfileKind, CliError> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "saved_query" => Ok(ProfileKind::SavedQuery),
+        "connection" => Ok(ProfileKind::Connection),
+        "preference" => Ok(ProfileKind::Preference),
+        other => Err(CliError::Usage(format!(
+            "unknown KIND '{other}'; expected saved_query, connection or preference"
+        ))),
+    }
+}
+
+/// A setting that has to be there, refused with the action it was for.
+fn required(settings: &Settings, key: &str, why: &str) -> Result<String, CliError> {
+    let value = settings.text(key, "");
+    if value.trim().is_empty() {
+        return Err(CliError::Usage(format!("{key} is required {why}")));
+    }
+    Ok(value)
+}
+
+/// A setting whose blank means "not given" rather than "given, empty".
+fn non_empty(settings: &Settings, key: &str) -> Option<String> {
+    let value = settings.text(key, "");
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn profile_id(settings: &Settings) -> Result<SyncId, CliError> {
+    parse_id(
+        &required(settings, "PROFILE_ID", "to name a profile")?,
+        "PROFILE_ID",
+    )
+}
+
+fn parse_id(text: &str, key: &str) -> Result<SyncId, CliError> {
+    SyncId::parse(text.trim())
+        .map_err(|error| CliError::Usage(format!("{key} is not an identity: {error}")))
+}
+
+/// One account as the `account` event carries it.
+fn account_json(record: &AppAccount) -> Json {
+    json!({
+        "id": record.meta.id.as_str(),
+        "provider": record.provider.map(Provider::as_str),
+        "subject": record.subject,
+        "email": record.email,
+        "display_name": record.display_name,
+        "signed_in_at": record.signed_in_at,
+        "signed_out_at": record.signed_out_at,
+    })
+}
+
+/// One profile as the events carry it. The payload is emitted parsed, because it was required to
+/// be JSON on the way in and a caller should not have to parse a string it just wrote.
+fn profile_json(record: &ProfileRecord) -> Json {
+    json!({
+        "id": record.meta.id.as_str(),
+        "owner_id": record.owner_id.as_str(),
+        "kind": record.kind.as_str(),
+        "name": record.name,
+        "payload": serde_json::from_str::<Json>(&record.payload_json).unwrap_or(Json::Null),
+    })
 }
 
 /// The `connections.json` an import would read: `LEGACY_PATH` when the caller named one,

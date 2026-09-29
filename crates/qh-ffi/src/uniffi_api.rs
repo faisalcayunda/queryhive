@@ -98,6 +98,10 @@ pub enum EngineCommand {
     HistoryClear,
     SavedQueries,
     Session,
+    Account,
+    Profiles,
+    ProfileSave,
+    ProfileDelete,
     ImportData,
     ApplyChanges,
     TableOp,
@@ -131,7 +135,7 @@ pub enum EngineCommand {
 /// This exists because the tautology shipped once. `command_names` used to read `crate::COMMANDS`
 /// directly and the test compared it with `crate::COMMANDS`, so four new commands reached the
 /// usage line and `Command` while `EngineCommand` stayed at fourteen, and nothing failed.
-pub const EVERY_COMMAND: [EngineCommand; 22] = [
+pub const EVERY_COMMAND: [EngineCommand; 26] = [
     EngineCommand::DbDrivers,
     EngineCommand::Connections,
     EngineCommand::ImportConnections,
@@ -141,6 +145,10 @@ pub const EVERY_COMMAND: [EngineCommand; 22] = [
     EngineCommand::HistoryClear,
     EngineCommand::SavedQueries,
     EngineCommand::Session,
+    EngineCommand::Account,
+    EngineCommand::Profiles,
+    EngineCommand::ProfileSave,
+    EngineCommand::ProfileDelete,
     EngineCommand::ImportData,
     EngineCommand::ApplyChanges,
     EngineCommand::TableOp,
@@ -169,6 +177,10 @@ impl EngineCommand {
             Self::HistoryClear => "history_clear",
             Self::SavedQueries => "saved_queries",
             Self::Session => "session",
+            Self::Account => "account",
+            Self::Profiles => "profiles",
+            Self::ProfileSave => "profile_save",
+            Self::ProfileDelete => "profile_delete",
             Self::ImportData => "import_data",
             Self::ApplyChanges => "apply_changes",
             Self::TableOp => "table_op",
@@ -502,6 +514,10 @@ mod tests {
                 EngineCommand::HistoryClear => "history_clear",
                 EngineCommand::SavedQueries => "saved_queries",
                 EngineCommand::Session => "session",
+                EngineCommand::Account => "account",
+                EngineCommand::Profiles => "profiles",
+                EngineCommand::ProfileSave => "profile_save",
+                EngineCommand::ProfileDelete => "profile_delete",
                 EngineCommand::ImportData => "import_data",
                 EngineCommand::ApplyChanges => "apply_changes",
                 EngineCommand::TableOp => "table_op",

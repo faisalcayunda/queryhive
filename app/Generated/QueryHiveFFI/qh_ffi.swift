@@ -1028,6 +1028,10 @@ public enum EngineCommand: Equatable, Hashable {
     case historyClear
     case savedQueries
     case session
+    case account
+    case profiles
+    case profileSave
+    case profileDelete
     case importData
     case applyChanges
     case tableOp
@@ -1080,31 +1084,39 @@ public struct FfiConverterTypeEngineCommand: FfiConverterRustBuffer {
         
         case 9: return .session
         
-        case 10: return .importData
+        case 10: return .account
         
-        case 11: return .applyChanges
+        case 11: return .profiles
         
-        case 12: return .tableOp
+        case 12: return .profileSave
         
-        case 13: return .objects
+        case 13: return .profileDelete
         
-        case 14: return .test
+        case 14: return .importData
         
-        case 15: return .catalogs
+        case 15: return .applyChanges
         
-        case 16: return .schemas
+        case 16: return .tableOp
         
-        case 17: return .tables
+        case 17: return .objects
         
-        case 18: return .export
+        case 18: return .test
         
-        case 19: return .toTable
+        case 19: return .catalogs
         
-        case 20: return .preview
+        case 20: return .schemas
         
-        case 21: return .count
+        case 21: return .tables
         
-        case 22: return .explain
+        case 22: return .export
+        
+        case 23: return .toTable
+        
+        case 24: return .preview
+        
+        case 25: return .count
+        
+        case 26: return .explain
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1150,56 +1162,72 @@ public struct FfiConverterTypeEngineCommand: FfiConverterRustBuffer {
             writeInt(&buf, Int32(9))
         
         
-        case .importData:
+        case .account:
             writeInt(&buf, Int32(10))
         
         
-        case .applyChanges:
+        case .profiles:
             writeInt(&buf, Int32(11))
         
         
-        case .tableOp:
+        case .profileSave:
             writeInt(&buf, Int32(12))
         
         
-        case .objects:
+        case .profileDelete:
             writeInt(&buf, Int32(13))
         
         
-        case .test:
+        case .importData:
             writeInt(&buf, Int32(14))
         
         
-        case .catalogs:
+        case .applyChanges:
             writeInt(&buf, Int32(15))
         
         
-        case .schemas:
+        case .tableOp:
             writeInt(&buf, Int32(16))
         
         
-        case .tables:
+        case .objects:
             writeInt(&buf, Int32(17))
         
         
-        case .export:
+        case .test:
             writeInt(&buf, Int32(18))
         
         
-        case .toTable:
+        case .catalogs:
             writeInt(&buf, Int32(19))
         
         
-        case .preview:
+        case .schemas:
             writeInt(&buf, Int32(20))
         
         
-        case .count:
+        case .tables:
             writeInt(&buf, Int32(21))
         
         
-        case .explain:
+        case .export:
             writeInt(&buf, Int32(22))
+        
+        
+        case .toTable:
+            writeInt(&buf, Int32(23))
+        
+        
+        case .preview:
+            writeInt(&buf, Int32(24))
+        
+        
+        case .count:
+            writeInt(&buf, Int32(25))
+        
+        
+        case .explain:
+            writeInt(&buf, Int32(26))
         
         }
     }

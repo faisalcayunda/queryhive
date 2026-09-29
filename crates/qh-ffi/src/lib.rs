@@ -513,6 +513,10 @@ pub enum Command {
     HistoryClear,
     SavedQueries,
     Session,
+    Account,
+    Profiles,
+    ProfileSave,
+    ProfileDelete,
     ImportData,
     ApplyChanges,
     TableOp,
@@ -535,9 +539,9 @@ pub enum Command {
 /// must keep seeing it. A new command can only be added ahead of `objects` — which is
 /// why `objects` sits near the head, ahead of the frozen suffix, rather than beside the
 /// other browse commands where it belongs semantically. The local commands are ahead of it
-/// for the same reason, and there are eight of them now rather than the three that sat
+/// for the same reason, and there are twelve of them now rather than the three that sat
 /// there when this order was written.
-pub const COMMANDS: [&str; 22] = [
+pub const COMMANDS: [&str; 26] = [
     "db_drivers",
     "connections",
     "import_connections",
@@ -547,6 +551,10 @@ pub const COMMANDS: [&str; 22] = [
     "history_clear",
     "saved_queries",
     "session",
+    "account",
+    "profiles",
+    "profile_save",
+    "profile_delete",
     "import_data",
     "apply_changes",
     "table_op",
@@ -575,6 +583,10 @@ impl Command {
             "history_clear" => Command::HistoryClear,
             "saved_queries" => Command::SavedQueries,
             "session" => Command::Session,
+            "account" => Command::Account,
+            "profiles" => Command::Profiles,
+            "profile_save" => Command::ProfileSave,
+            "profile_delete" => Command::ProfileDelete,
             "import_data" => Command::ImportData,
             "apply_changes" => Command::ApplyChanges,
             "table_op" => Command::TableOp,
@@ -621,6 +633,10 @@ pub async fn run(
         Command::HistoryClear => local::history_clear(settings, out).await,
         Command::SavedQueries => local::saved_queries(settings, out).await,
         Command::Session => local::session(settings, out).await,
+        Command::Account => local::account(settings, out).await,
+        Command::Profiles => local::profiles(settings, out).await,
+        Command::ProfileSave => local::profile_save(settings, out).await,
+        Command::ProfileDelete => local::profile_delete(settings, out).await,
         Command::ImportData => import::import_data(settings, out, engine, cancel).await,
         Command::ApplyChanges => apply::apply_changes(settings, out, engine, cancel).await,
         Command::TableOp => commands::table_op(settings, out, engine, cancel).await,
