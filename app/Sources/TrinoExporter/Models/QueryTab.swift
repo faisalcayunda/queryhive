@@ -583,6 +583,14 @@ final class QueryTab: Identifiable {
     /// screen, and the selection and the queued edits are positions in that order.
     private(set) var gridSort: GridSort?
 
+    /// The server-side order the rows are in, when "Sort on server" ran, or `nil`.
+    ///
+    /// Set by `AppModel.sortOnServer` and cleared by any ordinary run. Separate from `gridSort`
+    /// because the two are different claims: one says the grid ordered what it fetched, the other
+    /// says the server ordered the whole result. New rows clear the in-memory order through
+    /// `preview`'s own `didSet`, which is why `runPreview` is what re-sets this mark.
+    var serverSort: ServerSortMark?
+
     /// Sort the grid by a column, dropping the positional state the new order invalidates.
     ///
     /// The selection and the edits are indices into the rows on screen — the same hazard a filter

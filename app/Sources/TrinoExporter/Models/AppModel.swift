@@ -141,6 +141,14 @@ final class AppModel {
     var editingConnection: ConnectionEditorTarget?
     var notice: Notice?
 
+    /// The run waiting for the user to approve it, when the engine's `confirm` Safe Mode level
+    /// demands an answer. Held on the model rather than in one view because every run path — Run,
+    /// Export, Explain, Count and the tree's truncate/drop — goes through the same question.
+    var pendingConfirmation: PendingConfirmation?
+
+    /// The import the sheet is editing, or `nil` when no sheet is open.
+    var importDraft: ImportDraft?
+
     private var tabCounter = 0
 
     init(persistsSession: Bool = false) {
@@ -1722,8 +1730,268 @@ final class AppModel {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
+        // A Run of a write on a `confirm` connection asks first; the approval is merged into this
+        // one run's environment and is never stored.
+        if let request = RunConfirmation.request(for: statements(in: sql), command: "preview",
+                                                 safeMode: connection.safeMode) {
+            awaitConfirmation(request) { [weak self] in
+                self?.runPreview(tab, sql: sql, connection: connection,
+                                 env: env.merging(RunConfirmation.approvalSettings(true)) { _, new in new })
+            }
+            return
+        }
         runPreview(tab, sql: sql, connection: connection, env: env)
     }
+
+    /// The statements a script holds, split the way the engine splits them, so the confirmation
+    /// names the same pieces the engine's own classifier reads.
+    private func statements(in sql: String) -> [String] {
+        sqlStatements(in: sql).map(\.text)
+    }
+
+    /// Hold a run until the user answers it, with the action that starts it on approval.
+    private func awaitConfirmation(_ request: RunConfirmation.Request, run: @escaping () -> Void) {
+        pendingConfirmation = PendingConfirmation(request: request, approve: run)
+    }
+
+    /// The statements a write run would execute, as far as the app can name them.
+    ///
+    /// An export streams the caller's statement; a table destination sends the statements the
+    /// engine generates for the chosen write mode (`crates/qh-ffi/src/commands.rs`). The generated
+    /// ones are spelled from the app's own qualified target, which is what the confirmation sheet
+    /// shows; the engine quotes them itself when it runs, and both name the same table.
+    private func destinationStatements(_ tab: QueryTab, connection: Connection, sql: String) -> [String] {
+        guard tab.destination == .table else { return statements(in: sql) }
+        let target = tab.target(for: connection.kind)
+        let body = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ";"))
+        switch tab.writeMode {
+        case .replace:
+            return ["DROP TABLE IF EXISTS \(target)", "CREATE TABLE \(target) AS \(body)"]
+        case .append:
+            return ["INSERT INTO \(target) \(body)"]
+        case .create:
+            return ["CREATE TABLE \(target) AS \(body)"]
+        }
+    }
+
+    // MARK: Table operations
+
+    /// A table's context menu asks for truncate or drop: the engine's `table_op`, through the same
+    /// confirmation the run paths use.
+    ///
+    /// Whether a question is asked is the engine's own contract. At `confirm` these two operations
+    /// ask (ADR-0027's one exception to confirm refusing DDL); at `full` they run without asking;
+    /// and at `no_ddl`/`read_only` the engine refuses them before opening a connection. The app
+    /// does not pre-refuse those two levels — the engine's sentence is the answer, and duplicating
+    /// the rule in Swift is how the two would come to disagree.
+    func requestTableOperation(_ operation: TableOperation, node: TreeNode) {
+        guard let connection = connections.first(where: { $0.id == node.connectionID }) else { return }
+        let statement = operation.statement(table: node.insertableText ?? node.title)
+        if let request = RunConfirmation.destructiveRequest(for: statement,
+                                                            title: "\(operation.title)?",
+                                                            safeMode: connection.safeMode) {
+            awaitConfirmation(request) { [weak self] in
+                self?.runTableOperation(operation, node: node, confirmed: true)
+            }
+            return
+        }
+        runTableOperation(operation, node: node, confirmed: false)
+    }
+
+    /// Runs `table_op` for one node and reports what the server said.
+    private func runTableOperation(_ operation: TableOperation, node: TreeNode, confirmed: Bool) {
+        guard let connection = connections.first(where: { $0.id == node.connectionID }) else { return }
+        let name = node.insertableText ?? node.title
+        var env: [String: String]
+        do {
+            env = try connectionEnvironment(connection)
+        } catch {
+            notice = Notice(title: "\(operation.title) failed",
+                            message: (error as? EngineLaunchError)?.message ?? error.localizedDescription)
+            return
+        }
+        env["TABLE_OP"] = operation.rawValue
+        env.merge(TableOperation.targetSettings(catalog: node.database, schema: node.schema,
+                                                table: node.title)) { _, new in new }
+        env.merge(RunConfirmation.approvalSettings(confirmed)) { _, new in new }
+
+        var message: String?
+        var rows: Int?
+        _ = Engine.current.run("table_op", env: env, onEvent: { event in
+            switch event.event {
+            case "error": message = event.message
+            case "done": rows = event.rows
+            default: break
+            }
+        }, onExit: { [weak self] status, log in
+            guard let self else { return }
+            guard status == 0 else {
+                let reason = message ?? log.split(separator: "\n").last.map(String.init)
+                    ?? "The engine exited with status \(status)."
+                self.notice = Notice(title: "\(operation.title) did not run", message: reason)
+                return
+            }
+            var text = name
+            if let rows, rows >= 0 { text += " · \(pluralized(rows, "row"))" }
+            self.notice = Notice(title: "\(operation.title) done", message: text)
+            // The table is gone or empty, so the sibling list the node was drawn from is stale.
+            if let parent = self.parent(of: node) { self.refresh(parent) }
+        })
+    }
+
+    /// The node's parent in the tree, or `nil` for a root. A walk, used only after a table
+    /// operation rather than on any drawing path.
+    func parent(of node: TreeNode) -> TreeNode? {
+        allNodes().first { $0.children?.contains(where: { $0 === node }) == true }
+    }
+
+    // MARK: Importing data
+
+    /// Opens the import sheet for a file the user picks, with the active tab's connection as the
+    /// target's default.
+    func presentImport() {
+        presentImport(into: nil)
+    }
+
+    /// Opens the import sheet for a table node's context menu, so the target is already named.
+    func presentImport(into node: TreeNode?) {
+        guard !connections.isEmpty else {
+            notice = Notice(title: "No connections",
+                            message: "Add a connection before importing data.")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Import Data from File"
+        panel.message = "Choose a CSV, TSV or XLSX file to read rows from."
+        panel.prompt = "Choose"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = ["csv", "tsv", "xlsx"].compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        presentImport(from: url, into: node)
+    }
+
+    /// Builds the draft for one file and opens the sheet.
+    private func presentImport(from url: URL, into node: TreeNode?) {
+        guard let format = ImportSourceFormat.detect(path: url.path) else {
+            notice = Notice(title: "Unsupported file",
+                            message: "Import reads CSV, TSV or XLSX. \(url.lastPathComponent) is none of those.")
+            return
+        }
+        let connectionID = node?.connectionID
+            ?? selectedTab.flatMap { connection(for: $0)?.id }
+            ?? connections.first?.id
+        let connection = connections.first { $0.id == connectionID }
+        var mapping = ImportMapping()
+        mapping.path = url.path
+        mapping.format = format
+        mapping.delimiter = format.delimiter
+        if let node, node.kind == .table {
+            mapping.targetCatalog = node.database ?? ""
+            mapping.targetSchema = node.schema ?? ""
+            mapping.targetTable = node.title
+        } else {
+            mapping.targetCatalog = connection?.database ?? ""
+            mapping.targetSchema = connection?.schema ?? ""
+            mapping.targetTable = url.deletingPathExtension().lastPathComponent
+        }
+        importDraft = ImportDraft(mapping: mapping, connectionID: connectionID)
+    }
+
+    /// Points an open draft at another file, keeping the target the user already set.
+    func configure(_ draft: ImportDraft, for url: URL) {
+        guard let format = ImportSourceFormat.detect(path: url.path) else {
+            notice = Notice(title: "Unsupported file",
+                            message: "Import reads CSV, TSV or XLSX. \(url.lastPathComponent) is none of those.")
+            return
+        }
+        draft.mapping.path = url.path
+        draft.mapping.format = format
+        draft.mapping.delimiter = format.delimiter
+        // The old file's columns are gone; the target's are still the target's.
+        draft.mapping.fields = []
+    }
+
+    /// Reads the target table's columns through the engine's `preview`, for the import mapping.
+    ///
+    /// `SELECT * FROM <qualified> LIMIT 1`, the same shape the object inspector uses: the engine
+    /// describes the result set before the rows arrive, so the `columns` event answers the question
+    /// without reading the table. A table that does not exist, or a driver that reports nothing
+    /// before a row, calls back with `[]`, and the sheet maps by header name instead of pretending.
+    func loadImportColumns(connectionID: UUID, qualifiedName: String,
+                           completion: @escaping ([String]) -> Void) {
+        guard let connection = connections.first(where: { $0.id == connectionID }) else {
+            completion([])
+            return
+        }
+        var env: [String: String]
+        do {
+            env = try connectionEnvironment(connection)
+        } catch {
+            completion([])
+            return
+        }
+        env["RETRIES"] = "2"
+        env["SQL"] = "SELECT * FROM \(qualifiedName)"
+        env["LIMIT"] = "1"
+        var columns: [String] = []
+        _ = Engine.current.run("preview", env: env, onEvent: { event in
+            if event.event == "columns" { columns = (event.columns ?? []).map(\.name) }
+        }, onExit: { _, _ in completion(columns) })
+    }
+
+    /// Runs `import_data` for an import sheet and fills in what the engine answered.
+    ///
+    /// No confirmation setting is merged: an import is a bulk path, and the engine's own guard
+    /// refuses it on a `confirm` connection rather than take one approval for every statement a
+    /// file becomes (ADR-0026). The sheet states the refusal before this is reachable.
+    func runImport(_ draft: ImportDraft) {
+        guard let connectionID = draft.connectionID,
+              let connection = connections.first(where: { $0.id == connectionID }) else {
+            draft.failure = "Choose a connection first."
+            return
+        }
+        var env: [String: String]
+        do {
+            env = try connectionEnvironment(connection)
+        } catch {
+            draft.failure = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        env.merge(draft.mapping.settings()) { _, new in new }
+        draft.running = true
+        draft.outcome = nil
+        draft.failure = nil
+        var outcome = ImportOutcome()
+        var message: String?
+        _ = Engine.current.run("import_data", env: env, onEvent: { event in
+            switch event.event {
+            case "done":
+                outcome.rows = event.rows ?? 0
+                outcome.rejected = event.rejected ?? 0
+                outcome.errors = event.errors ?? []
+                outcome.stoppedAt = event.stoppedAt
+                outcome.mode = event.mode ?? ""
+                outcome.disposition = event.disposition
+                outcome.transaction = event.transaction ?? false
+            case "error":
+                message = event.message
+            default:
+                break
+            }
+        }, onExit: { [weak draft] status, log in
+            guard let draft else { return }
+            draft.running = false
+            guard status == 0 else {
+                draft.failure = message ?? log.split(separator: "\n").last.map(String.init)
+                    ?? "The engine exited with status \(status)."
+                return
+            }
+            draft.outcome = outcome
+        })
+    }
+
 
     /// Escalate the grid's in-memory search: run the same statement again with the term turned into
     /// a cross-column `WHERE`, so the server finds rows the grid never fetched.
@@ -1778,17 +2046,73 @@ final class AppModel {
         }
     }
 
+    /// Escalate the grid's in-memory sort: run the same statement again with an `ORDER BY`, so the
+    /// server orders the whole result rather than the rows that were fetched.
+    ///
+    /// The run is the ordinary `preview` one, so the safety mode, the timeout, the retries and the
+    /// streaming are the same as a Run; only the SQL differs. The statement is built by
+    /// `ServerSort`, which wraps the user's SQL inside a derived table rather than editing it, and
+    /// is refused rather than guessed when the text holds more than one statement.
+    func sortOnServer(_ tab: QueryTab, column: Event.Column, direction: GridSort.Direction) {
+        guard !tab.previewing, tab.stage != .running else { return }
+        guard let connection = connection(for: tab) else { return }
+        guard let original = tab.previewBaseSQL ?? tab.previewedSQL, !original.isEmpty else {
+            tab.note(.warning, "Run the query before sorting it on the server.")
+            tab.panel = .log
+            return
+        }
+        let statement: String
+        do {
+            statement = try ServerSort.order(sql: original, column: column.name,
+                                             direction: direction, kind: connection.kind)
+        } catch {
+            tab.note(.error, sortFailureMessage(error))
+            tab.panel = .log
+            return
+        }
+        let env: [String: String]
+        do {
+            env = try previewEnvironment(for: tab, connection: connection, sql: statement)
+        } catch {
+            tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        tab.note(.info, "Sorting on the server by \(column.name) "
+                + "\(direction == .ascending ? "↑" : "↓") — the whole result, not only the rows fetched.")
+        runPreview(tab, sql: statement, connection: connection, env: env, clearSearch: false,
+                   baseSQL: original,
+                   serverSort: ServerSortMark(column: column.name, direction: direction))
+    }
+
+    /// Why a server sort could not be built, in the words the user needs to fix it.
+    private func sortFailureMessage(_ error: Error) -> String {
+        guard let failure = error as? ServerSort.Failure else {
+            return "Cannot sort on the server: \(error.localizedDescription)"
+        }
+        switch failure {
+        case .noColumn:
+            return "Cannot sort on the server: this column has no name to order by."
+        case .multipleStatements(let count):
+            return "Sorting on the server needs one statement, and this result's text has \(count). "
+                + "Run the one you mean, then sort again."
+        }
+    }
+
     /// The body of a preview run, shared by Run and the search escalation: put the tab into its
     /// "a new result is arriving" state and start the engine.
     private func runPreview(_ tab: QueryTab, sql: String, connection: Connection,
                             env: [String: String], clearSearch: Bool = true,
-                            baseSQL: String? = nil) {
+                            baseSQL: String? = nil, serverSort: ServerSortMark? = nil) {
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
         tab.showingPlan = false
         tab.previewedSQL = sql
         tab.previewBaseSQL = baseSQL ?? sql
+        // Set on every run, so an ordinary Run clears the mark left by a server sort — the rows it
+        // is about to replace are the ones the mark described.
+        tab.serverSort = serverSort
+
         // The filters described rows that are about to be replaced, and clearing them is also what
         // drops the cell selection — see `columnFilters`' own note. The last total described them
         // too.
@@ -2083,13 +2407,22 @@ final class AppModel {
     /// statement a Run would and lets the reply land in the grid. Deliberately the same context
     /// (`database(for:)` / `schema(for:)`) and the same source resolution, because a plan for a
     /// different context than the one the query would run in is worse than no plan.
-    func explain(_ tab: QueryTab, from source: QuerySource = .selection) {
+    func explain(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false) {
         guard !tab.previewing, !tab.explaining, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
         let sql = tab.sql(for: source)
-        let env: [String: String]
+        if !confirmed,
+           let request = RunConfirmation.request(for: statements(in: sql), command: "explain",
+                                                 safeMode: connection.safeMode) {
+            awaitConfirmation(request) { [weak self] in
+                self?.explain(tab, from: source, confirmed: true)
+            }
+            return
+        }
+        var env: [String: String]
         do {
             env = try previewEnvironment(for: tab, connection: connection, sql: sql)
+            if confirmed { env.merge(RunConfirmation.approvalSettings(true)) { _, new in new } }
         } catch {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
@@ -2148,14 +2481,23 @@ final class AppModel {
     /// DBeaver's "fetch row count": asks the server how many rows the statement on screen really
     /// returns. Deliberately a button and not something the preview does — it is a second query
     /// over the whole result, which can be slow and which the user should choose to pay for.
-    func countRows(_ tab: QueryTab) {
+    func countRows(_ tab: QueryTab, confirmed: Bool = false) {
         guard !tab.countingRows, let sql = tab.previewedSQL, !sql.isEmpty,
               let connection = connection(for: tab) else { return }
+        // The engine guards `count` against the caller's own statement, not the `COUNT(*)` wrapper,
+        // so counting a write still needs the confirmation at `confirm`.
+        if !confirmed,
+           let request = RunConfirmation.request(for: statements(in: sql), command: "count",
+                                                 safeMode: connection.safeMode) {
+            awaitConfirmation(request) { [weak self] in self?.countRows(tab, confirmed: true) }
+            return
+        }
         let env: [String: String]
         do {
             var built = try connectionEnvironment(connection)
             built["SQL"] = sql
             built["RETRIES"] = String(tab.retries)
+            if confirmed { built.merge(RunConfirmation.approvalSettings(true)) { _, new in new } }
             env = built
         } catch {
             tab.countError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
@@ -2225,12 +2567,27 @@ final class AppModel {
 
     /// Writes the result out. Separate from `preview` so the toolbar can offer both without one
     /// standing in for the other.
-    func run(_ tab: QueryTab, from source: QuerySource = .selection) {
+    func run(_ tab: QueryTab, from source: QuerySource = .selection, confirmed: Bool = false) {
         guard tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
+        let sql = tab.sql(for: source)
+        let command = tab.destination == .table ? "to_table" : "export"
+        // A write run on a `confirm` connection asks first. A table destination's own statements
+        // are the generated DROP/CREATE/INSERT rather than the caller's SELECT, so those are what
+        // the engine guards — and what the sheet names.
+        if !confirmed,
+           let request = RunConfirmation.request(
+                for: destinationStatements(tab, connection: connection, sql: sql),
+                command: command,
+                safeMode: connection.safeMode) {
+            awaitConfirmation(request) { [weak self] in
+                self?.run(tab, from: source, confirmed: true)
+            }
+            return
+        }
         let env: [String: String]
         do {
-            env = try overrides(for: tab, connection: connection, sql: tab.sql(for: source))
+            env = try overrides(for: tab, connection: connection, sql: sql, confirmed: confirmed)
         } catch {
             let message = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             tab.stage = .failed
@@ -2263,7 +2620,6 @@ final class AppModel {
         tab.note(.info, tab.runSummary(for: connection.kind))
 
         let directory = tab.outputDirectory
-        let command = tab.destination == .table ? "to_table" : "export"
         let run = UUID()
         tab.runToken = run
         var message: String?
@@ -2474,9 +2830,14 @@ final class AppModel {
     /// Full environment for one export run: the connection plus the query, the destination and
     /// the per-format options. Throws rather than launching with a password the Keychain refused
     /// to hand over, which would silently export as the wrong identity.
+    ///
+    /// `confirmed` carries the user's approval of a `confirm`-level write into the run's own
+    /// environment. It is never stored: the engine's whole model of a confirmation is that one run
+    /// carries the flag.
     private func overrides(for tab: QueryTab, connection: Connection,
-                           sql: String) throws -> [String: String] {
+                           sql: String, confirmed: Bool = false) throws -> [String: String] {
         var env = try connectionEnvironment(connection)
+        env.merge(RunConfirmation.approvalSettings(confirmed)) { _, new in new }
         // Same context rule as a preview: an export runs where the cascade says it runs.
         env["DB_DATABASE"] = database(for: tab)
         env["DB_SCHEMA"] = schema(for: tab)
@@ -2518,4 +2879,15 @@ final class AppModel {
 /// connection editor catch this and surface `message` verbatim.
 struct EngineLaunchError: Error {
     let message: String
+}
+
+/// A run waiting for the user to approve it, and the action that starts it once they do.
+///
+/// The `approve` closure rebuilds and starts the run with `SAFE_MODE_CONFIRMED=1` merged in, so the
+/// approval covers exactly that one run. A model-level value rather than per-tab state because the
+/// question is about the engine's own level, which belongs to the connection rather than the tab.
+struct PendingConfirmation: Identifiable {
+    let id = UUID()
+    let request: RunConfirmation.Request
+    let approve: () -> Void
 }

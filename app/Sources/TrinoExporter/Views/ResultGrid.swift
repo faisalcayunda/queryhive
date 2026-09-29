@@ -515,15 +515,29 @@ struct ResultGrid: View {
     private func headerRow(_ preview: PreviewResult, widths: [CGFloat]) -> some View {
         let visible = tab.visibleColumnSources
         return VStack(alignment: .leading, spacing: 0) {
-            // The sort's own sentence, above the names. A chevron beside a column says *which* column
-            // and which way; it cannot say that this is an in-memory order over the rows already
-            // fetched. That is the part the plan asked to be written down, and it matters: a sorted
-            // grid looks exactly like a sorted result.
-            if let sort = tab.gridSort {
+            // The server's own order, when the escalation ran: a different claim from the
+            // in-memory one below, so it gets its own sentence rather than a second chevron.
+            if let server = tab.serverSort {
+                GridServerSortBanner(column: server.column, direction: server.direction)
+            } else if let sort = tab.gridSort {
+                // The sort's own sentence, above the names. A chevron beside a column says *which*
+                // column and which way; it cannot say that this is an in-memory order over the rows
+                // already fetched. That is the part the plan asked to be written down, and it
+                // matters: a sorted grid looks exactly like a sorted result. When the result was
+                // cut short, the same banner offers the way out — re-run with the order on the
+                // server — because an in-memory order over a truncated result is a partial order.
+                let column = preview.columns.indices.contains(sort.column)
+                    ? preview.columns[sort.column] : nil
+                let serverSort: (() -> Void)? = {
+                    guard preview.truncated, let column else { return nil }
+                    return { model.sortOnServer(tab, column: column, direction: sort.direction) }
+                }()
                 GridSortBanner(column: tab.columnLayout.label(sort.column, original: preview.columns),
                                direction: sort.direction,
                                fetched: tab.preview?.rows.count ?? 0,
-                               onClear: { tab.setGridSort(nil) })
+                               truncated: preview.truncated,
+                               onClear: { tab.setGridSort(nil) },
+                               onServerSort: serverSort)
             }
             HStack(spacing: 0) {
                 gutter("#")
@@ -599,7 +613,8 @@ struct ResultGrid: View {
     }
 
     /// The header's right-click menu: the three rendering-only column actions, plus the sort a
-    /// header click already offers.
+    /// header click already offers. When the result was cut short the in-memory sort is a partial
+    /// order, so the two server forms are offered beside it.
     @ViewBuilder
     private func columnMenu(_ source: Int, display: Int, drawn: Int) -> some View {
         Button("Sort Ascending") {
@@ -607,6 +622,15 @@ struct ResultGrid: View {
         }
         Button("Sort Descending") {
             tab.setGridSort(GridSort(column: source, direction: .descending))
+        }
+        if tab.preview?.truncated == true, let column = previewColumn(source) {
+            Divider()
+            Button("Sort on Server (Ascending)") {
+                model.sortOnServer(tab, column: column, direction: .ascending)
+            }
+            Button("Sort on Server (Descending)") {
+                model.sortOnServer(tab, column: column, direction: .descending)
+            }
         }
         Divider()
         Button("Move Left") { tab.moveColumn(from: display, to: display - 1) }
@@ -620,6 +644,12 @@ struct ResultGrid: View {
         Button("Show All Columns") { tab.showAllColumns() }
             .disabled(tab.columnLayout.hiddenCount == 0)
         Button("Reset Column Layout") { tab.resetColumnLayout() }
+    }
+
+    /// The server's own column at a source index, or `nil` past the result's shape.
+    private func previewColumn(_ source: Int) -> Event.Column? {
+        guard let columns = tab.preview?.columns, columns.indices.contains(source) else { return nil }
+        return columns[source]
     }
 
     private func rowView(_ row: [String?], index: Int, columns: [Event.Column],
@@ -1117,18 +1147,33 @@ struct GridSortBanner: View {
     let column: String
     let direction: GridSort.Direction
     let fetched: Int
+    /// Whether the result was cut short, in which case the order is over part of it.
+    var truncated = false
     let onClear: () -> Void
+    /// Re-runs the statement with the order on the server. Present only when the result was
+    /// truncated, where an in-memory order over what was fetched is no longer the whole answer.
+    var onServerSort: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.up.arrow.down")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(Tone.accent)
-            Text("Sorted by \(column) \(direction == .ascending ? "↑" : "↓") · in memory over the "
-                 + "\(pluralized(fetched, "row")) fetched — not the whole result.")
+            Text(sentence)
                 .font(.ui(10.5))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize()
+            if let onServerSort {
+                Button(action: onServerSort) {
+                    Label("Sort on server", systemImage: "arrow.up.right.square")
+                        .font(.ui(10))
+                        .foregroundStyle(Tone.accent)
+                        .fixedSize()
+                }
+                .buttonStyle(.plain)
+                .help("Re-run the query with an ORDER BY over the whole result, so rows outside the "
+                      + "limit are ordered too. It reads the table again.")
+            }
             Button(action: onClear) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 10))
@@ -1136,6 +1181,44 @@ struct GridSortBanner: View {
             }
             .buttonStyle(.plain)
             .help("Clear the sort and go back to the server's own order")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    /// The sentence differs when the result was cut short: there, saying "not the whole result" is
+    /// not a caveat but the reason the offer beside it exists.
+    private var sentence: String {
+        let arrow = direction == .ascending ? "↑" : "↓"
+        if truncated {
+            return "Sorted by \(column) \(arrow) · in memory over the \(pluralized(fetched, "row")) "
+                + "fetched. The result was cut short, so this order is partial."
+        }
+        return "Sorted by \(column) \(arrow) · in memory over the \(pluralized(fetched, "row")) "
+            + "fetched — not the whole result."
+    }
+}
+
+/// The header's sentence for a server-side order: the whole result, not only the rows fetched.
+///
+/// A separate banner rather than a variant of `GridSortBanner`, because the two say different
+/// things: the in-memory one is a caveat, and this one is the absence of the caveat. No clear
+/// button, either — the way back to the server's own order is another Run, which replaces the rows.
+struct GridServerSortBanner: View {
+    let column: String
+    let direction: GridSort.Direction
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.mint)
+            Text("Sorted on the server by \(column) \(direction == .ascending ? "↑" : "↓") · "
+                 + "the whole result, not only the rows fetched.")
+                .font(.ui(10.5))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize()
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
