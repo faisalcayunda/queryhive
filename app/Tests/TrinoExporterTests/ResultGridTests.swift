@@ -149,6 +149,30 @@ final class ResultGridTests: XCTestCase {
         XCTAssertNil(tab.gridSort)
     }
 
+    func testTheDisplayedRowsCacheFollowsTheThreeThingsThatChangeIt() {
+        // `QueryTab.displayedRows` is cached by `gridRevision`, so this is the test that the cache
+        // cannot go stale: the rows, the sort and the filter are the three things that change the
+        // answer, and each must invalidate it.
+        let tab = QueryTab(title: "Query 1")
+        let columns = [Event.Column(name: "n", type: "bigint")]
+        tab.preview = PreviewResult(columns: columns, rows: [["3"], ["1"], ["2"]],
+                                    truncated: false, queryID: nil, elapsedMS: 0)
+        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "server order first")
+
+        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"], "the sort is followed")
+
+        tab.setGridSort(nil)
+        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "clearing it too")
+
+        tab.preview = PreviewResult(columns: columns, rows: [["9"], ["8"]],
+                                    truncated: false, queryID: nil, elapsedMS: 0)
+        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["9", "8"], "and a new set of rows")
+
+        tab.columnFilters[0] = .text("9")
+        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["9"], "and a filter")
+    }
+
     func testChangingTheSortDropsTheSelectionAndTheQueuedEdits() {
         // The selection and the edits are positions in the rows on screen, and sorting moves those
         // rows. Leaving either behind would attach it to the wrong row, exactly as a filter would.

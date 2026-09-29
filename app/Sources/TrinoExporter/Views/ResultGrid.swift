@@ -97,23 +97,13 @@ struct ResultGrid: View {
     /// queued edits, the copy, the paste — indexes *these* rows, because these are what the user
     /// pointed at. `QueryTab.setGridSort` and the filter's own `didSet` clear that state when the
     /// order changes, for exactly that reason.
-    private var displayedRows: [[String?]] {
-        guard let preview = tab.preview else { return [] }
-        let filtered = filteredRows(preview.rows)
-        guard let sort = tab.gridSort else { return filtered }
-        return sort.order(filtered)
-    }
-
-    /// The fetched rows a filter keeps. Split out from `displayedRows` so the sort is the last step
-    /// rather than something the filter has to know about.
-    private func filteredRows(_ rows: [[String?]]) -> [[String?]] {
-        guard !tab.columnFilters.isEmpty else { return rows }
-        return rows.filter { row in
-            tab.columnFilters.allSatisfy { index, filter in
-                filter.matches(index < row.count ? row[index] : nil)
-            }
-        }
-    }
+    /// The rows the grid draws, filtered and sorted — computed once per change and cached by
+    /// `QueryTab`.
+    ///
+    /// The work lives on the tab rather than here because the grid reads this several times per
+    /// render (the rows, the placeholder's count, the clipboard), and a sort over a large result is
+    /// not free. `QueryTab.gridRevision` is what makes the cache safe to keep.
+    private var displayedRows: [[String?]] { tab.displayedRows }
 
     /// The sentence for a run in flight, or `nil` when nothing is running. A preview and an explain
     /// are both runs, and both fill this grid.

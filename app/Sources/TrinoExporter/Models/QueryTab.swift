@@ -472,7 +472,10 @@ final class QueryTab: Identifiable {
     /// `AppModel.preview`, because Explain fills the same grid from a run of its own and has to be
     /// covered too.
     var preview: PreviewResult? {
-        didSet { gridSort = nil }
+        didSet {
+            gridSort = nil
+            gridRevision += 1
+        }
     }
     var previewError: String?
 
@@ -520,6 +523,7 @@ final class QueryTab: Identifiable {
             // selection and the edits. Kept here, beside them, because all three are the same kind
             // of state: a claim about a specific set of rows that no longer exists.
             gridSort = nil
+            gridRevision += 1
         }
     }
 
@@ -538,6 +542,43 @@ final class QueryTab: Identifiable {
         gridSort = sort
         cellSelection = nil
         cellEdits.discard()
+        gridRevision += 1
+    }
+
+    /// A counter that changes whenever the rows, the filters or the sort change.
+    ///
+    /// It exists so `displayedRows` can be cached: the grid reads that value several times per
+    /// render, and filtering and sorting a large result on each read is work the user pays for on
+    /// every hover and selection. Bumped in the three places that can change what is on screen —
+    /// `preview`, `columnFilters` and `setGridSort`.
+    private(set) var gridRevision = 0
+
+    /// The cached answer, and the revision it was computed for.
+    @ObservationIgnored private var displayedCache: [[String?]]?
+    @ObservationIgnored private var displayedCacheRevision = -1
+
+    /// The rows the grid draws: the fetched rows with the filters and the sort applied.
+    ///
+    /// Pure in the rows, the filters and the sort — all three revision-stamped — so the answer
+    /// cannot change without a bump, which is what makes the cache safe rather than merely fast.
+    var displayedRows: [[String?]] {
+        if displayedCacheRevision == gridRevision, let displayedCache { return displayedCache }
+        let rows: [[String?]]
+        if let preview {
+            let filtered = columnFilters.isEmpty
+                ? preview.rows
+                : preview.rows.filter { row in
+                    columnFilters.allSatisfy { index, filter in
+                        filter.matches(index < row.count ? row[index] : nil)
+                    }
+                }
+            rows = gridSort.map { $0.order(filtered) } ?? filtered
+        } else {
+            rows = []
+        }
+        displayedCache = rows
+        displayedCacheRevision = gridRevision
+        return rows
     }
 
     /// The block of cells the pointer has dragged out in the grid, if any. Indices are positions
