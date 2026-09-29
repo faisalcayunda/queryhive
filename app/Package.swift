@@ -115,7 +115,8 @@ let package = Package(
         .testTarget(
             name: "QueryHiveTests",
             dependencies: ["QueryHive"],
-            path: "Tests/QueryHiveTests"
+            path: "Tests/QueryHiveTests",
+            exclude: ["__Baselines__"]
         ),
     ]
 )

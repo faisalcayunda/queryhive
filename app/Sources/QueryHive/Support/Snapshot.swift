@@ -258,7 +258,7 @@ enum Snapshot {
                   "aktif": ParameterEntry(kind: .boolean, text: "true"),
                   "wilayah": ParameterEntry(kind: .text, text: "%Sukamaju%")])
 
-    private static func seeded(scene: String) -> AppModel {
+    static func seeded(scene: String) -> AppModel {
         let model = AppModel()
         let primary = Connection(id: UUID(), name: "Trino production", color: .blue, kind: .trino,
                                  host: "trino.internal", port: 8443, scheme: "https",
@@ -520,7 +520,8 @@ enum Snapshot {
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
-        case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns", "grid-inspector":
+        case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns", "grid-inspector",
+             "grid-kinds", "grid-counted":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -604,6 +605,37 @@ enum Snapshot {
                 tab.preview?.columns[6] = json
                 tab.preview?.rows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04","selesai":false}"#
                 tab.cellSelection = CellRange(from: (row: 1, column: 6), to: (row: 1, column: 6))
+            }
+            // Every cell kind, header state and footer state at once, for the visual parity gate: a
+            // NULL, an empty string, a long text, JSON and numbers; a sort chevron, an active filter
+            // funnel and a type chip on every header; a staged edit, a selected block, and the footer
+            // that goes with them. Order matters: the filter clears the sort, and the sort clears the
+            // selection and the queue, so they are set in that order. `aktif` and `diperbarui` are
+            // hidden so the JSON column and its NULL fit inside the window the gate renders at.
+            if scene == "grid-kinds" {
+                tab.sourceTable = "\"hive\".\"analytics\".\"penerima_manfaat\""
+                let json = Event.Column(name: "catatan", type: "json")
+                tab.columns[6] = json
+                tab.preview?.columns[6] = json
+                tab.preview?.rows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04"}"#
+                tab.preview?.rows[4][6] = "[1,2,3]"
+                tab.preview?.rows[7][6] = #"{"ganda":true}"#
+                tab.preview?.rows[11][6] = #"{"status":"menunggu"}"#
+                tab.preview?.rows[2][0] = ""
+                tab.preview?.rows[3][1] = "KPM Sukajadi dengan nama yang sangat panjang sehingga tidak muat "
+                    + "di dalam satu sel dan harus dipotong di ujung kanannya oleh grid"
+                tab.setColumnHidden(4, true)
+                tab.setColumnHidden(5, true)
+                tab.columnFilters[1] = .text("KPM")
+                tab.setGridSort(GridSort(column: 2, direction: .ascending))
+                tab.cellEdits.edit("KPM Cibadak Baru", at: CellKey(row: 1, column: 1),
+                                   original: "KPM Cibadak")
+                tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
+                tab.cellSelection = CellRange(from: (row: 5, column: 3), to: (row: 7, column: 4))
+            }
+            // The footer once the server has been asked how many rows there really are.
+            if scene == "grid-counted" {
+                tab.totalRows = 312_480
             }
         case "grid-empty", "grid-loading", "grid-filtered-out":
             // A run whose columns are on screen and whose rows are not. Three states look exactly
