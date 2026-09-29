@@ -51,6 +51,10 @@
 > hidup terhadap PostgreSQL 17 lokal (`pg_sleep(5)` di bawah 500 ms kembali dalam 1,25 detik dengan
 > error bertipe). MySQL dan Trino belum diuji hidup karena mesin podman hilang. Detailnya di
 > §"Keselamatan eksekusi" di bawah.
+>
+> **Status 29 Sep 2026 (Fase 4):** editor harian (find/replace, folding, sort grid, JSON cell viewer)
+> mendarat lewat dua lane paralel di worktree, di-merge. Gate `swift test` **222 tes / 0 gagal**.
+> Detailnya di §"Editor harian" di bawah.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -1914,6 +1918,47 @@ Verifikasi berat 29 Sep 2026 (sesudah Fase 3): `cargo fmt --all --check` ✅,
 `cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
 **674 lulus / 0 gagal** ✅, `swift build && swift test` → **169 tes / 0 gagal** ✅. Keputusan di
 `docs/decisions/0016-statement-timeout.md` dan `0017-safe-mode.md`.
+
+### Editor harian: dua lane paralel di worktree, lalu merge (29 Sep 2026)
+
+**Fase 4 dikerjakan dua subagent sekaligus, masing-masing di git worktree sendiri** — editor
+(find/replace + folding) dan grid (sort + JSON viewer) — karena keempat itemnya memang tidak saling
+bergantung, dan berkasnya hampir lepas. Worktree-nya berbasis `8c1dfec`, dan tiap lane diberi
+`target/ffi/static/release/libqh_ffi.a` yang sudah disalin sehingga tidak perlu cargo sama sekali;
+itu yang menjaga disk tetap lega setelah Fase 3 sempat kena `database or disk is full`. Merge-nya
+bersih karena Fase 3 tidak menyentuh `SQLEditor.swift`, `ResultGrid.swift`, maupun `QueryTab.swift`.
+
+**Find/replace adalah fungsi murni, dan itu yang membuatnya bisa dites.** `FindReplace` mencocokkan
+**literal** — potongan SQL yang ditempel dicari apa adanya, termasuk `.` dan `*` — dan `replaceAll`
+diterapkan dari belakang supaya penggantian yang lebih panjang tidak menggeser range match di
+depannya. Bar-nya view AppKit yang mendorong teks ke bawah, dan highlight-nya lewat temporary
+attribute layout manager sehingga undo tidak tersentuh.
+
+**Folding menyembunyikan baris, bukan memotong teks.** `SQLFolding` memakai ulang scanner statement
+yang sudah dipakai Run Current Statement, jadi keduanya tidak bisa berbeda pendapat soal batas
+statement; teksnya tetap utuh dan hanya tinggi layout yang menyusut. Identitas lipatan adalah offset
+header, dan CTE yang `(`-nya menempel di baris statement dibuang supaya satu baris hanya punya satu
+marka.
+
+**Sortir di memori, dan comparator-nya menetapkan dua hal.** NULL terakhir saat ascending dan pertama
+saat descending; angka dibandingkan numerik hanya bila kedua sel angka murni, dengan `Decimal` supaya
+id 64-bit tidak kehilangan digit; nilai kembar mempertahankan urutan asal. Banner di header mengatakan
+bahwa yang tersortir adalah baris yang sudah diambil, bukan seluruh hasil.
+
+**Render diperiksa dengan mata, bukan hanya "tes hijau".** `--scene grid-sorted` dan `--scene
+grid-json` saya render dan lihat: barisnya benar-benar urut dan reader JSON menampilkan
+`map(varchar,json)` ter-format. Untuk find/replace dan folding, render-nya lewat tes render lane
+(`app/.build/render/`) karena kedua permukaan itu view AppKit yang tidak bisa dibangun
+`seeded(scene:)` — penyimpangan dari kata "`--snapshot`" di kriteria, dan dinyatakan di plan §6.
+
+**Yang belum.** Bar dan lipatan di dalam window asli belum pernah dijalankan: tidak ada tes yang
+memanggil `makeNSView` end-to-end, jadi tombol ⌘F lewat `keyDown`, klik marka gutter, dan tombol
+Replace/Replace All belum dites tekan.
+
+Verifikasi berat 29 Sep 2026 (sesudah Fase 4): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**674 lulus / 0 gagal** ✅, `cargo deny check licenses` → `licenses ok` ✅,
+`swift build && swift test` → **222 tes / 0 gagal** ✅.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 

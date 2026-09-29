@@ -100,6 +100,17 @@ enum Snapshot {
             hosting = NSHostingView(rootView: AnyView(SettingsView(pane: pane)
                 .environment(model)
                 .preferredColorScheme(scheme)))
+        } else if scene == "grid-json" {
+            // The structured-cell reader is a popover in the app, and a popover is a window of its
+            // own that offscreen capture cannot reach. Rendering it directly is the same move the
+            // Settings scenes make: the surface gets its own root so it can be looked at.
+            hosting = NSHostingView(rootView: AnyView(CellValueViewer(
+                value: #"{"kabupaten":"Bandung","jumlah_jiwa":48320,"kecamatan":["Sukamaju","Cibadak","Mekarsari"]}"#,
+                column: "detail_wilayah",
+                type: "map(varchar,json)")
+                .frame(width: 592, height: 460)
+                .background(Tone.canvas)
+                .preferredColorScheme(scheme)))
         } else {
             hosting = NSHostingView(rootView: AnyView(RootView()
                 .environment(model)
@@ -108,7 +119,9 @@ enum Snapshot {
         }
         hosting.frame = scene.hasPrefix("settings")
             ? NSRect(x: 0, y: 0, width: 560, height: 640)
-            : NSRect(x: 0, y: 0, width: width, height: height)
+            : scene == "grid-json"
+                ? NSRect(x: 0, y: 0, width: 592, height: 460)
+                : NSRect(x: 0, y: 0, width: width, height: height)
 
         let window = NSWindow(contentRect: hosting.frame,
                               styleMask: [.titled, .fullSizeContentView],
@@ -445,7 +458,7 @@ enum Snapshot {
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
-        case "grid", "grid-selection", "grid-edits":
+        case "grid", "grid-selection", "grid-edits", "grid-sorted":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -499,6 +512,12 @@ enum Snapshot {
                                    original: "KPM Cibadak")
                 tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
                 tab.cellSelection = CellRange(from: (row: 1, column: 0), to: (row: 2, column: 1))
+            }
+            // The in-memory sort, and the banner that says the order is the grid's own rather than
+            // the server's. Sorted on `jumlah_jiwa`, which is the column the rows below are not
+            // already in order by — so the scene shows the sort doing something.
+            if scene == "grid-sorted" {
+                tab.setGridSort(GridSort(column: 2, direction: .ascending))
             }
         case "grid-empty", "grid-loading", "grid-filtered-out":
             // A run whose columns are on screen and whose rows are not. Three states look exactly

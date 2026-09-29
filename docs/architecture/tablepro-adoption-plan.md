@@ -7,7 +7,9 @@
 > **Status:** Fase 0 dan Fase 1 selesai, keduanya diukur dan dicatat di §2 dan §3. Fase 1 ditutup
 > 29 Sep 2026 oleh session restore (§3). Fase 2 mendarat 29 Sep 2026 dan diukur di §4, dengan satu
 > caveat yang disebut di sana (kliennya digulung sendiri, bukan klien MCP pihak ketiga). Fase 3
-> mendarat pada tanggal yang sama dan diukur di §5. Fase 4 sampai 5 belum disentuh.
+> mendarat pada tanggal yang sama dan diukur di §5. Fase 4 juga mendarat pada tanggal itu dan diukur
+> di §6, dengan satu penyimpangan yang dinyatakan (dua dari empat item tidak punya scene
+> `--snapshot`). Fase 5 belum disentuh.
 
 ## 0. Prinsip dan aturan gate
 
@@ -544,6 +546,55 @@ di ekspor. Di grid, nilai seperti itu perlu bisa dibuka dan dibaca, bukan dipoto
 
 **Kriteria selesai Fase 4.** `swift test` hijau untuk tiap item, plus satu render `--snapshot` per
 item supaya perubahannya bisa dilihat, sesuai cara tema ditinjau sekarang.
+
+**Hasil 29 Sep 2026.** Keempat item mendarat, dikerjakan dua lane paralel di worktree terpisah lalu
+di-merge. Gate sesudah merge: `swift build` selesai, `swift test` **222 tes / 0 gagal**, dan gate
+beratnya hijau seluruhnya.
+
+**4.1 Find and replace.** `app/Sources/TrinoExporter/Support/EditorFind.swift` memuat `FindReplace`
+sebagai fungsi murni atas `NSString`: pencocokan **literal** (jadi potongan SQL yang ditempel dicari
+apa adanya, termasuk `.` dan `*`-nya), case-insensitive secara default, opsi case dan whole-word,
+next/previous dengan wrap, dan `replaceAll` yang diterapkan **dari belakang** supaya penggantian
+yang lebih panjang atau lebih pendek tidak menggeser range match di depannya. Bar-nya view AppKit
+(`Views/SQLFindBar.swift`) yang **mendorong teks ke bawah**, bukan overlay; highlight lewat temporary
+attribute layout manager, jadi pencarian tidak menyentuh text storage maupun undo. Bindings: ⌘F,
+⌥⌘F, ⌘G/⇧⌘G, Esc.
+
+**4.2 Code folding.** `app/Sources/TrinoExporter/Support/SQLFolding.swift` menghitung region yang
+bisa dilipat (statement multi-baris dan body CTE) dengan memakai ulang scanner statement yang sudah
+dipakai "Run Current Statement" — jadi lipatan dan Run tidak bisa berbeda pendapat soal batas
+statement. Penyembunyiannya di `SQLEditor` mengambil tinggi baris yang dikuncupkan, jadi **teksnya
+tidak berubah sama sekali** dan hanya layout-nya yang menyusut; marka-nya di gutter. Identitas
+lipatan adalah offset header, dan CTE yang `(`-nya menempel di baris statement dibuang supaya satu
+baris hanya membawa satu marka.
+
+**4.3 Sorting di grid.** `Models/GridSort.swift` + state di `QueryTab`; urutannya **di memori atas
+baris yang sudah diambil**, dan banner di header mengatakannya. Comparator menetapkan dua hal yang
+tidak bisa dijawab grid `String?`: NULL terakhir saat ascending dan pertama saat descending (cermin
+default PostgreSQL), dan angka dibandingkan numerik hanya bila **kedua** sel angka murni — jadi "10"
+setelah "9", dan id 64-bit tidak kehilangan digit. Nilai kembar mempertahankan urutan asal. Sort
+dibuang saat baris baru datang, saat filter berubah, dan saat sortnya berubah, karena ketiganya
+menggeser indeks yang ditunjuk seleksi, antrean edit, dan UPDATE yang dihasilkan.
+
+**4.4 JSON cell viewer.** `Views/CellValueViewer.swift` membuka sel `ARRAY`/`MAP`/`ROW`/`JSON` dan
+menampilkannya penuh: JSON ter-format bila teksnya bisa di-parse (key tersortir supaya satu nilai
+selalu tercetak sama), dan teks mentah server bila tidak — kasus literal array PostgreSQL `{1,NULL,3}`
+yang memang keadaan nyata (`docs/golden-deltas.md` D-9), bukan fallback yang rusak. Ini **pembaca**,
+bukan editor: penyimpanan dan ekspor tidak disentuh.
+
+**Render, dan satu penyimpangan yang dinyatakan.** 4.3 dan 4.4 punya scene `--snapshot`
+(`grid-sorted`, `grid-json`), dan keduanya sudah dilihat: banner sortir plus chevron dengan baris yang
+benar-benar urut (1, 1, 2, 2, 3, 4, 4, 5, 6, 7, 8), dan reader JSON dengan chip tipe `map(varchar,json)`.
+4.1 dan 4.2 **tidak** punya scene `--snapshot`: bar find dan editor terlipat adalah view AppKit yang
+tidak bisa dibangun `seeded(scene:)`, jadi render-nya ada di tes render lane-nya
+(`EditorFindAndFoldingTests`, PNG di `app/.build/render/`). Itu penyimpangan dari kata "`--snapshot`"
+di kriteria, dan dicatat sebagai penyimpangan alih-alih dibiarkan terbaca sebagai terpenuhi.
+
+**Yang belum, dan tidak diklaim.** Bar dan lipatan **di dalam window asli** belum pernah dijalankan:
+tidak ada tes yang memanggil `makeNSView` end-to-end, jadi tombol ⌘F lewat `keyDown`, layout
+push-down, klik marka gutter, dan tombol Replace/Replace All belum dites tekan. Auto-unfold saat caret
+masuk body dan pergeseran offset lewat edit sungguhan di text view hidup juga belum dites; fungsi
+murninya dites terpisah. Render membuktikan tentang view-nya, bukan bahwa app menampilkannya.
 
 ## 7. Fase 5: perpindahan data
 
