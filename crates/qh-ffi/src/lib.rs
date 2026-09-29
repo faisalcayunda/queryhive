@@ -438,6 +438,28 @@ impl Session for TunnelledSession {
         Ok(cursor)
     }
 
+    /// Forwarded, not inherited.
+    ///
+    /// The trait's default refuses a non-empty parameter list, which is the right default for a
+    /// driver that cannot bind — but a wrapper is not a driver. Without this, every bound statement
+    /// through an SSH tunnel (the only production wrapper) is refused, and `apply_changes` on a
+    /// tunnelled PostgreSQL or MySQL connection stops working for no reason the caller can see.
+    async fn execute_bound(
+        &mut self,
+        sql: &str,
+        parameters: &[qh_driver::Parameter],
+        options: &qh_driver::ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
+        let cursor = self
+            .inner
+            .lock()
+            .await
+            .execute_bound(sql, parameters, options)
+            .await?;
+        self.query_id = self.inner.lock().await.query_id();
+        Ok(cursor)
+    }
+
     async fn browse(
         &mut self,
         level: qh_driver::BrowseLevel,

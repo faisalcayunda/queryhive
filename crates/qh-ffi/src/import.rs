@@ -280,7 +280,7 @@ async fn import_rows_file(
     let mode = mode_of(settings)?;
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
-    let safe = safe_mode(settings)?;
+    let safe = safe_mode(settings, engine)?;
     // Importing writes. A mode that refuses a DML statement refuses the whole
     // import, and that is decided here rather than after a connection: a
     // read-only connection must not even open.
@@ -470,7 +470,7 @@ async fn import_statements(
 ) -> Result<(), CliError> {
     let mode = mode_of(settings)?;
     let config = connection(settings, engine)?;
-    let safe = safe_mode(settings)?;
+    let safe = safe_mode(settings, engine)?;
     let fk = fk_checks(settings, config.kind)?;
     let timeout = statement_timeout(settings)?;
 

@@ -118,7 +118,7 @@ pub async fn apply_changes(
             "CHANGES is empty: there is nothing to apply".to_owned(),
         ));
     }
-    let safe = safe_mode(settings)?;
+    let safe = safe_mode(settings, engine)?;
     // Guarded before the connect step, so a read-only connection refuses the
     // whole plan without opening one — the same order every other write command
     // follows.

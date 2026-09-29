@@ -104,20 +104,24 @@ pub(crate) fn statement_timeout(settings: &Settings) -> Result<Option<Duration>,
 
 /// Every condition that can raise a run's Safe Mode, and the strictest of them.
 ///
-/// Three conditions exist here. The user's own `SAFE_MODE` is the base; `DB_READ_ONLY`
-/// is the connection's own marking, so a connection the app knows is read-only stays
-/// read-only whatever level is chosen; and `SAFE_MODE_FLOOR` is a minimum pinned from
-/// outside the connection — an embedding caller, an external-client gate, a managed
-/// policy — which is the one input a configuration profile would set if this project had
-/// one. The floor is resolved by [`SafeMode::strictness`](qh_sql::SafeMode::strictness),
-/// never by which condition matched first, and it is **never written back**: it is a value
-/// for one run, and when the condition goes away the user's own level is what remains.
+/// Four conditions exist here. The user's own `SAFE_MODE` is the base; `DB_READ_ONLY` is the
+/// connection's own marking, so a connection the app knows is read-only stays read-only whatever
+/// level is chosen; `SAFE_MODE_FLOOR` is a minimum pinned from outside the connection — an
+/// embedding caller, an external-client gate, a managed policy — which is the one input a
+/// configuration profile would set if this project had one; and a driver whose
+/// `Capabilities::read_only` is set raises the floor itself. The floor is resolved by
+/// [`SafeMode::strictness`](qh_sql::SafeMode::strictness), never by which condition matched first,
+/// and it is **never written back**: it is a value for one run, and when the condition goes away
+/// the user's own level is what remains.
 ///
-/// A driver that cannot write would be a fourth condition, raised at
-/// [`FloorSource::Driver`]. No driver in this workspace declares that — `Capabilities` has
-/// no such bit, and the driver crates are out of scope for this change — so the source is
-/// defined and resolved but nothing raises it today. That is stated rather than faked.
-pub(crate) fn safe_mode_floor(settings: &Settings) -> Result<SafeModeFloor, CliError> {
+/// The driver condition is read from `engine.driver(kind).capabilities()` **before** connecting,
+/// which is why the floor can see it at all. All three drivers report `read_only: false` today, so
+/// this changes nothing yet — it is what makes the bit mean something the day one of them cannot
+/// write.
+pub(crate) fn safe_mode_floor(
+    settings: &Settings,
+    engine: &dyn Engine,
+) -> Result<SafeModeFloor, CliError> {
     let mut floor = SafeModeFloor::new();
     floor.raise(
         FloorSource::User,
@@ -125,6 +129,16 @@ pub(crate) fn safe_mode_floor(settings: &Settings) -> Result<SafeModeFloor, CliE
     );
     if settings.flag("DB_READ_ONLY", false) {
         floor.raise(FloorSource::Connection, SafeMode::ReadOnly);
+    }
+    // A driver that cannot write raises the floor itself. Read **before connecting**, which is why
+    // the floor can see it: `Capabilities` is documented as readable before a session exists, so
+    // `driver(kind)` answers without opening anything. Today all three drivers report `false`, so
+    // this changes nothing yet — it is the wiring that makes the bit mean something the day one of
+    // them is read-only.
+    if let Some(kind) = DriverKind::parse(&settings.text("DB_KIND", "")) {
+        if engine.driver(kind).capabilities().read_only {
+            floor.raise(FloorSource::Driver, SafeMode::ReadOnly);
+        }
     }
     let pinned = settings.text("SAFE_MODE_FLOOR", "");
     if !pinned.is_empty() {
@@ -141,8 +155,8 @@ pub(crate) fn safe_mode_floor(settings: &Settings) -> Result<SafeModeFloor, CliE
 /// Absent `SAFE_MODE` is `full`, which is what every caller that predates this setting
 /// sends. A spelling nobody recognises is refused by name: a typo in a safety setting is
 /// not a decision to make silently, the same rule `sslmode` follows.
-pub(crate) fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
-    Ok(safe_mode_floor(settings)?
+pub(crate) fn safe_mode(settings: &Settings, engine: &dyn Engine) -> Result<SafeMode, CliError> {
+    Ok(safe_mode_floor(settings, engine)?
         .resolve()
         .map(|(mode, _source)| mode)
         .unwrap_or(SafeMode::Full))
@@ -773,7 +787,7 @@ pub async fn export(
     let sql = source_sql(settings)?;
     // The Safe Mode is checked before the connect step, so a read-only connection
     // refuses a write without opening one.
-    let mode = safe_mode(settings)?;
+    let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let format = format_of(settings)?;
@@ -948,7 +962,7 @@ pub async fn to_table(
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
-    let safe = safe_mode(settings)?;
+    let safe = safe_mode(settings, engine)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
@@ -1178,7 +1192,7 @@ pub async fn table_op(
             )))
         }
     };
-    let mode = safe_mode(settings)?;
+    let mode = safe_mode(settings, engine)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
@@ -1323,7 +1337,7 @@ pub async fn preview(
     let sql = source_sql(settings)?;
     // Checked before the connect step: a read-only connection refuses a write
     // without opening one.
-    let mode = safe_mode(settings)?;
+    let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     // Floored at one: a preview that returned no rows at all would tell the caller
@@ -1366,7 +1380,7 @@ pub async fn explain(
     // Checked before the connect step: a read-only connection refuses a write
     // without opening one. The statement is the caller's own; the driver's `EXPLAIN`
     // prefix is added later and does not change what was asked.
-    let mode = safe_mode(settings)?;
+    let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
@@ -1580,7 +1594,7 @@ pub async fn count(
     // Checked before the connect step. The caller's statement is the one classified:
     // `count` wraps a `WITH … DELETE` in a `SELECT COUNT(*)` that would run it, so the
     // gate has to look at what was asked and not at the wrapper.
-    let mode = safe_mode(settings)?;
+    let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let statement = qh_sql::count_statement(&sql)?;
