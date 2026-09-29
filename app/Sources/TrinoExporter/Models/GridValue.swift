@@ -8,6 +8,21 @@ import Foundation
 /// is a *viewer*, not a decoder: it never changes how a value is stored or exported, it only decides
 /// whether a cell can be opened and how to lay the text out once it is.
 enum GridValue {
+    /// The largest value this will parse as JSON, in UTF-16 units.
+    ///
+    /// TablePro's number, and the reason it exists: a JSON cell is untrusted input, and parsing a
+    /// multi-megabyte one on the main thread is a hang the user cannot cancel. Above it a
+    /// structured cell is still openable — the viewer shows the server's raw text instead — so the
+    /// limit is stated rather than silent.
+    static let parseLimit = 100_000
+
+    /// The largest value the viewer renders in full, in UTF-16 units.
+    ///
+    /// Above it the text is truncated **with a marker**: a control holding ten megabytes of text
+    /// is its own hang. The Copy button still copies the whole value, which is what the limit is
+    /// protecting.
+    static let textLimit = 500_000
+
     /// Whether a column's type is one whose cells arrive as structured text.
     ///
     /// Matched loosely because the three drivers spell the same shape differently: Trino says
@@ -26,13 +41,26 @@ enum GridValue {
     /// `isOpenable` only offers the viewer for values that look like an object or array, so a
     /// boolean column is never turned into an "openable JSON" cell.
     static func prettyPrinted(_ text: String) -> String? {
-        guard let data = text.data(using: .utf8),
+        // Before the parse, not after: the point of the limit is not to build the object at all.
+        guard (text as NSString).length <= parseLimit,
+              let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data,
                                                              options: [.fragmentsAllowed]),
               let pretty = try? JSONSerialization.data(withJSONObject: object,
                                                        options: [.prettyPrinted, .fragmentsAllowed,
                                                                  .sortedKeys]) else { return nil }
         return String(decoding: pretty, as: UTF8.self)
+    }
+
+    /// The raw text the viewer shows, truncated with a marker when it is over `textLimit`.
+    ///
+    /// The marker is the whole point: a viewer that quietly cut the tail off would be a reader
+    /// that lies about the value, which is the one thing a reader must not do.
+    static func displayText(_ text: String) -> String {
+        let length = (text as NSString).length
+        guard length > textLimit else { return text }
+        let head = (text as NSString).substring(to: textLimit)
+        return head + "\n\n… truncated for display (\(length.formatted()) units); Copy keeps the whole value."
     }
 
     /// Whether a cell is worth opening: a structured column, or text that is itself a JSON object

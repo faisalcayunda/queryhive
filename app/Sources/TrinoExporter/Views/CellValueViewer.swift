@@ -11,16 +11,23 @@ import SwiftUI
 ///
 /// A viewer, not an editor: the value is read-only, and nothing here changes what the cell holds or
 /// what an export writes.
+///
+/// Two limits, both from `GridValue` and both stated rather than silent: a value over
+/// `parseLimit` is not parsed, and one over `textLimit` is truncated **with a marker**. A cell is
+/// untrusted input, and parsing or laying out a multi-megabyte one is a hang the user cannot
+/// cancel. The Copy button always copies the whole value, which is what the limits protect.
 struct CellValueViewer: View {
     let value: String
     let column: String
     let type: String
 
-    /// The pretty form when there is one, the raw text otherwise.
-    private var shown: String { GridValue.prettyPrinted(value) ?? value }
-    private var isJSON: Bool { GridValue.prettyPrinted(value) != nil }
-
     var body: some View {
+        // Computed once here rather than in three computed properties: `prettyPrinted` parses the
+        // value, and asking it twice is the same mistake the grid just stopped making.
+        let pretty = GridValue.prettyPrinted(value)
+        let shown = pretty ?? GridValue.displayText(value)
+        let truncated = pretty == nil && (value as NSString).length > GridValue.textLimit
+
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Text(column)
@@ -47,16 +54,26 @@ struct CellValueViewer: View {
             .background(Tone.recess.opacity(0.30),
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            Text(isJSON
-                 ? "Shown as formatted JSON. The cell itself is unchanged."
-                 : "Not JSON, so this is the text the server sent — a PostgreSQL array literal "
-                   + "arrives this way.")
+            Text(note(pretty: pretty != nil, truncated: truncated))
                 .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .frame(width: 560)
+    }
+
+    /// What the reader has to say about the value it is showing, and why.
+    private func note(pretty: Bool, truncated: Bool) -> String {
+        if truncated {
+            return "Too large to show in full, so the end is cut off and marked. Copy still takes "
+                + "the whole value."
+        }
+        if pretty {
+            return "Shown as formatted JSON. The cell itself is unchanged."
+        }
+        return "Not JSON, so this is the text the server sent — a PostgreSQL array literal "
+            + "arrives this way."
     }
 
     /// The raw text, not the pretty one: a copy out of a viewer should paste what the server stored,
