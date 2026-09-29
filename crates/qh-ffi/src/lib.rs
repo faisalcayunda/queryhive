@@ -211,6 +211,10 @@ impl From<EngineError> for CliError {
             EngineError::Usage { .. } => CliError::Usage(message),
             EngineError::Connect { .. } => CliError::Connect(message),
             EngineError::Query { .. } => CliError::Query(message),
+            // A timeout is the server's refusal to keep running, and it arrives on
+            // the same event as any other query failure: the app shows the message,
+            // which names the bound.
+            EngineError::Timeout { .. } => CliError::Query(message),
             EngineError::StaleHandle => CliError::Internal(message),
             EngineError::Internal { .. } => CliError::Internal(message),
         }

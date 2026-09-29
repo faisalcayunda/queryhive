@@ -22,7 +22,7 @@
 //!    position is part of the protocol, not decoration.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use qh_core::{ColumnBatch, ColumnMeta, Value};
 use qh_driver::{
@@ -30,6 +30,7 @@ use qh_driver::{
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
+use qh_sql::{SafeMode, SAFE_MODES};
 use serde_json::{json, Value as Json};
 
 use crate::config;
@@ -78,6 +79,49 @@ fn connection(settings: &Settings, engine: &dyn Engine) -> Result<ConnectionConf
         config.port = engine.driver(config.kind).default_port();
     }
     Ok(config)
+}
+
+/// The statement bound a run asks for, from `STATEMENT_TIMEOUT_MS`.
+///
+/// `0` — the engine's default — means no bound, so the CLI and the golden corpus
+/// behave exactly as they did before this setting existed. A negative value is
+/// refused by name rather than floored: a bound that quietly became no bound would
+/// be the opposite of what the caller asked for.
+///
+/// The bound is a `Duration` here and a server setting one layer down; each driver
+/// translates it into its own mechanism, and a driver that cannot enforce one says
+/// so through `Capabilities::statement_timeout`.
+fn statement_timeout(settings: &Settings) -> Result<Option<Duration>, CliError> {
+    let milliseconds = settings.non_negative("STATEMENT_TIMEOUT_MS", 0)?;
+    Ok((milliseconds > 0).then(|| Duration::from_millis(milliseconds as u64)))
+}
+
+/// The Safe Mode a run is under, from `SAFE_MODE`.
+///
+/// Absent is `full`, which is what every caller that predates this setting sends.
+/// A spelling nobody recognises is refused by name: a typo in a safety setting is
+/// not a decision to make silently, the same rule `sslmode` follows.
+fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
+    let raw = settings.text("SAFE_MODE", "");
+    if raw.is_empty() {
+        return Ok(SafeMode::Full);
+    }
+    SafeMode::parse(&raw).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown SAFE_MODE '{raw}'; expected {}",
+            SAFE_MODES.join(", ")
+        ))
+    })
+}
+
+/// Refuse a script the connection's Safe Mode does not allow.
+///
+/// The engine's own guard, and deliberately not the UI's: the CLI and the MCP
+/// server run this same code, and neither has a picker to enforce anything. A
+/// refusal is a usage error decided before the network is touched, so a read-only
+/// connection refuses a `DROP` without opening one.
+fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
+    qh_sql::check(mode, sql).map_err(|error| CliError::Usage(error.to_string()))
 }
 
 /// Where a browse or objects call is aimed.
@@ -532,6 +576,11 @@ pub async fn export(
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
+    // The Safe Mode is checked before the connect step, so a read-only connection
+    // refuses a write without opening one.
+    let mode = safe_mode(settings)?;
+    guard(mode, &sql)?;
+    let timeout = statement_timeout(settings)?;
     let format = format_of(settings)?;
     let directory = out_dir(settings)?;
     let name = settings.raw("NAME", "export");
@@ -554,6 +603,7 @@ pub async fn export(
         &ExecuteOptions {
             max_batch_rows: Some(batch_size),
             row_limit: None,
+            statement_timeout: timeout,
         },
     )
     .await?;
@@ -703,6 +753,8 @@ pub async fn to_table(
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
+    let safe = safe_mode(settings)?;
+    let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
 
@@ -775,6 +827,15 @@ pub async fn to_table(
         _ => vec![format!("CREATE TABLE {target} AS {body}")],
     };
 
+    // The Safe Mode is checked against the statements this command will actually
+    // send — the generated `DROP`/`CREATE TABLE AS`/`INSERT`, not only the caller's
+    // SELECT — because those are what run. Checked here, before the connect step, so
+    // a read-only connection refuses `replace` without opening one: `to_table`'s
+    // write mode is a decision of the engine and not of the UI that offered it.
+    for statement in &statements {
+        guard(safe, statement)?;
+    }
+
     out.emit(event("step").field("step", "connect").build())?;
     // The connect is retried; the statements below are not, and deliberately so: a
     // `DROP`/`CREATE TABLE AS`/`INSERT` is not safe to re-issue blind, so this command
@@ -812,7 +873,13 @@ pub async fn to_table(
         // does afterwards can undo a DROP that has run.
         let outcome: Result<(), CliError> = async {
             let mut cursor = session
-                .execute(statement, &ExecuteOptions::default())
+                .execute(
+                    statement,
+                    &ExecuteOptions {
+                        statement_timeout: timeout,
+                        ..ExecuteOptions::default()
+                    },
+                )
                 .await?;
             // A DDL statement has no rows to read, but it is not finished when
             // `execute` returns: driving the cursor to its end is what waits for the
@@ -877,6 +944,18 @@ pub async fn to_table(
     Ok(())
 }
 
+/// The two bounds a previewed page carries: how many rows the grid shows, and how long
+/// the server may spend producing them.
+///
+/// One value rather than two arguments because they are always decided together, at the
+/// top of `preview`, and both belong to the same question — how much of this statement
+/// is worth paying for.
+#[derive(Debug, Clone, Copy)]
+struct PageBounds {
+    limit: Option<u64>,
+    timeout: Option<Duration>,
+}
+
 /// `preview`: the first `LIMIT` rows of the caller's statement, as written.
 ///
 /// The cap is enforced while pulling and never by rewriting the SQL: the statement
@@ -894,14 +973,23 @@ pub async fn preview(
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
+    // Checked before the connect step: a read-only connection refuses a write
+    // without opening one.
+    let mode = safe_mode(settings)?;
+    guard(mode, &sql)?;
+    let timeout = statement_timeout(settings)?;
     // Floored at one: a preview that returned no rows at all would tell the caller
     // nothing about the statement.
     let limit = settings.number("LIMIT", PREVIEW_LIMIT)?.max(1) as u64;
     let config = connection(settings, engine)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
+    let bounds = PageBounds {
+        limit: Some(limit),
+        timeout,
+    };
     let (rows, truncated, query_id, cancelled) =
-        stream_rows(settings, out, engine, &config, &sql, Some(limit), cancel).await?;
+        stream_rows(settings, out, engine, &config, &sql, bounds, cancel).await?;
     let done = event("done")
         .field("rows", rows)
         .field("truncated", truncated)
@@ -927,6 +1015,12 @@ pub async fn explain(
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
+    // Checked before the connect step: a read-only connection refuses a write
+    // without opening one. The statement is the caller's own; the driver's `EXPLAIN`
+    // prefix is added later and does not change what was asked.
+    let mode = safe_mode(settings)?;
+    guard(mode, &sql)?;
+    let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
@@ -940,6 +1034,7 @@ pub async fn explain(
         &ExecuteOptions {
             max_batch_rows: Some(PREVIEW_BATCH),
             row_limit: None,
+            statement_timeout: timeout,
         },
     )
     .await?;
@@ -972,7 +1067,7 @@ async fn stream_rows(
     engine: &dyn Engine,
     config: &ConnectionConfig,
     sql: &str,
-    limit: Option<u64>,
+    bounds: PageBounds,
     cancel: &CancelFlag,
 ) -> Result<(u64, bool, Option<String>, bool), CliError> {
     let (mut session, policy) = open(settings, engine, config).await?;
@@ -985,6 +1080,7 @@ async fn stream_rows(
             // early never asks the coordinator for more rows than the cap shows.
             max_batch_rows: Some(PREVIEW_BATCH),
             row_limit: None,
+            statement_timeout: bounds.timeout,
         },
     )
     .await?;
@@ -995,7 +1091,7 @@ async fn stream_rows(
     // than dropped: those rows are already fetched.
     let primed = cursor.next_batch(PREVIEW_BATCH).await?;
     let (rows, truncated, cancelled) =
-        emit_batches(out, cursor, primed, limit, Some(cancel)).await?;
+        emit_batches(out, cursor, primed, bounds.limit, Some(cancel)).await?;
     let query_id = session.query_id();
     let _ = session.close().await;
     Ok((rows, truncated, query_id, cancelled))
@@ -1133,6 +1229,12 @@ pub async fn count(
     engine: &dyn Engine,
 ) -> Result<(), CliError> {
     let sql = source_sql(settings)?;
+    // Checked before the connect step. The caller's statement is the one classified:
+    // `count` wraps a `WITH … DELETE` in a `SELECT COUNT(*)` that would run it, so the
+    // gate has to look at what was asked and not at the wrapper.
+    let mode = safe_mode(settings)?;
+    guard(mode, &sql)?;
+    let timeout = statement_timeout(settings)?;
     let statement = qh_sql::count_statement(&sql)?;
     let config = connection(settings, engine)?;
     let started = Instant::now();
@@ -1143,12 +1245,22 @@ pub async fn count(
         &mut session,
         &policy,
         &statement,
-        &ExecuteOptions::default(),
+        &ExecuteOptions {
+            statement_timeout: timeout,
+            ..ExecuteOptions::default()
+        },
     )
     .await?;
     let mut rows: Vec<Value> = Vec::new();
     // The count is one row; reading to the end anyway would be a second statement's
     // worth of waiting for a number that is already in hand.
+    //
+    // A timeout here is reported, not estimated. No driver in this workspace can give
+    // a cheap approximate count — PostgreSQL's `reltuples`, MySQL's
+    // `information_schema.TABLES.TABLE_ROWS` and Trino's `$partitions` all answer for
+    // a *table* and not for an arbitrary statement, and this command counts a
+    // statement — so the honest answer is that an estimate is not available and the
+    // run failed. A fabricated number would be read as the count.
     if let Some(batch) = cursor.next_batch(PREVIEW_BATCH).await? {
         if batch.rows() > 0 {
             rows = row_of(&batch, 0);

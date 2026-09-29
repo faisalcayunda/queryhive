@@ -333,6 +333,33 @@ fn a_connection_outside_the_allowlist_is_refused_without_saying_it_exists() {
     assert!(!text.contains("was not found"), "{text}");
 }
 
+#[test]
+fn mcp_runs_caller_sql_read_only_so_a_drop_is_refused_before_connecting() {
+    // The gap ADR-0015 documented: token scope names tools, and a tool that runs caller
+    // SQL can carry any SQL. The engine's Safe Mode is what closes it, and the MCP
+    // server pins every call to `read_only` whatever the connection's own mode says.
+    // The refusal names the mode, which is what proves the setting was injected: without
+    // it the run would have tried to reach `trino.internal` and failed there instead.
+    let (_dir, db_path, allowed_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    let result = call(
+        &server,
+        &runtime(),
+        "preview",
+        json!({"connection": allowed_id, "sql": "DROP TABLE people"}),
+    );
+    assert_eq!(result["result"]["isError"], json!(true));
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(
+        text.contains("read-only"),
+        "MCP must run caller SQL read-only: {text}"
+    );
+}
+
 // --------------------------------------------------------------------------- //
 // framing
 // --------------------------------------------------------------------------- //

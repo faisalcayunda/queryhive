@@ -648,6 +648,32 @@ struct DataSettings: View {
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            SettingsCard(title: "Statement timeout",
+                         detail: "How long a statement may run before the server stops it. The engine puts the bound in force with each server's own mechanism — PostgreSQL's statement_timeout, Trino's query_max_run_time, MySQL's max_execution_time — so a statement that overruns is cancelled and releases its resources even if this window is gone. A local timer would only stop the reading, not the work.") {
+                HStack(spacing: 8) {
+                    Text("Stop a statement after")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                    Spacer(minLength: 12)
+                    TextField("", value: $model.statementTimeoutMS, format: .number)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .font(.code(11.5))
+                        .frame(width: 72)
+                    Text("ms")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                    Stepper("", value: $model.statementTimeoutMS, in: 0...600_000, step: 5_000)
+                        .labelsHidden()
+                }
+                .padding(.vertical, 6)
+
+                Text("Zero means no bound. The setting applies to every run that reaches a server — Preview, Count, Explain and Export alike — and survives a restart. What a connection refuses outright is its Safe Mode, chosen per connection in its editor.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

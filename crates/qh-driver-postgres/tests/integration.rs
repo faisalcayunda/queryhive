@@ -17,9 +17,9 @@
 //! is a fact about the wire, not about this code. That is what is checked here,
 //! against the same `type_zoo` table the Python golden snapshots use.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use qh_core::Value;
+use qh_core::{EngineError, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions, ObjectPath, Session,
     TlsMode,
@@ -311,6 +311,7 @@ async fn a_row_limit_stops_reading_without_changing_the_statement() {
     let options = ExecuteOptions {
         max_batch_rows: None,
         row_limit: Some(10),
+        statement_timeout: None,
     };
     let mut cursor = session
         .execute("SELECT id FROM wide_500k ORDER BY id", &options)
@@ -624,4 +625,53 @@ async fn require_refuses_a_server_that_does_not_offer_tls() {
         .expect("Require connected to a server that does not offer TLS");
 
     assert!(error.message().contains("TLS"), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_statement_timeout_is_a_typed_error_that_names_the_limit() {
+    // The bound is PostgreSQL's own `statement_timeout`, so the server cancels the
+    // statement rather than this process stopping its read. A short bound against a
+    // five-second sleep is the discriminating pair: without the mechanism the test
+    // would wait five seconds, and without the classification it would come back as a
+    // generic `57014` query error.
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let started = Instant::now();
+    let mut cursor = session
+        .execute(
+            "SELECT pg_sleep(5)",
+            &ExecuteOptions {
+                statement_timeout: Some(Duration::from_millis(500)),
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("the statement is described and started");
+    let error = loop {
+        match cursor.next_batch(10).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("pg_sleep(5) finished instead of timing out"),
+            Err(error) => break error,
+        }
+    };
+    let elapsed = started.elapsed();
+
+    match &error {
+        EngineError::Timeout { message, limit_ms } => {
+            assert_eq!(*limit_ms, Some(500));
+            assert!(message.contains("500 ms"), "{message}");
+            // The server's own sentence travels with it.
+            assert!(message.contains("statement timeout"), "{message}");
+        }
+        other => panic!("expected a typed timeout, got {other:?}"),
+    }
+    // Promptly, not after the sleep. A wide margin over the 500 ms bound: the point is
+    // that it did not wait five seconds, and CI is not a latency benchmark.
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the timeout took {elapsed:?}, which is the sleep and not the bound"
+    );
 }

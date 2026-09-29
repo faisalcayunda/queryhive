@@ -90,14 +90,24 @@ bukan di `rusqlite`, dan `Cargo.toml` proyek ini tidak menunjuk ke sana sama sek
 menuntut `cargo deny check licenses` dan bukan hanya `cargo test`, karena versi baru membawa kode
 baru beserta lisensinya.
 
-## 7. Tidak ada query timeout
+## 7. Tidak ada query timeout — **DITUTUP 29 Sep 2026**
 
-**Keadaan.** Satu-satunya timeout di seluruh `crates/` adalah `connect_timeout` di
+**Keadaan saat itu.** Satu-satunya timeout di seluruh `crates/` adalah `connect_timeout` di
 `crates/qh-driver-trino/src/lib.rs:262`. `ExecuteOptions` di `crates/qh-driver/src/lib.rs:167` tidak
 punya batas waktu statement, dan tidak ada driver yang memasangnya.
 
-**Konsekuensinya.** `preview` pada tabel besar tidak punya batas selain tombol Stop, dan Stop
-sendiri bergantung pada driver yang menghormati `cancel` (lihat `Capabilities.cancel`).
+**Konsekuensinya saat itu.** `preview` pada tabel besar tidak punya batas selain tombol Stop, dan
+Stop sendiri bergantung pada driver yang menghormati `cancel` (lihat `Capabilities.cancel`).
+
+**Yang menahannya sekarang.** `ExecuteOptions::statement_timeout` dan `Capabilities::statement_timeout`
+di `crates/qh-driver/src/lib.rs`, dengan tiap driver memakai mekanisme servernya sendiri —
+PostgreSQL `statement_timeout`, Trino `query_max_run_time`, MySQL `max_execution_time` — dan batas
+yang terlampaui datang sebagai `EngineError::Timeout` yang menyebut batasnya. Setelannya
+`STATEMENT_TIMEOUT_MS`. Alasannya di `docs/decisions/0016-statement-timeout.md`.
+
+**Yang tetap berlaku.** MySQL tidak menerapkan `max_execution_time` pada write; itu sifat servernya,
+dan ia dinyatakan di doc modul driver alih-alih disembunyikan. Sebuah driver yang tidak bisa
+menegakkan batas menjawab `Capabilities::statement_timeout == false`, bukan diam-diam mengabaikannya.
 
 ## 8. PostgreSQL menolak SQL multi-statement
 

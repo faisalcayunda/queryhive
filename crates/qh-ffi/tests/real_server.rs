@@ -263,3 +263,45 @@ async fn a_live_preview_of_one_row_keeps_the_event_shape_the_corpus_froze() {
     );
     assert_eq!(done["rows"], 1, "{}", lines(&out.lines));
 }
+
+#[tokio::test]
+async fn a_count_that_times_out_names_the_bound_and_invents_no_number() {
+    // `count` is the command most tempted to answer anyway: a grid footer wants a
+    // number, and a slow count is exactly when one is wanted most. No driver here can
+    // estimate the count of an arbitrary *statement* cheaply, so the honest answer is
+    // the typed timeout and no `count` event — never a number this process did not get.
+    let Some(env) = settings() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let mut pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.retain(|(key, _)| key != "SQL" && key != "LIMIT");
+    pairs.push(("SQL".to_owned(), "SELECT pg_sleep(5)".to_owned()));
+    pairs.push(("STATEMENT_TIMEOUT_MS".to_owned(), "500".to_owned()));
+
+    let cancel = CancelFlag::new();
+    let mut out = Capture::new();
+    let error = run(
+        Command::Count,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &cancel,
+    )
+    .await
+    .expect_err("a count that timed out is not a count");
+    assert!(
+        error.message().contains("500 ms"),
+        "the bound is named: {}",
+        error.message()
+    );
+    assert!(
+        out.lines.iter().all(|event| event["event"] != "count"),
+        "a timeout must not emit a count: {}",
+        lines(&out.lines)
+    );
+}

@@ -15,6 +15,8 @@
 //! classifies errors the same way (`exporter/source.py:57`, `PERMANENT`) so that
 //! a syntax error is never retried five times before the user sees it.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Whether an operation may be tried again.
@@ -77,6 +79,21 @@ pub enum EngineError {
     #[error("result handle is stale")]
     StaleHandle,
 
+    /// The server stopped the statement because it ran past its own time bound.
+    ///
+    /// Its own variant rather than a [`EngineError::Query`] because the caller
+    /// must be able to tell "this query was slow" apart from "this query was
+    /// wrong" without parsing a message: the first is a limit the user can raise,
+    /// the second is the server's answer. `limit_ms` is the bound this engine
+    /// asked for, when it asked for one; the message always names it, because a
+    /// timeout that does not say what it timed out against is not actionable.
+    #[error("{message}")]
+    Timeout {
+        message: String,
+        /// The configured statement timeout, in milliseconds, when known.
+        limit_ms: Option<u64>,
+    },
+
     /// A bug in this program, including a caught panic at the FFI boundary.
     ///
     /// Never caused by server data. It is separated from the variants above
@@ -92,6 +109,10 @@ impl EngineError {
         match self {
             EngineError::Connect { kind, .. } | EngineError::Query { kind, .. } => *kind,
             EngineError::Usage { .. } | EngineError::Internal { .. } => FailureKind::Permanent,
+            // A bound the caller set is not an accident: repeating the statement
+            // under the same limit produces the same timeout, so a retry would
+            // only make the user wait for it again.
+            EngineError::Timeout { .. } => FailureKind::Permanent,
             EngineError::StaleHandle => FailureKind::Cancelled,
         }
     }
@@ -106,6 +127,7 @@ impl EngineError {
             EngineError::Usage { message }
             | EngineError::Connect { message, .. }
             | EngineError::Query { message, .. }
+            | EngineError::Timeout { message, .. }
             | EngineError::Internal { message } => message,
             EngineError::StaleHandle => "result handle is stale",
         }
@@ -124,6 +146,44 @@ impl EngineError {
         match self {
             EngineError::Query { position, .. } => *position,
             _ => None,
+        }
+    }
+
+    /// The statement timeout this engine asked for, when one was in force.
+    pub fn limit_ms(&self) -> Option<u64> {
+        match self {
+            EngineError::Timeout { limit_ms, .. } => *limit_ms,
+            _ => None,
+        }
+    }
+
+    /// The error a driver reports when the server stopped a statement for
+    /// running past `limit`.
+    ///
+    /// One constructor so all three drivers word it the same way, and so the
+    /// limit is always named when it is known — the whole point of giving this
+    /// its own variant. `server_message` is the server's own sentence and is
+    /// appended rather than dropped: it is where a coordinator names the bound it
+    /// actually enforced.
+    pub fn statement_timeout(limit: Option<Duration>, server_message: &str) -> Self {
+        let message = match limit {
+            Some(limit) => format!(
+                "the statement exceeded the {} ms statement timeout and was cancelled by the server",
+                limit.as_millis()
+            ),
+            None => {
+                "the statement was cancelled by the server because it exceeded a statement timeout"
+                    .to_owned()
+            }
+        };
+        let message = if server_message.trim().is_empty() {
+            message
+        } else {
+            format!("{message}: {}", server_message.trim())
+        };
+        EngineError::Timeout {
+            message,
+            limit_ms: limit.and_then(|limit| u64::try_from(limit.as_millis()).ok()),
         }
     }
 }
@@ -179,5 +239,40 @@ mod tests {
         };
         assert_eq!(error.failure_kind(), FailureKind::Permanent);
         assert_eq!(error.to_string(), "usage: SQL is required");
+    }
+
+    #[test]
+    fn a_statement_timeout_names_its_limit_and_is_not_retried() {
+        // The bound is the caller's own, so repeating the statement under the same
+        // limit would only make the user wait for the same timeout again.
+        let error = EngineError::statement_timeout(
+            Some(Duration::from_millis(1_500)),
+            "canceling statement due to statement timeout",
+        );
+        assert_eq!(error.failure_kind(), FailureKind::Permanent);
+        assert_eq!(error.limit_ms(), Some(1_500));
+        assert!(error.message().contains("1500 ms"), "{}", error.message());
+        assert!(
+            error.message().contains("statement timeout"),
+            "{}",
+            error.message()
+        );
+        // The server's own sentence is kept: it is where the real bound is named.
+        assert!(
+            error.message().contains("canceling statement"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_statement_timeout_without_a_known_limit_still_says_what_it_is() {
+        let error = EngineError::statement_timeout(None, "");
+        assert_eq!(error.limit_ms(), None);
+        assert!(
+            error.message().contains("statement timeout"),
+            "{}",
+            error.message()
+        );
     }
 }

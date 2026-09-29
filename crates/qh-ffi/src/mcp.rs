@@ -46,6 +46,7 @@ use std::path::PathBuf;
 
 use qh_credentials::{account_key, KeychainStore, SecretStore};
 use qh_driver::DriverKind;
+use qh_sql::SafeMode;
 use qh_storage::{ConnectionKind, ConnectionRecord, McpTokenRecord, Storage, TokenState};
 use qh_sync::SyncId;
 use secrecy::ExposeSecret;
@@ -936,6 +937,16 @@ impl Server {
         ));
         pairs.push(("DB_DATABASE".to_owned(), resolved.catalog.clone()));
         pairs.push(("DB_SCHEMA".to_owned(), resolved.schema.clone()));
+        // Every MCP call runs under `read_only`, whatever the connection's own Safe
+        // Mode says. Scope names tools, and a tool that runs caller SQL can carry any
+        // SQL — so `preview` was a write path until the engine grew a guard. This is
+        // that guard, pinned here rather than left to the connection: a token is not
+        // allowed to widen its own reach by naming a `full` connection. ADR-0015's
+        // "scope does not constrain SQL" is what this closes.
+        pairs.push((
+            "SAFE_MODE".to_owned(),
+            SafeMode::ReadOnly.as_str().to_owned(),
+        ));
         for (key, value) in extra {
             pairs.push(((*key).to_owned(), value.clone()));
         }

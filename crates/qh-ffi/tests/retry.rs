@@ -138,6 +138,7 @@ impl Session for ScriptedSession {
             levels: vec![BrowseLevel::Table],
             objects_columns: Vec::new(),
             persistent_connection: self.persistent,
+            statement_timeout: true,
         }
     }
 
@@ -214,6 +215,7 @@ impl Driver for FakeDriver {
             levels: vec![BrowseLevel::Table],
             objects_columns: Vec::new(),
             persistent_connection: false,
+            statement_timeout: true,
         }
     }
 

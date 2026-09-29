@@ -121,6 +121,43 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
     var defaultSSLMode: String { self == .postgres ? "prefer" : "disable" }
 }
 
+/// What a connection refuses, as the engine's `SAFE_MODE` names it.
+///
+/// Three levels rather than a boolean, because "allow writes but not schema changes" is a
+/// real middle ground: someone poking at a production replica wants to run an `UPDATE` on
+/// one row without being able to `DROP` the table.
+///
+/// The engine is what enforces this — the CLI and the MCP server run the same guard — so
+/// this enum is only how the level is chosen and stored. It reaches the engine as
+/// `SAFE_MODE`, and the stored value is one of the engine's own words, so a connection
+/// moved between the app and the command line means the same thing in both.
+enum ConnectionSafeMode: String, CaseIterable, Identifiable, Codable {
+    /// Run anything. The default, and what every connection made before this setting did.
+    case full
+    case noDDL = "no_ddl"
+    case readOnly = "read_only"
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .full: "Full"
+        case .noDDL: "No DDL"
+        case .readOnly: "Read only"
+        }
+    }
+
+    /// The one-line consequence, shown beside the picker so the level is a promise and
+    /// not a name.
+    var detail: String {
+        switch self {
+        case .full: "Anything runs, including DDL."
+        case .noDDL: "Writes are allowed; CREATE, ALTER, DROP and the rest of DDL are refused."
+        case .readOnly: "Only reads run. Every write and every DDL is refused."
+        }
+    }
+}
+
 /// Trino's transport, as its picker spells it: the two scheme words, plus the one outcome
 /// neither of them can express.
 ///
@@ -229,11 +266,17 @@ struct Connection: Identifiable, Codable, Equatable {
     /// way to say which one a connection meant. Decoded with `decodeIfPresent`, so a
     /// connections.json written before groups existed loads with everything at the top level.
     var group: UUID?
+    /// What this connection refuses, enforced by the engine. Stored as the engine's own
+    /// `SAFE_MODE` word, so a connection moved between the app and the command line means
+    /// the same thing in both. Decoded with `decodeIfPresent`, so a file written before
+    /// this existed loads as `full` — the behaviour it had.
+    var safeMode: ConnectionSafeMode
 
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
          user: String, database: String, schema: String, verify: Bool,
-         showAllSchemas: Bool = false, showAllDatabases: Bool = false, group: UUID? = nil) {
+         showAllSchemas: Bool = false, showAllDatabases: Bool = false, group: UUID? = nil,
+         safeMode: ConnectionSafeMode = .full) {
         self.id = id
         self.name = name
         self.color = color
@@ -249,11 +292,12 @@ struct Connection: Identifiable, Codable, Equatable {
         self.showAllSchemas = showAllSchemas
         self.showAllDatabases = showAllDatabases
         self.group = group
+        self.safeMode = safeMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
-        case showAllSchemas, showAllDatabases, group
+        case showAllSchemas, showAllDatabases, group, safeMode
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -287,6 +331,9 @@ struct Connection: Identifiable, Codable, Equatable {
         showAllDatabases = try container.decodeIfPresent(Bool.self, forKey: .showAllDatabases) ?? false
         // Absent on a file written before groups existed: everything sits at the top level.
         group = try container.decodeIfPresent(UUID.self, forKey: .group)
+        // Absent on a file written before Safe Mode existed: `full`, which is what that
+        // connection was already doing.
+        safeMode = try container.decodeIfPresent(ConnectionSafeMode.self, forKey: .safeMode) ?? .full
     }
 
     /// One-line identity for the sidebar and the picker: `host:port/database.schema`.

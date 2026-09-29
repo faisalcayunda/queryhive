@@ -26,6 +26,20 @@
 //! the statement. The id is read from the producer's connection and published in a
 //! shared cell as soon as that connection exists.
 //!
+//! ## Statement timeouts, and the write they do not cover
+//!
+//! `ExecuteOptions::statement_timeout` is put in force as the `max_execution_time`
+//! session variable, which MySQL enforces itself: a `SELECT` that overruns is
+//! interrupted with error `3024` and the connection stays usable. The bound is set on
+//! the same connection the statement runs on, right before it runs.
+//!
+//! **It does not cover writes.** MySQL applies `max_execution_time` to read-only
+//! `SELECT` statements only; an `INSERT`, `UPDATE` or `DELETE` ignores it. So a
+//! bounded connection bounds its reads and not its writes, and this note is here
+//! because a capability that claimed more would be pretending. The other two drivers'
+//! mechanisms cover writes as well, which is a difference the UI would have to state
+//! if it ever offered the bound per statement rather than per connection.
+//!
 //! ## TLS
 //!
 //! All four `TlsMode`s are implemented, through `mysql_async`'s `rustls`
@@ -61,6 +75,7 @@ pub mod tls;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
@@ -134,6 +149,9 @@ impl Driver for MysqlDriver {
                 .map(|name| (*name).to_owned())
                 .collect(),
             persistent_connection: true,
+            // `max_execution_time`, which the server enforces for a read-only
+            // `SELECT`. See the module note: it does not cover a write.
+            statement_timeout: true,
         }
     }
 
@@ -168,6 +186,10 @@ impl Driver for MysqlDriver {
             opts,
             connection_id,
             idle: Some(conn),
+            // Nothing has been asked of the server yet, so the session must not send a
+            // `SET SESSION max_execution_time = 0` on its first statement and override a
+            // bound the server's configuration set.
+            statement_timeout: None,
         }))
     }
 }
@@ -204,6 +226,9 @@ struct MysqlSession {
     /// The connection kept for the next statement, so an idle session is one
     /// connection rather than a new handshake per query.
     idle: Option<Conn>,
+    /// The `max_execution_time` this session last sent to the server, so the `SET`
+    /// is sent when the bound changes rather than on every statement.
+    statement_timeout: Option<Duration>,
 }
 
 impl MysqlSession {
@@ -235,7 +260,7 @@ impl MysqlSession {
             let rows: Vec<mysql_async::Row> = conn
                 .query(sql)
                 .await
-                .map_err(|error| map_query_error(error, sql))?;
+                .map_err(|error| map_query_error(error, sql, None))?;
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
                 let width = row.len();
@@ -280,6 +305,19 @@ impl Session for MysqlSession {
     ) -> Result<Box<dyn Cursor>, EngineError> {
         let mut conn = self.connection().await?;
 
+        // The bound is a server setting, so it reaches the server before the statement
+        // does. Applied when it changed: `SET` is a round trip.
+        if let Err(error) =
+            apply_max_execution_time(&mut conn, self.statement_timeout, options.statement_timeout)
+                .await
+        {
+            // The connection is still good — the bound was refused, the session was not
+            // — so it goes back to the session rather than being thrown away.
+            self.idle = Some(conn);
+            return Err(error);
+        }
+        self.statement_timeout = options.statement_timeout;
+
         // Describe the statement **without running it**. `prep` is
         // COM_STMT_PREPARE: it returns the result columns and executes nothing, so
         // it costs one round trip and does no work.
@@ -320,6 +358,7 @@ impl Session for MysqlSession {
             sender,
             connection_id: Arc::clone(&self.connection_id),
             affected: Arc::clone(&affected),
+            timeout: options.statement_timeout,
         };
         tokio::spawn(producer.run());
 
@@ -440,7 +479,7 @@ impl Session for MysqlSession {
         let outcome = killer
             .query_drop(&statement)
             .await
-            .map_err(|error| map_query_error(error, &statement));
+            .map_err(|error| map_query_error(error, &statement, None));
         let _ = killer.disconnect().await;
         outcome
     }
@@ -519,6 +558,8 @@ struct Producer {
     connection_id: Arc<AtomicU32>,
     /// Rows the statement wrote, once the server has said.
     affected: Arc<Mutex<Option<u64>>>,
+    /// The bound the statement runs under, so a server timeout names it.
+    timeout: Option<Duration>,
 }
 
 impl Producer {
@@ -543,7 +584,7 @@ impl Producer {
             .conn
             .query_iter(&self.sql)
             .await
-            .map_err(|error| map_query_error(error, &self.sql))?;
+            .map_err(|error| map_query_error(error, &self.sql, self.timeout))?;
 
         let (column_types, binary) = if self.announce_columns {
             // Not described up front, so ask the result set. This is also where a
@@ -590,7 +631,7 @@ impl Producer {
         while let Some(row) = result
             .next()
             .await
-            .map_err(|error| map_query_error(error, &self.sql))?
+            .map_err(|error| map_query_error(error, &self.sql, self.timeout))?
         {
             if let Some(limit) = self.row_limit {
                 if emitted + batch.rows >= limit {
@@ -874,20 +915,29 @@ fn classify_connect_error(error: &mysql_async::Error) -> FailureKind {
     }
 }
 
-fn map_query_error(error: mysql_async::Error, sql: &str) -> EngineError {
+fn map_query_error(error: mysql_async::Error, sql: &str, timeout: Option<Duration>) -> EngineError {
     match &error {
-        mysql_async::Error::Server(server) => EngineError::Query {
-            message: match sql.is_empty() {
-                true => server.message.clone(),
-                false => format!("{}: {}", server.message, snippet(sql)),
-            },
-            // MySQL's numeric error code, as a string so it matches the shape
-            // PostgreSQL's SQLSTATE takes. 1317 is "query interrupted", which is
-            // what a `KILL QUERY` produces.
-            code: Some(server.code.to_string()),
-            position: None,
-            kind: FailureKind::Permanent,
-        },
+        mysql_async::Error::Server(server) => {
+            // 3024 is `ER_QUERY_TIMEOUT`: "Query execution was interrupted, maximum
+            // statement execution time exceeded", which is what `max_execution_time`
+            // raises. The server's own sentence is kept, because it says the same
+            // thing in words the user can search for.
+            if server.code == 3024 {
+                return EngineError::statement_timeout(timeout, &server.message);
+            }
+            EngineError::Query {
+                message: match sql.is_empty() {
+                    true => server.message.clone(),
+                    false => format!("{}: {}", server.message, snippet(sql)),
+                },
+                // MySQL's numeric error code, as a string so it matches the shape
+                // PostgreSQL's SQLSTATE takes. 1317 is "query interrupted", which is
+                // what a `KILL QUERY` produces.
+                code: Some(server.code.to_string()),
+                position: None,
+                kind: FailureKind::Permanent,
+            }
+        }
         mysql_async::Error::Io(_) => EngineError::Connect {
             message: format!("the connection failed while the query ran: {error}"),
             kind: FailureKind::Transient,
@@ -899,6 +949,28 @@ fn map_query_error(error: mysql_async::Error, sql: &str) -> EngineError {
             kind: FailureKind::Transient,
         },
     }
+}
+
+/// Put `wanted` in force on the server, when it is not there already.
+///
+/// MySQL's server-side bound is the `max_execution_time` session variable, in
+/// milliseconds, and `0` is its own value for "no bound". It is enforced for read-only
+/// `SELECT` statements only — the module note says what that leaves uncovered.
+async fn apply_max_execution_time(
+    conn: &mut Conn,
+    current: Option<Duration>,
+    wanted: Option<Duration>,
+) -> Result<(), EngineError> {
+    if current == wanted {
+        return Ok(());
+    }
+    let milliseconds = wanted.map_or(0, |limit| {
+        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
+    });
+    let statement = format!("SET SESSION max_execution_time = {milliseconds}");
+    conn.query_drop(&statement)
+        .await
+        .map_err(|error| map_query_error(error, &statement, wanted))
 }
 
 fn snippet(sql: &str) -> String {
@@ -938,6 +1010,57 @@ mod tests {
         let capabilities = MysqlDriver.capabilities();
         assert!(capabilities.cancel);
         assert!(capabilities.persistent_connection);
+    }
+
+    #[test]
+    fn a_statement_bound_is_declared_as_the_servers_own() {
+        // `max_execution_time`, which MySQL enforces itself. A driver that could not
+        // would say `false` rather than pretend.
+        assert!(MysqlDriver.capabilities().statement_timeout);
+    }
+
+    #[test]
+    fn error_3024_becomes_a_typed_timeout_that_names_the_limit() {
+        let error = map_query_error(
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 3024,
+                message: "Query execution was interrupted, maximum statement execution \
+                          time exceeded"
+                    .to_owned(),
+                state: "HY000".to_owned(),
+            }),
+            "SELECT SLEEP(3)",
+            Some(Duration::from_millis(500)),
+        );
+        match &error {
+            EngineError::Timeout { message, limit_ms } => {
+                assert_eq!(*limit_ms, Some(500));
+                assert!(message.contains("500 ms"), "{message}");
+                assert!(
+                    message.contains("maximum statement execution time"),
+                    "the server's own sentence is kept: {message}"
+                );
+            }
+            other => panic!("expected a typed timeout, got {other:?}"),
+        }
+        // A bound is the caller's, so a retry would only wait for it again.
+        assert_eq!(error.failure_kind(), FailureKind::Permanent);
+    }
+
+    #[test]
+    fn an_ordinary_server_error_is_not_mistaken_for_a_timeout() {
+        // 1317 is "query interrupted", which is what a `KILL QUERY` produces, and it
+        // must stay a query error: the user asked for the stop.
+        let error = map_query_error(
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1317,
+                message: "Query execution was interrupted".to_owned(),
+                state: "70100".to_owned(),
+            }),
+            "SELECT 1",
+            Some(Duration::from_millis(500)),
+        );
+        assert!(matches!(error, EngineError::Query { .. }), "{error:?}");
     }
 
     #[test]
@@ -1049,10 +1172,11 @@ mod tests {
         assert!(snippet(&"x".repeat(200)).ends_with('…'));
     }
 
-    // `map_query_error` is not unit-tested here: `mysql_async::Error` cannot be
-    // constructed outside the crate for most variants. It is exercised against a
-    // live server in `tests/integration.rs`, which produces a real authentication
-    // failure, a real syntax error, and a real KILL QUERY.
+    // `map_query_error` is unit-tested above for the one variant that can be built
+    // from outside the crate (`Error::Server`, which is what carries error 3024). It is
+    // exercised against a live server in `tests/integration.rs` too, which produces a
+    // real authentication failure, a real syntax error, a real `KILL QUERY`, and a real
+    // `max_execution_time` timeout.
     //
     // `classify_connect_error` and `connect_failure` are pinned in `src/tls.rs`
     // for the one variant that *can* be built from outside (a rejected

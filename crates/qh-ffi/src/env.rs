@@ -26,6 +26,15 @@ pub enum SettingError {
     /// these messages recognises the next one.
     #[error("{key} must be a whole number, got '{value}'")]
     NotANumber { key: String, value: String },
+
+    /// A whole number was read, and it was negative.
+    ///
+    /// Its own variant because it is a different mistake from a typo: the caller
+    /// typed a number, and the number means the opposite of what the setting can
+    /// be. Refused by name rather than floored, so a bound cannot silently become
+    /// no bound.
+    #[error("{key} cannot be negative, got '{value}'")]
+    Negative { key: String, value: i64 },
 }
 
 /// Every setting this engine reads.
@@ -97,6 +106,24 @@ impl Settings {
         })
     }
 
+    /// A whole number that must not be negative.
+    ///
+    /// `0` is a real value and not an absence: `STATEMENT_TIMEOUT_MS=0` means "no
+    /// bound", which is the engine's default. A negative number is refused by name
+    /// rather than floored, because flooring it would turn the bound the caller
+    /// asked for into no bound at all — the opposite of what a safety setting is
+    /// for.
+    pub fn non_negative(&self, key: &str, default: i64) -> Result<i64, SettingError> {
+        let value = self.number(key, default)?;
+        if value < 0 {
+            return Err(SettingError::Negative {
+                key: key.to_owned(),
+                value,
+            });
+        }
+        Ok(value)
+    }
+
     /// A boolean setting: `1/true/yes/on` and `0/false/no/off`, case-insensitive.
     ///
     /// A blank value, or anything else unrecognised, keeps `default` — so only the
@@ -152,6 +179,29 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "PORT must be a whole number, got 'not-a-number'"
+        );
+    }
+
+    #[test]
+    fn a_non_negative_setting_refuses_a_negative_one_by_name() {
+        let env = settings(&[
+            ("STATEMENT_TIMEOUT_MS", "60000"),
+            ("ZERO", "0"),
+            ("NEGATIVE", "-1"),
+            ("BROKEN", "soon"),
+        ]);
+        assert_eq!(env.non_negative("STATEMENT_TIMEOUT_MS", 0).unwrap(), 60_000);
+        // Zero is a value, not an absence: it is how "no bound" is spelled.
+        assert_eq!(env.non_negative("ZERO", 99).unwrap(), 0);
+        assert_eq!(env.non_negative("ABSENT", 99).unwrap(), 99);
+        assert_eq!(
+            env.non_negative("NEGATIVE", 0).unwrap_err().to_string(),
+            "NEGATIVE cannot be negative, got '-1'"
+        );
+        // A typo is still the number reader's refusal.
+        assert_eq!(
+            env.non_negative("BROKEN", 0).unwrap_err().to_string(),
+            "BROKEN must be a whole number, got 'soon'"
         );
     }
 

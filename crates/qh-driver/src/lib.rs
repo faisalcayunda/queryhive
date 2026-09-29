@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
@@ -160,6 +161,15 @@ pub struct Capabilities {
     /// Trino does not: each query is an HTTP exchange. Anything that assumed a
     /// socket — an idle timeout, a keepalive, a pool — must ask first.
     pub persistent_connection: bool,
+    /// Whether the driver can bound a statement's run time **on the server**.
+    ///
+    /// `true` means `ExecuteOptions::statement_timeout` is enforced by the
+    /// server's own mechanism, and a statement that runs past it comes back as
+    /// [`qh_core::EngineError::Timeout`] rather than hanging. `false` is a driver
+    /// saying it cannot, which is a fact the UI must report rather than paper
+    /// over with a local timer: a local timeout stops reading, not the work, and
+    /// the query keeps running and holding its resources.
+    pub statement_timeout: bool,
 }
 
 /// How to run one statement.
@@ -174,6 +184,16 @@ pub struct ExecuteOptions {
     /// `LIMIT`: the row count the grid shows must never change the query that
     /// runs, which is a rule the Python engine kept and the README states.
     pub row_limit: Option<usize>,
+    /// Stop the statement after this long, **on the server**.
+    ///
+    /// Each driver translates this into its own mechanism — PostgreSQL's
+    /// `statement_timeout`, Trino's `query_max_run_time`, MySQL's
+    /// `max_execution_time` — so a statement that overruns is cancelled and its
+    /// resources released even if this process is gone. `None` leaves the
+    /// server's own default in place, which is normally no limit. A driver whose
+    /// [`Capabilities::statement_timeout`] is `false` ignores it, and the caller
+    /// is expected to have asked first.
+    pub statement_timeout: Option<Duration>,
 }
 
 /// What the objects grid shows for one level.
@@ -581,6 +601,7 @@ mod tests {
                 levels: vec![BrowseLevel::Schema, BrowseLevel::Table],
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: true,
+                statement_timeout: true,
             }
         }
 
@@ -604,6 +625,7 @@ mod tests {
                 levels: vec![BrowseLevel::Schema, BrowseLevel::Table],
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: true,
+                statement_timeout: true,
             }
         }
 
@@ -798,6 +820,22 @@ mod tests {
         // Defaulting to Disable would silently talk in clear to a server that
         // offered TLS.
         assert_eq!(TlsMode::default(), TlsMode::Prefer);
+    }
+
+    #[test]
+    fn execute_options_default_to_no_statement_bound() {
+        // The engine's `STATEMENT_TIMEOUT_MS` default is 0, which is this `None`:
+        // a caller that says nothing gets the server's own default, so the CLI and
+        // the golden corpus behave exactly as they did before the bound existed.
+        assert_eq!(ExecuteOptions::default().statement_timeout, None);
+        let bounded = ExecuteOptions {
+            statement_timeout: Some(Duration::from_millis(1_500)),
+            ..ExecuteOptions::default()
+        };
+        assert_eq!(
+            bounded.statement_timeout,
+            Some(Duration::from_millis(1_500))
+        );
     }
 
     #[test]

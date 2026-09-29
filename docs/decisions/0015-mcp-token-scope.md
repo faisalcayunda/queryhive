@@ -91,9 +91,11 @@ Rincian yang mengikat:
 - **`mcp_token` adalah tabel baru tanpa sync meta penuh.** Revocation adalah `revoked_at`, bukan
   tombstone, supaya `list` masih bisa melaporkan token yang sudah dicabut. `deleted_at` ada untuk
   konvensi tabel dan purge di masa depan, bukan untuk mencabut.
-- **Scope tidak membatasi SQL.** Sebuah token dengan `preview` bisa menjalankan SQL apa pun yang
-  diterima server, termasuk DDL. Batas read-only yang sesungguhnya adalah pekerjaan engine (Fase 3,
-  Safe Mode); dokumen ini hanya memastikan MCP tidak menambah jalur tulis baru.
+- **Scope tidak membatasi SQL, dan sekarang ditutup di lapisan lain.** Sebuah token dengan `preview`
+  bisa menjalankan SQL apa pun yang diterima server, termasuk DDL — dokumen ini hanya memastikan MCP
+  tidak menambah jalur tulis baru. Batas read-only yang sesungguhnya mendarat bersama Fase 3:
+  `SAFE_MODE` ditegakkan di engine (`docs/decisions/0017-safe-mode.md`), dan server MCP kini
+  menambahkan `SAFE_MODE=read_only` pada **setiap** panggilan, apa pun tingkat koneksinya.
 - **Server memakai `KeychainStore` langsung.** Seam `CREDENTIAL_STORE=memory` milik perintah
   `credential` tidak dipakai MCP, jadi pengujian otomatis hanya mencakup tool yang tidak membaca
   password; jalur password diuji lewat penerimaan hidup dengan koneksi tanpa password (Trino dev).

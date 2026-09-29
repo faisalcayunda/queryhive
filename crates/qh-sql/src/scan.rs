@@ -21,6 +21,19 @@ pub struct Scan {
     /// The first bare keyword, uppercased, with leading whitespace and comments
     /// skipped. `Some("SELECT")` for `/* c */ select 1`.
     pub leading_keyword: Option<String>,
+    /// Every bare word, uppercased, in order.
+    ///
+    /// A word is a run of letters, digits and `_` that starts with a letter or `_`
+    /// and is **outside** a literal, a quoted identifier, a comment or a
+    /// dollar-quoted block — the same places [`Scan::separators`] ignores. It is
+    /// what lets [`crate::classify`] look for a data-modifying keyword anywhere in
+    /// a statement without a second scanner that could disagree with this one.
+    ///
+    /// Digits and `_` are part of a word, so `updated_at` is one word
+    /// (`UPDATED_AT`) and not `UPDATE` followed by junk. That is deliberate: a
+    /// keyword match must be exact to be safe, and a column whose name merely
+    /// contains a keyword is not that keyword.
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +102,15 @@ pub fn scan(sql: &str) -> Scan {
                     } else {
                         index += 1;
                     }
+                }
+                byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                    let start = index;
+                    while index < bytes.len()
+                        && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                    {
+                        index += 1;
+                    }
+                    scan.keywords.push(sql[start..index].to_ascii_uppercase());
                 }
                 _ => {
                     index += 1;
@@ -363,6 +385,29 @@ mod tests {
         assert!(scan("SELECT 1 -- note;").ends_with_terminator);
         assert!(!scan("SELECT 1 -- note").ends_with_terminator);
         assert!(!scan("SELECT 'a;b;'").ends_with_terminator);
+    }
+
+    #[test]
+    fn bare_words_are_collected_from_syntax_but_not_from_text() {
+        // The words a classifier may act on: exact, uppercased, and only where they
+        // are syntax.
+        assert_eq!(
+            scan("select * from t where updated_at > 1").keywords,
+            vec!["SELECT", "FROM", "T", "WHERE", "UPDATED_AT"]
+        );
+        // A `;` and a keyword inside a literal, a quoted identifier, a comment and a
+        // dollar-quoted body are all text, so none of them is a word.
+        assert_eq!(
+            scan("SELECT 'DROP TABLE', \"delete\", `insert` /* update */ -- merge\n").keywords,
+            vec!["SELECT"]
+        );
+        assert_eq!(scan("DO $body$ DELETE FROM t; $body$").keywords, vec!["DO"]);
+        // Digits and underscores stay inside a word, so a column named `drop2` and a
+        // table named `created_at` are not `DROP` or `CREATE`.
+        assert_eq!(
+            scan("select drop2, created_at").keywords,
+            vec!["SELECT", "DROP2", "CREATED_AT"]
+        );
     }
 
     #[test]

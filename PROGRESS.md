@@ -40,11 +40,17 @@
 > Restore tab dibuktikan pada bundel sungguhan lewat AppleScript quit, bukan hanya lewat render
 > offscreen. Seluruh pekerjaan Fase 0 + Fase 1 **sudah di-commit**.
 >
-> **Status 29 Sep 2026 (lanjutan):** Fase 2 (MCP server read-only) mendarat di ruang kerja yang sama
-> dan **belum di-commit**. Gate: `cargo test --workspace` **636 lulus / 0 gagal**, `swift test`
+> **Status 29 Sep 2026 (lanjutan):** Fase 2 (MCP server read-only) mendarat dan **sudah di-commit**
+> (`8c1dfec`). Gate: `cargo test --workspace` **636 lulus / 0 gagal**, `swift test`
 > **169 / 0 gagal**, `cargo deny check licenses` `licenses ok`, `./app/build.sh` menaruh
 > `queryhive-mcp` di bundle. Penerimaan hidup pada Trino 483 lulus; klien MCP-nya digulung sendiri,
 > bukan pihak ketiga. Detailnya di §"MCP server read-only" di bawah.
+>
+> **Status 29 Sep 2026 (Fase 3):** timeout server-enforced dan Safe Mode tiga tingkat mendarat, gate
+> `cargo test --workspace` **674 lulus / 0 gagal** dan `swift test` **169 / 0 gagal**. Timeout diuji
+> hidup terhadap PostgreSQL 17 lokal (`pg_sleep(5)` di bawah 500 ms kembali dalam 1,25 detik dengan
+> error bertipe). MySQL dan Trino belum diuji hidup karena mesin podman hilang. Detailnya di
+> §"Keselamatan eksekusi" di bawah.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -1862,6 +1868,52 @@ Verifikasi berat 29 Sep 2026 (sesudah MCP): `cargo fmt --all --check` ✅,
 `swift build && swift test` → **169 tes / 0 gagal** ✅, `./app/build.sh` →
 `Built dist/QueryHive.app` dengan `queryhive-mcp` di `Contents/MacOS/` ✅. **Nol commit** — pohon
 sengaja ditinggalkan kotor untuk ditinjau orkestrator.
+
+### Keselamatan eksekusi: timeout server-enforced dan Safe Mode di engine (29 Sep 2026)
+
+**Fase 3 mendarat, dan separuhnya dikerjakan dua kali.** Subagent Fase 3 mengerjakan sisi engine lalu
+**mati di tengah karena disk penuh** — `database or disk is full` — sebelum menulis dokumen dan
+sebelum menyentuh UI app. Yang sudah ditulisnya utuh dan saya verifikasi, bukan saya tulis ulang:
+timeout di trait driver dan ketiga driver, classifier Safe Mode, gerbang di `commands.rs`, dan
+`SAFE_MODE=read_only` untuk MCP. Sisa pekerjaannya — editor koneksi, tab Data, dua ADR, plan,
+invariant, dan gate — saya selesaikan sendiri. Itu dicatat di sini karena "subagent selesai" bukan
+bukti, dan yang membuktikan justru gate yang dijalankan sesudahnya.
+
+**Timeout adalah mekanisme server, bukan timer lokal.** `ExecuteOptions::statement_timeout` dan
+`Capabilities::statement_timeout`; PostgreSQL memakai `statement_timeout`, Trino `query_max_run_time`
+lewat `X-Trino-Session`, MySQL `max_execution_time`. Batas yang terlampaui datang sebagai
+`EngineError::Timeout` yang menyebut batasnya. Default engine `0` = tanpa batas, jadi CLI dan korpus
+golden tidak berubah; app memberi default 60.000 ms yang bertahan di `UserDefaults`.
+
+**Satu detail yang sengaja tidak disederhanakan.** PostgreSQL `SQLSTATE 57014` juga dipakai
+`pg_cancel_backend`, jadi driver memeriksa kode **dan** pesannya; mencocokkan kode saja akan membaca
+cancel biasa sebagai timeout. Dan MySQL tidak menerapkan `max_execution_time` pada write — itu
+dinyatakan di doc modulnya, bukan disembunyikan.
+
+**Safe Mode tiga tingkat, ditegakkan di engine.** `crates/qh-sql/src/classify.rs` mengklasifikasi
+read-only/DML/DDL/Unknown dengan aturan konservatif: yang tidak dikenali diperlakukan sebagai write
+dan ditolak. Gerbangnya ada di `preview`, `explain`, `export`, `count` dan `to_table`, dan
+`to_table` diklasifikasi pada statement yang benar-benar dikirim, jadi mode `replace` gagal pada
+koneksi read-only **sebelum** connect. Tingkatnya disimpan per koneksi dan dipilih di editor; MCP
+selalu `read_only`.
+
+**Verifikasi.** `safe_mode.rs` membuktikan penolakan terjadi sebelum engine connect lewat
+`CountingEngine` (`connects() == 0`), jadi tidak butuh server. Timeout diuji **hidup** terhadap
+PostgreSQL 17 lokal — cluster sementara di `127.0.0.1:55432`, karena mesin podman hilang — dan
+hasilnya: `SELECT pg_sleep(5)` di bawah `STATEMENT_TIMEOUT_MS=500` kembali dalam **1,25 detik** dengan
+pesan `the statement exceeded the 500 ms statement timeout and was cancelled by the server: canceling
+statement due to statement timeout`, sementara tanpa batas `pg_sleep(1)` selesai (`elapsed_ms: 1007`).
+Empat tes `real_server.rs` lulus dengan `QH_TEST_POSTGRES=1`, termasuk
+`a_count_that_times_out_names_the_bound_and_invents_no_number`.
+
+**Yang belum, dan tidak diklaim.** MySQL dan Trino tidak diuji hidup pada Fase 3 — mesin podman sudah
+tidak ada saat verifikasi, jadi kedua mekanisme itu hanya terbukti lewat uji unit pemetaan error di
+drivernya masing-masing.
+
+Verifikasi berat 29 Sep 2026 (sesudah Fase 3): `cargo fmt --all --check` ✅,
+`cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →
+**674 lulus / 0 gagal** ✅, `swift build && swift test` → **169 tes / 0 gagal** ✅. Keputusan di
+`docs/decisions/0016-statement-timeout.md` dan `0017-safe-mode.md`.
 
 ## Perkakas lokal (sengaja tidak masuk repo)
 

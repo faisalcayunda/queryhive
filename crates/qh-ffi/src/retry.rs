@@ -452,6 +452,7 @@ mod tests {
                 levels: vec![BrowseLevel::Table],
                 objects_columns: vec!["Name".to_owned()],
                 persistent_connection: self.persistent,
+                statement_timeout: true,
             }
         }
 

@@ -7,7 +7,7 @@
 > **Status:** Fase 0 dan Fase 1 selesai, keduanya diukur dan dicatat di §2 dan §3. Fase 1 ditutup
 > 29 Sep 2026 oleh session restore (§3). Fase 2 mendarat 29 Sep 2026 dan diukur di §4, dengan satu
 > caveat yang disebut di sana (kliennya digulung sendiri, bukan klien MCP pihak ketiga). Fase 3
-> sampai 5 belum disentuh.
+> mendarat pada tanggal yang sama dan diukur di §5. Fase 4 sampai 5 belum disentuh.
 
 ## 0. Prinsip dan aturan gate
 
@@ -465,6 +465,62 @@ waktu yang sama, dan laporkan hasilnya sebagai perkiraan bila batas itu tercapai
 **Kriteria selesai Fase 3.** Tes yang membuktikan timeout memicu error bertipe dengan pesan yang
 menyebut batas waktunya, bukan hang. Tes yang membuktikan safe mode menolak `DROP TABLE` di engine
 dan bukan hanya di UI. Setting timeout bisa diubah dan bertahan setelah restart.
+
+**Hasil 29 Sep 2026.** Ketiga item mendarat dan kriteria selesainya dijalankan.
+
+**3.1 Timeout statement.** `ExecuteOptions` bertambah `statement_timeout: Option<Duration>` dan
+`Capabilities` bertambah `statement_timeout: bool` (`crates/qh-driver/src/lib.rs`). Ketiga driver
+memakai mekanisme servernya sendiri, bukan timer lokal: PostgreSQL `statement_timeout` (SQLSTATE
+`57014`, diperiksa bersama pesannya karena kode itu juga dipakai cancel biasa), Trino
+`query_max_run_time` lewat `X-Trino-Session` pada POST statement (`EXCEEDED_TIME_LIMIT` dan
+`QUERY_EXCEEDED_MAX_EXECUTION_TIME`), MySQL `max_execution_time` (error `3024`, dan **tidak** mencakup
+write — dinyatakan di doc modulnya, bukan disembunyikan). Batas yang terlampaui datang sebagai
+`EngineError::Timeout` yang menyebut batasnya (`crates/qh-core/src/error.rs`). Setelan
+`STATEMENT_TIMEOUT_MS`: `0` berarti tanpa batas, dan nilai negatif ditolak dengan menyebut namanya.
+Keputusannya di `docs/decisions/0016-statement-timeout.md`.
+
+**3.2 Safe Mode.** Tiga tingkat `full`/`no_ddl`/`read_only`, diklasifikasi di
+`crates/qh-sql/src/classify.rs` dan ditegakkan di engine untuk `preview`, `explain`, `export`, `count`
+dan `to_table`. `to_table` diklasifikasi pada statement yang benar-benar dikirim — `DROP`/`CREATE
+TABLE AS`/`INSERT` hasil bangunan perintah — jadi mode `replace` gagal pada koneksi read-only
+**sebelum** connect. Aturannya konservatif: yang tidak bisa dikenali diperlakukan sebagai write dan
+ditolak di semua mode selain `full`. Tingkatnya disimpan per koneksi (`Connection.safeMode`, dibaca
+`decodeIfPresent` sehingga berkas lama tetap `full`) dan dipilih di editor koneksi; server MCP selalu
+menambahkan `SAFE_MODE=read_only`, yang menutup celah yang ADR-0015 nyatakan terbuka.
+Keputusannya di `docs/decisions/0017-safe-mode.md`.
+
+**3.3 Batas untuk `count`.** `count` memakai batas yang sama dan, pada timeout, melaporkan galat
+bertipe alih-alih angka. Tidak ada driver di ruang kerja ini yang bisa memberi perkiraan murah untuk
+sebuah *statement* (`reltuples`, `TABLE_ROWS` dan `$partitions` menjawab untuk *tabel*), jadi
+perkiraan tidak tersedia dan itu dikatakan alih-alih dikarang.
+
+**Verifikasi, dan bagaimana.** `crates/qh-ffi/tests/safe_mode.rs` membuktikan penolakan terjadi
+**sebelum** engine connect, jadi ia tidak butuh server: sebuah `CountingEngine` yang gagal saat
+connect dipakai, dan `connects() == 0` adalah assertionnya. Cakupannya: `read_only` menolak `DROP`
+dan `to_table replace`; `no_ddl` menolak DDL tetapi membiarkan write sampai connect; `read_only`
+membiarkan read sampai connect; `full` tidak menolak apa pun; `SAFE_MODE` yang tidak dikenal ditolak
+dengan menyebut namanya; `count` digerbangi pada statement pemanggil dan bukan pada pembungkusnya;
+script multi-statement menyebut nomor statement yang ditolak.
+
+Timeout diuji **hidup** terhadap PostgreSQL 17 lokal — cluster sementara di `127.0.0.1:55432`,
+karena mesin podman hilang sebelum verifikasi. Hasilnya: `SELECT pg_sleep(5)` di bawah
+`STATEMENT_TIMEOUT_MS=500` kembali dalam **1,25 detik** (bukan 5) dengan pesan
+
+    the statement exceeded the 500 ms statement timeout and was cancelled by the server:
+    canceling statement due to statement timeout
+
+dan tanpa batas, `SELECT pg_sleep(1)` selesai dengan `elapsed_ms: 1007`. Empat tes
+`crates/qh-ffi/tests/real_server.rs` dijalankan dengan `QH_TEST_POSTGRES=1` terhadap cluster yang sama
+dan lulus, termasuk `a_count_that_times_out_names_the_bound_and_invents_no_number`.
+
+**Setelan bertahan setelah restart.** `statementTimeoutMS` hidup di `UserDefaults` dengan default
+60.000 ms, dan `object(forKey:)` dipakai alih-alih `integer(forKey:)` karena `0` di sini adalah nilai
+nyata — "tanpa batas" — bukan ketiadaan.
+
+**Yang belum.** MySQL dan Trino tidak diuji hidup pada Fase 3: mesin podman sudah tidak ada saat
+verifikasi (hilang bersama peristiwa disk penuh), jadi `max_execution_time` dan `query_max_run_time`
+hanya terbukti lewat uji unit pemetaan error di masing-masing driver, bukan lewat larian yang bisa
+dilihat. Keduanya tercatat sebagai belum di sini, bukan sebagai lulus.
 
 ## 6. Fase 4: editor harian
 

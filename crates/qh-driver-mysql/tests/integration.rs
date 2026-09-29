@@ -12,11 +12,11 @@
 //! rules given a column type, but whether MySQL actually reports those types, and
 //! whether `KILL QUERY` really interrupts a statement, are facts about the wire.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::Queryable;
-use qh_core::{FailureKind, Value};
+use qh_core::{EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions, ObjectPath, Session,
     TlsMode,
@@ -359,6 +359,7 @@ async fn a_row_limit_stops_reading_without_changing_the_statement() {
     let options = ExecuteOptions {
         max_batch_rows: None,
         row_limit: Some(10),
+        statement_timeout: None,
     };
     let mut cursor = session
         .execute("SELECT id FROM wide_500k ORDER BY id", &options)
@@ -799,4 +800,56 @@ async fn cipher_in_use(session: &mut Box<dyn Session>) -> String {
         Some(Value::Text(value)) => value.to_string(),
         other => panic!("expected the variable's value, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_statement_timeout_is_a_typed_error_that_names_the_limit() {
+    // MySQL's own bound is `max_execution_time`, which it enforces for a read-only
+    // `SELECT`. `SELECT SLEEP(3)` is deliberately not used here: MySQL does not apply
+    // the bound to it (measured), so the query below is a genuine scan — the
+    // Cartesian product of the server's own column catalogue — which the server does
+    // interrupt with error 3024.
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let started = Instant::now();
+    let mut cursor = session
+        .execute(
+            "SELECT COUNT(*) FROM information_schema.columns a \
+             CROSS JOIN information_schema.columns b \
+             CROSS JOIN information_schema.columns c",
+            &ExecuteOptions {
+                statement_timeout: Some(Duration::from_millis(300)),
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("execute");
+    let error = loop {
+        match cursor.next_batch(10).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("the scan finished instead of timing out"),
+            Err(error) => break error,
+        }
+    };
+    let elapsed = started.elapsed();
+
+    match &error {
+        EngineError::Timeout { message, limit_ms } => {
+            assert_eq!(*limit_ms, Some(300));
+            assert!(message.contains("300 ms"), "{message}");
+            // The server's own sentence travels with it.
+            assert!(
+                message.contains("maximum statement execution time"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a typed timeout, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the timeout took {elapsed:?}"
+    );
 }

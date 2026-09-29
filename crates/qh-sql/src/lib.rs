@@ -17,10 +17,14 @@
 
 #![forbid(unsafe_code)]
 
+mod classify;
 mod ident;
 mod scan;
 mod wrap;
 
+pub use classify::{
+    check, classify, statements, SafeMode, SafeModeError, StatementKind, SAFE_MODES,
+};
 pub use ident::{quote_ident, IdentStyle};
 pub use scan::{has_significant_text, scan, statement_count, Scan};
 pub use wrap::{count_statement, strip_terminator, SqlError};

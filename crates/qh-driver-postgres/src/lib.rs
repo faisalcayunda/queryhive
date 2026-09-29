@@ -88,6 +88,7 @@ pub mod tls;
 
 use std::error::Error as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -153,6 +154,8 @@ impl Driver for PostgresDriver {
                 .map(|name| (*name).to_owned())
                 .collect(),
             persistent_connection: true,
+            // The server's own `statement_timeout` session parameter.
+            statement_timeout: true,
         }
     }
 
@@ -268,6 +271,10 @@ where
         client,
         cancel_token,
         config: config.clone(),
+        // Nothing has been asked of the server yet, so the session must not send a
+        // `SET statement_timeout = 0` on its first statement and override a bound the
+        // server's own configuration set.
+        statement_timeout: None,
     }))
 }
 
@@ -277,6 +284,11 @@ struct PostgresSession {
     /// Sends the `CancelRequest` on its own connection.
     cancel_token: tokio_postgres::CancelToken,
     config: ConnectionConfig,
+    /// The `statement_timeout` this session last sent to the server.
+    ///
+    /// Kept so a bound is sent when it changes and not on every statement: `SET` is a
+    /// round trip, and an unchanged value is already in force on the connection.
+    statement_timeout: Option<Duration>,
 }
 
 impl PostgresSession {
@@ -296,7 +308,7 @@ impl PostgresSession {
             self.client
                 .simple_query_raw(sql)
                 .await
-                .map_err(|error| map_query_error(error, sql))?,
+                .map_err(|error| map_query_error(error, sql, None))?,
         );
         let mut rows = Vec::new();
         while let Some(message) = stream.next().await {
@@ -311,7 +323,7 @@ impl PostgresSession {
                 }
                 // CommandComplete and RowDescription carry no data.
                 Ok(_) => {}
-                Err(error) => return Err(map_query_error(error, sql)),
+                Err(error) => return Err(map_query_error(error, sql, None)),
             }
         }
         Ok(rows)
@@ -335,6 +347,17 @@ impl Session for PostgresSession {
         sql: &str,
         options: &ExecuteOptions,
     ) -> Result<Box<dyn Cursor>, EngineError> {
+        // The bound is a server setting, so it has to reach the server before the
+        // statement does. Applied only when it changed: `SET` is a round trip, and the
+        // value already in force is already in force.
+        apply_statement_timeout(
+            &self.client,
+            self.statement_timeout,
+            options.statement_timeout,
+        )
+        .await?;
+        self.statement_timeout = options.statement_timeout;
+
         // Described first so the columns arrive with their types. A statement
         // that cannot be described is reported as the server reports it — which
         // is also how a multi-statement script is refused.
@@ -342,14 +365,14 @@ impl Session for PostgresSession {
             .client
             .prepare(sql)
             .await
-            .map_err(|error| map_describe_error(error, sql))?;
+            .map_err(|error| map_describe_error(error, sql, options.statement_timeout))?;
         let (columns, type_names) = describe_columns(&statement);
 
         let stream = self
             .client
             .simple_query_raw(sql)
             .await
-            .map_err(|error| map_query_error(error, sql))?;
+            .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
 
         Ok(Box::new(PostgresCursor {
             columns,
@@ -358,6 +381,7 @@ impl Session for PostgresSession {
             row_limit: options.row_limit,
             emitted: 0,
             finished: false,
+            timeout: options.statement_timeout,
         }))
     }
 
@@ -454,6 +478,8 @@ struct PostgresCursor {
     row_limit: Option<usize>,
     emitted: usize,
     finished: bool,
+    /// The bound this statement was started under, so a server timeout names it.
+    timeout: Option<Duration>,
 }
 
 #[async_trait]
@@ -490,7 +516,7 @@ impl Cursor for PostgresCursor {
                 Some(Ok(_)) => continue,
                 Some(Err(error)) => {
                     self.finished = true;
-                    return Err(map_query_error(error, ""));
+                    return Err(map_query_error(error, "", self.timeout));
                 }
                 None => {
                     self.finished = true;
@@ -665,7 +691,11 @@ fn is_tls_failure(error: &tokio_postgres::Error) -> bool {
 }
 
 /// Map a failure while describing a statement.
-fn map_describe_error(error: tokio_postgres::Error, sql: &str) -> EngineError {
+fn map_describe_error(
+    error: tokio_postgres::Error,
+    sql: &str,
+    timeout: Option<Duration>,
+) -> EngineError {
     // A multi-statement script is the one case worth naming, because the server's
     // own message does not say what to do about it.
     if let Some(db_error) = error.as_db_error() {
@@ -678,12 +708,33 @@ fn map_describe_error(error: tokio_postgres::Error, sql: &str) -> EngineError {
             };
         }
     }
-    map_query_error(error, sql)
+    map_query_error(error, sql, timeout)
+}
+
+/// Whether the server's error is the one `statement_timeout` raises.
+///
+/// The SQLSTATE alone is not enough: `57014` (`query_canceled`) is also what a
+/// `CancelRequest` produces, and the two mean opposite things to a user — one is a
+/// limit being reported, the other is the stop they asked for. The server's own
+/// sentence is what tells them apart, and it is the part this reads.
+fn is_statement_timeout(db_error: &tokio_postgres::error::DbError) -> bool {
+    db_error.code().code() == "57014"
+        && db_error
+            .message()
+            .to_ascii_lowercase()
+            .contains("statement timeout")
 }
 
 /// Map a failure the server reported while running a statement.
-fn map_query_error(error: tokio_postgres::Error, sql: &str) -> EngineError {
+fn map_query_error(
+    error: tokio_postgres::Error,
+    sql: &str,
+    timeout: Option<Duration>,
+) -> EngineError {
     if let Some(db_error) = error.as_db_error() {
+        if is_statement_timeout(db_error) {
+            return EngineError::statement_timeout(timeout, db_error.message());
+        }
         return EngineError::Query {
             message: match sql.is_empty() {
                 true => db_error.message().to_owned(),
@@ -710,6 +761,32 @@ fn map_query_error(error: tokio_postgres::Error, sql: &str) -> EngineError {
         position: None,
         kind: FailureKind::Transient,
     }
+}
+
+/// Put `wanted` in force on the server, when it is not there already.
+///
+/// PostgreSQL's server-side bound is the `statement_timeout` session parameter, and `0`
+/// is its own value for "no bound". Sending the change with `SET` is what makes the
+/// limit the server's: a statement that overruns is cancelled by the backend and its
+/// resources released, whichever client asked for it.
+async fn apply_statement_timeout(
+    client: &Client,
+    current: Option<Duration>,
+    wanted: Option<Duration>,
+) -> Result<(), EngineError> {
+    if current == wanted {
+        return Ok(());
+    }
+    let milliseconds = wanted.map_or(0, |limit| {
+        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
+    });
+    let statement = format!("SET statement_timeout = {milliseconds}");
+    client
+        .batch_execute(&statement)
+        .await
+        // The bound is in force from here, so a failure setting it is reported as what
+        // it is: the timeout is not on, and the caller must not be told it is.
+        .map_err(|error| map_query_error(error, &statement, wanted))
 }
 
 /// A short, single-line rendering of a statement for an error message.

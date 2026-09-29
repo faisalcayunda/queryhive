@@ -548,6 +548,7 @@ async fn the_callers_row_ceiling_is_honoured_across_pages() {
             &ExecuteOptions {
                 max_batch_rows: None,
                 row_limit: Some(7),
+                statement_timeout: None,
             },
         )
         .await
@@ -739,5 +740,54 @@ async fn require_never_connects_to_a_coordinator_without_tls() {
         matches!(outcome, Err(qh_core::EngineError::Connect { .. })),
         "require over a plaintext coordinator should fail, got {:?}",
         outcome.is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_statement_timeout_is_a_typed_error_that_names_the_limit() {
+    // Trino's bound is the `query_max_run_time` session property, sent on the POST. The
+    // error arrives on a page, like every other Trino failure, so the assertion is on
+    // `next_batch` and not on `execute`. Measured on 483: a two-second bound produced
+    // `EXCEEDED_TIME_LIMIT` at about 2.8 s, which is the coordinator's own check
+    // interval and not the bound itself.
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+
+    let started = Instant::now();
+    let mut cursor = session
+        .execute(
+            "SELECT count(*) FROM tpch.tiny.lineitem a \
+             CROSS JOIN tpch.tiny.lineitem b \
+             CROSS JOIN tpch.tiny.lineitem c",
+            &ExecuteOptions {
+                statement_timeout: Some(Duration::from_secs(2)),
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("execute returns while the query is still queued");
+    let error = loop {
+        match cursor.next_batch(16).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("the cross join finished instead of timing out"),
+            Err(error) => break error,
+        }
+    };
+    let elapsed = started.elapsed();
+
+    match &error {
+        qh_core::EngineError::Timeout { message, limit_ms } => {
+            assert_eq!(*limit_ms, Some(2_000));
+            assert!(message.contains("2000 ms"), "{message}");
+            // The coordinator's own sentence travels with it.
+            assert!(message.contains("maximum time limit"), "{message}");
+        }
+        other => panic!("expected a typed timeout, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the timeout took {elapsed:?}"
     );
 }

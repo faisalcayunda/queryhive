@@ -137,6 +137,9 @@ struct ConnectionEditorSheet: View {
     /// Postgres only, and the same deal one level up: draw a database level under the connection
     /// instead of starting at the schemas of the database named above.
     @State private var showAllDatabases = false
+    /// What the engine refuses on this connection. Chosen here, enforced there: the picker
+    /// only records the level, and `AppModel.connectionEnvironment` sends it as `SAFE_MODE`.
+    @State private var safeMode = ConnectionSafeMode.full
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
     @State private var testProcess: (any EngineRun)?
@@ -158,7 +161,7 @@ struct ConnectionEditorSheet: View {
             || kind != original.kind || host != original.host || port != original.port
             || scheme != original.scheme || sslmode != original.sslmode
             || user != original.user || database != original.database || schema != original.schema
-            || verifyTLS != original.verify
+            || verifyTLS != original.verify || safeMode != original.safeMode
     }
 
     /// Name, host and user are what the engine cannot invent, and Postgres cannot open a
@@ -495,6 +498,21 @@ struct ConnectionEditorSheet: View {
                               + "answer lives on the HTTPS transport rather than here.")
                 }
             }
+
+            // Last, because it is about what may run rather than how to reach the server. The
+            // engine enforces it and this picker only records the choice: the command line and
+            // the MCP server go through the same guard, and neither has this control.
+            LabeledField("Safe Mode") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Segmented(selection: $safeMode, options: ConnectionSafeMode.allCases) { $0.title }
+                    Text(safeMode.detail)
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .help("Refused by the engine, not by this window: a `read_only` connection refuses a write "
+                  + "even when the statement comes from the command line or an MCP client.")
         }
     }
 
@@ -641,6 +659,7 @@ struct ConnectionEditorSheet: View {
         verifyTLS = connection.verify
         showAllSchemas = connection.showAllSchemas
         showAllDatabases = connection.showAllDatabases
+        safeMode = connection.safeMode
     }
 
     private func save() {
@@ -660,7 +679,8 @@ struct ConnectionEditorSheet: View {
                                      schema: schema.trimmingCharacters(in: .whitespaces),
                                      verify: verifyTLS,
                                      showAllSchemas: showAllSchemas,
-                                     showAllDatabases: showAllDatabases)
+                                     showAllDatabases: showAllDatabases,
+                                     safeMode: safeMode)
         // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
         do {
             if !credential.isEmpty {
@@ -722,7 +742,8 @@ struct ConnectionEditorSheet: View {
             schema: schema.trimmingCharacters(in: .whitespaces),
             scheme: scheme,
             sslmode: sslmode,
-            verify: verifyTLS
+            verify: verifyTLS,
+            safeMode: safeMode.rawValue
         )
         var catalogs = 0
         var message: String?

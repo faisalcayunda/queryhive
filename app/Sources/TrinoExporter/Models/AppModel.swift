@@ -1824,6 +1824,23 @@ final class AppModel {
         didSet { UserDefaults.standard.set(recordsHistory, forKey: "recordsHistory") }
     }
 
+    /// How long a statement may run before the server stops it, in milliseconds.
+    ///
+    /// The engine's `STATEMENT_TIMEOUT_MS`; `0` means no bound. The default is a minute, which
+    /// is the one number here that is a judgement rather than a mechanism: a query that has run
+    /// for a minute against a database this app talks to is usually a mistake, and the Stop
+    /// button only stops the *reading*, not the work. Sixty seconds is long enough for an
+    /// honest report and short enough that a forgotten query does not hold a warehouse slot all
+    /// afternoon.
+    ///
+    /// `object(forKey:)` rather than `integer(forKey:)`: the latter answers 0 for a key that was
+    /// never written, and 0 here is a real setting — no bound — not the absence of one.
+    var statementTimeoutMS: Int = {
+        UserDefaults.standard.object(forKey: "statementTimeoutMS") as? Int ?? 60_000
+    }() {
+        didSet { UserDefaults.standard.set(statementTimeoutMS, forKey: "statementTimeoutMS") }
+    }
+
     /// Reads the engine's history into `historyEntries`, optionally narrowed to `search`.
     ///
     /// Fire and forget, like the write above, and it keeps the list it already had on a failure:
@@ -2216,7 +2233,8 @@ final class AppModel {
     /// back in an error message can never carry the secret.
     static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
                                       password: String?, database: String, schema: String,
-                                      scheme: String, sslmode: String, verify: Bool) -> [String: String] {
+                                      scheme: String, sslmode: String, verify: Bool,
+                                      safeMode: String) -> [String: String] {
         let transport = TrinoTransport(stored: scheme)
         return [
             "DB_KIND": kind.rawValue,
@@ -2249,6 +2267,10 @@ final class AppModel {
             // mode and not the fallback the user asked for. Every other transport keeps the
             // stored flag, `http` included — the engine ignores it in clear.
             "DB_INSECURE": kind == .trino && transport == .prefer ? "" : (verify ? "" : "1"),
+            // What the engine refuses, enforced there and not here: the CLI and the MCP
+            // server run the same guard, and neither has this picker. Sent for every
+            // driver, because the levels are about SQL and not about a server.
+            "SAFE_MODE": safeMode,
         ]
     }
 
@@ -2257,11 +2279,15 @@ final class AppModel {
                               user: connection.user, password: password,
                               database: connection.database, schema: connection.schema,
                               scheme: connection.scheme, sslmode: connection.sslmode,
-                              verify: connection.verify)
+                              verify: connection.verify, safeMode: connection.safeMode.rawValue)
     }
 
     /// The connection variables for a saved connection, Keychain read included. Shared by `run`
     /// and the target-option fetches so those cannot drift from what a run actually sends.
+    ///
+    /// The statement timeout is added here rather than at each run path: this is the one
+    /// function every path that runs caller SQL goes through, and a bound that reached
+    /// `preview` but not `count` would be a bound the user thinks they set.
     private func connectionEnvironment(_ connection: Connection) throws -> [String: String] {
         let password: String?
         do {
@@ -2269,7 +2295,9 @@ final class AppModel {
         } catch {
             throw EngineLaunchError(message: "Couldn't read the password for \(connection.name) from Keychain: \(error.localizedDescription)")
         }
-        return Self.connectionEnvironment(connection, password: password)
+        var env = Self.connectionEnvironment(connection, password: password)
+        env["STATEMENT_TIMEOUT_MS"] = String(statementTimeoutMS)
+        return env
     }
 
     /// Full environment for one export run: the connection plus the query, the destination and

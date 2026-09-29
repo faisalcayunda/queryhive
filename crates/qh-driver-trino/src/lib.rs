@@ -430,6 +430,8 @@ impl Driver for TrinoDriver {
             // No socket is kept between statements, so anything that assumed one
             // -- an idle timeout, a keepalive, a pool -- must ask first.
             persistent_connection: false,
+            // The `query_max_run_time` session property, sent on the statement's POST.
+            statement_timeout: true,
         }
     }
 
@@ -637,13 +639,23 @@ impl TrinoSession {
     /// holds, with no fallback of its own.
     ///
     /// Split out so `post` can try it once, decide, and try again if — and only
-    /// if — the peer turned out not to speak TLS.
-    async fn send_post(&self, sql: &str) -> Result<reqwest::Response, reqwest::Error> {
+    /// if — the peer turned out not to speak TLS. `session` is the
+    /// `X-Trino-Session` value that carries the statement's own bound, when it has
+    /// one; it belongs on the POST and nowhere else, because a session property is
+    /// read when the query is created.
+    async fn send_post(
+        &self,
+        sql: &str,
+        session: Option<&str>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let mut request = with_shared_headers(
             self.client.post(format!("{}/v1/statement", self.base)),
             &self.credentials,
         )
         .header("Content-Type", "text/plain");
+        if let Some(session) = session {
+            request = request.header("X-Trino-Session", session);
+        }
         if !self.catalog.is_empty() {
             request = request.header("X-Trino-Catalog", &self.catalog);
         }
@@ -658,8 +670,9 @@ impl TrinoSession {
     /// This is where [`TlsMode::Prefer`] settles the scheme, because it is the
     /// first request the session makes and the answer has to hold for every page
     /// after it.
-    async fn post(&mut self, sql: &str) -> Result<Page, EngineError> {
-        let response = match self.send_post(sql).await {
+    async fn post(&mut self, sql: &str, timeout: Option<Duration>) -> Result<Page, EngineError> {
+        let session = session_header(timeout);
+        let response = match self.send_post(sql, session.as_deref()).await {
             Ok(response) => response,
             // The one downgrade that is allowed, and only with a plaintext client
             // still in reserve: the coordinator answered the handshake with
@@ -671,7 +684,7 @@ impl TrinoSession {
                 self.fallback = None;
                 self.client = client_for(TlsMode::Disable, None)?;
                 self.base = with_scheme("http", &self.base);
-                self.send_post(sql)
+                self.send_post(sql, session.as_deref())
                     .await
                     .map_err(|error| EngineError::Connect {
                         message: format!("could not reach {}: {error}", self.base),
@@ -701,7 +714,7 @@ impl TrinoSession {
             // reason.
             if let Ok(page) = serde_json::from_str::<Page>(&text) {
                 if let Some(error) = page.error {
-                    return Err(map_error(error));
+                    return Err(map_error(error, timeout));
                 }
             }
             return Err(EngineError::Query {
@@ -720,7 +733,7 @@ impl TrinoSession {
         })?;
 
         if let Some(error) = page.error {
-            return Err(map_error(error));
+            return Err(map_error(error, timeout));
         }
         if let Some(running) = running_from(&page) {
             *self.running.lock().expect("running state") = Some(running);
@@ -783,7 +796,17 @@ fn running_from(page: &Page) -> Option<Running> {
 /// the data is wrong and repeating it will produce the same thing, so it is
 /// permanent. Everything else — internal errors, resource exhaustion — is
 /// transient, because those are the ones that can pass on a second attempt.
-fn map_error(error: WireError) -> EngineError {
+fn map_error(error: WireError, timeout: Option<Duration>) -> EngineError {
+    // The time bound comes first, because it is the one failure that is not the
+    // server's opinion of the statement. Trino 483 raises two names for it and both
+    // are read: `query_max_run_time` — the property this driver sets — produced
+    // `EXCEEDED_TIME_LIMIT` when measured against the dev coordinator, and
+    // `QUERY_EXCEEDED_MAX_EXECUTION_TIME` is the coordinator-config spelling of the
+    // same idea. Matching only the second would have missed every timeout this
+    // driver actually causes.
+    if is_timeout(&error) {
+        return EngineError::statement_timeout(timeout, &error.message);
+    }
     // Checked before `errorType`, because the name is more specific and the two
     // disagree: a cancelled query arrives as `USER_CANCELED` with
     // `errorType = USER_ERROR`. Verified against Trino 483 -- `DELETE` on the page
@@ -816,6 +839,24 @@ fn map_error(error: WireError) -> EngineError {
     }
 }
 
+/// Whether Trino is reporting that the query ran past its time bound.
+fn is_timeout(error: &WireError) -> bool {
+    matches!(
+        error.error_name.as_deref(),
+        Some("EXCEEDED_TIME_LIMIT" | "QUERY_EXCEEDED_MAX_EXECUTION_TIME")
+    )
+}
+
+/// The `X-Trino-Session` value that bounds a statement's run time.
+///
+/// `query_max_run_time` is a session property, and it is sent on the statement's POST
+/// because that is when the coordinator reads session properties. The value is
+/// milliseconds, which Trino's duration parser accepts (`1500ms` was measured against
+/// 483, alongside `2s`).
+fn session_header(timeout: Option<Duration>) -> Option<String> {
+    timeout.map(|limit| format!("query_max_run_time={}ms", limit.as_millis()))
+}
+
 #[async_trait]
 impl Session for TrinoSession {
     fn capabilities(&self) -> Capabilities {
@@ -834,7 +875,7 @@ impl Session for TrinoSession {
         // Returns as soon as the POST answers, which is normally while the query
         // is still QUEUED. See the module note: waiting here for the columns would
         // mean waiting for the whole query.
-        let page = self.post(sql).await?;
+        let page = self.post(sql, options.statement_timeout).await?;
         // Recorded here rather than in the cursor: the id arrives with the POST's
         // answer and belongs to the session, which is what `query_id` is asked of.
         if page.id.is_some() {
@@ -868,6 +909,7 @@ impl Session for TrinoSession {
             // The statement's own answer is the first page, and it is already in
             // `pending`, so the pause is only spent once a poll comes back empty.
             poll_pause: POLL_INTERVAL_MIN,
+            timeout: options.statement_timeout,
         }))
     }
 
@@ -995,6 +1037,8 @@ struct TrinoCursor {
     /// doubles while pages keep arriving without rows, and drops back the moment
     /// one carries rows.
     poll_pause: Duration,
+    /// The bound the query runs under, so a server timeout names it.
+    timeout: Option<Duration>,
 }
 
 impl TrinoCursor {
@@ -1046,7 +1090,7 @@ impl TrinoCursor {
 
         if let Some(error) = page.error {
             self.finished = true;
-            return Err(map_error(error));
+            return Err(map_error(error, self.timeout));
         }
 
         // The columns arrive with the first page that has rows. Taking them here
@@ -1320,6 +1364,10 @@ mod tests {
         );
         assert!(!capabilities.transactions);
         assert!(capabilities.cancel, "DELETE reaches the server");
+        assert!(
+            capabilities.statement_timeout,
+            "query_max_run_time is the server's own bound"
+        );
         assert_eq!(
             capabilities.levels,
             vec![
@@ -1414,12 +1462,15 @@ mod tests {
     fn a_users_error_is_permanent_and_a_resource_error_is_not() {
         // The distinction decides whether a retry loop runs. Retrying a syntax
         // error produces the same syntax error forever.
-        let user = map_error(WireError {
-            message: "mismatched input".to_owned(),
-            error_code: Some(1),
-            error_name: Some("SYNTAX_ERROR".to_owned()),
-            error_type: Some("USER_ERROR".to_owned()),
-        });
+        let user = map_error(
+            WireError {
+                message: "mismatched input".to_owned(),
+                error_code: Some(1),
+                error_name: Some("SYNTAX_ERROR".to_owned()),
+                error_type: Some("USER_ERROR".to_owned()),
+            },
+            None,
+        );
         match user {
             EngineError::Query {
                 kind,
@@ -1435,12 +1486,15 @@ mod tests {
         }
 
         for error_type in ["INTERNAL_ERROR", "INSUFFICIENT_RESOURCES"] {
-            let error = map_error(WireError {
-                message: "busy".to_owned(),
-                error_code: Some(65537),
-                error_name: None,
-                error_type: Some(error_type.to_owned()),
-            });
+            let error = map_error(
+                WireError {
+                    message: "busy".to_owned(),
+                    error_code: Some(65537),
+                    error_name: None,
+                    error_type: Some(error_type.to_owned()),
+                },
+                None,
+            );
             match error {
                 EngineError::Query { kind, .. } => assert_eq!(kind, FailureKind::Transient),
                 other => panic!("expected a query error, got {other:?}"),
@@ -1453,12 +1507,15 @@ mod tests {
         // The server's own answer to a successful cancel, quoted exactly as Trino
         // 483 sent it. `errorType` says USER_ERROR, which is why the name is read
         // first: the user asked for this, so the UI must not say it failed.
-        let error = map_error(WireError {
-            message: "Query was canceled".to_owned(),
-            error_code: Some(3),
-            error_name: Some("USER_CANCELED".to_owned()),
-            error_type: Some("USER_ERROR".to_owned()),
-        });
+        let error = map_error(
+            WireError {
+                message: "Query was canceled".to_owned(),
+                error_code: Some(3),
+                error_name: Some("USER_CANCELED".to_owned()),
+                error_type: Some("USER_ERROR".to_owned()),
+            },
+            None,
+        );
         match error {
             EngineError::Query {
                 kind,
@@ -1472,6 +1529,50 @@ mod tests {
             }
             other => panic!("expected a query error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_timeout_is_typed_and_names_the_limit_in_force() {
+        // Measured against Trino 483: `query_max_run_time=2s` produced this error on a
+        // page, `EXCEEDED_TIME_LIMIT` rather than the name the plan predicted. Both
+        // names are accepted, and the message keeps the coordinator's own sentence.
+        for name in ["EXCEEDED_TIME_LIMIT", "QUERY_EXCEEDED_MAX_EXECUTION_TIME"] {
+            let error = map_error(
+                WireError {
+                    message: "Query exceeded maximum time limit of 2.00s".to_owned(),
+                    error_code: Some(131075),
+                    error_name: Some(name.to_owned()),
+                    error_type: Some("INSUFFICIENT_RESOURCES".to_owned()),
+                },
+                Some(Duration::from_millis(2_000)),
+            );
+            match &error {
+                EngineError::Timeout { message, limit_ms } => {
+                    assert_eq!(*limit_ms, Some(2_000), "{name}");
+                    assert!(message.contains("2000 ms"), "{name}: {message}");
+                    assert!(
+                        message.contains("Query exceeded maximum time limit"),
+                        "the coordinator's own sentence is kept: {message}"
+                    );
+                }
+                other => panic!("{name} should be a timeout, got {other:?}"),
+            }
+            // Not retried: the bound is the caller's.
+            assert_eq!(error.failure_kind(), FailureKind::Permanent);
+        }
+    }
+
+    #[test]
+    fn the_session_header_carries_the_bound_in_milliseconds() {
+        assert_eq!(session_header(None), None);
+        assert_eq!(
+            session_header(Some(Duration::from_millis(1_500))).as_deref(),
+            Some("query_max_run_time=1500ms")
+        );
+        assert_eq!(
+            session_header(Some(Duration::from_secs(60))).as_deref(),
+            Some("query_max_run_time=60000ms")
+        );
     }
 
     #[test]
