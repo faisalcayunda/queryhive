@@ -595,6 +595,8 @@ final class AppModel {
         if let raw = UserDefaults.standard.string(forKey: "lastFormat"), let format = ExportFormat(rawValue: raw) {
             tab.format = format
         }
+        // The starting row limit, which the grid's own field can then change for this tab alone.
+        tab.rowLimit = defaultRowLimit
         tabs.append(tab)
         selectedTabID = tab.id
         // A new tab has nothing to put in the panel: no rows, no log lines, no files. Opening it at
@@ -2330,6 +2332,19 @@ final class AppModel {
         UserDefaults.standard.object(forKey: "statementTimeoutMS") as? Int ?? 60_000
     }() {
         didSet { UserDefaults.standard.set(statementTimeoutMS, forKey: "statementTimeoutMS") }
+    }
+
+    /// How many rows a Run fetches by default, for a tab that has not chosen its own.
+    ///
+    /// The engine's `LIMIT`. It is a property of looking rather than of the query, which is why it
+    /// lives on the tab and why this is only the starting value: the grid's own field changes one
+    /// tab and leaves the others alone, and a restored session keeps whatever each tab was left
+    /// with. `object(forKey:)` rather than `integer(forKey:)`, so a stored zero is distinguishable
+    /// from a key nobody has written.
+    var defaultRowLimit: Int = {
+        UserDefaults.standard.object(forKey: "defaultRowLimit") as? Int ?? 1000
+    }() {
+        didSet { UserDefaults.standard.set(defaultRowLimit, forKey: "defaultRowLimit") }
     }
 
     /// Reads the engine's history into `historyEntries`, optionally narrowed to `search`.

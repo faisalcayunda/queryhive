@@ -392,31 +392,17 @@ struct AppearanceSettings: View {
                 presetButtons
             }
 
-            // Mode, Theme, Accent and Tone in one card: they are four parts of one question, and
-            // the divider between rows says so without the weight of four separate sections.
+            // The canvas list on the left, and everything that is global rather than per-theme on
+            // the right. The list shows both appearances at once, which the old row of tiles could
+            // not: it filtered to the appearance in effect, so the other half was unreachable
+            // without switching mode first.
             SettingsCard(title: "Appearance",
-                         detail: "The canvas, the accent that paints the chrome, and how the coloured surfaces are filled.") {
+                         detail: "Which canvas each appearance uses, the accent that paints the chrome, and how the coloured surfaces are filled. Picking a theme fills the slot for its own appearance: a dark canvas goes to Dark, a light one to Light.") {
                 SettingsRow(label: "Mode") {
                     Segmented(selection: $store.mode, options: AppearanceMode.allCases) { $0.title }
                 }
                 RowDivider()
-                SettingsRow(label: "Theme") { themeTiles }
-                RowDivider()
-                SettingsRow(label: "Accent") { accentSwatches }
-                RowDivider()
-                SettingsRow(label: "Tone",
-                            trailing: store.tone.isLuminous ? nil : "flat") { tonePicker }
-            }
-
-            SettingsCard(title: "Backdrop",
-                         detail: store.tone.isLuminous
-                            ? "How hard the two radial glows behind the workspace burn. 0 leaves a flat canvas."
-                            : "The \(store.tone.title) tone draws a flat backdrop, so there is nothing to scale.") {
-                SettingsRow(label: "Glow", trailing: glowLabel) {
-                    Slider(value: $store.glow, in: 0...1.5)
-                        .tint(Tone.accent)
-                        .disabled(!store.tone.isLuminous)
-                }
+                themeMasterDetail
             }
         }
     }
@@ -535,47 +521,114 @@ struct AppearanceSettings: View {
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
-    private var themeTiles: some View {
-        // Filtered, not every case: offering a near-black Midnight tile while the app is light
-        // would be offering a canvas that cannot be painted in this appearance. `store.theme` is
-        // resolved per appearance too, so the selected ring always lands on one of these.
-        let tiles = AppTheme.allCases.filter { $0.isDark == store.isDarkAppearance }
-        return HStack(spacing: 8) {
-            ForEach(tiles) { theme in
-                Button { store.theme = theme } label: {
-                    VStack(spacing: 6) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.canvas)
-                            // A miniature of the shell: a lit capsule and two chrome rows, so the
-                            // tile previews the palette rather than just swatching one colour.
-                            VStack(alignment: .leading, spacing: 4) {
-                                Capsule()
-                                    .fill(previewFill(store.accent, tone: store.tone))
-                                    .frame(width: 30, height: 7)
-                                RoundedRectangle(cornerRadius: 2).fill(Tone.ink.opacity(0.22)).frame(height: 3)
-                                RoundedRectangle(cornerRadius: 2).fill(Tone.ink.opacity(0.12)).frame(width: 34, height: 3)
-                            }
-                            .padding(9)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        }
-                        .frame(height: 46)
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(store.theme == theme ? Tone.accent.opacity(0.85) : Tone.ink.opacity(0.12),
-                                          lineWidth: store.theme == theme ? 1.5 : 1))
+    /// The list on the left and the detail on the right: the shape TablePro's Appearance pane has,
+    /// and the reason it is worth having is that both appearances are visible at once. The row of
+    /// tiles this replaces could only ever show the appearance in effect.
+    private var themeMasterDetail: some View {
+        HStack(alignment: .top, spacing: 14) {
+            themeList
+            Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
+            themeDetail
+        }
+        .padding(.vertical, 6)
+    }
 
-                        Text(theme.title)
-                            .font(.ui(11, weight: store.theme == theme ? .semibold : .regular))
-                            .foregroundStyle(store.theme == theme ? Tone.ink : Tone.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(theme.detail)
-                .accessibilityLabel(theme.title)
-                .accessibilityAddTraits(store.theme == theme ? [.isSelected] : [])
+    private var themeList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            themeGroup("Dark", AppTheme.allCases.filter(\.isDark))
+            themeGroup("Light", AppTheme.allCases.filter { !$0.isDark })
+        }
+        .frame(width: 168, alignment: .leading)
+    }
+
+    private func themeGroup(_ title: String, _ themes: [AppTheme]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.ui(9.5, weight: .semibold))
+                .foregroundStyle(Tone.secondary)
+            ForEach(themes) { theme in
+                themeRow(theme)
             }
         }
+    }
+
+    /// One canvas in the list. The thumbnail is the theme's own canvas, so the list reads as a set
+    /// of colours rather than as a set of names, and picking one fills the slot for *its* appearance.
+    private func themeRow(_ theme: AppTheme) -> some View {
+        let active = (theme.isDark ? store.darkTheme : store.lightTheme) == theme
+        return Button { store.theme = theme } label: {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(theme.canvas)
+                    .frame(width: 24, height: 16)
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(Tone.ink.opacity(0.18)))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(theme.title)
+                        .font(.ui(11.5, weight: active ? .semibold : .regular))
+                        .foregroundStyle(active ? Tone.ink : Tone.ink.opacity(0.85))
+                    Text(theme.isDark ? "Dark" : "Light")
+                        .font(.ui(9.5))
+                        .foregroundStyle(Tone.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(active ? Tone.accent.opacity(0.14) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(theme.detail)
+        .accessibilityLabel(theme.title)
+        .accessibilityAddTraits(active ? [.isSelected] : [])
+    }
+
+    /// The detail on the right: the canvas the list has chosen, then the three values that are
+    /// global rather than per-theme. Accent, tone and glow apply to the whole shell, so they sit
+    /// beside the preview rather than inside it.
+    private var themeDetail: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(store.theme.title)
+                .font(.ui(12, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+            themePreview
+            SettingsRow(label: "Accent") { accentSwatches }
+            RowDivider()
+            SettingsRow(label: "Tone",
+                        trailing: store.tone.isLuminous ? nil : "flat") { tonePicker }
+            RowDivider()
+            SettingsRow(label: "Glow", trailing: glowLabel) {
+                Slider(value: $store.glow, in: 0...1.5)
+                    .tint(Tone.accent)
+                    .disabled(!store.tone.isLuminous)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The shell in miniature: the chosen canvas, the accent under the current tone, and three
+    /// chrome rows. The ink comes from the theme's own darkness rather than from the window's,
+    /// because the canvas painted here can belong to the other appearance.
+    private var themePreview: some View {
+        let ink: Color = store.theme.isDark ? .white : .black
+        return ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(store.theme.canvas)
+            VStack(alignment: .leading, spacing: 6) {
+                Capsule()
+                    .fill(previewFill(store.accent, tone: store.tone))
+                    .frame(width: 56, height: 9)
+                RoundedRectangle(cornerRadius: 2).fill(ink.opacity(0.24)).frame(height: 4)
+                RoundedRectangle(cornerRadius: 2).fill(ink.opacity(0.13)).frame(width: 92, height: 4)
+                RoundedRectangle(cornerRadius: 2).fill(ink.opacity(0.13)).frame(width: 68, height: 4)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(height: 86)
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .strokeBorder(Tone.ink.opacity(0.12)))
     }
 
     private var accentSwatches: some View {
@@ -830,6 +883,32 @@ struct DataSettings: View {
                 .padding(.vertical, 6)
 
                 Text("Zero means no bound. The setting applies to every run that reaches a server — Preview, Count, Explain and Export alike — and survives a restart. What a connection refuses outright is its Safe Mode, chosen per connection in its editor.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SettingsCard(title: "Result rows",
+                         detail: "How many rows a new query fetches before it stops. A Run reads the first page and writes nothing, so this bounds how much is looked at rather than what a statement could return. Each tab keeps its own number once you change it in the grid; this is only what a new tab starts with.") {
+                HStack(spacing: 8) {
+                    Text("A new query fetches")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                    Spacer(minLength: 12)
+                    TextField("", value: $model.defaultRowLimit, format: .number.grouping(.never))
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .font(.code(11.5))
+                        .frame(width: 72)
+                    Text("rows")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                    Stepper("", value: $model.defaultRowLimit, in: 1...1_000_000, step: 100)
+                        .labelsHidden()
+                }
+                .padding(.vertical, 6)
+
+                Text("The grid's own field overrides this for the tab in front, and a restored session keeps each tab's number. Export is not bounded by it: an export streams the whole statement to a file, which is the point of it.")
                     .font(.ui(10.5))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
