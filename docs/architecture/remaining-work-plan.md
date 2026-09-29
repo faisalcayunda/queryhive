@@ -43,9 +43,14 @@ tentang rotasi key, Apple Developer ID, serta riset web bukan pekerjaan agen.
 > **Status 29 Sep 2026.** Batch 1 selesai. Lane A mendarat sebagai `30aef13` (floor ADR-0027
 > ditutup, `cargo test` 770/0), Lane B sebagai `d502d0c` (default row limit dan Appearance
 > master-detail, `swift test` 395/0), dan keempat keputusan Batch 2 dicatat di `2dbe952`.
-> Batch 3 juga selesai: command akun dan profil sebagai `581ece6` (`cargo test` 773/0), dan Open
-> Quickly sebagai `551b13a` (`swift test` 401/0). Yang tersisa dari rencana ini hanyalah pane
-> Profiles sebagai UI, yang menunggu sign-in; rotasi key kenari tetap tugas pengguna.
+> Batch 3 selesai: command akun dan profil sebagai `581ece6` (`cargo test` 773/0), dan Open Quickly
+> sebagai `551b13a` (`swift test` 401/0). Batch 4, sign-in Google dan pane Account, mendarat sebagai
+> `0ad767e` (`swift test` 411/0); addendum ADR-0029 mencatat bentuknya.
+>
+> **Yang tersisa bukan pekerjaan, melainkan konfigurasi.** Sign-in butuh OAuth client ID tipe
+> *Desktop app* dari Google Cloud Console milik pemilik proyek, diberikan saat build sebagai
+> `QH_GOOGLE_CLIENT_ID`. Tanpa itu pane-nya mengatakan apa yang kurang alih-alih menawarkan tombol
+> yang tidak bisa bekerja. Rotasi key kenari tetap tugas pengguna.
 
 ### Batch 1, Lane A: floor Safe Mode (engine, serial)
 
