@@ -242,6 +242,18 @@ final class ResultGridTests: XCTestCase {
         }
     }
 
+    func testBinaryTypesAreRecognisedAcrossDriversAndOpenTheReader() {
+        // The three drivers spell the byte family differently, and every one of them must open the
+        // reader: the one-line cell cannot show a hex dump.
+        for type in ["bytea", "blob", "tinyblob", "mediumblob", "longblob", "varbinary", "binary(16)"] {
+            XCTAssertTrue(GridValue.isBinary(type: type), type)
+            XCTAssertTrue(GridValue.isOpenable(value: "00ff10", type: type), type)
+        }
+        for type in ["varchar", "bigint", "json", "integer[]"] {
+            XCTAssertFalse(GridValue.isBinary(type: type), type)
+        }
+    }
+
     // MARK: Renders (evidence about the views, not about the app)
 
     /// Draws the reader and the sort banner through a real AppKit view tree and leaves PNGs behind.
@@ -253,12 +265,18 @@ final class ResultGridTests: XCTestCase {
     /// `QH_RENDER_DIR=app/.build/render swift test --filter ResultGridTests` writes the PNGs.
     @MainActor
     func testTheReaderAndTheSortBannerRender() throws {
+        // A JSON cell opens on its Tree mode and a byte cell on its Hex mode, so these three PNGs
+        // are the reader's new surfaces and not just the text one.
         try render(CellValueViewer(value: "{\"b\":1,\"a\":[1,2]}", column: "payload", type: "json")
                 .background(Tone.canvas),
-                   named: "cell-reader-json.png", size: CGSize(width: 560, height: 300))
+                   named: "cell-reader-json.png", size: CGSize(width: 640, height: 340))
         try render(CellValueViewer(value: "{1,NULL,3}", column: "ints", type: "integer[]")
                 .background(Tone.canvas),
-                   named: "cell-reader-raw.png", size: CGSize(width: 560, height: 240))
+                   named: "cell-reader-raw.png", size: CGSize(width: 640, height: 260))
+        try render(CellValueViewer(value: "89504e470d0a1a0a0000000d494844520000001000000010",
+                                   column: "favicon", type: "bytea")
+                .background(Tone.canvas),
+                   named: "cell-reader-hex.png", size: CGSize(width: 640, height: 300))
         try render(
             GridSortBanner(column: "nama", direction: .ascending, fetched: 1000, onClear: {})
                 .background(Tone.canvas)
