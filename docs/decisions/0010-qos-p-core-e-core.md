@@ -58,3 +58,15 @@ eksplisit**.
 - Karena pilihan ini bergantung pada kunci `sysctl` yang spesifik, ia ditambahkan ke daftar yang
   diuji saat naik versi macOS mayor — satu test yang memverifikasi bahwa jumlah P-core/E-core yang
   dibaca masuk akal (positif dan jumlahnya sama dengan total core).
+
+## Addendum 2026-09-30
+
+Keputusan di atas semula hanya berlaku untuk CLI dan MCP. Jalur app membangun runtime tokio-nya
+sendiri per run, tanpa `qh_rt`, sehingga jumlah worker dan QoS `USER_INITIATED` tidak pernah
+diterapkan di tempat yang paling terlihat pengguna.
+
+Sejak commit `af6018d`, jalur app memakai `qh_rt::build_main` untuk satu runtime per proses (lihat
+ADR-0031 bagian 1), dan `RustEngine.swift` menjalankan run di `DispatchQueue` konkuren pribadi
+ber-QoS `.userInitiated`, bukan di antrean global bersama. Dengan begitu thread yang memanggil
+`block_on` dan worker tokio berada di kelas yang sama. Keputusan pemetaan P-core/E-core di atas tidak
+berubah; yang berubah adalah cakupannya, yang kini mencakup app.

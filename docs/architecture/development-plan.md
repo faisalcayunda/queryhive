@@ -1,6 +1,6 @@
 # Rencana pengembangan: performa, desain, dan fitur untuk eksekusi orkestrator
 
-- **Status:** rencana eksekusi, 29 Sep 2026. Belum ada yang dikerjakan.
+- **Status:** rencana eksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..93c864b`, 30 Sep 2026); berikutnya W3. Rincian di `PROGRESS.md` §"Run perf-parity".
 - **Pasangan:** `docs/architecture/prd-performance-and-parity.md` (PRD: FR, NFR, dan log keputusan O-* dan P-*). Isi teknis setiap fase performa ada di `docs/architecture/performance-plan.md`. Dokumen ini tidak mengulanginya dan hanya menyebut tugas, berkas, gate, dan urutan.
 - **Penomoran fase** mengikuti `performance-plan.md` versi final:
   - 0 pengukuran;

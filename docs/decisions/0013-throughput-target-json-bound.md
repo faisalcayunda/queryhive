@@ -1,5 +1,12 @@
 # 0013 — Target throughput dibatasi protokol JSON
 
+> **Catatan 2026-09-30:** klaim "JSON 99,6%" di bawah sudah diprofil pada W1-T8 dan **tidak
+> bertahan**. Angka itu hanya `(elapsed − TTFR)/elapsed`, jadi memuat seluruh kerja setelah batch
+> pertama, bukan hanya JSON. Hasil profil (samply, `preview` `wide_500k`): JSON **11%** di CLI dan
+> **20%** di FFI; penulisan stdout **36%** di CLI; decode driver **25 sampai 38%**. Batasnya CPU satu
+> thread engine, bukan protokol. ADR-0030 (akan datang) menggantikan ADR ini. Badan di bawah sengaja
+> tidak ditulis ulang.
+
 - **Status:** Diterima
 - **Tanggal:** 2026-09-23
 - **Konteks instruksi:** handoff task 4

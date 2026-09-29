@@ -1,6 +1,6 @@
 # Rencana performa: melampaui TablePro di setiap sumbu
 
-- **Status:** rencana kerja, 29 Sep 2026. Belum ada yang dikerjakan.
+- **Status:** rencana kerja, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..93c864b`, 30 Sep 2026); berikutnya W3. Rincian di `PROGRESS.md` §"Run perf-parity".
 - **Konteks:** hasil audit statis QueryHive dan TablePro. Setiap klaim yang dipakai di sini sudah diperiksa ulang terhadap kode di pohon ini, dan path serta nomor barisnya disebut. Pemilik melonggarkan batasnya. ADR lama diperlakukan sebagai catatan, dan rencana ini boleh membatalkannya asal menyebut yang mana (§14). Penggantian data plane masuk lingkup sekarang.
 - **Pasangan:** `docs/benchmarks.md` (angka), `docs/architecture/remaining-work-plan.md` Batch 7 (sort dan search ke server), dan `docs/architecture/tablepro-adoption-plan.md` §12.2 dan §13 (dicatat di §15, mana yang diserap dan mana yang digantikan).
 

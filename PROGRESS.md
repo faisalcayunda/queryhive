@@ -65,6 +65,10 @@
 > gestur insert/delete di grid. Detailnya di §"Perpindahan data (Fase 5)" di bawah dan di
 > `docs/architecture/tablepro-adoption-plan.md` §7.
 
+> **Status 30 Sep 2026 (run perf-parity):** W0, W1, dan W2 mendarat di branch `work/perf-parity`
+> (`3ba01ae..93c864b`, 16 commit lokal, belum di-push). Ringkasan dan backlog di §"Run perf-parity"
+> di akhir dokumen. Berikutnya W3.
+
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
 
@@ -2177,3 +2181,104 @@ dijalankan; klaimnya bersandar pada `Capabilities` dan pembacaan kode.
    **Lanjutannya selesai:** `crates/qh-driver-trino` kini ada dan diuji — 24 uji unit + 15 uji
    integrasi terhadap rilis 483 yang sama. Yang tetap berlaku: Trino tidak memberi jaminan
    antarversi, jadi setiap klaim tentangnya harus menyebut nomor rilis.
+
+## Run perf-parity (branch `work/perf-parity`, mulai 29 Sep 2026; W0-W2 mendarat 30 Sep 2026)
+
+Run otonom dari rencana `docs/architecture/performance-plan.md` dan `development-plan.md`. Titik awal
+adalah commit P = `3ba01ae` (milik pemilik); semua di bawah adalah commit lokal di branch ini,
+`git log --oneline 3ba01ae..HEAD` = 16 commit, dari `9892ddb` sampai `93c864b`. Belum ada push dan belum
+ada merge ke `main` (merge dijadwalkan di akhir run). Sumber angka: ledger run (`target/run/ledger.md`,
+gitignored) dan log git; tidak ada angka di bagian ini yang berasal dari tempat lain.
+
+**Lingkungan.** Mac16,12 (M4, 16 GiB, 4P+6E), disk kosong 30 sampai 37 GiB (di bawah 60), jadi **tanpa
+worktree** dan build TablePro (W1-T9) dilewati; `TablePro.app` di `/Applications` dipakai pemilik untuk
+`qhbench`. VM podman dinaikkan dari 2 CPU/1908 MB ke 4 CPU/6144 MB. Container hanya di loopback:
+PostgreSQL 55432, MySQL 53306, Trino 58080 (`--memory 3g`), sshd 52222, toxiproxy 55435 (+30 ms RTT,
+konfigurasinya di memori, jalankan ulang `up.sh toxiproxy` setelah restart). `samply` terpasang. Bench
+scroll berjalan dengan layar terkunci (fallback timer, tidak resmi).
+
+### W0: baseline gate
+
+| Tugas | Status | Commit | Bukti |
+|---|---|---|---|
+| W0-T1 | selesai | `9892ddb` | dokumen rencana masuk branch; P sudah di-commit pemilik |
+| W0-T2 | selesai | - | lingkungan di atas |
+| W0-T3 | selesai | `8fabe1c`, `88e21bf` | G-RUST merah di baseline (rustfmt + satu lint clippy), diperbaiki sendiri; golden live **12/22**, sepuluh selisihnya terklasifikasi |
+
+### W1 (Fase 0): pengukuran
+
+| Tugas | Commit | Isi |
+|---|---|---|
+| W1-T1 | `7edc4ac` | skema rekaman bench satu bentuk untuk semua sumbu, 22 tes |
+| W1-T2 | `b810592` | `bench_ffi`: bench in-process untuk biaya per panggilan FFI, preview, dan emit |
+| W1-T3 | `2e81eab` | gerbang paritas visual, 48 scene sRGB, baseline direkam dari kode yang di-commit, 17 tes |
+| W1-T7 | `35342e9` | fixture: toxiproxy 55435 (+30 ms RTT), 5.000 tabel (`bench_many`, PG + MySQL), korpus SQL besar; semua bind loopback |
+| W1-T6 | `75ab593` | `qhbench`: harness kotak hitam yang menggerakkan kedua app dengan cara sama; `--drive` opt-in. **Dijalankan pemilik, butuh izin OS** (Screen Recording, Accessibility) |
+| W1-T5 | `44a57ec` | microbench Swift: decode, paint, sort, satu keystroke |
+| W1-T4 | `49c405a` | mode `--bench` dan signpost di app |
+| W1-T8 | `78ca927` | profil klaim ADR-0013: JSON ternyata **11% (CLI) / 20% (FFI)**, bukan 99,6% |
+| W1-T10 | `27377e9` | angka Fase 0 per sumbu (di bawah) |
+
+Angka Fase 0 (dari ledger): TTFR 64 ms; throughput 79,5k baris/s; ketik 669 ms per keystroke; cancel
+28,5 s; sort 14 s; launch 229 ms (OK); introspect 14,6 ms (OK); mem-500k **mencurigakan** (belum
+dipercaya). Ringkasan profil di `target/run/w1-t8-profile.md`.
+
+**Gate W1: hijau** di `27377e9`. `cargo test` 773 lulus, `swift test` 490 lulus dengan 5 dilewati,
+golden 12/22 (terklasifikasi), app berjalan.
+
+### W2: Fase 1, W2-T2, Fase 4A, dan blueprint
+
+- **Blueprint (W2-A1/A2/A3, `dc4186f`).** Tiga blueprint (host engine, analisis editor 4B, data plane
+  Fase 6) dengan verdict AR dan perbaikan pada rencana. Fase 2, 4B, dan 6 dikerjakan lewat blueprint ini.
+- **Fase 1, W2-T1 (`af6018d`).** Satu runtime per proses, dan Stop sampai ke server. Cancel: **28,5 s
+  menjadi 27 sampai 34 ms** (angka 0,7 ms sempat muncul dan ternyata artefak; yang dipakai adalah
+  `done` sungguhan). Balapan MySQL di tengah stream, termasuk di driver, diperbaiki: cancel-before-drop.
+  Disetujui reviewer setelah tiga putaran (RR + SF).
+- **W2-T2 (`a953344`).** Run yang dihentikan berstatus **Stopped**, barisnya tetap ada, dan batas baris
+  punya plafon **200k** untuk sementara. `rows-wide-500k` mengukur 500k lewat override plafon khusus
+  bench. SR approved putaran kedua; `swift test` 508 lulus / 5 dilewati / 0 gagal. Catatan: Stop belum
+  bisa menjangkau `explain`, jadi explain yang dihentikan akan terlihat sukses.
+- **Fase 4A, W2-T3 (`93c864b`).** TextKit 1 dengan sengaja, folding di layout manager, dan tidak ada kerja
+  seluruh dokumen per keystroke. Ketik 10k baris: **p99 669 ms turun ke 6,6 sampai 8,3 ms** (sekitar
+  7 ms). **Gate 4 ms meleset**; itu dicatat sebagai P-21 dan keputusannya dibawa ke Fase 8; 4B
+  (tree-sitter + temporary attributes) diharapkan membantu. Sempat "changes requested" dari SR
+  (`flushPendingEdits` tanpa pemanggil, lag UI pada `tab.sql`, warna salah pada kutip, tulis eksternal
+  `updateNSView` hilang, kedipan jumlah baris); disetujui putaran keempat, bench berwarna diperbaiki
+  ke baris realistis. Konteks: `wiki/concepts/AppKit text editor performance gotchas.md`.
+
+### Keputusan pemilik di tengah run (30 Sep 2026)
+
+- **O-14:** tree-sitter dipakai untuk analisis editor. Perubahan visual diizinkan: palet dan kontras
+  yang dilindungi disetel ulang dan baseline editor direkam ulang sebagai perubahan V yang dinyatakan.
+  Jadi fondasi untuk folding, diagnostik, autocomplete, dan formatter.
+- **O-15:** DataFusion + Arrow masuk data plane sekarang (hasil analitik besar, SQL di atas hasil,
+  agregasi, CSV/Parquet lokal). Lisensi dan ukuran binari masih harus diverifikasi.
+- Blueprint 4B (tree-sitter) dan Fase 6 (Arrow/DataFusion) **sedang ditulis ulang**; setelah itu gerbang
+  AR dan pembaruan PRD, performance-plan, dan development-plan.
+- **O-16:** di akhir run, tulis panduan agen (`AGENTS.md` + penunjuk `CLAUDE.md`): gate, invarian,
+  anggaran performa, gerbang paritas, batas lisensi, aturan yang dipelajari di run ini (W14-T7).
+
+### Backlog (dikerjakan di fase pemiliknya)
+
+- B-1: overlay tombol clear `EditorPane` menimpa tombol tutup find bar; peringatan constraint find bar (W10/W9-T5).
+- B-2: wrap-on, statement kedua tanpa tanda run di gutter (W4-T2b).
+- B-3: `retry::execute` bisa mengulang tulis editor pada error sementara (W3-T1).
+- B-4: `qh-tunnel` tanpa connect timeout (W11-T2).
+- B-5: result-store: Unknown raw lossy, tanpa sweep spill, spill bisa menimpa (W4-T3).
+- B-6: duplikasi koneksi menulis Keychain sungguhan walau di bawah bench (rendah).
+- B-7: W3, cancel terlambat yang terlepas tidak boleh mengenai statement berikutnya di session yang dipakai ulang.
+- B-8: kegagalan stop di jalur capped di latar belakang harus ke log eksekusi, bukan stderr.
+- B-9: baseline wrap-off mungkin menyimpan bug teks di bawah gutter (terkonfirmasi: `scrollOffset` awal 0,0).
+- B-10: `EngineContractTests.testTheContractTestNoticesAnEngineThatAnswersOffTheMainQueue` menggantung sekitar 1 dari 6 kali; flake lama, diperbaiki di W3.
+
+### Insiden (dilaporkan ke pemilik)
+
+- I-1: agen `qhbench` beberapa kali (sekitar 10x) menutup dan meluncurkan ulang `/Applications/QueryHive`
+  dan sekali mengirim Cmd+R; aturan 12 ditambahkan ke brief.
+- I-2: `xctrace --launch` menyalakan `/Applications/QueryHive` (pid 40923) dengan argumen bench; hanya pid itu yang dimatikan.
+- I-3: reboot laptop menghapus scratchpad `/tmp`; ledger dibangun ulang di `target/run/`.
+
+### Berikutnya
+
+**W3** (Fase 2: `EngineHost`, pool, dan TTFR; plus Fase 4B-core; memuat B-3, B-7, dan B-10), setelah blueprint 4B dan
+Fase 6 selesai ditulis ulang dan lolos AR. Biaya run sekitar US$235 di titik tengah W2.
