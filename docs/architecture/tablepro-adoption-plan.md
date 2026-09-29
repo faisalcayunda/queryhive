@@ -9,7 +9,8 @@
 > caveat yang disebut di sana (kliennya digulung sendiri, bukan klien MCP pihak ketiga). Fase 3
 > mendarat pada tanggal yang sama dan diukur di §5. Fase 4 juga mendarat pada tanggal itu dan diukur
 > di §6, dengan satu penyimpangan yang dinyatakan (dua dari empat item tidak punya scene
-> `--snapshot`). Fase 5 belum disentuh.
+> `--snapshot`). Fase 5 mendarat 29 Sep 2026 dan diukur di §7, sebagian: mesin untuk ketiga itemnya
+> ada dan diuji, tetapi lembar mapping impor dan gestur insert/delete di grid belum dibangun.
 
 ## 0. Prinsip dan aturan gate
 
@@ -617,6 +618,95 @@ polanya, bukan tambahan.
 `count` keduanya. Parquet dibandingkan terhadap pembaca independen. Insert dan delete punya tes yang
 membuktikan statement yang ditinjau sama dengan statement yang dijalankan.
 
+**Hasil 29 Sep 2026, sebagian dan dinyatakan.** Mesin untuk ketiga item mendarat dan diuji; dua
+bagian UI-nya tidak dibangun, dan itu ditulis di sini alih-alih dibiarkan terbaca sebagai selesai.
+
+**5.2 Parquet.** `crates/qh-export/src/parquet.rs` adalah penulis format kesepuluh, memakai crate
+`parquet` 59.3 native (tanpa fitur `arrow`), dan `Format::Parquet` masuk ke `ALL`, `name`,
+`extension`, `implemented` dan `open`. Keputusannya di `docs/decisions/0018-parquet-native-writer.md`.
+Streaming-nya per **row group** (65.536 baris): baris dikumpulkan, column chunk di-encode, lalu
+dilepas — puncak memori satu row group, bukan seluruh hasil, dan doc modulnya menyatakan itu sebagai
+batas yang jujur, bukan "flat per baris" seperti penulis teks.
+
+Kriterianya dijalankan dengan pembaca independen yang sungguhan: tabel PostgreSQL `parquet_src`
+(5 baris: `bigint`, `text`, `float8`, `bool`) diekspor lewat binari engine dengan `FORMAT=parquet`,
+lalu dibaca kembali oleh **`pyarrow` 21.0.0** — implementasi C++ Apache Arrow, bukan crate Rust yang
+menulisnya. Hasilnya: skema `id: int64, name: string, score: double, active: bool`, 5 baris, dan
+nilainya persis (`{1..5}`, `row-1..row-5`, `0.5..2.5`, `False/True/…`). Perintahnya:
+
+```bash
+DB_KIND=postgres DB_HOST=127.0.0.1 DB_PORT=55432 DB_USER=qh DB_DATABASE=qh \
+  SQL="SELECT id, name, score, active FROM parquet_src ORDER BY id" \
+  FORMAT=parquet OUT_DIR=… NAME=parquet_src ./target/debug/queryhive-engine export
+…/qhvenv/bin/python -c "import pyarrow.parquet as pq; t=pq.read_table('…/parquet_src.parquet'); print(t.schema, t.to_pydict())"
+```
+
+**5.1 Impor.** Crate baru `crates/qh-import` memuat dua pembaca: CSV streaming satu record sekaligus
+(`csv`), dan XLSX yang membaca worksheet utuh (`calamine`) — yang kedua **tidak** mengaku streaming,
+dan `done` membawa `streams: false` untuknya. Perintah `import_data` ada di
+`crates/qh-ffi/src/import.rs`; mapping kolom lewat `COLUMNS` (`[{source,target,include}]`) atau
+diturunkan dari header; tipe target dibaca dari server (`SELECT * FROM <t> LIMIT 0`) untuk memutuskan
+nilai ditulis bare atau dikutip. Kebijakan transaksinya di
+`docs/decisions/0019-import-transaction-policy.md`: default `stop` dengan rollback, `commit`
+mempertahankan prefix, `skip` tanpa transaksi.
+
+Kriterianya dijalankan hidup terhadap PostgreSQL 17 lokal: ekspor `parquet_src` ke CSV, `CREATE
+TABLE parquet_dst`, `import_data` → `done rows:5`, lalu `count`/`psql` menjawab 5 dan nilainya cocok.
+XLSX juga: ekspor ke XLSX, impor ke `xlsx_dst` → 5 baris. Tiga perilaku mode diuji hidup:
+baris buruk di tengah di mode `stop` → exit 1, tabel tetap **0 baris** (rollback), pesan menyebut
+batch-nya; mode `skip` → baris 10 dan 11 mendarat, error menyebut **baris 3** persis, exit 0; dan
+`SAFE_MODE=read_only` → error sebelum event `step connect` (engine menolak tanpa membuka koneksi).
+
+**5.3 Insert dan delete.** Perintah `apply_changes` ada di `crates/qh-ffi/src/apply.rs`: `CHANGES`
+berisi `{sql, expected, keyed}`, dijalankan berurutan di satu transaksi, `affected_rows` tiap
+statement diperiksa (`actual > expected` untuk keyed, `actual != expected` untuk keyless), dan
+rencana di-rollback kalau ada yang tidak cocok. Sisi app: `WritePlan` (baru) membangun rencana
+sekali — deletes → updates → inserts — `ChangeReview` menampilkan `plan.sql`, dan
+`AppModel.applyChanges` mengirim `plan.payload`, jadi yang ditinjau adalah yang dijalankan. Tes yang
+diminta ada di dua sisi: `crates/qh-ffi/tests/apply_changes.rs` merekam setiap statement yang
+diterima session dan membandingkannya byte-per-byte dengan `CHANGES` (juga membuktikan rollback saat
+count meleset), dan `app/Tests/TrinoExporterTests/WritePlanTests.swift` membuktikan `payload`
+mengandung `sql` yang ditampilkan lembar tinjauan. Keputusannya di
+`docs/decisions/0020-apply-changes-in-engine.md`.
+
+`CellEdits` kini memiliki insert dan delete sekaligus edit: `inserted` (id negatif, cap `sequence`)
+dan `deletedRows`; menghapus baris membuang edit selnya, karena satu baris tidak bisa sekaligus
+dihapus dan di-update. `apply_changes` adalah perintah FFI kedua puluh satu, jadi keempat daftar
+invariant #11 disentuh, `EngineCommand`/`RustEngine.commands` ikut, dan `./app/build-ffi.sh`
+dijalankan; tes `RustEngineTests` sempat menangkap `apply_changes` yang lupa didaftarkan, persis
+seperti yang invariant #11 gambarkan.
+
+**Satu perubahan driver yang perlu dicatat.** Verifikasi jumlah baris tidak berjalan di PostgreSQL
+sebelum ini, karena `PostgresCursor` mengabaikan tag `CommandComplete`. Sekarang stream dikuras untuk
+statement tanpa result set dan `affected_rows` diisi. Efek sampingnya: `to_table` di PostgreSQL
+melaporkan jumlah baris sungguhan, bukan `-1` seperti di Trino. Itu tidak menyentuh golden (kasus
+`to_table` memakai cursor palsu).
+
+**Gate, 29 Sep 2026.** `cargo fmt --all --check` bersih; `cargo clippy --workspace --all-targets --
+-D warnings` bersih; `cargo test --workspace` **702 lulus / 0 gagal**; `cargo deny check licenses`
+melaporkan `licenses ok` (dengan exception CC0-1.0 baru untuk `tiny-keccak`); `swift build` selesai
+dan `swift test` **229 tes / 0 gagal**; `./app/build.sh` mencetak `Built dist/QueryHive.app`.
+
+**Yang belum, dan tidak diklaim.**
+- **Lembar mapping kolom di app tidak dibangun.** Setengah mesinnya ada dan diuji; UI-nya, yang
+  diminta §7 "kalau itu tidak terlalu besar", tidak dibangun. `import_data` bisa dipanggil dari CLI
+  dan MCP hari ini.
+- **Gestur insert/delete di grid tidak dibangun.** Model, `WritePlan`, perintah engine, dan tesnya
+  ada; tombol "Add row"/"Delete row" yang mengisi antreannya belum. Karena itu tombol Run di lembar
+  tinjauan, secara praktis, hari ini hanya mengirim edit sel.
+- **XLSX dibaca utuh, dan itu memang batas formatnya.** Bukan regresi: `done.streams` menyatakannya.
+- **Trino dan MySQL tidak diuji hidup** untuk impor atau `apply_changes`; mesin podman sudah hilang,
+  jadi yang terbukti hidup hanya PostgreSQL. Mode `stop` pada driver tanpa transaksi (Trino) belum
+  dijalankan, jadi klaim "melaporkan `written`" bersandar pada `Capabilities::transactions` dan
+  pembacaan kode, bukan larian.
+- **Nomor baris di mode `stop` menyebut baris pertama batch, bukan baris yang gagal**, karena satu
+  `INSERT` multi-baris adalah satu statement dan PostgreSQL membatalkan transaksi pada error pertama
+  sehingga tidak bisa diprobe ulang setelahnya. Mode `skip` menyebut baris persis. Dinyatakan di
+  ADR-0019.
+- **`tools/golden/live_cases.py` tidak dijalankan** untuk fase ini: kasus live butuh container, dan
+  gate subagent kali ini memang tidak memuatnya.
+
+
 ## 8. Fase 6: kandidat besar, belum dijadwalkan
 
 Tidak dikerjakan sebelum ada keputusan produk: structure editor, routines dan user-defined types,
@@ -658,3 +748,91 @@ Fase 3: satu `preview` pada tabel besar berhenti sendiri pada batas waktunya den
 menyebut batas itu.
 Fase 4: tidak ada lagi alasan membuka editor lain untuk mencari kata di file `.sql`.
 Fase 5: satu tabel pindah ke Parquet dan kembali, dengan `count` yang cocok.
+
+## 12. Pengerasan: lubang di kode yang sudah dikirim, dan celah performa
+
+Bagian ini **belum dijadwalkan** dan bukan fase. Isinya keluar dari
+`docs/architecture/tablepro-source-study.md` §2–§8 setelah membandingkannya dengan kode di pohon ini,
+dan yang membedakannya dari §8: ini bukan fitur yang hilang, melainkan hal yang sudah dikirim tetapi
+belum sekuat pembandingnya. Urutannya menurut ongkos per nilai, bukan menurut fase.
+
+### 12.1 Kebenaran — yang paling mendesak, dan kecil
+
+1. **`UPDATE` dari edit sel tidak diverifikasi jumlah barisnya.** `Models/UpdateStatements.swift`
+   membangun predikat dari seluruh kolom asli, dan jalur commit-nya menjalankan statement itu tanpa
+   membandingkan berapa baris yang benar-benar tersentuh. Artinya sebuah edit yang tidak cocok dengan
+   baris mana pun bisa terlihat sukses sementara nilainya tidak tersimpan. TablePro membandingkan
+   `rowsAffected` dengan `expectedRowCount` **di dalam transaksi**, dengan aturan yang sengaja tidak
+   simetris: `actual > expected` untuk write ber-PK (MySQL melaporkan nol baris untuk `UPDATE` yang
+   menulis nilai yang sudah ada, dan itu save yang normal), dua arah untuk write tanpa PK. Ini satu
+   perubahan kecil yang menutup lubang "UPDATE tanpa WHERE cocok nol baris tapi melaporkan sukses".
+2. **Pencocokan tanpa PK rapuh.** Predikat "semua kolom asli" adalah yang terkuat tanpa kunci, tetapi
+   ia gagal persis di kasus yang paling mungkin: tabel tanpa PK tidak bisa membedakan dua baris
+   identik, sehingga satu edit bisa menulis dua baris; dan kolom `FLOAT`/`JSON` bisa dibaca balik
+   dengan teks yang tidak sama dengan aslinya. TablePro memakai `RowMatchPolicy`: kolom yang tidak
+   bisa dibandingkan **dikecualikan**, dan kolom teks dibandingkan lewat render server (MySQL
+   `CONCAT(col)`). Sudah dicatat di komentar `UpdateStatements.swift` sebagai "predikat terkuat yang
+   tersedia", tetapi belum ada jalan keluar untuk kolom yang memang tidak bisa dibandingkan.
+3. **Folding tanpa batas ukuran dokumen.** `Support/SQLFolding.swift` menghitung region untuk seluruh
+   teks. TablePro berhenti melipat sama sekali di atas `foldingSizeLimit` (dan 2 juta karakter).
+   Berkas `.sql` besar yang dibuka di QueryHive akan membayar pemindaian penuh tanpa batas.
+4. **JSON viewer tanpa batas input.** `Views/CellValueViewer.swift` menampilkan nilai apa adanya, dan
+   `GridValue.prettyPrinted` mem-parse JSON sebesar apa pun. TablePro membatasi input pada 100.000
+   unit UTF-16 dan pohon pada 5.000 node, dengan jalan keluar "terlalu besar, pakai mode teks".
+5. **Sort grid hanya benar untuk hasil yang dimuat penuh.** Sudah dinyatakan di banner, tetapi belum
+   ada penanda jalan menuju sort server. Begitu ada `hasMoreRows`/pagination, sort di memori menjadi
+   jawaban yang salah, bukan jawaban yang murah.
+
+### 12.2 Performa — terukur, bukan dugaan
+
+1. **`displayedRows` dihitung ulang pada setiap akses, bukan sekali per render.**
+   `Views/ResultGrid.swift:100` adalah properti terhitung yang menjalankan filter lalu sortir, dan ia
+   diakses beberapa kali dalam satu evaluasi body (`ForEach`, `GridClipboard.text`, `cellValue`,
+   jalur paste). Dengan 1.000 baris dan sortir aktif, itu O(n log n) dikali jumlah akses, tiap render
+   — dan render terjadi pada setiap perubahan seleksi, hover, dan edit. TablePro menghitung sekali
+   dan menyinkronkan state sortirnya (`syncSortState`). Perbaikannya: simpan hasilnya sebagai state
+   yang di-invalidasi saat baris, filter, atau sortirnya berubah — tiga peristiwa yang sudah punya
+   `didSet` masing-masing.
+2. **Folding memindai seluruh dokumen pada setiap ketikan, tanpa penjaga perubahan panjang.**
+   `recolour()` memanggil `refreshFolds(previous:)`, dan `SQLEditor.swift:474` memanggil
+   `SQLFolding.regions(in: text)` untuk seluruh teks. TablePro memindai ulang **hanya saat panjang
+   teks berubah** dan menjawab tiap baris lewat lookup kamus, jadi biayanya linear per pass, bukan
+   per ketikan. Ini di atas biaya yang sudah ada sebelumnya: `SQLSyntax.apply` juga memproses seluruh
+   dokumen tiap ketikan.
+3. **`SQLFolding.statementRanges` mencari tiap statement dengan `range(of:)`.**
+   `Support/SQLFolding.swift` memakai ulang `sqlStatement(in:atUTF16Offset:)` lalu **melokasikan**
+   hasilnya dengan pencarian literal dari kursor. Untuk berkas dengan banyak statement itu pencarian
+   per statement di sisa teks — bukan satu pass. TablePro memindai dalam **satu pass** dengan satu
+   stack frame. Alternatif yang lebih kecil: minta daftar batas statement dari `qh-sql`, yang memang
+   sudah memindainya sekali di Rust (dan studi itu sendiri merekomendasikan "kalau Swift butuh daftar
+   region, minta dari engine").
+4. **`run` FFI membangun runtime tokio per panggilan.** `crates/qh-ffi/src/uniffi_api.rs:297`
+   membuat runtime multi-thread setiap kali, dan itu didokumentasikan sebagai keputusan. Efeknya
+   baru terasa pada perintah lokal yang dipanggil berulang — pencarian History yang di-debounce,
+   penyimpanan session per pergantian tab — karena masing-masing membayar satu thread pool. Server
+   MCP sudah benar (satu runtime saat start, `src/bin/mcp.rs:87`).
+5. **`count` membungkus statement dalam `COUNT(*)`.** Sudah didokumentasikan bahwa tidak ada
+   perkiraan murah untuk sebuah *statement*; ini dicatat sebagai batas, bukan sebagai utang.
+6. **Parquet dan impor: memori adalah keputusan, bukan detail.** Untuk Parquet, TablePro menstaging
+   ke DuckDB dengan `temp_directory` supaya bisa spill — kalau QueryHive menstaging di memori, tabel
+   yang lebih besar dari RAM akan **gagal**, bukan melambat. Untuk impor, CSV bisa benar-benar
+   streaming (QueryHive lebih ketat dari TablePro yang mmap seluruh berkas), tetapi XLSX **tidak
+   bisa** dan janji "streaming" untuknya tidak boleh ditulis.
+
+### 12.3 Pengerasan MCP — hanya kalau dipakai lebih dari satu orang
+
+Belum mendesak, tetapi murah dan jelas bentuknya: kolom prefiks token supaya daftar token bisa
+dikenali manusia tanpa membocorkan rahasia; pencabutan yang membatalkan request yang sedang jalan;
+pemeriksaan kepercayaan handshake (pemilik berkas, mode, pid hidup, executable pid itu); satu halaman
+kebijakan stabilitas tool/resource sebelum tool ke-10 mendarat; rate limit pada autentikasi; dan
+memisahkan "External Clients" dari Safe Mode sebagai lapisan tersendiri. Pairing PKCE adalah cetak
+biru kalau MCP menjadi fitur pengguna, bukan hanya token lewat CLI.
+
+### 12.4 Yang **tidak** masuk daftar ini
+
+Tiga hal di mana QueryHive sudah lebih benar, dan studi itu mengatakannya: Safe Mode ditegakkan di
+**engine** sehingga CLI dan MCP melihatnya (TablePro menegakkannya di gate app); penulis streaming
+dengan part splitting dan retry; dan allowlist kosong berarti tidak ada koneksi (fail closed). Timeout
+statement di trait driver juga sudah sejajar. Semuanya tidak perlu "diperbaiki" agar mirip TablePro —
+justru sebaliknya.
+

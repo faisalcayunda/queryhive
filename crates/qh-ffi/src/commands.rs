@@ -73,7 +73,10 @@ pub const CANCEL_WARNING: &str = "stopped before the statement finished";
 /// Port 0 means "the driver's default" throughout this engine — it is what a
 /// missing `DB_PORT` produces — and this is the layer that knows which driver is
 /// in play, so this is where it is resolved.
-fn connection(settings: &Settings, engine: &dyn Engine) -> Result<ConnectionConfig, CliError> {
+pub(crate) fn connection(
+    settings: &Settings,
+    engine: &dyn Engine,
+) -> Result<ConnectionConfig, CliError> {
     let mut config = config::build(settings)?;
     if config.port == 0 {
         config.port = engine.driver(config.kind).default_port();
@@ -91,7 +94,7 @@ fn connection(settings: &Settings, engine: &dyn Engine) -> Result<ConnectionConf
 /// The bound is a `Duration` here and a server setting one layer down; each driver
 /// translates it into its own mechanism, and a driver that cannot enforce one says
 /// so through `Capabilities::statement_timeout`.
-fn statement_timeout(settings: &Settings) -> Result<Option<Duration>, CliError> {
+pub(crate) fn statement_timeout(settings: &Settings) -> Result<Option<Duration>, CliError> {
     let milliseconds = settings.non_negative("STATEMENT_TIMEOUT_MS", 0)?;
     Ok((milliseconds > 0).then(|| Duration::from_millis(milliseconds as u64)))
 }
@@ -101,7 +104,7 @@ fn statement_timeout(settings: &Settings) -> Result<Option<Duration>, CliError> 
 /// Absent is `full`, which is what every caller that predates this setting sends.
 /// A spelling nobody recognises is refused by name: a typo in a safety setting is
 /// not a decision to make silently, the same rule `sslmode` follows.
-fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
+pub(crate) fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
     let raw = settings.text("SAFE_MODE", "");
     if raw.is_empty() {
         return Ok(SafeMode::Full);
@@ -120,7 +123,7 @@ fn safe_mode(settings: &Settings) -> Result<SafeMode, CliError> {
 /// server run this same code, and neither has a picker to enforce anything. A
 /// refusal is a usage error decided before the network is touched, so a read-only
 /// connection refuses a `DROP` without opening one.
-fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
+pub(crate) fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
     qh_sql::check(mode, sql).map_err(|error| CliError::Usage(error.to_string()))
 }
 
@@ -399,7 +402,7 @@ async fn browse_session(
 /// pass it to [`retry::execute`], and the one that writes deliberately does not — see
 /// [`crate::retry`]. Reading the setting in one place is what keeps `RETRIES` from being
 /// read two ways.
-async fn open(
+pub(crate) async fn open(
     settings: &Settings,
     engine: &dyn Engine,
     config: &ConnectionConfig,

@@ -55,6 +55,15 @@
 > **Status 29 Sep 2026 (Fase 4):** editor harian (find/replace, folding, sort grid, JSON cell viewer)
 > mendarat lewat dua lane paralel di worktree, di-merge. Gate `swift test` **222 tes / 0 gagal**.
 > Detailnya di §"Editor harian" di bawah.
+>
+> **Status 29 Sep 2026 (Fase 5, sebagian):** perpindahan data mendarat di sisi mesin. Ekspor Parquet
+> (format kesepuluh, crate `parquet` native) diverifikasi terhadap pembaca independen `pyarrow`;
+> impor CSV/XLSX (`import_data`) dan apply perubahan (`apply_changes`) ada dan diuji hidup terhadap
+> PostgreSQL 17 lokal. Gate: `cargo test --workspace` **702 lulus / 0 gagal**, `swift test`
+> **229 tes / 0 gagal**, `cargo deny check licenses` `licenses ok` (satu exception CC0-1.0), dan
+> `./app/build.sh` `Built dist/QueryHive.app`. **Belum dibangun:** lembar mapping kolom di app dan
+> gestur insert/delete di grid. Detailnya di §"Perpindahan data (Fase 5)" di bawah dan di
+> `docs/architecture/tablepro-adoption-plan.md` §7.
 
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
@@ -1986,7 +1995,44 @@ membuatnya lagi:
 
 `x_search` belum bisa dipakai: ditagih dari saldo, bukan dari kuota paket, dan saldonya kurang.
 
-## [BUTUH TINDAKAN MANUAL]
+## Perpindahan data (Fase 5, 29 Sep 2026)
+
+Tiga item, dua sisi, satu gate. Yang mendarat adalah **mesinnya**; dua potong UI-nya tidak, dan itu
+dinyatakan di sini dan di §7 rencana.
+
+**Parquet (5.2).** Format kesepuluh di `crates/qh-export`, ditulis crate `parquet` native tanpa fitur
+`arrow` — bukan DuckDB seperti TablePro (ADR-0018). Baris dilepas per row group 65.536 baris, jadi
+puncak memori satu row group, bukan seluruh hasil. Karena `parquet` menarik `tiny-keccak` (CC0-1.0),
+deny.toml bertambah satu exception sempit dan `docs/dependencies.md` diperbarui.
+
+Verifikasi kriterianya memakai pembaca independen: tabel PostgreSQL 5 baris → `FORMAT=parquet` →
+dibaca kembali `pyarrow` 21.0.0 → skema dan nilainya persis. Bukan crate yang menulisnya yang
+membacanya.
+
+**Impor CSV/XLSX (5.1).** Crate baru `qh-import` (CSV streaming; XLSX utuh, dan `done.streams`
+mengatakannya). Perintah `import_data` di engine, mapping lewat `COLUMNS` atau header, tipe target
+dibaca dari server. Tiga mode `ON_ERROR`: `stop` (default, rollback), `commit` (prefix), `skip`
+(tanpa transaksi) — ADR-0019. Diuji hidup: bolak-balik CSV/ekspor–impor–count cocok; baris buruk di
+mode `stop` → 0 baris mendarat; mode `skip` → error menyebut baris 3 persis; `read_only` menolak
+sebelum connect.
+
+**Insert/delete (5.3).** Perintah `apply_changes` menjalankan rencana `{sql, expected, keyed}`
+berurutan di satu transaksi, memeriksa `affected_rows`, rollback kalau meleset (ADR-0020). Sisi app:
+`WritePlan` dibangun sekali, `ChangeReview` menampilkan `plan.sql`, `AppModel.applyChanges` mengirim
+`plan.payload`. Kriteria "statement yang ditinjau = statement yang dijalankan" dibuktikan di dua
+tes: `crates/qh-ffi/tests/apply_changes.rs` (statement yang direkam session = `CHANGES`, byte per
+byte) dan `WritePlanTests.swift` (payload = yang ditampilkan).
+
+Satu efek samping driver: `PostgresCursor` sekarang mengisi `affected_rows` dari `CommandComplete`,
+tanpa itu verifikasi di PostgreSQL tidak berjalan sama sekali. `to_table` di PostgreSQL ikut
+melaporkan count sungguhan.
+
+**Yang belum.** Lembar mapping kolom di app dan tombol tambah/hapus baris di grid tidak dibangun;
+jadi jalur impor dan insert/delete baru bisa dipakai dari CLI/MCP dan dari tes, bukan dari jendela.
+Trino/MySQL tidak diuji hidup (podman hilang). Mode `stop` di driver tanpa transaksi belum
+dijalankan; klaimnya bersandar pada `Capabilities` dan pembacaan kode.
+
+
 
 1. ~~Kuota paket untuk `web_search` habis.~~ **Teratasi**, dan risetnya sudah mulai dikerjakan.
    §8.1 kini memuat empat issue DBeaver sebagai sumber primer, dengan kutipan dan URL. Yang

@@ -381,6 +381,7 @@ impl Session for PostgresSession {
             row_limit: options.row_limit,
             emitted: 0,
             finished: false,
+            affected: None,
             timeout: options.statement_timeout,
         }))
     }
@@ -478,6 +479,14 @@ struct PostgresCursor {
     row_limit: Option<usize>,
     emitted: usize,
     finished: bool,
+    /// The rows the statement reported affecting, from PostgreSQL's
+    /// `CommandComplete` tag.
+    ///
+    /// `None` until that tag is seen, and it is only read for a statement with no
+    /// result set — an `UPDATE`, `INSERT`, `DELETE` or DDL. A `SELECT`'s
+    /// `CommandComplete` count is the rows *returned*, which is not what
+    /// `Cursor::affected_rows` means, so it is deliberately not recorded here.
+    affected: Option<u64>,
     /// The bound this statement was started under, so a server timeout names it.
     timeout: Option<Duration>,
 }
@@ -489,9 +498,27 @@ impl Cursor for PostgresCursor {
     }
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
-        if self.finished || self.columns.is_empty() {
-            // A statement with no result set (DDL, or an UPDATE) has no columns
-            // to fill, so it is finished the moment it starts.
+        if self.finished {
+            return Ok(None);
+        }
+        if self.columns.is_empty() {
+            // A statement with no result set (DDL, or an `UPDATE`/`INSERT`/
+            // `DELETE`) has no columns to fill, so it is finished the moment it
+            // starts — but not before the stream is drained, because the
+            // `CommandComplete` at its end is the only place PostgreSQL reports
+            // how many rows the statement affected.
+            while let Some(message) = self.stream.next().await {
+                match message {
+                    Ok(tokio_postgres::SimpleQueryMessage::CommandComplete(count)) => {
+                        self.affected = Some(count);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.finished = true;
+                        return Err(map_query_error(error, "", self.timeout));
+                    }
+                }
+            }
             self.finished = true;
             return Ok(None);
         }
@@ -546,6 +573,10 @@ impl Cursor for PostgresCursor {
             .map_err(|error| EngineError::Internal {
                 message: format!("the cursor built a batch the store refused: {error}"),
             })
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        self.affected
     }
 }
 

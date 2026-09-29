@@ -7,8 +7,10 @@
 //!
 //! # Which formats exist today
 //!
-//! All nine are here: `text`, `csv`, `json`, `xml`, `html`, `sql`, `dbf`, `xlsx` and
-//! `xls`.
+//! The Python engine's nine are all here: `text`, `csv`, `json`, `xml`, `html`,
+//! `sql`, `dbf`, `xlsx` and `xls`. Parquet is the tenth, added after the
+//! migration and not part of that nine — see [`parquet`] for why it is a native
+//! Rust writer and how it stays bounded.
 //!
 //! The strength of the claim differs by format, and knowing which is which matters more
 //! than a single label.
@@ -70,6 +72,7 @@
 
 mod dbf;
 pub mod encoding;
+mod parquet;
 pub mod plan;
 mod writers;
 mod xls;
@@ -84,6 +87,7 @@ use thiserror::Error;
 
 pub use dbf::DbfWriter;
 pub use encoding::Codec;
+pub use parquet::ParquetWriter;
 pub use plan::{export_rows, ExportOutcome, ExportSpec, Exporter};
 pub use writers::{DelimitedWriter, HtmlWriter, JsonWriter, SqlWriter, XmlWriter};
 pub use xls::XlsWriter;
@@ -102,15 +106,17 @@ pub enum Format {
     Xlsx,
     Xls,
     Dbf,
+    /// Parquet, added after the nine the Python engine had. Columnar, and the
+    /// only format here that is not a stream of characters.
+    Parquet,
 }
 
 impl Format {
-    /// Every format the Python engine offered, in the order it listed them.
-    ///
-    /// The order is the Python source's `WRITERS` order, `xls` before `xlsx` included:
-    /// it is the order a format menu shows, and a menu that reorders itself between the
-    /// two engines is a small thing a user still notices.
-    pub const ALL: [Format; 9] = [
+    /// Every format this crate offers, in the order a format menu shows them:
+    /// the Python engine's nine first, in its own order, then Parquet, which the
+    /// Python engine did not have and which is added at the end so the nine keep
+    /// the positions they had.
+    pub const ALL: [Format; 10] = [
         Format::Text,
         Format::Csv,
         Format::Json,
@@ -120,6 +126,7 @@ impl Format {
         Format::Xls,
         Format::Xlsx,
         Format::Dbf,
+        Format::Parquet,
     ];
 
     /// The format's own name, which is the key the Python engine filed it under.
@@ -139,6 +146,7 @@ impl Format {
             Format::Xlsx => "xlsx",
             Format::Xls => "xls",
             Format::Dbf => "dbf",
+            Format::Parquet => "parquet",
         }
     }
 
@@ -154,6 +162,7 @@ impl Format {
             Format::Xlsx => "xlsx",
             Format::Xls => "xls",
             Format::Dbf => "dbf",
+            Format::Parquet => "parquet",
         }
     }
 
@@ -203,6 +212,7 @@ impl Format {
                 | Format::Dbf
                 | Format::Xlsx
                 | Format::Xls
+                | Format::Parquet
         )
     }
 
@@ -412,6 +422,7 @@ pub fn open(
         Format::Dbf => Box::new(DbfWriter::new(path, columns, options)?),
         Format::Xlsx => Box::new(XlsxWriter::new(path, columns, options)?),
         Format::Xls => Box::new(XlsWriter::new(path, columns, options)?),
+        Format::Parquet => Box::new(ParquetWriter::new(path, columns, options)?),
     })
 }
 
@@ -448,11 +459,20 @@ mod tests {
         let python_keys = [
             "txt", "csv", "json", "xml", "html", "sql", "xls", "xlsx", "dbf",
         ];
-        assert_eq!(Format::ALL.len(), python_keys.len());
+        // Parquet is the one format the Python engine did not have. It is
+        // checked separately rather than folded into the list above, because
+        // the list above is the engine's and this one is the addition.
+        assert_eq!(Format::ALL.len(), python_keys.len() + 1);
         let names: Vec<&str> = Format::ALL.iter().map(|format| format.name()).collect();
         assert_eq!(
-            names, python_keys,
-            "the names and their order are the engine's"
+            names[..python_keys.len()],
+            python_keys,
+            "the nine, names and order, are the engine's"
+        );
+        assert_eq!(
+            names[python_keys.len()],
+            "parquet",
+            "the tenth is the addition"
         );
         for name in python_keys {
             assert_eq!(Format::parse(name).map(Format::name), Some(name));
@@ -463,7 +483,8 @@ mod tests {
         // Case does not matter: this arrives from a menu, a URL or a command line.
         assert_eq!(Format::parse("CSV"), Some(Format::Csv));
         assert_eq!(Format::parse("  Json "), Some(Format::Json));
-        assert_eq!(Format::parse("parquet"), None);
+        assert_eq!(Format::parse("parquet"), Some(Format::Parquet));
+        assert_eq!(Format::parse("snappy"), None);
     }
 
     #[test]

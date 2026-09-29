@@ -18,8 +18,33 @@ struct CellKey: Hashable {
 struct CellEdits: Equatable {
     private(set) var values: [CellKey: String] = [:]
 
-    var isEmpty: Bool { values.isEmpty }
-    var count: Int { values.count }
+    /// Rows the user added that are not in the fetched result.
+    ///
+    /// Held here rather than in a second queue because the invariants are shared:
+    /// deleting a row drops its edits, and a plan must see all three kinds of
+    /// change together and in one order. A negative id keeps an inserted row's
+    /// identity distinct from every fetched row's index.
+    private(set) var inserted: [InsertedRow] = []
+
+    /// Fetched rows the user marked for deletion, in the order they were marked.
+    private(set) var deletedRows: [Int] = []
+
+    /// One added row, and where it sits in the queue's own order.
+    struct InsertedRow: Equatable {
+        let id: Int
+        /// The stamp that orders the queue. A removal swaps nothing here (the
+        /// arrays are append-only), but the stamp is what keeps the plan's order
+        /// from depending on a dictionary's iteration order, which is the failure
+        /// the source study records TablePro guarding against.
+        let sequence: Int
+        var values: [Int: String] = [:]
+    }
+
+    private var sequence = 0
+    private var nextInsertID = -1
+
+    var isEmpty: Bool { values.isEmpty && inserted.isEmpty && deletedRows.isEmpty }
+    var count: Int { values.count + inserted.count + deletedRows.count }
 
     /// The staged text for a cell, or `nil` when the cell is untouched.
     func value(at key: CellKey) -> String? { values[key] }
@@ -58,7 +83,49 @@ struct CellEdits: Equatable {
         }
     }
 
-    mutating func discard() { values.removeAll() }
+    mutating func discard() {
+        values.removeAll()
+        inserted.removeAll()
+        deletedRows.removeAll()
+        sequence = 0
+        nextInsertID = -1
+    }
+
+    // MARK: Rows
+
+    /// Add a row and return its id, which is what its cells are keyed by.
+    @discardableResult
+    mutating func insertRow() -> Int {
+        sequence += 1
+        let id = nextInsertID
+        nextInsertID -= 1
+        inserted.append(InsertedRow(id: id, sequence: sequence))
+        return id
+    }
+
+    /// Mark a fetched row for deletion. Its staged edits go with it: a row that
+    /// is being removed cannot also be updated, and keeping the edits would put
+    /// two statements for one row into the plan.
+    mutating func deleteRow(_ row: Int) {
+        if !deletedRows.contains(row) { deletedRows.append(row) }
+        values = values.filter { $0.key.row != row }
+    }
+
+    /// Stage one cell of an added row — the insert's counterpart of `edit`.
+    mutating func setInserted(_ text: String, row id: Int, column: Int) {
+        guard let index = inserted.firstIndex(where: { $0.id == id }) else { return }
+        if text.isEmpty {
+            inserted[index].values[column] = nil
+        } else {
+            inserted[index].values[column] = text
+        }
+    }
+
+    func isDeleted(_ row: Int) -> Bool { deletedRows.contains(row) }
+
+    func insertedValue(row id: Int, column: Int) -> String? {
+        inserted.first { $0.id == id }?.values[column]
+    }
 
     private mutating func stage(_ text: String, at key: CellKey, original: String?) {
         if text == original { values[key] = nil } else { values[key] = text }

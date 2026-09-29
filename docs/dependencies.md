@@ -38,17 +38,29 @@ transitive dependencies, so no new crate and no new licence entered the build; t
 below is unchanged. They were made direct so the store does not inherit somebody else's
 feature selection, and `rand` is pinned at `0.9` to match the version already resolved.
 
+**Fase 5, 29 Sep 2026.** Two crates were added and their whole transitive closures came with them.
+`qh-export` gained `parquet` 59.3.0 with `default-features = false` (the native Parquet encoder, no
+`arrow`, no codec feature, so no C library is linked — ADR-0018). `qh-import`, a new crate, gained
+`csv` 1.4.0 (the streaming reader) and `calamine` 0.30.1 with the `dates`/`chrono` features (the
+whole-workbook XLSX reader). The closures bring `thrift`, `half`, `seq-macro`, `quick-xml`, `zip`
+and `encoding_rs`, among others. One licence in the new graph is not on ADR-0002's allow-list:
+`tiny-keccak` 2.0.2 is `CC0-1.0`, reached through `parquet` → `ahash` → `const-random`. CC0 is a
+public-domain dedication, and it is permitted as a narrow `exceptions` entry for that one crate,
+recorded in ADR-0018; a future unrelated crate that arrives CC0 still has to argue for itself.
+
 | Crate | Version | Licence | Source |
 |---|---|---|---|
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | aead | 0.6.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | aes | 0.9.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | aes-gcm | 0.11.1 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| ahash | 0.8.12 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | android_system_properties | 0.1.6 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| arbitrary | 1.4.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | argon2 | 0.6.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | askama | 0.16.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | askama_derive | 0.16.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -58,6 +70,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | asn1-rs-derive | 0.6.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | asn1-rs-impl | 0.2.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | async-trait | 0.1.92 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| atoi_simd | 0.16.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | base16ct | 1.0.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -77,6 +90,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | byteorder | 1.5.0 | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | bytes | 1.12.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| calamine | 0.30.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | camino | 1.2.6 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cargo-platform | 0.3.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cargo_metadata | 0.23.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -93,32 +107,41 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | clap_derive | 4.6.7 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | clap_lex | 1.1.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cmov | 0.5.4 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| codepage | 0.1.3 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | combine | 4.6.8 | MIT | registry+https://github.com/rust-lang/crates.io-index |
-| const-oid | 0.9.6 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| const-oid | 0.9.6 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| const-random | 0.1.18 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| const-random-macro | 0.1.16 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| core_detect | 1.0.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cpubits | 0.1.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | crossbeam-queue | 0.3.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| crunchy | 0.2.4 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | crypto-bigint | 0.7.5 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | crypto-primes | 0.7.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| csv | 1.4.0 | Unlicense/MIT | registry+https://github.com/rust-lang/crates.io-index |
+| csv-core | 0.1.13 | Unlicense/MIT | registry+https://github.com/rust-lang/crates.io-index |
 | ctr | 0.10.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | ctutils | 0.4.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | curve25519-dalek | 5.0.0 | BSD-3-Clause | registry+https://github.com/rust-lang/crates.io-index |
 | curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | data-encoding | 2.11.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| debug_unsafe | 0.1.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | delegate | 0.13.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | der | 0.7.10 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | der | 0.8.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | der-parser | 10.0.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | der_derive | 0.7.3 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | deranged | 0.5.8 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| derive_arbitrary | 1.4.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | des | 0.9.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | digest | 0.10.7 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | digest | 0.11.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -127,12 +150,14 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | ed25519 | 3.0.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | ed25519-dalek | 3.0.0 | BSD-3-Clause | registry+https://github.com/rust-lang/crates.io-index |
 | elliptic-curve | 0.14.1 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| encoding_rs | 0.8.42 | (Apache-2.0 OR MIT) AND BSD-3-Clause | registry+https://github.com/rust-lang/crates.io-index |
 | enum_dispatch | 0.3.13 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | errno | 0.3.14 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fallible-iterator | 0.2.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| fast-float2 | 0.2.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | ff | 0.14.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | fiat-crypto | 0.3.0 | MIT OR Apache-2.0 OR BSD-1-Clause | registry+https://github.com/rust-lang/crates.io-index |
@@ -161,6 +186,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | glob | 0.3.4 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | goblin | 0.8.2 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | group | 0.14.0 | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| half | 2.7.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hashbrown | 0.15.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -206,6 +232,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | keyed_priority_queue | 0.4.2 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | libc | 0.2.189 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| libm | 0.2.16 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | libredox | 0.1.25 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | libsqlite3-sys | 0.35.0 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -222,6 +249,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | mio | 1.2.3 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | ml-kem | 0.3.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | module-lattice | 0.2.3 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| multiversion_no_op | 1.0.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | mysql_async | 0.36.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | mysql_common | 0.35.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | nix | 0.31.3 | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -242,6 +270,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | pageant | 0.2.3 | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| parquet | 59.3.0 | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | password-hash | 0.6.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | pbkdf2 | 0.13.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | pem | 3.0.6 | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -267,17 +296,18 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | primefield | 0.14.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | primeorder | 0.14.0 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| quick-xml | 0.37.5 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | quinn | 0.11.12 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | quinn-proto | 0.11.18 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | quinn-udp | 0.5.15 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | quote | 1.0.47 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | registry+https://github.com/rust-lang/crates.io-index |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | registry+https://github.com/rust-lang/crates.io-index |
-| rand | 0.9.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rand | 0.10.3 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| rand | 0.9.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| rand_core | 0.9.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rand_core | 0.10.1 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| rand_core | 0.9.5 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rand_pcg | 0.10.2 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | redox_syscall | 0.5.18 | MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -319,6 +349,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | security-framework | 3.7.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | security-framework-sys | 2.17.0 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | semver | 1.0.28 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| seq-macro | 0.3.6 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | serde | 1.0.229 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -369,6 +400,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | time | 0.3.55 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | time-core | 0.1.9 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | time-macros | 0.2.32 | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| tiny-keccak | 2.0.2 | CC0-1.0 | registry+https://github.com/rust-lang/crates.io-index |
 | tinystr | 0.8.4 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | tls_codec | 0.4.2 | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
@@ -480,5 +512,7 @@ feature selection, and `rand` is pinned at `0.9` to match the version already re
 | zerotrie | 0.2.5 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
 | zerovec | 0.11.8 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
+| zip | 4.6.1 | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | zlib-rs | 0.6.8 | Zlib | registry+https://github.com/rust-lang/crates.io-index |
 | zmij | 1.0.23 | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| zopfli | 0.8.3 | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

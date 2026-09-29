@@ -1,7 +1,7 @@
 [package]
 name = "qh-export"
 version = "0.1.0"
-description = "Streaming export writers: text, csv, json, xml, html, sql"
+description = "Streaming export writers: text, csv, json, xml, html, sql, xls, xlsx, dbf, parquet"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,6 +19,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # (two correct deflate implementations may choose different back-references); its
 # contents are.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# The tenth format: Parquet, written by the native Rust encoder rather than
+# DuckDB (ADR-0018). No default features, because this writer writes
+# uncompressed column chunks and the codec features would pull a codec crate in
+# for a setting nothing here can choose. `arrow` is deliberately not enabled:
+# the writer takes the low-level column API, so an arrow array is never built and
+# the result set is never held in memory as a columnar table.
+parquet = { version = "59", default-features = false }
 thiserror.workspace = true
 
 [lints.rust]

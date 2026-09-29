@@ -68,4 +68,15 @@ exceptions = [
     { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "=0.26.11" },
     { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "=1.0.9" },
     { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs", version = "=1.0.9" },
+
+    # The third exception, for the public-domain dedication the Parquet encoder's
+    # hashing dependency carries.
+    #
+    # ADR-0018 records why CC0-1.0 is acceptable here: it is a public-domain
+    # dedication, not a copyleft, and the obligation it cannot impose is the point.
+    # It arrives through `parquet` -> `ahash` -> `const-random` -> `tiny-keccak`,
+    # which hashes constant generation, and only that one crate is CC0. An
+    # exception rather than an `allow` entry for the same reason as the others: an
+    # unrelated crate that arrives CC0 must still argue for itself in an ADR.
+    { allow = ["CC0-1.0"], crate = "tiny-keccak" },
 ]

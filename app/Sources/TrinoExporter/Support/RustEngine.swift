@@ -78,6 +78,8 @@ struct RustEngine: DatabaseEngine {
         "history_clear": .historyClear,
         "saved_queries": .savedQueries,
         "session": .session,
+        "import_data": .importData,
+        "apply_changes": .applyChanges,
         "objects": .objects,
         "test": .test,
         "catalogs": .catalogs,

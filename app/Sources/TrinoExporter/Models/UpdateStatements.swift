@@ -38,8 +38,8 @@ enum UpdateStatements {
     }
 
     /// The columns that identify the row, at the values it was fetched with.
-    private static func predicate(for row: [String?], columns: [Event.Column],
-                                  kind: ConnectionKind) -> String {
+    static func predicate(for row: [String?], columns: [Event.Column],
+                          kind: ConnectionKind) -> String {
         columns.indices.compactMap { index -> String? in
             let name = quotedIdent(columns[index].name, for: kind)
             // A column the row does not carry is NULL, which is what the grid drew for it: `rowView`

@@ -1,11 +1,11 @@
 # Trino Exporter
 
-Export a Trino query to any of nine file formats, streaming in batches so a big
-result set never lands in memory whole.
+Export a Trino query to any of ten file formats, streaming in batches so a big
+result set never lands in memory whole — and import a CSV or XLSX back into a table.
 
 | | |
 |---|---|
-| **Formats** | `.txt` `.csv` `.json` `.xml` `.html` `.sql` `.xls` `.xlsx` `.dbf` |
+| **Formats** | `.txt` `.csv` `.json` `.xml` `.html` `.sql` `.xls` `.xlsx` `.dbf` `.parquet` |
 | **Interfaces** | native macOS app (SwiftUI), `queryhive-engine` CLI, macOS `.app` in a DMG |
 | **Connection** | any coordinator: URL or host/port/user/password, nothing hardcoded |
 | **Engine** | Rust, no interpreter: the app links it across UniFFI, the CLI runs it directly |
@@ -62,7 +62,7 @@ in that grid's footer, which re-runs the statement and streams the whole result.
 changes what you look at, never the query: the engine stops reading, it does not rewrite your SQL.
 
 A query can go to one of two destinations, switched in the toolbar. **File** streams the result
-into any of the nine formats. **Table** hands the query to Trino to write itself —
+into any of the ten formats. **Table** hands the query to Trino to write itself —
 `CREATE TABLE … AS`, `DROP TABLE IF EXISTS` + `CREATE`, or `INSERT INTO … SELECT` — so the rows
 never travel over the wire to your laptop at all. Replace is drawn in coral and asks first,
 because the drop happens before the query runs.
@@ -232,7 +232,9 @@ comes back, which is what the app decodes.
 | `connections` `import_connections` `credential` | the app's saved connections and its password store (no driver opened) |
 | `objects` `catalogs` `schemas` `tables` | introspection for the object tree |
 | `test` | connect and report, without reading rows |
-| `export` | stream a query into any of the nine formats |
+| `export` | stream a query into any of the ten formats |
+| `import_data` | stream a CSV, or read an XLSX whole, into a table (ADR-0019) |
+| `apply_changes` | run a reviewed INSERT/UPDATE/DELETE plan in one transaction (ADR-0020) |
 | `to_table` | `CREATE TABLE AS` / `DROP + CREATE` / `INSERT INTO … SELECT` |
 | `preview` `count` `explain` | the first N rows, a row count, the plan |
 
@@ -254,7 +256,7 @@ Batching and output:
 | `BATCH_SIZE` | 10000 | rows per fetch from the server |
 | `ROWS_PER_FILE` | none | split the output every N rows |
 | `RETRIES` | 5 | retries on a transient fetch error |
-| `FORMAT` | `csv` | one of the nine |
+| `FORMAT` | `csv` | one of the ten |
 | `OUT_DIR` `NAME` | cwd, `export` | |
 | `ZIP` | off | bundle the result files |
 | `LIMIT` | 1000 | `preview`'s row cap |
@@ -277,6 +279,7 @@ Per-format options: `DELIMITER ENCODING HEADER BOM NULL_TEXT` (txt/csv), `JSONL`
 | `xls` | BIFF8: **65,535 rows / 256 columns** per file, splits automatically |
 | `xlsx` | 1,048,576 rows per file, splits automatically; written streaming |
 | `dbf` | dBase III+: 10-char upper-case field names, fixed-width fields, 4000-byte records. Char width shrinks to fit and long text is truncated (the run warns and counts it). Verified against `dbfread`. |
+| `parquet` | The tenth format, added after the migration: columnar, written by the native Rust `parquet` crate (ADR-0018), one file per table. Numeric and boolean columns are typed; decimals, dates and times are canonical text so precision and the timezone offset survive. The result is never held whole: rows are released a row group at a time. Verified against `pyarrow`. |
 
 Dates and numbers stay native in `xls`/`xlsx`/`dbf`. Timezone-aware timestamps
 have no cell representation in Excel, so they are written as text with the
@@ -313,13 +316,15 @@ crates/
   qh-driver/        the driver trait every backend implements
   qh-driver-trino/  the hand-rolled Trino client (ADR-0006)
   qh-driver-postgres/  qh-driver-mysql/    libpq / MySQL protocol clients
-  qh-export/        9 streaming writers, part splitting, plan
+  qh-export/        streaming writers — txt, csv, json, xml, html, sql, xls, xlsx, dbf, parquet —
+                    part splitting, plan
+  qh-import/        streaming CSV and whole-workbook XLSX readers
   qh-sql/           identifier quoting and the SQL a connection's driver needs
   qh-storage/       connections.json; qh-credentials/ the Keychain side
   qh-tunnel/        the SSH bastion a connection can be reached through
   qh-result-store/  the grid's row store; qh-sync/ its prefetch
   qh-rt/            the tokio runtime the FFI owns
-  qh-ffi/           the engine entry point: the fourteen commands, the UniFFI surface,
+  qh-ffi/           the engine entry point: the commands, the UniFFI surface,
                     and `queryhive-engine`, the CLI the golden harness runs
 app/
   DESIGN.md                 the native app's design contract and engine protocol

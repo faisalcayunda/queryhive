@@ -120,7 +120,17 @@ Angkanya datang dari server, dan itu diukur, bukan diasumsikan:
 |---|---|---|
 | Trino | `updateCount` **di level atas page**, bukan di dalam `stats` | `CREATE TABLE AS SELECT` → 25, `INSERT` → 3, `SELECT`/`DROP` tidak menjawab apa pun (Trino 483) |
 | MySQL | `affected_rows` dari paket OK, lewat `QueryResult::affected_rows()` | `create`/`append`/`replace` pada `type_zoo` → 1 baris, dan tabelnya benar-benar berisi angka itu (uji integrasi `a_write_reports_the_rows_the_server_said_it_wrote`) |
-| PostgreSQL | `-1` | `CommandComplete` untuk `CREATE TABLE AS` memang tidak membawa jumlah baris, jadi `cursor.rowcount` psycopg pun `-1`. Ini **paritas**, bukan kekurangan |
+| PostgreSQL | `CommandComplete` tag, dibaca dari stream | Sebelum 29 Sep 2026 driver melaporkan `-1`; sekarang jumlah sebenarnya. Lihat catatan di bawah |
+
+**PostgreSQL berubah 29 Sep 2026, dan barisnya dulu salah.** Baris itu berbunyi `-1` dan
+menyebutnya paritas. Itu keliru: `CREATE TABLE AS` memang menjawab `CommandComplete` dengan jumlah
+barisnya — psql menampilkan `SELECT n` — dan yang belum ada hanyalah pembacaan tag itu di driver.
+Sekarang `PostgresCursor` menuntaskan stream untuk statement tanpa result set dan melaporkan angkanya,
+karena `apply_changes` membutuhkan jumlah baris nyata untuk verifikasinya
+(`docs/decisions/0020-apply-changes-in-engine.md`). Efek samping yang disengaja: `to_table` pada
+PostgreSQL kini melaporkan jumlah sebenarnya, bukan `-1`. Tidak ada snapshot beku yang terpengaruh —
+`to_table_create` di uji paritas memakai sesi palsu, dan tidak ada kasus live untuk `to_table`
+PostgreSQL.
 
 Satu hal yang benar-benar belum: **`progress.state` selalu `null`.** Nilainya dulu datang dari
 `stats_callback` klien trino (`{"state": "RUNNING", "writtenRows": …}`), sebuah aliran kejadian yang

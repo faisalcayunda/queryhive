@@ -2193,6 +2193,54 @@ final class AppModel {
         })
     }
 
+    /// Run a reviewed plan of deletes, updates and inserts in one transaction.
+    ///
+    /// The plan is the same value the review sheet showed — `WritePlan` is built once and
+    /// `payload` is the single encoder of its statements — so this cannot send a statement the
+    /// user did not read. The engine verifies each statement's affected-row count and rolls the
+    /// whole plan back if one disagrees.
+    func applyChanges(_ plan: WritePlan, in tab: QueryTab) {
+        guard !plan.isEmpty, let connection = connection(for: tab) else { return }
+        let env: [String: String]
+        do {
+            var built = try connectionEnvironment(connection)
+            built["CHANGES"] = plan.payload
+            built["IN_TRANSACTION"] = "true"
+            env = built
+        } catch {
+            let message = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            tab.note(.error, message)
+            tab.panel = .log
+            return
+        }
+        tab.panel = .log
+        tab.note(.info, "Applying \(pluralized(plan.statements.count, "change")) to "
+                + "\(plan.table ?? "the table")…")
+        var message: String?
+        var applied = 0
+        _ = Engine.current.run("apply_changes", env: env, onEvent: { event in
+            switch event.event {
+            case "progress":
+                applied = event.rows ?? applied
+            case "done":
+                applied = event.applied ?? applied
+            case "error":
+                message = event.message
+            default:
+                break
+            }
+        }, onExit: { status, _ in
+            if status == 0 {
+                // The plan is in the table; the queue it came from has nothing
+                // left to say.
+                tab.cellEdits.discard()
+                tab.note(.success, "Applied \(pluralized(applied, "change")).")
+            } else {
+                tab.note(.error, message ?? "The change plan failed and was rolled back.")
+            }
+        })
+    }
+
     private func handle(_ event: Event, in tab: QueryTab) {
         switch event.event {
         case "error":

@@ -1,0 +1,25 @@
+[package]
+name = "qh-import"
+version = "0.1.0"
+description = "Streaming CSV and whole-workbook XLSX readers, and the INSERTs they become"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-core.workspace = true
+# Only for the identifier quote character and the escaping a MySQL string
+# literal needs; the crate's own dialect rules stay in one place.
+qh-sql.workspace = true
+# The CSV reader: RFC 4180 quoting, configurable delimiter, and one record at a
+# time, so a large file is not held. `default-features = false` drops the serde
+# integration this crate does not use.
+csv = { version = "1", default-features = false }
+# XLSX is read whole, and the module says so: the format interleaves a sheet with
+# a shared-string table, so a streaming read still has to hold that table.
+calamine = { version = "0.30", default-features = false, features = ["dates", "chrono"] }
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -192,6 +192,9 @@ struct Event: Decodable {
     var queries: [SavedQuery]?
     /// `history_clear`: how many rows were living when it ran, so a caller can say what it did.
     var cleared: Int?
+    /// `apply_changes` reply: how many statements ran and committed. The plan is
+    /// rolled back otherwise, so this number is the whole plan or none of it.
+    var applied: Int?
     /// `history_entry`: whether the write landed on a row that was already there. False means the
     /// id in the reply is the one the caller would have chosen.
     var merged: Bool?

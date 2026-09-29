@@ -258,7 +258,11 @@ struct ResultGrid: View {
         }
         .contextMenu { selectionMenu }
         .sheet(isPresented: $reviewingChanges) {
-            ChangeReview(statements: pendingStatements, table: tab.sourceTable,
+            ChangeReview(plan: pendingPlan,
+                         onApply: { plan in
+                             reviewingChanges = false
+                             model.applyChanges(plan, in: tab)
+                         },
                          onClose: { reviewingChanges = false })
         }
     }
@@ -539,14 +543,18 @@ struct ResultGrid: View {
                             rows: displayedRows, columnCount: preview.columns.count)
     }
 
-    /// The statements the queued edits would run, or none when the app cannot say which table to
-    /// write to — a hand-written query, whose `sourceTable` is nil.
-    private var pendingStatements: [String] {
-        guard let preview = tab.preview, let table = tab.sourceTable,
-              let connection = model.connection(for: tab) else { return [] }
-        return UpdateStatements.generate(edits: tab.cellEdits, rows: displayedRows,
-                                         columns: preview.columns, table: table,
-                                         kind: connection.kind)
+    /// The statements the queued changes would run, or none when the app cannot say which table
+    /// to write to — a hand-written query, whose `sourceTable` is nil.
+    ///
+    /// Built once, and the same value is handed to the review sheet and, from there, to
+    /// `apply_changes`: what the sheet shows is literally the plan that runs.
+    private var pendingPlan: WritePlan {
+        guard let preview = tab.preview, let connection = model.connection(for: tab) else {
+            return WritePlan(table: tab.sourceTable, statements: [])
+        }
+        return WritePlan.build(edits: tab.cellEdits, rows: displayedRows,
+                               columns: preview.columns, table: tab.sourceTable,
+                               kind: connection.kind)
     }
 
     /// The drag that selects a block of cells.
@@ -885,9 +893,16 @@ struct GridSortBanner: View {
 /// (the FFI's command list is a contract, so that is its own change). Until then the statements are
 /// the user's to read and take away, which is the safe half of the feature rather than a stub.
 private struct ChangeReview: View {
-    let statements: [String]
-    let table: String?
+    let plan: WritePlan
+    let onApply: (WritePlan) -> Void
     let onClose: () -> Void
+
+    /// Guards against a double-click sending the plan twice. A plan is not
+    /// idempotent — an `INSERT` run twice inserts twice — so the button is spent
+    /// once pressed.
+    @State private var applying = false
+
+    private var statements: [WriteStatement] { plan.statements }
 
     private var title: String {
         "\(statements.count) change\(statements.count == 1 ? "" : "s")"
@@ -898,8 +913,10 @@ private struct ChangeReview: View {
             Text(title)
                 .font(.ui(13, weight: .semibold))
                 .foregroundStyle(Tone.ink)
-            Text(table.map { "Against \($0). Each row is matched by every column at the value it "
-                              + "was fetched with, so two identical rows would both be changed." }
+            Text(plan.table.map { "Against \($0). Each row is matched by every column at the value it "
+                              + "was fetched with, so two identical rows would both be changed. The "
+                              + "plan runs in one transaction and is rolled back if a statement "
+                              + "affects a different number of rows than expected." }
                  ?? "This tab does not know which table it is showing, so there is nothing to write "
                     + "back to. Open the table from the tree to edit its rows.")
                 .font(.ui(11))
@@ -909,12 +926,18 @@ private struct ChangeReview: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(statements.enumerated()), id: \.offset) { _, statement in
-                        Text(statement)
-                            .font(.code(11))
-                            .foregroundStyle(Tone.ink)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(statement.kind.rawValue)
+                                .font(.code(9, weight: .semibold))
+                                .foregroundStyle(Tone.accent)
+                                .frame(width: 52, alignment: .leading)
+                            Text(statement.sql)
+                                .font(.code(11))
+                                .foregroundStyle(Tone.ink)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
                 .padding(10)
@@ -927,6 +950,12 @@ private struct ChangeReview: View {
                     .disabled(statements.isEmpty)
                 Spacer()
                 PillButton(title: "Close", role: .quiet, action: onClose)
+                PillButton(title: applying ? "Running…" : "Run", symbol: "play.fill", role: .destructive) {
+                    guard !applying, !plan.isEmpty else { return }
+                    applying = true
+                    onApply(plan)
+                }
+                .disabled(plan.isEmpty || applying)
             }
         }
         .padding(18)
@@ -936,7 +965,9 @@ private struct ChangeReview: View {
     /// The statements as one script, each terminated. The terminator is what makes it pasteable into
     /// a client that expects one; without it the last statement looks truncated.
     private func copyAll() {
-        let script = statements.map { $0.hasSuffix(";") ? $0 : $0 + ";" }.joined(separator: "\n")
+        let script = statements.map { $0.sql }
+            .map { $0.hasSuffix(";") ? $0 : $0 + ";" }
+            .joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(script, forType: .string)
     }

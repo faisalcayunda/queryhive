@@ -1,4 +1,4 @@
-//! The engine entry point: the fourteen commands, and the CLI the golden harness runs.
+//! The engine entry point: the commands, and the CLI the golden harness runs.
 //!
 //! This is the Rust side of the Python engine that came before it
 //! (`app/engine/queryhive_engine.py`). That engine and the `exporter/` package beside it
@@ -29,13 +29,15 @@
 //! | `catalogs`, `schemas`, `tables` | `catalogs` / `schemas` / `tables`, each `names` |
 //! | `objects` | `objects` (`object_columns`, `data`) |
 //! | `export` | `step`, `start`, `progress`, `done` |
+//! | `import_data` | `step`, `progress`, `done` |
+//! | `apply_changes` | `step`, `progress`, `done` |
 //! | `to_table` | `step`, `progress`, `done` |
 //! | `preview` | `step`, `columns`, `rows`, `done` |
 //! | `explain` | `step`, `columns`, `rows`, `done` |
 //! | `count` | `step`, `count`, `done` |
 //! | any failure | one `error`, exit 1 |
 //!
-//! Three of the fourteen open no driver at all: `connections`, `import_connections` and
+//! Three of the commands open no driver at all: `connections`, `import_connections` and
 //! `credential` are the local connection store and the password store, and they live in
 //! [`local`] rather than beside the driver-facing commands. The Python engine had none of
 //! them, so their events are not frozen by the golden harness — the app is their only
@@ -84,10 +86,12 @@
 //! Nothing in a command reaches for `std::env` or stdout directly, which is also what
 //! makes the FFI surface a wrapper rather than a rewrite.
 
+pub mod apply;
 pub mod commands;
 pub mod config;
 pub mod env;
 pub mod events;
+pub mod import;
 pub mod local;
 /// The MCP server's protocol, tools, scope rules and handshake (Fase 2). A separate
 /// binary in this crate speaks it; the app links the same library and never calls it.
@@ -169,6 +173,10 @@ pub enum CliError {
     /// verified.
     #[error(transparent)]
     Import(#[from] qh_storage::import::ImportError),
+
+    /// A CSV or XLSX file could not be read, or was not the shape it claimed.
+    #[error(transparent)]
+    Read(#[from] qh_import::ImportError),
 
     /// The password store refused an operation.
     #[error(transparent)]
@@ -478,6 +486,8 @@ pub enum Command {
     HistoryClear,
     SavedQueries,
     Session,
+    ImportData,
+    ApplyChanges,
     Objects,
     Test,
     Catalogs,
@@ -499,7 +509,7 @@ pub enum Command {
 /// other browse commands where it belongs semantically. The local commands are ahead of it
 /// for the same reason, and there are eight of them now rather than the three that sat
 /// there when this order was written.
-pub const COMMANDS: [&str; 19] = [
+pub const COMMANDS: [&str; 21] = [
     "db_drivers",
     "connections",
     "import_connections",
@@ -509,6 +519,8 @@ pub const COMMANDS: [&str; 19] = [
     "history_clear",
     "saved_queries",
     "session",
+    "import_data",
+    "apply_changes",
     "objects",
     "test",
     "catalogs",
@@ -534,6 +546,8 @@ impl Command {
             "history_clear" => Command::HistoryClear,
             "saved_queries" => Command::SavedQueries,
             "session" => Command::Session,
+            "import_data" => Command::ImportData,
+            "apply_changes" => Command::ApplyChanges,
             "objects" => Command::Objects,
             "test" => Command::Test,
             "catalogs" => Command::Catalogs,
@@ -577,6 +591,8 @@ pub async fn run(
         Command::HistoryClear => local::history_clear(settings, out).await,
         Command::SavedQueries => local::saved_queries(settings, out).await,
         Command::Session => local::session(settings, out).await,
+        Command::ImportData => import::import_data(settings, out, engine, cancel).await,
+        Command::ApplyChanges => apply::apply_changes(settings, out, engine, cancel).await,
         Command::Objects => commands::objects(settings, out, engine).await,
         Command::Test => commands::test(settings, out, engine).await,
         Command::Catalogs => commands::catalogs(settings, out, engine).await,
