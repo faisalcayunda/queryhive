@@ -118,3 +118,38 @@ Rincian yang mengikat:
 - **`table_op` belum punya tes live.** Yang diuji adalah gating Safe Mode dan penolakan sebelum
   connect (`tests/safe_mode.rs`); jalur statement sungguhan terhadap server belum, dan itu dicatat
   sebagai belum diverifikasi.
+
+## Addendum, 29 Sep 2026: biaya yang tercatat di atas sudah ditutup
+
+Konsekuensi pertama di atas mencatat satu pengecualian: floor `no_ddl` bersama pengguna `confirm`
+resolve ke `confirm`, sehingga `table_op` yang dikonfirmasi bisa berjalan di koneksi yang
+kebijakannya melarang seluruh DDL. Kalimat penutupnya menunjuk "resolusi floor" sebagai tempat
+memperbaikinya. Setelah diperiksa, tempatnya bukan di sana.
+
+**Yang salah bukan urutan strictness.** Urutan itu total dan kumulatif, dan `classify.rs` menyatakan
+invariannya sendiri: sebuah floor yang menaikkan `no_ddl` ke `confirm` "can never let anything
+through that the user's own choice would have refused". Guard biasa mematuhi invarian itu, karena ia
+menerapkan floor yang sudah di-resolve pada statement yang sudah diklasifikasi, dan tiap tingkat
+menolak superset dari tingkat di bawahnya.
+
+**Yang melanggarnya hanya `guard_destructive`.** Ia menerima mode yang **sudah di-resolve**, jadi ia
+tidak bisa lagi melihat bahwa salah satu entri floor adalah `no_ddl`. Dengan `SAFE_MODE=confirm` dan
+`SAFE_MODE_FLOOR=no_ddl`, resolve memberi `confirm` (2 > 1), dan pengecualian `confirm` di fungsi itu
+berubah menjadi "tanya", bukan "tolak".
+
+**Perbaikannya karena itu di fungsi itu, bukan di `qh-sql`.** `guard_destructive` sekarang membaca
+entri floor (`SafeModeFloor::iter()`), bukan mode hasil resolve. Entri yang menolak DDL (`no_ddl`
+atau `read_only`) memutuskan lebih dulu, lalu entri yang bertanya (`confirm`), dan hanya floor `full`
+yang mengizinkan tanpa pertanyaan. Resolusi per jenis statement di `qh-sql` tidak diperlukan dan
+tidak diambil, karena ia akan menyentuh jalur yang sudah benar.
+
+Konsekuensinya: floor benar-benar hanya bisa lebih ketat daripada pilihan pengguna, sesuai janji
+ADR-0026, dan `SAFE_MODE_FLOOR` aman dipakai sebagai input kebijakan begitu profil organisasi
+menetapkannya. Dua tes mengunci perilakunya di `crates/qh-ffi/tests/safe_mode.rs`:
+`a_no_ddl_floor_refuses_a_confirmed_drop` dan `a_users_own_no_ddl_refuses_a_confirm_floor`.
+
+**Catatan cakupan.** Sampai addendum ini, `SAFE_MODE_FLOOR` hanya dibaca di
+`crates/qh-ffi/src/commands.rs` dan di tes: app hanya mengirim `SAFE_MODE`, dan server MCP memaksa
+`read_only`. Jadi pengecualian di atas belum bisa dicapai dari app. Ia ditutup sekarang justru karena
+komentar `safe_mode_floor` menyebut floor itu sebagai "the one input a configuration profile would
+set": begitu profil bisa menetapkannya, lubang itu menjadi nyata.

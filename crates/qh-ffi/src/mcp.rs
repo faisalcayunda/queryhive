@@ -79,8 +79,12 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// The revisions this server will echo back.
 ///
 /// Echoing the client's own revision when it is one of these is what the specification
-/// asks for; falling back to [`PROTOCOL_VERSION`] when it is not is the honest answer,
-/// because the alternative is claiming to speak something nobody built.
+/// asks for. One that is not is **refused** with [`UNSUPPORTED_PROTOCOL_VERSION`] and this
+/// list in `error.data.supported`. Falling back to [`PROTOCOL_VERSION`] was the older
+/// behaviour and it hid the mismatch: the client could not learn which revisions it could
+/// have asked for. [`PROTOCOL_VERSION`] is what an `initialize` naming no revision at all
+/// still gets, because a client that merely omitted the field is not a client asking for
+/// something nobody built.
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The JSON-RPC error code the specification reserves for a protocol revision the server

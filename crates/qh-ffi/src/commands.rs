@@ -287,13 +287,14 @@ pub(crate) const DESTRUCTIVE_CONFIRM_REASON: &str =
 /// written it. `confirm` is the one difference, and it is deliberate: ADR-0026 makes the
 /// classifier refuse DDL there, which would leave the two operations the plan asks for
 /// ("truncate/drop tabel lewat konfirmasi") unrunnable at the level built to ask about them.
-/// ADR-0027 records the exception and its one cost.
+/// ADR-0027 records the exception; its one recorded cost is closed by [`destructive_mode`].
 pub(crate) fn guard_destructive(
     settings: &Settings,
-    mode: SafeMode,
+    engine: &dyn Engine,
     statement: &str,
 ) -> Result<(), CliError> {
     let kind = qh_sql::classify(statement);
+    let mode = destructive_mode(settings, engine)?;
     let (decision, reason) = match mode {
         SafeMode::Full => (Decision::Allow, None),
         // Both refusals reuse the classifier's sentence, so a `no_ddl` connection is told
@@ -313,6 +314,32 @@ pub(crate) fn guard_destructive(
         return Err(CliError::Usage(error.to_string()));
     }
     Ok(())
+}
+
+/// The Safe Mode a destructive table operation is under.
+///
+/// The floor's **entries**, not its resolved mode. A total strictness order cannot express
+/// "this condition forbids DDL whatever else is pinned", and that is the hole ADR-0027
+/// recorded: with `SAFE_MODE=confirm` and `SAFE_MODE_FLOOR=no_ddl` the resolved mode is
+/// `confirm` (strictness 2 > 1), so the ordinary guard asked and a confirmed `DROP` ran on a
+/// connection whose floor forbids every DDL. Here an entry that refuses DDL decides first,
+/// then an entry that asks, and only a floor of `full` allows without a question. A floor may
+/// therefore only ever be stricter than the user's own choice, which is what ADR-0026
+/// promises.
+fn destructive_mode(settings: &Settings, engine: &dyn Engine) -> Result<SafeMode, CliError> {
+    let floor = safe_mode_floor(settings, engine)?;
+    let forbids_ddl = floor
+        .iter()
+        .filter(|(_, mode)| matches!(mode, SafeMode::NoDdl | SafeMode::ReadOnly))
+        .map(|(_, mode)| mode)
+        .max_by_key(|mode| mode.strictness());
+    if let Some(mode) = forbids_ddl {
+        return Ok(mode);
+    }
+    if floor.iter().any(|(_, mode)| mode == SafeMode::Confirm) {
+        return Ok(SafeMode::Confirm);
+    }
+    Ok(SafeMode::Full)
 }
 
 /// Record the decision a mode makes about a whole operation, before its own error is raised.
@@ -1192,7 +1219,6 @@ pub async fn table_op(
             )))
         }
     };
-    let mode = safe_mode(settings, engine)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
@@ -1239,7 +1265,7 @@ pub async fn table_op(
 
     // The gate reads the statement this command will send, before the connect step, so a
     // read-only connection refuses without opening one.
-    guard_destructive(settings, mode, &sql)?;
+    guard_destructive(settings, engine, &sql)?;
 
     out.emit(event("step").field("step", "connect").build())?;
     let (mut session, _policy) = open(settings, engine, &config).await?;

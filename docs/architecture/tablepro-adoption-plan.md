@@ -858,8 +858,10 @@ pembaca handshake di pohon ini dan tidak ada `getuid` yang aman tanpa `libc`. Ti
 diputuskan, bukan dikerjakan, dan alasannya di [`docs/mcp-stability.md`](../mcp-stability.md):
 pencabutan tidak punya request berjalan untuk dibatalkan (loop `serve` sekuensial), rate limit
 ditunda karena token 256-bit tidak punya ruang tebak, dan "External Clients" menunggu MCP dipakai
-lebih dari satu orang. Halaman kebijakan stabilitas itu juga mencatat satu celah: server belum
-menolak versi protokol yang tidak dikenal dengan daftar versi yang didukung.
+lebih dari satu orang. Penolakan versi protokol yang tidak dikenal, beserta daftar versi yang
+didukung, sudah mendarat (`crates/qh-ffi/src/mcp.rs`, `-32022` dengan `error.data.supported`, commit
+`310c03d`) dan `docs/mcp-stability.md` mencatatnya, jadi §12.3 tidak menyisakan apa pun untuk
+dibangun.
 
 ### 12.4 Yang **tidak** masuk daftar ini
 

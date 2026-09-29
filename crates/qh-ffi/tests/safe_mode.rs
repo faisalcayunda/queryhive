@@ -500,3 +500,63 @@ async fn table_op_is_gated_like_every_other_write() {
     );
     assert_eq!(engine.connects(), 0);
 }
+
+#[tokio::test]
+async fn a_no_ddl_floor_refuses_a_confirmed_drop() {
+    // ADR-0027 recorded this as its one cost: a total strictness order cannot say "this
+    // floor forbids DDL whatever else is pinned". With `SAFE_MODE=confirm` and
+    // `SAFE_MODE_FLOOR=no_ddl`, the resolved mode is `confirm` (2 > 1), so the ordinary
+    // guard asked and a confirmed `DROP` ran on a connection whose floor forbids all DDL.
+    // The floor's own condition is what decides now.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::TableOp,
+        &engine,
+        &[
+            ("SAFE_MODE", "confirm"),
+            ("SAFE_MODE_FLOOR", "no_ddl"),
+            ("SAFE_MODE_CONFIRMED", "1"),
+            ("TABLE_OP", "drop"),
+            ("TARGET_CATALOG", "hive"),
+            ("TARGET_SCHEMA", "default"),
+            ("TARGET_TABLE", "people"),
+        ],
+    )
+    .await;
+    let message = usage_message(&error);
+    assert!(message.contains("no_ddl"), "{message}");
+    assert!(
+        message.contains("DDL"),
+        "the refusal should be the classifier's own DDL sentence: {message}"
+    );
+    assert_eq!(
+        engine.connects(),
+        0,
+        "a floor that forbids DDL must refuse before connecting"
+    );
+}
+
+#[tokio::test]
+async fn a_users_own_no_ddl_refuses_a_confirm_floor() {
+    // The same hole from the other side, and the one a managed profile would create: the
+    // user's connection is `no_ddl` while the pinned floor is only `confirm`. Strictness
+    // alone resolves to `confirm`, but the user's own level refuses DDL and a floor may
+    // only ever be stricter, so the answer is the refusal.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::TableOp,
+        &engine,
+        &[
+            ("SAFE_MODE", "no_ddl"),
+            ("SAFE_MODE_FLOOR", "confirm"),
+            ("SAFE_MODE_CONFIRMED", "1"),
+            ("TABLE_OP", "truncate"),
+            ("TARGET_CATALOG", "hive"),
+            ("TARGET_SCHEMA", "default"),
+            ("TARGET_TABLE", "people"),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("no_ddl"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+}
