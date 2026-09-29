@@ -45,18 +45,33 @@ struct ResultGrid: View {
     /// Whether the review of the queued changes is open.
     @State private var reviewingChanges = false
 
+    /// The column being renamed, and the text in the rename sheet. `nil` between renames.
+    @State private var renaming: RenameTarget?
+
+    /// The name being typed in the "save filters as a preset" sheet.
+    @State private var savingPreset = false
+    @State private var presetName = ""
+
+    /// One column rename in flight. An identity of its own so the sheet can be driven by `item:`
+    /// without the source index having to be `Identifiable`.
+    struct RenameTarget: Identifiable {
+        let id = UUID()
+        let source: Int
+        var name: String
+    }
+
     /// Per-column pixel width, computed once per result rather than per cell: at 1000 rows the
     /// per-cell version is O(rows × columns) work on every render pass.
-    /// Natural widths, before the viewport has a say.
+    /// Natural widths, before the viewport has a say. One per **drawn** column, in display order.
     private var naturalWidths: [CGFloat] {
         guard let preview = tab.preview else { return [] }
-        return preview.columns.enumerated().map { index, column in
-            let header = column.name.count
+        return tab.visibleColumnSources.map { source in
+            let header = tab.columnLayout.label(source, original: preview.columns).count
             // Only the head of the result decides the width: measuring every row would make a
             // 1000-row preview pay for its own layout, and one long tail cell would stretch the
             // column to the cap anyway.
             let longest = preview.rows.prefix(200).map { row -> Int in
-                guard index < row.count, let value = row[index] else { return 4 }
+                guard source < row.count, let value = row[source] else { return 4 }
                 return value.count
             }.max() ?? 0
             // The funnel lives in the header cell, so every column pays for it.
@@ -177,16 +192,20 @@ struct ResultGrid: View {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     .font(.system(size: 22))
                     .foregroundStyle(Tone.secondary)
-                Text("No rows match the filters. \(pluralized(hidden, "fetched row")) hidden by "
-                     + "\(filtersLabel).")
+                Text("No rows match. \(pluralized(hidden, "fetched row")) hidden by "
+                     + "\(hiddenByLabel).")
                     .font(.ui(11.5))
                     .foregroundStyle(Tone.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)
                 // The same `Clear` the filter popover offers, put where the user is looking. It is
                 // one control over the whole dictionary rather than one per column because the
-                // question the empty body asks is "what is hiding my rows", not "this column".
-                PillButton(title: "Clear Filters", symbol: "xmark.circle", role: .quiet) {
+                // question the empty body asks is "what is hiding my rows", not "this column". It
+                // clears the cross-column search too: when the search is what emptied the grid,
+                // clearing only the filters would leave the button doing nothing.
+                PillButton(title: tab.columnFilters.isEmpty ? "Clear Search" : "Clear Filters",
+                           symbol: "xmark.circle", role: .quiet) {
+                    tab.gridSearch = ""
                     tab.columnFilters = [:]
                 }
             }
@@ -199,42 +218,53 @@ struct ResultGrid: View {
         "\(tab.columnFilters.count) filter\(tab.columnFilters.count == 1 ? "" : "s")"
     }
 
+    /// What is hiding the rows for the empty body's sentence: the filters, the search, or both.
+    private var hiddenByLabel: String {
+        var parts: [String] = []
+        if !tab.columnFilters.isEmpty { parts.append(filtersLabel) }
+        if tab.hasGridSearch { parts.append("the search") }
+        return parts.isEmpty ? "nothing" : parts.joined(separator: " and ")
+    }
+
     private func grid(_ preview: PreviewResult) -> some View {
-        // The reader has to be outside the scroller: inside it, `geometry` would report the
-        // content's width, which is the thing being decided.
-        GeometryReader { geometry in
-            let widths = widths(fitting: geometry.size.width)
-            if let placeholder = placeholder(preview) {
-                // No rows to scroll through, so the two halves are separate views rather than one
-                // scroller. The header still scrolls sideways, which is what keeps a wide result's
-                // columns reachable in a narrow panel, but with no rows under it there is nothing it
-                // has to stay in step with. The body is then laid out across the *panel*, not across
-                // the header: one scroller around both centred the sentence on the header's width,
-                // so in a narrow window with eight columns it was drawn off the right edge.
-                VStack(spacing: 0) {
-                    ScrollView(.horizontal) { headerRow(preview.columns, widths: widths) }
-                    placeholderBody(placeholder)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        Section {
-                            ForEach(Array(displayedRows.enumerated()), id: \.offset) { index, row in
-                                rowView(row, index: index, columns: preview.columns, widths: widths)
-                            }
-                        } header: {
-                            headerRow(preview.columns, widths: widths)
-                        }
+        VStack(spacing: 0) {
+            gridToolbar(preview)
+            // The reader has to be outside the scroller: inside it, `geometry` would report the
+            // content's width, which is the thing being decided.
+            GeometryReader { geometry in
+                let widths = widths(fitting: geometry.size.width)
+                if let placeholder = placeholder(preview) {
+                    // No rows to scroll through, so the two halves are separate views rather than one
+                    // scroller. The header still scrolls sideways, which is what keeps a wide result's
+                    // columns reachable in a narrow panel, but with no rows under it there is nothing it
+                    // has to stay in step with. The body is then laid out across the *panel*, not across
+                    // the header: one scroller around both centred the sentence on the header's width,
+                    // so in a narrow window with eight columns it was drawn off the right edge.
+                    VStack(spacing: 0) {
+                        ScrollView(.horizontal) { headerRow(preview, widths: widths) }
+                        placeholderBody(placeholder)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    // maxHeight as well as minWidth: a short result was centred in the scroller and
-                    // floated in the middle of the panel instead of sitting under its header.
-                    .frame(minWidth: geometry.size.width, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                            Section {
+                                ForEach(Array(displayedRows.enumerated()), id: \.offset) { index, row in
+                                    rowView(row, index: index, columns: preview.columns, widths: widths)
+                                }
+                            } header: {
+                                headerRow(preview, widths: widths)
+                            }
+                        }
+                        // maxHeight as well as minWidth: a short result was centred in the scroller and
+                        // floated in the middle of the panel instead of sitting under its header.
+                        .frame(minWidth: geometry.size.width, maxHeight: .infinity, alignment: .topLeading)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         // ⌘C copies the selected block; the context menu is the same action for a pointer that has
         // not found the key, and the footer's own button is the third door to it. Three, because
         // copying a table out is the reason the grid exists and it should not need discovering.
@@ -255,6 +285,160 @@ struct ResultGrid: View {
                          },
                          onClose: { reviewingChanges = false })
         }
+        .sheet(item: $renaming) { target in
+            RenameColumnSheet(name: target.name) { name in
+                tab.renameColumn(target.source, to: name)
+                renaming = nil
+            } onCancel: {
+                renaming = nil
+            }
+        }
+        .sheet(isPresented: $savingPreset) {
+            SavePresetSheet(name: $presetName, canSave: !tab.columnFilters.isEmpty) { name in
+                model.saveFilterPreset(named: name, in: tab)
+                savingPreset = false
+                presetName = ""
+            } onCancel: {
+                savingPreset = false
+                presetName = ""
+            }
+        }
+    }
+
+    /// Open the rename sheet over one column, seeded with the label it currently carries.
+    private func beginRename(_ source: Int) {
+        let original = tab.preview?.columns ?? []
+        renaming = RenameTarget(source: source,
+                                name: tab.columnLayout.label(source, original: original))
+    }
+
+    // MARK: Search, columns and presets toolbar
+
+    /// The strip above the header: the cross-column search, and the column and filter-preset menus.
+    ///
+    /// It sits outside the scroller so it stays put while the columns scroll sideways, and it is the
+    /// one place that can say what the two searches do differently — the in-memory one and the
+    /// server one are both reachable from here, and neither is obvious from its own control.
+    @ViewBuilder private func gridToolbar(_ preview: PreviewResult) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                searchField(preview)
+                Spacer(minLength: 8)
+                columnsMenu
+                presetsMenu
+            }
+            .padding(.horizontal, Metrics.gutter)
+            .padding(.vertical, 5)
+            if tab.hasGridSearch {
+                Text("In memory over the \(preview.rows.count.formatted()) rows fetched. "
+                     + "“Search Server” runs the query again with a WHERE over every column, so it "
+                     + "can find rows this grid never fetched.")
+                    .font(.ui(10.5))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Metrics.gutter)
+                    .padding(.bottom, 4)
+            }
+        }
+        .background(Tone.recess.opacity(0.18))
+        .overlay(Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1), alignment: .bottom)
+    }
+
+    @ViewBuilder private func searchField(_ preview: PreviewResult) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11)).foregroundStyle(Tone.secondary)
+            TextField("Search all columns", text: $tab.gridSearch)
+                .textFieldStyle(.plain)
+                .font(.ui(11.5))
+                .frame(width: 170)
+            if tab.hasGridSearch {
+                Text("\(displayedRows.count.formatted()) of \(preview.rows.count.formatted())")
+                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                Button {
+                    model.searchOnServer(tab, term: tab.gridSearch)
+                } label: {
+                    Label("Search Server", systemImage: "arrow.up.right.square")
+                        .font(.ui(10.5))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Tone.accent)
+                .help("Re-run the query with this term as a WHERE over every column, so a row "
+                      + "outside the row limit is found too. It reads the table again.")
+                Button {
+                    tab.gridSearch = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Tone.ink.opacity(0.35))
+                .help("Clear the search")
+            }
+        }
+    }
+
+    private var columnsMenu: some View {
+        let hidden = tab.columnLayout.hiddenCount
+        return Menu {
+            ForEach(0..<tab.columnLayout.sourceCount, id: \.self) { source in
+                Button {
+                    tab.toggleColumn(source)
+                } label: {
+                    Label(tab.columnLayout.label(source, original: tab.preview?.columns ?? []),
+                          systemImage: tab.columnLayout.isVisible(source) ? "checkmark" : "circle.dashed")
+                }
+            }
+            Divider()
+            Button("Show All Columns") { tab.showAllColumns() }
+                .disabled(hidden == 0)
+            Button("Reset Column Layout") { tab.resetColumnLayout() }
+        } label: {
+            Label(hidden == 0 ? "Columns" : "Columns (\(hidden) hidden)", systemImage: "tablecells")
+                .font(.ui(10.5))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Hide and show the grid's columns. Rendering only: a hidden column is still copied "
+              + "and still exported.")
+    }
+
+    private var presetsMenu: some View {
+        let presets = model.filterPresets(for: tab)
+        return Menu {
+            Button("Save Current Filters…") {
+                presetName = ""
+                savingPreset = true
+            }
+            .disabled(tab.columnFilters.isEmpty)
+            if !presets.isEmpty {
+                Divider()
+                ForEach(presets) { preset in
+                    Button(preset.name) { apply(preset) }
+                }
+                Divider()
+                Menu("Delete Preset") {
+                    ForEach(presets) { preset in
+                        Button(preset.name) { model.deleteFilterPreset(named: preset.name, in: tab) }
+                    }
+                }
+            }
+        } label: {
+            Label(presets.isEmpty ? "Filters" : "Filters (\(presets.count))",
+                  systemImage: "line.3.horizontal.decrease.circle")
+                .font(.ui(10.5))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Save the filters on screen as a preset and reapply one later. Saved per connection "
+              + "and table; a hand-written query keeps its presets for this tab only.")
+    }
+
+    private func apply(_ preset: FilterPreset) {
+        let missing = tab.applyFilterPreset(preset)
+        if !missing.isEmpty {
+            tab.note(.warning, "Preset “\(preset.name)” names columns this result does not have: "
+                     + "\(missing.joined(separator: ", ")).")
+        }
     }
 
     /// The selected block as the tab-separated text a spreadsheet reads back as a table, or `nil`
@@ -262,10 +446,29 @@ struct ResultGrid: View {
     ///
     /// `displayedRows`, not the fetched rows: the user pointed at what is on screen, so what they
     /// copy is what they saw. A filter that hid a row must not put it back in the paste.
+    ///
+    /// Hiding, reordering and renaming are rendering-only, so the copy is built from the **source**
+    /// columns the selection covers, in the server's own order and under the server's own names.
+    /// The selection is a rectangle of display positions, so a reordered grid can put two columns
+    /// that are not adjacent in the source between the block's corners; taking the source indices
+    /// and sorting them is what keeps the copy honest about which values it holds, rather than
+    /// copying a source range that reaches through a column the user never selected.
     private func selectionText(withHeaders: Bool) -> String? {
         guard let preview = tab.preview, let selection = tab.cellSelection else { return nil }
-        return GridClipboard.text(rows: displayedRows, headers: preview.columns.map(\.name),
-                                  selection: selection, withHeaders: withHeaders)
+        let visible = tab.visibleColumnSources
+        let sources = (selection.left...selection.right)
+            .compactMap { visible.indices.contains($0) ? visible[$0] : nil }
+            .sorted()
+        guard !sources.isEmpty else { return nil }
+        let headers = sources.map { preview.columns.indices.contains($0) ? preview.columns[$0].name : "" }
+        let projected: [[String?]] = (selection.top...selection.bottom).map { row -> [String?] in
+            let source = displayedRows.indices.contains(row) ? displayedRows[row] : []
+            return sources.map { $0 < source.count ? source[$0] : nil }
+        }
+        let block = CellRange(from: (row: 0, column: 0),
+                              to: (row: projected.count - 1, column: sources.count - 1))
+        return GridClipboard.text(rows: projected, headers: headers, selection: block,
+                                  withHeaders: withHeaders)
     }
 
     /// Puts the selected block on the clipboard. The path the context menu and the footer button
@@ -291,8 +494,16 @@ struct ResultGrid: View {
         Divider()
         Button("Review \(changeLabel)…") { reviewingChanges = true }
             .disabled(tab.cellEdits.isEmpty)
-        Button("Discard \(changeLabel)") { tab.cellEdits.discard() }
+        Button("Discard \(changeLabel)") { tab.discardCellEdits() }
             .disabled(tab.cellEdits.isEmpty)
+        Divider()
+        // The queue's own undo, one step per editing session. The window's ⌘Z is not wired to this
+        // manager, so the grid offers the two commands here rather than pretending the system key
+        // works on its own history.
+        Button("Undo Edit") { tab.undoCellEdit() }
+            .disabled(!tab.canUndoCellEdit)
+        Button("Redo Edit") { tab.redoCellEdit() }
+            .disabled(!tab.canRedoCellEdit)
     }
 
     /// "3 Changes", for the menu items and the footer. One place, so the two cannot disagree about
@@ -301,23 +512,27 @@ struct ResultGrid: View {
         "\(tab.cellEdits.count) Change\(tab.cellEdits.count == 1 ? "" : "s")"
     }
 
-    private func headerRow(_ columns: [Event.Column], widths: [CGFloat]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func headerRow(_ preview: PreviewResult, widths: [CGFloat]) -> some View {
+        let visible = tab.visibleColumnSources
+        return VStack(alignment: .leading, spacing: 0) {
             // The sort's own sentence, above the names. A chevron beside a column says *which* column
             // and which way; it cannot say that this is an in-memory order over the rows already
             // fetched. That is the part the plan asked to be written down, and it matters: a sorted
             // grid looks exactly like a sorted result.
             if let sort = tab.gridSort {
-                GridSortBanner(column: columnName(sort.column, in: columns),
+                GridSortBanner(column: tab.columnLayout.label(sort.column, original: preview.columns),
                                direction: sort.direction,
                                fetched: tab.preview?.rows.count ?? 0,
                                onClear: { tab.setGridSort(nil) })
             }
             HStack(spacing: 0) {
                 gutter("#")
-                ForEach(Array(columns.enumerated()), id: \.offset) { index, column in
-                    headerCell(index, column,
-                               width: widths.indices.contains(index) ? widths[index] : 120)
+                // The id is the source index, not the display position: a moved column keeps its
+                // identity and only its order changes, so SwiftUI moves the view rather than
+                // rebuilding it as a different column.
+                ForEach(Array(visible.enumerated()), id: \.element) { position, source in
+                    headerCell(source, display: position, preview.columns[source],
+                               width: widths.indices.contains(position) ? widths[position] : 120)
                 }
             }
         }
@@ -340,18 +555,29 @@ struct ResultGrid: View {
     /// One column's header cell, and the door to the sort: clicking it cycles ascending, descending,
     /// and off. The whole cell is the target rather than a small glyph, because a header that only
     /// sorts from one 10pt corner is a header nobody sorts from.
-    private func headerCell(_ index: Int, _ column: Event.Column, width: CGFloat) -> some View {
+    ///
+    /// `source` is the column's identity — what the sort and the filter are keyed by — while
+    /// `display` is where it is drawn, which is what the move commands act on.
+    private func headerCell(_ source: Int, display: Int, _ column: Event.Column,
+                            width: CGFloat) -> some View {
         let numeric = isNumeric(column.type)
-        let sort = tab.gridSort?.column == index ? tab.gridSort : nil
+        let sort = tab.gridSort?.column == source ? tab.gridSort : nil
+        let label = tab.columnLayout.label(source, original: tab.preview?.columns ?? [])
+        let drawn = tab.visibleColumnSources.count
         return Button {
-            tab.setGridSort(GridSort.next(tab.gridSort, clickedColumn: index))
+            tab.setGridSort(GridSort.next(tab.gridSort, clickedColumn: source))
         } label: {
             VStack(alignment: numeric ? .trailing : .leading, spacing: 3) {
                 HStack(spacing: 3) {
-                    Text(column.name)
+                    Text(label)
                         .font(.code(12, weight: .semibold))
                         .foregroundStyle(Tone.ink.opacity(0.92))
                         .lineLimit(1)
+                    if tab.columnLayout.isRenamed(source) {
+                        // A dot, because the label no longer matches the server's name and the
+                        // header is the only place that knows.
+                        Circle().fill(Tone.accent.opacity(0.7)).frame(width: 4, height: 4)
+                    }
                     if let sort {
                         Image(systemName: sort.direction.symbol)
                             .font(.system(size: 8, weight: .bold))
@@ -366,34 +592,56 @@ struct ResultGrid: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .topTrailing) { filterButton(index) }
+        .overlay(alignment: .topTrailing) { filterButton(source) }
         .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
-        .help("Sort by \(column.name) — over the rows already fetched, not the whole result")
+        .contextMenu { columnMenu(source, display: display, drawn: drawn) }
+        .help("Sort by \(label) — over the rows already fetched, not the whole result")
     }
 
-    /// A column's name by position, for the sort banner. Falls back to the position when the sort
-    /// and the columns disagree, which can happen for the instant between a new result's columns
-    /// landing and its sort being cleared.
-    private func columnName(_ index: Int, in columns: [Event.Column]) -> String {
-        columns.indices.contains(index) ? columns[index].name : "column \(index + 1)"
+    /// The header's right-click menu: the three rendering-only column actions, plus the sort a
+    /// header click already offers.
+    @ViewBuilder
+    private func columnMenu(_ source: Int, display: Int, drawn: Int) -> some View {
+        Button("Sort Ascending") {
+            tab.setGridSort(GridSort(column: source, direction: .ascending))
+        }
+        Button("Sort Descending") {
+            tab.setGridSort(GridSort(column: source, direction: .descending))
+        }
+        Divider()
+        Button("Move Left") { tab.moveColumn(from: display, to: display - 1) }
+            .disabled(display == 0)
+        Button("Move Right") { tab.moveColumn(from: display, to: display + 1) }
+            .disabled(display >= drawn - 1)
+        Divider()
+        Button("Rename Column…") { beginRename(source) }
+        Button("Hide Column") { tab.setColumnHidden(source, true) }
+        Divider()
+        Button("Show All Columns") { tab.showAllColumns() }
+            .disabled(tab.columnLayout.hiddenCount == 0)
+        Button("Reset Column Layout") { tab.resetColumnLayout() }
     }
 
-    private func rowView(_ row: [String?], index: Int, columns: [Event.Column], widths: [CGFloat]) -> some View {
+    private func rowView(_ row: [String?], index: Int, columns: [Event.Column],
+                         widths: [CGFloat]) -> some View {
         HStack(spacing: 0) {
             gutter("\(index + 1)")
-            ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, column in
-                let key = CellKey(row: index, column: columnIndex)
+            // Drawn in display order, but keyed and read by the source index, so hiding and moving
+            // are the only things that change here and the queue, the copy and the plan never do.
+            ForEach(Array(tab.visibleColumnSources.enumerated()), id: \.element) { position, source in
+                let column = columns[source]
+                let key = CellKey(row: index, column: source)
                 let staged = tab.cellEdits.value(at: key) != nil
-                cellView(key: key, original: columnIndex < row.count ? row[columnIndex] : nil,
+                cellView(key: key, original: source < row.count ? row[source] : nil,
                          column: column)
-                    .frame(width: widths.indices.contains(columnIndex) ? widths[columnIndex] : 120,
+                    .frame(width: widths.indices.contains(position) ? widths[position] : 120,
                            alignment: isNumeric(column.type) ? .trailing : .leading)
                     .padding(.horizontal, cellPadding)
                     .padding(.vertical, 4)
                     // Under the cell rather than behind the text: the highlight has to cover the
                     // padding too, or a selected block reads as a run of text highlights with the
                     // column separators cutting through it.
-                    .background(cellBackground(row: index, column: columnIndex, staged: staged))
+                    .background(cellBackground(row: index, column: position, staged: staged))
                     // A dot as well as the wash: a cell can be both selected and changed, and one
                     // tint cannot say which of the two it is.
                     .overlay(alignment: .topTrailing) {
@@ -410,8 +658,9 @@ struct ResultGrid: View {
         .gesture(selectionDrag(row: index, widths: widths))
     }
 
-    /// The wash behind one cell. A staged change wins over the selection, because what the user has
-    /// changed is the thing they most need to see.
+    /// The wash behind one cell. `column` is the **display** position, which is what the selection
+    /// rectangle holds. A staged change wins over the selection, because what the user has changed
+    /// is the thing they most need to see.
     private func cellBackground(row: Int, column: Int, staged: Bool) -> Color {
         if staged { return Tone.amber.opacity(0.20) }
         if tab.cellSelection?.contains(row: row, column: column) == true {
@@ -441,6 +690,10 @@ struct ResultGrid: View {
                 .font(.mono12)
                 .foregroundStyle(Tone.ink)
                 .focused($editorFocused)
+                // Every keystroke goes into the session's buffer, not the queue: the queue change —
+                // and its one undo step — is registered when the session ends, so "hello" undoes as
+                // one word rather than five letters.
+                .onChange(of: editingText) { _, text in tab.typeCellEdit(text) }
                 .onSubmit { commitEdit(at: key) }
                 .onExitCommand { cancelEdit() }
                 .onAppear { editorFocused = true }
@@ -470,19 +723,21 @@ struct ResultGrid: View {
     }
 
     /// The text a cell currently shows: the staged edit when there is one, the server's value
-    /// otherwise. The same rule `cellView` uses, so the menu and the reader cannot disagree with
-    /// the cell about what it holds.
-    private func cellValue(at key: CellKey) -> String? {
-        tab.cellEdits.value(at: key) ?? originalText(at: key)
-    }
+    /// otherwise. Delegates to the tab, which owns the same rule the queue and the plan use, so the
+    /// menu and the reader cannot disagree with the cell about what it holds.
+    private func cellValue(at key: CellKey) -> String? { tab.cellValue(at: key) }
 
     /// The selected cell when its value is one the reader can open, or `nil` when it is not — or
     /// when nothing is selected. Drives the context menu item's enabled state.
+    ///
+    /// The selection is a rectangle of display positions, so its top-left is mapped to the source
+    /// column before the reader is opened on it; that is the key the reader's popover is bound to.
     private func selectedCell() -> (value: String, column: Event.Column)? {
         guard let preview = tab.preview, let selection = tab.cellSelection,
-              preview.columns.indices.contains(selection.left) else { return nil }
-        let column = preview.columns[selection.left]
-        let key = CellKey(row: selection.top, column: selection.left)
+              let source = tab.columnLayout.source(at: selection.left),
+              preview.columns.indices.contains(source) else { return nil }
+        let column = preview.columns[source]
+        let key = CellKey(row: selection.top, column: source)
         guard let value = cellValue(at: key),
               GridValue.isOpenable(value: value, type: column.type) else { return nil }
         return (value, column)
@@ -490,8 +745,9 @@ struct ResultGrid: View {
 
     /// Open the reader on the selection's top-left cell, the cell its own double-click would open.
     private func viewSelectedValue() {
-        guard let selection = tab.cellSelection, selectedCell() != nil else { return }
-        viewingCell = CellKey(row: selection.top, column: selection.left)
+        guard let selection = tab.cellSelection, selectedCell() != nil,
+              let source = tab.columnLayout.source(at: selection.left) else { return }
+        viewingCell = CellKey(row: selection.top, column: source)
     }
 
     /// The reader's presentation, bound to one cell's key so only that cell's popover can be open.
@@ -500,21 +756,28 @@ struct ResultGrid: View {
     }
 
     /// Open the editor over one cell, seeded with what the cell currently shows.
+    ///
+    /// A session still open over another cell is ended first rather than abandoned: its text would
+    /// otherwise be lost without ever reaching the queue or the undo history.
     private func beginEdit(at key: CellKey) {
+        if let open = editingCell, open != key { tab.endCellEdit() }
         editingCell = key
-        editingText = tab.cellEdits.value(at: key) ?? originalText(at: key) ?? ""
+        editingText = tab.cellValue(at: key) ?? ""
+        tab.beginCellEdit(at: key)
     }
 
     /// Take the editor's text into the queue.
     ///
     /// Over the whole selection when one covers more than the edited cell: "select these cells and
     /// set them all to this" is one gesture, not N, and it is the bulk edit the selection was drawn
-    /// for.
+    /// for. Either way it lands as one undo step; the single-cell path goes through the session, so
+    /// the keystrokes that produced it coalesce into that one step.
     private func commitEdit(at key: CellKey) {
         if let selection = tab.cellSelection, selection.cellCount > 1 {
-            tab.cellEdits.fill(editingText, over: selection, rows: displayedRows)
+            tab.fillCellEdits(editingText, over: selection)
         } else {
-            tab.cellEdits.edit(editingText, at: key, original: originalText(at: key))
+            tab.typeCellEdit(editingText)
+            tab.endCellEdit()
         }
         cancelEdit()
     }
@@ -522,28 +785,24 @@ struct ResultGrid: View {
     private func cancelEdit() {
         editingCell = nil
         editingText = ""
-    }
-
-    /// The value the server sent for a cell, before any staged edit.
-    private func originalText(at key: CellKey) -> String? {
-        guard displayedRows.indices.contains(key.row) else { return nil }
-        let row = displayedRows[key.row]
-        return row.indices.contains(key.column) ? row[key.column] : nil
+        tab.cancelCellEdit()
     }
 
     /// Open the editor from the menu, over the selection's top-left cell.
     private func beginEditingSelection() {
-        guard let selection = tab.cellSelection else { return }
-        beginEdit(at: CellKey(row: selection.top, column: selection.left))
+        guard let selection = tab.cellSelection,
+              let source = tab.columnLayout.source(at: selection.left) else { return }
+        beginEdit(at: CellKey(row: selection.top, column: source))
     }
 
     /// Put the clipboard's block into the selection, anchored at its top-left corner the way a
-    /// spreadsheet takes a paste.
+    /// spreadsheet takes a paste. The anchor's column is a display position; the tab maps it and the
+    /// run of columns after it back to the source cells a paste is keyed by.
     private func pasteIntoSelection() {
-        guard let selection = tab.cellSelection, let preview = tab.preview,
+        guard let selection = tab.cellSelection, tab.preview != nil,
               let text = NSPasteboard.general.string(forType: .string) else { return }
-        tab.cellEdits.paste(text, at: CellKey(row: selection.top, column: selection.left),
-                            rows: displayedRows, columnCount: preview.columns.count)
+        tab.pasteCellEdits(text, at: CellKey(row: selection.top, column: selection.left),
+                           columnCount: tab.visibleColumnSources.count)
     }
 
     /// The statements the queued changes would run, or none when the app cannot say which table
@@ -567,11 +826,12 @@ struct ResultGrid: View {
     private func selectionDrag(row: Int, widths: [CGFloat]) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                guard let preview = tab.preview, !preview.columns.isEmpty, !displayedRows.isEmpty
-                else { return }
+                let drawn = tab.visibleColumnSources
+                guard let preview = tab.preview, !preview.columns.isEmpty, !displayedRows.isEmpty,
+                      !drawn.isEmpty else { return }
                 let target = geometry.cell(at: value.location, inRow: row, widths: widths,
                                            lastRow: displayedRows.count - 1,
-                                           lastColumn: preview.columns.count - 1)
+                                           lastColumn: drawn.count - 1)
                 if dragAnchor == nil { dragAnchor = target }
                 guard let anchor = dragAnchor else { return }
                 tab.cellSelection = CellRange(from: anchor, to: target)
@@ -631,17 +891,14 @@ struct ResultGrid: View {
         if tab.showingPlan {
             return "Query plan · \(pluralized(preview.rows.count, "line"))"
         }
-        let fetched = tab.columnFilters.isEmpty
-            ? preview.rows.count
-            : displayedRows.count
-        let scope = tab.columnFilters.isEmpty ? "" : " of \(preview.rows.count.formatted())"
+        let narrowed = !tab.columnFilters.isEmpty || tab.hasGridSearch
+        let fetched = narrowed ? displayedRows.count : preview.rows.count
+        let scope = narrowed ? " of \(preview.rows.count.formatted())" : ""
 
         if let total = tab.totalRows {
             return "\(fetched.formatted())\(scope) of \(total.formatted()) rows"
         }
-        return tab.columnFilters.isEmpty
-            ? preview.summary
-            : "\(fetched.formatted())\(scope) rows"
+        return narrowed ? "\(fetched.formatted())\(scope) rows" : preview.summary
     }
 
     /// DBeaver's count, as a button. Only offered once there is a result to count, and only while
@@ -768,7 +1025,8 @@ struct ResultGrid: View {
                 // says which it is, and a fetched total makes the two one sentence.
                 Text(summaryText(preview))
                     .font(.ui(11))
-                    .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty ? Tone.amber : Tone.secondary)
+                    .foregroundStyle(preview.truncated || !tab.columnFilters.isEmpty || tab.hasGridSearch
+                                     ? Tone.amber : Tone.secondary)
                 countControl
                 // The commit pair, beside the count button: the grid's two ways of asking the server
                 // something about what is on screen — how many rows, and "make these changes real".
@@ -782,7 +1040,7 @@ struct ResultGrid: View {
                                diameter: 22) { reviewingChanges = true }
                     IconButton(symbol: "arrow.uturn.backward",
                                help: "Discard the \(changeLabel.lowercased())",
-                               diameter: 22) { tab.cellEdits.discard() }
+                               diameter: 22) { tab.discardCellEdits() }
                 }
                 if preview.elapsedMS > 0 {
                     Text("· \(preview.elapsedMS) ms").font(.ui(11)).foregroundStyle(Tone.secondary)
@@ -881,6 +1139,75 @@ struct GridSortBanner: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+    }
+}
+
+/// The rename sheet for one column.
+///
+/// A sheet rather than an inline edit of the header text: the header is a button that sorts, and a
+/// name field inside it would fight the click. Submitting a blank name reverts to the server's own,
+/// which is what "clear the rename" has to mean.
+private struct RenameColumnSheet: View {
+    @State var name: String
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename Column")
+                .font(.ui(13, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+            TextField("Column name", text: $name)
+                .field()
+            Text("Display only. The server's name is what the copy and the export use, and the "
+                 + "column keeps its own data and filter.")
+                .font(.ui(11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                PillButton(title: "Cancel", role: .quiet, action: onCancel)
+                PillButton(title: "Rename") { onCommit(name) }
+            }
+        }
+        .padding(18)
+        .frame(width: 340)
+    }
+}
+
+/// The sheet that names a filter preset before saving it.
+private struct SavePresetSheet: View {
+    @Binding var name: String
+    let canSave: Bool
+    let onSave: (String) -> Void
+    let onCancel: () -> Void
+
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save Filters as Preset")
+                .font(.ui(13, weight: .semibold))
+                .foregroundStyle(Tone.ink)
+            TextField("Preset name", text: $name)
+                .field()
+            Text(canSave
+                 ? "Saved against this connection and table, so reopening the table offers it again. "
+                   + "Columns are matched by name, so it still applies if the result comes back in a "
+                   + "different order."
+                 : "There are no filters to save yet. Set one from a column's funnel first.")
+                .font(.ui(11))
+                .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                PillButton(title: "Cancel", role: .quiet, action: onCancel)
+                PillButton(title: "Save") { onSave(trimmed) }
+                    .disabled(!canSave || trimmed.isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 360)
     }
 }
 

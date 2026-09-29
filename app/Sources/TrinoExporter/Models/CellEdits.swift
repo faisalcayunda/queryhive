@@ -59,10 +59,16 @@ struct CellEdits: Equatable {
     }
 
     /// Stage one text over every cell of a block — "select these cells and set them all to this".
-    mutating func fill(_ text: String, over range: CellRange, rows: [[String?]]) {
+    ///
+    /// The range's columns are **display positions**, and `columns` maps each to the source index a
+    /// cell is keyed by; the grid passes its visible columns, so a block dragged over a reordered
+    /// grid still edits the cells the user pointed at. Omitting it means the two are the same, which
+    /// is the shape the tests use.
+    mutating func fill(_ text: String, over range: CellRange, rows: [[String?]],
+                       columns: [Int]? = nil) {
         for row in range.top...range.bottom {
-            for column in range.left...range.right {
-                let key = CellKey(row: row, column: column)
+            for position in range.left...range.right {
+                let key = CellKey(row: row, column: Self.source(position, in: columns))
                 stage(text, at: key, original: Self.value(in: rows, at: key))
             }
         }
@@ -72,15 +78,26 @@ struct CellEdits: Equatable {
     /// spreadsheet takes a paste.
     ///
     /// Cells past the edge of the grid are dropped rather than wrapped: a paste that ran off the end
-    /// and reappeared on the next row would put values in cells the user never pointed at.
-    mutating func paste(_ text: String, at origin: CellKey, rows: [[String?]], columnCount: Int) {
+    /// and reappeared on the next row would put values in cells the user never pointed at. As with
+    /// `fill`, `origin`'s column and `columnCount` are display positions and `columns` maps them to
+    /// the source indices the cells are keyed by.
+    mutating func paste(_ text: String, at origin: CellKey, rows: [[String?]], columnCount: Int,
+                        columns: [Int]? = nil) {
         for (down, line) in Self.parse(text).enumerated() {
             for (across, field) in line.enumerated() {
-                let key = CellKey(row: origin.row + down, column: origin.column + across)
-                guard key.row < rows.count, key.column < columnCount else { continue }
+                let position = origin.column + across
+                guard position < columnCount else { continue }
+                let key = CellKey(row: origin.row + down, column: Self.source(position, in: columns))
+                guard key.row < rows.count else { continue }
                 stage(field, at: key, original: Self.value(in: rows, at: key))
             }
         }
+    }
+
+    /// A display position as the source index a cell is keyed by.
+    private static func source(_ position: Int, in columns: [Int]?) -> Int {
+        guard let columns, columns.indices.contains(position) else { return position }
+        return columns[position]
     }
 
     mutating func discard() {

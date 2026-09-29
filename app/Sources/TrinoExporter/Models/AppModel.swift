@@ -42,6 +42,56 @@ final class AppModel {
         shortcutScheme.shortcut(for: action)?.keyboard
     }
 
+    // MARK: Filter presets
+
+    /// Saved filter sets, keyed by connection + table (`FilterPresetStore.identity`). Loaded at
+    /// launch and written back on every change, so a preset survives a relaunch. A hand-written
+    /// query has no such identity; its presets live on the tab instead and are never written here.
+    var filterPresets: [String: [FilterPreset]] = [:]
+
+    /// The key this tab's presets are filed under, or `nil` for a query with no table — where a
+    /// preset is tab-local for the reasons `FilterPresetStore` states.
+    func presetIdentity(for tab: QueryTab) -> String? {
+        FilterPresetStore.identity(connection: connection(for: tab)?.id, table: tab.sourceTable)
+    }
+
+    func filterPresets(for tab: QueryTab) -> [FilterPreset] {
+        guard let identity = presetIdentity(for: tab) else { return tab.localPresets }
+        return filterPresets[identity] ?? []
+    }
+
+    /// Save the tab's current filters under a name, replacing a preset of the same name. Returns
+    /// `false` when there is nothing to save (no filters, or a blank name).
+    @discardableResult
+    func saveFilterPreset(named name: String, in tab: QueryTab) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let preset = tab.currentFilterPreset(named: trimmed) else {
+            return false
+        }
+        if let identity = presetIdentity(for: tab) {
+            var list = filterPresets[identity] ?? []
+            list.removeAll { $0.name == trimmed }
+            list.append(preset)
+            filterPresets[identity] = list
+            FilterPresetStore.save(filterPresets)
+        } else {
+            tab.localPresets.removeAll { $0.name == trimmed }
+            tab.localPresets.append(preset)
+        }
+        return true
+    }
+
+    func deleteFilterPreset(named name: String, in tab: QueryTab) {
+        if let identity = presetIdentity(for: tab) {
+            var list = filterPresets[identity] ?? []
+            list.removeAll { $0.name == name }
+            filterPresets[identity] = list.isEmpty ? nil : list
+            FilterPresetStore.save(filterPresets)
+        } else {
+            tab.localPresets.removeAll { $0.name == name }
+        }
+    }
+
     // MARK: Query tabs
 
     var tabs: [QueryTab] = []
@@ -98,6 +148,7 @@ final class AppModel {
         let loaded = ConnectionStore.load()
         connections = loaded.document.connections
         groups = loaded.document.groups
+        filterPresets = FilterPresetStore.load()
         notice = loaded.notice
         rebuildTree()
         newTab()
@@ -1671,15 +1722,81 @@ final class AppModel {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
+        runPreview(tab, sql: sql, connection: connection, env: env)
+    }
+
+    /// Escalate the grid's in-memory search: run the same statement again with the term turned into
+    /// a cross-column `WHERE`, so the server finds rows the grid never fetched.
+    ///
+    /// The run is the ordinary `preview` one, so the safety mode, the timeout, the retries and the
+    /// streaming are the same as a Run; only the SQL differs. The statement is built by
+    /// `SearchStatement`, which wraps the user's SQL inside a derived table rather than editing it,
+    /// and is refused rather than guessed when the text holds more than one statement.
+    func searchOnServer(_ tab: QueryTab, term: String) {
+        guard !tab.previewing, tab.stage != .running else { return }
+        guard let connection = connection(for: tab) else { return }
+        guard let original = tab.previewBaseSQL ?? tab.previewedSQL, !original.isEmpty else {
+            tab.note(.warning, "Run the query before searching the server.")
+            tab.panel = .log
+            return
+        }
+        let statement: String
+        do {
+            statement = try SearchStatement.crossColumn(sql: original, term: term,
+                                                        columns: tab.preview?.columns ?? [],
+                                                        kind: connection.kind)
+        } catch {
+            tab.note(.error, searchFailureMessage(error))
+            tab.panel = .log
+            return
+        }
+        let env: [String: String]
+        do {
+            env = try previewEnvironment(for: tab, connection: connection, sql: statement)
+        } catch {
+            tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        tab.note(.info, "Searching the server for “\(term)” across every column…")
+        runPreview(tab, sql: statement, connection: connection, env: env, clearSearch: false,
+                   baseSQL: original)
+    }
+
+    /// Why an escalation could not be built, in the words the user needs to fix it.
+    private func searchFailureMessage(_ error: Error) -> String {
+        guard let failure = error as? SearchStatement.Failure else {
+            return "Cannot search on the server: \(error.localizedDescription)"
+        }
+        switch failure {
+        case .blank:
+            return "Nothing to search for."
+        case .multipleStatements(let count):
+            return "Searching the server needs one statement, and this result's text has \(count). "
+                + "Run the one you mean, then search again."
+        case .noColumns:
+            return "Cannot search on the server: none of this result's columns can be read as text."
+        }
+    }
+
+    /// The body of a preview run, shared by Run and the search escalation: put the tab into its
+    /// "a new result is arriving" state and start the engine.
+    private func runPreview(_ tab: QueryTab, sql: String, connection: Connection,
+                            env: [String: String], clearSearch: Bool = true,
+                            baseSQL: String? = nil) {
         tab.previewing = true
         tab.previewError = nil
         tab.preview = nil
         tab.showingPlan = false
         tab.previewedSQL = sql
+        tab.previewBaseSQL = baseSQL ?? sql
         // The filters described rows that are about to be replaced, and clearing them is also what
         // drops the cell selection — see `columnFilters`' own note. The last total described them
         // too.
         tab.columnFilters = [:]
+        // A fresh Run clears the cross-column search with the filters: neither describes the rows
+        // that are arriving. The escalated search is the exception — it *is* the search — so its
+        // caller keeps the term on screen.
+        if clearSearch { tab.gridSearch = "" }
         tab.totalRows = nil
         tab.countError = nil
         tab.panel = .result
