@@ -226,6 +226,37 @@ masing-masing butuhkan, supaya tidak diusulkan ulang tanpa alasan.
   menggantungkannya pada lisensi — sedangkan §9 menolak lisensi. Undo sebelum commit sudah ada
   (`CellEdits` dan penggabungan undo); yang belum adalah undo setelah commit.
 
+### Batch 7: sort dan filter ke server sebagai default
+
+**Diputuskan 29 Sep 2026.** Sort dan search yang sekarang in-memory atas halaman yang sudah
+difetch menjadi **server-first**, dengan jalur in-memory sebagai fallback. Alasan: urutan dan
+pencarian yang hanya melihat baris yang sudah difetch tidak bisa menjawab pertanyaan yang
+sesungguhnya ("baris mana di seluruh hasil"), dan `rowLimit` membuat batas itu sering tercapai.
+
+Yang sudah ada dan dipakai, bukan dibangun baru: `ServerSort.order(sql:)` membungkus SQL pengguna
+dalam derived table dengan `ORDER BY`, `SearchStatement.crossColumn(sql:)` membungkusnya dengan
+`WHERE` lintas kolom, dan keduanya berjalan lewat jalur `preview` biasa — jadi Safe Mode, timeout,
+retry dan streaming tetap sama, dan teks di editor tidak pernah berubah (`previewBaseSQL`).
+Perubahannya adalah siapa yang **default**, bukan mekanismenya.
+
+Tiga hal yang harus dijawab sebelum dikodekan, karena masing-masing mengubah perilaku:
+
+1. **Apa arti "sort dimatikan".** Siklus header adalah ascending → descending → off. Dengan sort di
+   server, "off" berarti menjalankan ulang SQL dasar — query ketiga untuk satu siklus klik. Pilihan
+   yang perlu diputuskan: jalankan ulang SQL dasar, atau simpan hasil dasar dan kembalikan tanpa
+   query. Yang kedua lebih cepat tetapi menahan satu hasil penuh di memori per tab.
+2. **Apa yang ditunjuk indikator header.** Chevron di header harus mengikuti sort yang **aktif**,
+   entah itu dari server atau in-memory, dan `tab.gridSort` tidak lagi menjadi satu-satunya sumber.
+   Kalau keduanya bisa aktif bersamaan, dua indikator akan berbeda pendapat.
+3. **Kapan fallback dipakai, dan apa yang dikatakan.** `ServerSort` dan `SearchStatement` menolak
+   teks yang memuat lebih dari satu statement, dan search menolak bila tidak ada kolom yang bisa
+   dibaca sebagai teks. Di situlah in-memory dipakai — dan di situ pula caveat "urutan ini parsial"
+   masih benar, jadi satu baris tipis tetap ada. Di jalur server bannernya hilang seluruhnya, karena
+   urutannya sudah utuh.
+
+Search di server butuh **debounce dan panjang minimum** (2–3 karakter): satu query per ketukan tidak
+mungkin, dan satu query untuk satu huruf hanya membuang waktu server.
+
 ### Di luar agen
 
 Rotasi key kenari, karena PROGRESS.md sudah menyatakannya bocor. Notarisasi dan kunci EdDSA Sparkle

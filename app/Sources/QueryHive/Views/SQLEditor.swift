@@ -120,6 +120,12 @@ struct SQLEditor: NSViewRepresentable {
         textView.interceptKey = { [weak coordinator = context.coordinator] event in
             coordinator?.handle(event) ?? false
         }
+        // A click in the text closes the suggestion list rather than leaving it pinned to the caret
+        // it was built for. The list is deliberately not clickable, so a click is the one gesture
+        // that can only mean "I am looking somewhere else now".
+        textView.onClick = { [weak coordinator = context.coordinator] in
+            coordinator?.dismissCompletionOnClick()
+        }
         // Whatever the tab was holding when it opened — restored SQL, a loaded file, a table just
         // double-clicked — is coloured once here. `updateNSView` cannot do it: it returns early
         // when the string already matches, and re-running the scan on every SwiftUI update would
@@ -412,8 +418,10 @@ struct SQLEditor: NSViewRepresentable {
                     colour(textView)
                 }
             }
-            // Clicking somewhere else with the list open should close it, not leave it pinned to
-            // the old caret. Typing keeps it open because that path re-runs `refresh`.
+            // The emptied document is the one case the caret can settle on its own: there is no word
+            // left to complete, so the list cannot outlive the deletion that emptied it. Every other
+            // way the caret moves is handled where it happens — a click closes the list through
+            // `SQLTextView.onClick`, and a keystroke rebuilds it against the new caret in `refresh`.
             guard parent.completion.active else { return }
             if (textView.string as NSString).length == 0 { parent.completion.dismiss() }
         }
@@ -734,6 +742,11 @@ struct SQLEditor: NSViewRepresentable {
             }
         }
 
+        /// A click moved the caret: close the list rather than leave it pinned to the old one.
+        func dismissCompletionOnClick() {
+            parent.completion.dismiss()
+        }
+
         // MARK: Candidates
 
         private func refresh(manual: Bool) {
@@ -933,6 +946,10 @@ enum SQLFoldStyler {
 final class SQLTextView: NSTextView {
     var interceptKey: ((NSEvent) -> Bool)?
 
+    /// Called before a click in the text is handled. A click moves the caret, so a suggestion list
+    /// still anchored to the old one is pointing at the wrong word; closing it is this hook's job.
+    var onClick: (() -> Void)?
+
     /// The bands drawn behind the text, painted in order: the caret's statement first, its line
     /// over it. Behind the text rather than over it, which is what keeps the selection, the syntax
     /// colours and the caret readable through them.
@@ -945,6 +962,13 @@ final class SQLTextView: NSTextView {
     /// The colour those bands are painted in. From the palette rather than a constant, so a light
     /// canvas does not get a light band on it.
     var highlightColour: NSColor = .clear
+
+    /// A click in the text is a caret move, so the suggestion list closes before the caret lands
+    /// rather than staying anchored to the word it was built for.
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         if let interceptKey, interceptKey(event) { return }
@@ -966,13 +990,28 @@ final class SQLTextView: NSTextView {
                 withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
                 in: textContainer
             ) { band, _ in
-                // Full width rather than the glyphs' own, so the band reads as a line of the editor
-                // and not as a highlight of the text that happens to be on it.
-                let line = NSRect(x: 0, y: band.minY,
-                                  width: max(self.bounds.width, band.maxX), height: band.height)
-                NSBezierPath(rect: line).fill()
+                NSBezierPath(rect: HighlightBand.rect(for: band, boundsWidth: self.bounds.width,
+                                                      inset: self.textContainerInset)).fill()
             }
         }
+    }
+}
+
+/// The band one line of a highlight is painted as.
+///
+/// A value of its own because this arithmetic was wrong in a way nothing could see: TextKit reports
+/// the line fragments in the *text container's* space and the fill happens in the view's, so leaving
+/// the inset out put every band one inset height above the line it belonged to — a stray strip of
+/// wash above the statement and a bare bottom edge under it. `drawHashMarksAndLabels` had always
+/// added the same inset for the same reason; only this one had forgotten.
+struct HighlightBand {
+    /// `band` is a line fragment as TextKit reports it and `boundsWidth` is the view's own width.
+    ///
+    /// Full width rather than the glyphs' own, so a band reads as a line of the editor and not as a
+    /// highlight of the text that happens to sit on it.
+    static func rect(for band: NSRect, boundsWidth: CGFloat, inset: NSSize) -> NSRect {
+        NSRect(x: 0, y: band.minY + inset.height,
+               width: max(boundsWidth, band.maxX), height: band.height)
     }
 }
 
@@ -1247,13 +1286,17 @@ final class LineNumberRulerView: NSRulerView {
         }
     }
 
-    /// A small right-pointing triangle: the mark that this statement can be run from here.
+    /// A right-pointing triangle: the mark that this statement can be run from here.
+    ///
+    /// Sized to be aimed at rather than merely seen. At nine by six and a half it read as a speck
+    /// beside the fold marker's nine by nine, and it is the one control in the gutter that does
+    /// something to the server. Eleven by eight still fits the 14-point run column.
     private func drawRunMarker(midY: CGFloat) {
         let path = NSBezierPath()
         let x = Self.runMarkerX
-        path.move(to: NSPoint(x: x, y: midY - 4.5))
-        path.line(to: NSPoint(x: x, y: midY + 4.5))
-        path.line(to: NSPoint(x: x + 6.5, y: midY))
+        path.move(to: NSPoint(x: x, y: midY - 5.5))
+        path.line(to: NSPoint(x: x, y: midY + 5.5))
+        path.line(to: NSPoint(x: x + 8, y: midY))
         path.close()
         NSColor(Tone.accent).setFill()
         path.fill()

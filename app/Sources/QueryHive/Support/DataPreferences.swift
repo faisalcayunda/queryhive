@@ -60,11 +60,20 @@ final class DataPreferences {
     private static let rowNumbersKey = "gridRowNumbers"
     private static let viewerModeKey = "jsonViewerMode"
     private static let firstSortKey = "gridFirstSortDirection"
+    private static let autoInspectorKey = "gridAutoShowInspector"
 
     /// The store these are read from and written to. A parameter so a test can hand in a scratch
     /// suite: this is a singleton whose setters persist, and a test that wrote to the real
     /// preferences would change what the user sees.
     private let defaults: UserDefaults
+
+    /// Raised by `pin`, which is what a snapshot render uses instead of the public setters.
+    ///
+    /// The setters persist, so a caller that only wants to *draw* a state has to be able to hand its
+    /// values to something that never writes. `ThemeStore` carries the same flag for the same
+    /// reason: a `--snapshot` run once wrote the appearance it was reviewing straight into the
+    /// user's preferences, which is the exact thing a review must not do.
+    private var isPinned = false
 
     private var storedRowHeight: RowHeight
     private var storedNullDisplay: String
@@ -72,6 +81,7 @@ final class DataPreferences {
     private var storedRowNumbers: Bool
     private var storedViewerMode: ViewerMode
     private var storedFirstSort: GridSort.Direction
+    private var storedAutoInspector: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -86,6 +96,10 @@ final class DataPreferences {
             ?? .automatic
         storedFirstSort = GridSort.Direction(rawValue: defaults.string(forKey: Self.firstSortKey) ?? "")
             ?? .ascending
+        // The one switch on this pane that changes the grid's shape rather than its drawing, and the
+        // only one that defaults off: an untouched install gets the whole pane for the grid, which
+        // is what it has always had.
+        storedAutoInspector = Self.on(defaults, Self.autoInspectorKey, default: false)
     }
 
     private static func on(_ defaults: UserDefaults, _ key: String, default fallback: Bool) -> Bool {
@@ -121,6 +135,21 @@ final class DataPreferences {
         set { storedViewerMode = newValue; persist() }
     }
 
+    /// Whether the value reader stands beside the grid whenever a cell is chosen.
+    ///
+    /// The reader is otherwise a popover on the cell, which is the right shape for looking at one
+    /// value and going back to the rows. This is for reading against the grid instead: it publishes
+    /// the choice to a panel, so a click does not have to be spent dismissing a popover before the
+    /// next cell can be chosen.
+    ///
+    /// Off by default, because it is the one switch here that changes the pane's shape rather than
+    /// the grid's drawing: on, the result pane is a grid and a reader side by side; off, the grid
+    /// has the whole width, which is what it has always had.
+    var autoShowInspector: Bool {
+        get { storedAutoInspector }
+        set { storedAutoInspector = newValue; persist() }
+    }
+
     /// Which way the **first** click on a column header sorts. The second click is always the other
     /// way and the third clears it, so this only decides where the cycle starts.
     var firstSortDirection: GridSort.Direction {
@@ -129,11 +158,27 @@ final class DataPreferences {
     }
 
     private func persist() {
+        // Pinned means a render: the values are for this process only and the file is left alone.
+        guard !isPinned else { return }
         defaults.set(storedRowHeight.rawValue, forKey: Self.rowHeightKey)
         defaults.set(storedNullDisplay, forKey: Self.nullDisplayKey)
         defaults.set(storedAlternateRows, forKey: Self.alternateRowsKey)
         defaults.set(storedRowNumbers, forKey: Self.rowNumbersKey)
         defaults.set(storedViewerMode.rawValue, forKey: Self.viewerModeKey)
         defaults.set(storedFirstSort.rawValue, forKey: Self.firstSortKey)
+        defaults.set(storedAutoInspector, forKey: Self.autoInspectorKey)
+    }
+
+    /// Set what the grid should draw without writing any of it down.
+    ///
+    /// Only the three a snapshot scene needs. `isPinned` is raised first, before anything is
+    /// assigned: that ordering is the whole point, because it is what keeps the value out of the
+    /// file.
+    func pin(rowHeight: RowHeight? = nil, showRowNumbers: Bool? = nil,
+             autoShowInspector: Bool? = nil) {
+        isPinned = true
+        if let rowHeight { storedRowHeight = rowHeight }
+        if let showRowNumbers { storedRowNumbers = showRowNumbers }
+        if let autoShowInspector { storedAutoInspector = autoShowInspector }
     }
 }

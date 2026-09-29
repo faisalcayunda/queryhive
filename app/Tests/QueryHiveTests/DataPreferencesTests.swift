@@ -67,6 +67,26 @@ final class DataPreferencesTests: XCTestCase {
                           DataPreferences.RowHeight.tall.points)
     }
 
+    func testTheReaderPanelIsOffUntilItIsAskedFor() {
+        // The one switch on the pane that changes the result pane's shape rather than the grid's
+        // drawing, so the only one that defaults off: an untouched install keeps the whole width for
+        // the rows, which is what it has always had.
+        XCTAssertFalse(store().autoShowInspector)
+    }
+
+    func testPinningChangesWhatIsDrawnWithoutWritingItDown() {
+        let prefs = store()
+        prefs.pin(showRowNumbers: false, autoShowInspector: true)
+        XCTAssertTrue(prefs.autoShowInspector)
+        XCTAssertFalse(prefs.showRowNumbers)
+
+        // And the file is left alone, because a render is not allowed to change what the user finds
+        // next time. This is the bug `ThemeStore.pin` exists to prevent, stated as a test.
+        let reopened = DataPreferences(defaults: suite)
+        XCTAssertFalse(reopened.autoShowInspector)
+        XCTAssertTrue(reopened.showRowNumbers)
+    }
+
     func testTheFirstSortDirectionOnlyDecidesWhereTheCycleStarts() {
         // Ascending as the first direction is what the grid has always done: ascending, descending,
         // off.

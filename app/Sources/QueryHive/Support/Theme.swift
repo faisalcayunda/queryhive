@@ -184,6 +184,15 @@ struct Hue {
     /// accent; `plain` uses it at full strength.
     var stroke: Color { tone == .soft ? glow.opacity(0.55) : glow }
 
+    /// The colour a label **on** this hue's fill should use.
+    ///
+    /// White reads on a saturated fill and disappears on a wash. `soft` fills with the accent at
+    /// 22%, so white on it is unreadable — reported on the light canvas, where the wash is palest.
+    /// The label takes `accent`, the deep half of the pair: `glow` is what the wash is made of, so a
+    /// label in it vanished into its own background — which the first attempt at this did, and only
+    /// a render caught. `plain` needs no special case, as it already fills with `accent`.
+    var onFill: Color { tone == .soft ? accent : .white }
+
     /// Whether the sheen overlay, the coloured drop shadow and the halo are drawn. They are all
     /// gradients, so a flat tone drops every one of them.
     var isLuminous: Bool { tone.isLuminous }
@@ -326,7 +335,7 @@ struct HubButton: View {
                 if let symbol { Image(systemName: symbol).font(.system(size: 11, weight: .bold)) }
                 Text(title).font(.ui(13, weight: .semibold))
             }
-            .foregroundStyle(enabled ? .white : Tone.ink.opacity(0.42))
+            .foregroundStyle(enabled ? hue.onFill : Tone.ink.opacity(0.42))
             .padding(.horizontal, 14)
             .frame(height: 28)
             .background {
@@ -436,7 +445,12 @@ struct PillButton: View {
                 Text(title).font(.ui(compact ? 11.5 : 12.5, weight: .medium))
             }
             .foregroundStyle(tint.opacity(enabled ? 1 : 0.4))
-            .padding(.horizontal, compact ? 10 : 13)
+            // Less room before a glyph than after the label, because equal padding is not equal
+            // gaps: a symbol's ink sits inside its own box while the last letter's runs to its
+            // advance. Measured on the Save button, `padding(.horizontal, 13)` left 35 points before
+            // the glyph against 27 after the label, which is what a reader calls "not symmetrical".
+            .padding(.leading, leadingPadding)
+            .padding(.trailing, compact ? 10 : 13)
             .frame(height: compact ? 24 : 28)
             .background(fill, in: Capsule())
             .overlay(Capsule().strokeBorder(border))
@@ -446,6 +460,16 @@ struct PillButton: View {
         .disabled(!enabled)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    /// The room before the label.
+    ///
+    /// Three points less than the trailing side when there is a glyph, because a symbol's ink is
+    /// inset inside its box while the last letter's ink runs to its advance: equal padding produced
+    /// visibly unequal gaps.
+    private var leadingPadding: CGFloat {
+        let base: CGFloat = compact ? 10 : 13
+        return symbol == nil ? base : base - 3
     }
 
     private var fill: Color {

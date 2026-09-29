@@ -1146,6 +1146,13 @@ struct DataSettings: View {
                 dataToggle("Show alternate row backgrounds", isOn: $prefs.alternateRows)
                 RowDivider()
                 dataToggle("Show row numbers", isOn: $prefs.showRowNumbers)
+                RowDivider()
+                dataToggle("Show the value reader beside the grid",
+                           hint: "A click shows the chosen cell's whole value in a card to the "
+                               + "right, instead of a popover over the cell. It is the same reader; "
+                               + "this is where it stands. A block selection says how big it is "
+                               + "rather than showing one of its cells.",
+                           isOn: $prefs.autoShowInspector)
             }
 
             SettingsCard(title: "JSON viewer",

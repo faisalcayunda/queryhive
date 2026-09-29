@@ -46,6 +46,18 @@ struct ResultGrid: View {
     /// soon as the pointer leaves it, so in practice it is open only while the pointer is inside.
     @State private var viewingCell: CellKey?
 
+    /// The selection the value reader beside the grid is holding, when the Data pane asks for one.
+    ///
+    /// Settled when a drag ends rather than followed step by step. The panel's presence — and so the
+    /// grid's width — is the same either way, so following the drag would buy nothing but a rebuilt
+    /// value, and for a JSON cell a re-parse, on every step of it.
+    @State private var inspectedRange: CellRange?
+
+    /// The reader card's width beside the grid. Fixed rather than resizable, for the same reason the
+    /// schema inspector's is: the grid beside it scrolls on both axes, so a wider reader costs it
+    /// columns rather than a layout, and one number is one thing to get right.
+    private let inspectorWidth: CGFloat = 340
+
     /// Whether the review of the queued changes is open.
     @State private var reviewingChanges = false
 
@@ -103,8 +115,26 @@ struct ResultGrid: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            content
+            HStack(spacing: 0) {
+                content
+                // Only while the setting asks for it and a cell is chosen. A panel on an empty
+                // selection would be a column of nothing, which reads as a grid that could not be
+                // drawn rather than as nothing being selected.
+                if let range = inspectorRange {
+                    Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
+                    inspector(range).frame(width: inspectorWidth)
+                }
+            }
             footer
+        }
+        // Bounded, so the panel is handed the height that is actually there. Without it the reader
+        // reports its ideal height, the row grows past the pane, and the note that explains the value
+        // is the part that falls off the bottom.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: DataPreferences.shared.autoShowInspector) { _, on in
+            // Switching the panel on with a cell already chosen should show it rather than wait for
+            // a click that has already happened.
+            if on { inspectedRange = tab.cellSelection }
         }
     }
 
@@ -494,7 +524,7 @@ struct ResultGrid: View {
         Button("Edit Cell…") { beginEditingSelection() }
             .disabled(tab.cellSelection == nil)
         Button("View Value…") { viewSelectedValue() }
-            .disabled(selectedCell() == nil)
+            .disabled(selectedCell() == nil || inspectorRange != nil)
         Button("Paste") { pasteIntoSelection() }
             .disabled(tab.cellSelection == nil)
         Divider()
@@ -745,7 +775,9 @@ struct ResultGrid: View {
             // Edit Cell… for the other one.
             cell(shown)
                 .contentShape(Rectangle())
-                .onTapGesture(count: 2) { viewingCell = key }
+                // While the panel is standing the reader is already open on this value, so the
+                // double-click has nothing to add and does not open a second, covering copy of it.
+                .onTapGesture(count: 2) { if inspectorRange == nil { viewingCell = key } }
                 .popover(isPresented: popoverBinding(for: key), arrowEdge: .bottom) {
                     // The reader gets the stored value and the cell's origin, so its format menu
                     // can file a choice under the same identity the grid reads it from.
@@ -790,9 +822,85 @@ struct ResultGrid: View {
         viewingCell = CellKey(row: selection.top, column: source)
     }
 
+    /// The range the panel holds, or `nil` when there should be no panel at all: the Data pane asks
+    /// for one, and something is still chosen.
+    ///
+    /// The settled range when there is one, and otherwise whatever is chosen — a selection no drag
+    /// has settled, which is a scene's or a restored one, is still a selection, and a panel that
+    /// showed nothing for it would be the worse answer. The stale case, a settled range whose
+    /// selection has gone, answers `nil` here rather than being cleared, because every path that
+    /// clears a selection already means the panel goes with it and the next click re-settles it.
+    private var inspectorRange: CellRange? {
+        guard DataPreferences.shared.autoShowInspector, let chosen = tab.cellSelection else {
+            return nil
+        }
+        return inspectedRange ?? chosen
+    }
+
+    /// The value reader standing beside the grid.
+    ///
+    /// Drawn for any selection rather than only for a value this reader can open. A panel that came
+    /// and went as the selection moved between columns would change the grid's width under the
+    /// pointer, and the columns would shift on the very click that was choosing one.
+    @ViewBuilder private func inspector(_ range: CellRange) -> some View {
+        if range.cellCount > 1 {
+            // One value is the reader's unit, so a block has no single value to show. Saying how big
+            // it is beats showing the top-left cell as though it stood for the rest of them.
+            inspectorNote(icon: "square.grid.3x3",
+                          title: "\(range.rowCount) × \(range.columnCount) cells chosen",
+                          detail: "The reader shows one cell at a time. Choose a single cell, or use "
+                              + "Copy for the block.")
+        } else if let cell = inspectorCell(range) {
+            // Keyed by the cell. The reader holds its mode and its format in `@State`, and a panel
+            // keeps its identity from one selection to the next, so without this the Tree mode of a
+            // JSON cell would follow the selection onto a varchar.
+            CellValueViewer(value: cell.value ?? "", column: cell.column.name, type: cell.column.type,
+                            connectionID: tab.connectionID, table: tab.sourceTable,
+                            placement: .panel)
+                .id(cell.key)
+        } else {
+            inspectorNote(icon: "tablecells",
+                          title: "Nothing to read",
+                          detail: "The chosen cell is past the shape the server reported.")
+        }
+    }
+
+    private func inspectorNote(icon: String, title: String, detail: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 20)).foregroundStyle(Tone.secondary)
+            Text(title)
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+                .multilineTextAlignment(.center)
+            Text(detail)
+                .font(.ui(10.5))
+                .foregroundStyle(Tone.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The selection's top-left cell, mapped to the source column the grid reads by — the same
+    /// mapping `selectedCell()` does, because the selection counts display positions and the reader
+    /// is keyed by source.
+    private func inspectorCell(_ range: CellRange)
+        -> (key: CellKey, column: Event.Column, value: String?)? {
+        guard let preview = tab.preview,
+              let source = tab.columnLayout.source(at: range.left),
+              preview.columns.indices.contains(source) else { return nil }
+        let key = CellKey(row: range.top, column: source)
+        return (key, preview.columns[source], tab.cellValue(at: key))
+    }
+
     /// The reader's presentation, bound to one cell's key so only that cell's popover can be open.
+    ///
+    /// Never while the panel is standing: the value is already on screen beside the rows, and a
+    /// popover would be the same value twice, one of them covering the grid it came from.
     private func popoverBinding(for key: CellKey) -> Binding<Bool> {
-        Binding(get: { viewingCell == key }, set: { if !$0 { viewingCell = nil } })
+        Binding(get: { inspectorRange == nil && viewingCell == key },
+                set: { if !$0 { viewingCell = nil } })
     }
 
     /// Open the editor over one cell, seeded with what the cell currently shows.
@@ -876,7 +984,14 @@ struct ResultGrid: View {
                 guard let anchor = dragAnchor else { return }
                 tab.cellSelection = CellRange(from: anchor, to: target)
             }
-            .onEnded { _ in dragAnchor = nil }
+            .onEnded { _ in
+                dragAnchor = nil
+                // The panel's value is settled here rather than on every step above. The grid's
+                // width is the same either way, so following the drag would only rebuild the value —
+                // and for JSON re-parse it — dozens of times for a result nobody can read until the
+                // drag is over.
+                inspectedRange = tab.cellSelection
+            }
     }
 
     /// The arithmetic that turns a drag into a cell, as a value the tests can reach. Built from the

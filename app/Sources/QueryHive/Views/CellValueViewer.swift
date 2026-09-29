@@ -43,6 +43,15 @@ struct CellValueViewer: View {
     var connectionID: UUID?
     var table: String?
 
+    /// Where the reader is standing. The two presentations want different geometry and nothing else.
+    ///
+    /// A popover is anchored to one cell, so it needs a width of its own and a ceiling on its height
+    /// or it would size itself to the value and cover the rows it came from. The side panel is
+    /// handed a column and a pane and should fill both, so it takes the width it is given and its
+    /// content runs to the bottom.
+    enum Placement { case popover, panel }
+    let placement: Placement
+
     /// The modes this value supports, in the order the picker shows them.
     let available: [Mode]
     private let pretty: String?
@@ -53,12 +62,14 @@ struct CellValueViewer: View {
     @State private var format: ColumnFormat
 
     init(value: String, column: String, type: String,
-         connectionID: UUID? = nil, table: String? = nil) {
+         connectionID: UUID? = nil, table: String? = nil,
+         placement: Placement = .popover) {
         self.value = value
         self.column = column
         self.type = type
         self.connectionID = connectionID
         self.table = table
+        self.placement = placement
 
         // Parsed once here rather than in the body: `prettyPrinted` parses the value, and asking it
         // on every state change is the mistake the grid just stopped making.
@@ -96,7 +107,11 @@ struct CellValueViewer: View {
             header
 
             content
-                .frame(minHeight: 160, maxHeight: 420)
+                // The popover can afford a floor under its content; the panel cannot, because it
+                // shares a pane with the grid, and a floor it cannot meet takes the note below it
+                // off the bottom of the window.
+                .frame(minHeight: placement == .popover ? 160 : 120,
+                       maxHeight: placement == .popover ? 420 : .infinity)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .background(Tone.recess.opacity(0.30),
@@ -107,25 +122,56 @@ struct CellValueViewer: View {
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(16)
-        .frame(width: 620)
+        .padding(placement == .popover ? 16 : 12)
+        .frame(width: placement == .popover ? 620 : nil)
     }
 
     // MARK: Header
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Text(column)
-                .font(.code(12, weight: .semibold))
-                .foregroundStyle(Tone.ink)
-                .lineLimit(1)
-            Chip(text: type, tint: Tone.violet)
-            Spacer(minLength: 8)
-            if available.count > 1 { modePicker }
-            formatMenu
-            PillButton(title: "Copy", symbol: "doc.on.doc", role: .secondary, compact: true) {
-                copy()
+    /// The reader's own header.
+    ///
+    /// One row in the popover, which is 620 wide and has the room. Two in the panel, which is a
+    /// column: the name and the type stay on the first line and the controls move under them, rather
+    /// than the row overflowing and the mode picker being clipped to a stub.
+    @ViewBuilder private var header: some View {
+        if placement == .popover {
+            HStack(spacing: 8) {
+                columnLabel
+                typeChip
+                Spacer(minLength: 8)
+                if available.count > 1 { modePicker }
+                formatMenu
+                copyButton
             }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    columnLabel
+                    typeChip
+                    Spacer(minLength: 8)
+                }
+                HStack(spacing: 8) {
+                    if available.count > 1 { modePicker }
+                    formatMenu
+                    Spacer(minLength: 8)
+                    copyButton
+                }
+            }
+        }
+    }
+
+    private var columnLabel: some View {
+        Text(column)
+            .font(.code(12, weight: .semibold))
+            .foregroundStyle(Tone.ink)
+            .lineLimit(1)
+    }
+
+    private var typeChip: some View { Chip(text: type, tint: Tone.violet) }
+
+    private var copyButton: some View {
+        PillButton(title: "Copy", symbol: "doc.on.doc", role: .secondary, compact: true) {
+            copy()
         }
     }
 
@@ -135,7 +181,7 @@ struct CellValueViewer: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: CGFloat(available.count) * 56)
+        .frame(width: CGFloat(available.count) * (placement == .popover ? 56 : 48))
     }
 
     /// The per-column format menu. Only shown when the cell can be filed somewhere: without a

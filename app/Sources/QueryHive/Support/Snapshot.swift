@@ -520,7 +520,7 @@ enum Snapshot {
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
-        case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns":
+        case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns", "grid-inspector":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -589,6 +589,21 @@ enum Snapshot {
                 tab.moveColumn(from: 6, to: 1)    // `catatan` up beside the name
                 tab.setColumnHidden(4, true)      // `aktif`
                 tab.gridSearch = "kpm"
+            }
+            // The value reader standing beside the grid rather than over the cell. `pin` and not the
+            // public setter: the setters write, and a render must leave the user's preferences as it
+            // found them.
+            if scene == "grid-inspector" {
+                DataPreferences.shared.pin(autoShowInspector: true)
+                tab.sourceTable = "\"hive\".\"analytics\".\"penerima_manfaat\""
+                // `catatan` is a JSON column for this scene only, so the reader's mode picker and
+                // its two-row header are in the picture. Every column this fixture otherwise carries
+                // is a scalar, and a scalar offers one mode, which is no picker at all.
+                let json = Event.Column(name: "catatan", type: "json")
+                tab.columns[6] = json
+                tab.preview?.columns[6] = json
+                tab.preview?.rows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04","selesai":false}"#
+                tab.cellSelection = CellRange(from: (row: 1, column: 6), to: (row: 1, column: 6))
             }
         case "grid-empty", "grid-loading", "grid-filtered-out":
             // A run whose columns are on screen and whose rows are not. Three states look exactly
