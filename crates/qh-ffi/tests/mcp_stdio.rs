@@ -139,6 +139,10 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         json!({"jsonrpc": "2.0", "id": 10, "method": "resources/read",
                "params": {"uri": format!("queryhive://connections/{connection_id}")}}),
         json!({"jsonrpc": "2.0", "id": 11, "method": "prompts/list"}),
+        // A tool that runs caller SQL under the server's own `read_only`: refused before any
+        // connection, and — the point of this request — recorded by the binary's log sink.
+        json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+               "params": {"name": "explain", "arguments": {"connection": connection_id, "sql": "DROP TABLE people"}}}),
     ];
 
     {
@@ -149,11 +153,11 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         stdin.flush().expect("flush");
     }
 
-    // Eleven replies: the notification is silent, the other eleven requests each answer.
+    // Twelve replies: the notification is silent, the other twelve requests each answer.
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
     let mut replies: Vec<Json> = Vec::new();
-    for _ in 0..11 {
+    for _ in 0..12 {
         let mut line = String::new();
         let read = reader.read_line(&mut line).expect("read");
         assert!(read > 0, "the server closed stdout early");
@@ -248,6 +252,19 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         "{prompts:?}"
     );
 
+    // The `explain` of a `DROP` is refused by the server's own `read_only`, before it would
+    // connect: a tool result, not a protocol error.
+    assert_eq!(replies[11]["id"], json!(12));
+    assert_eq!(replies[11]["result"]["isError"], json!(true));
+    assert!(
+        replies[11]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("read-only"),
+        "{:?}",
+        replies[11]
+    );
+
     // Closing stdin is a clean end of the stream: exit 0, handshake gone.
     drop(reader);
     let status = child.wait().expect("wait");
@@ -262,6 +279,21 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
         !stderr.contains(&token),
         "the token reached stderr: {stderr}"
     );
+
+    // The server wrote its own decision to the execution log: the sink is installed by the
+    // binary (`src/bin/mcp.rs`), not by the library, so this is the end-to-end proof of that
+    // wiring. Only the refused `explain` is a `guard` decision; the other tools never guard.
+    let storage = Storage::open(&db_path).expect("open the log database");
+    let decisions = storage.execution_log(10).expect("read the execution log");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "one guarded call, one decision: {decisions:?}"
+    );
+    assert_eq!(decisions[0].decision, "refused");
+    assert_eq!(decisions[0].statement_kind, "ddl");
+    assert_eq!(decisions[0].safe_mode, "read_only");
+    assert_eq!(storage.verify_execution_log().unwrap(), 1);
 
     // The call was recorded: `list` now shows a last-used time.
     let list = Command::new(BIN)

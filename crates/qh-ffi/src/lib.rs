@@ -32,6 +32,7 @@
 //! | `import_data` | `step`, `progress`, `done` |
 //! | `apply_changes` | `step`, `progress`, `done` |
 //! | `to_table` | `step`, `progress`, `done` |
+//! | `table_op` | `step`, `progress`, `done` |
 //! | `preview` | `step`, `columns`, `rows`, `done` |
 //! | `explain` | `step`, `columns`, `rows`, `done` |
 //! | `count` | `step`, `count`, `done` |
@@ -492,6 +493,7 @@ pub enum Command {
     Session,
     ImportData,
     ApplyChanges,
+    TableOp,
     Objects,
     Test,
     Catalogs,
@@ -513,7 +515,7 @@ pub enum Command {
 /// other browse commands where it belongs semantically. The local commands are ahead of it
 /// for the same reason, and there are eight of them now rather than the three that sat
 /// there when this order was written.
-pub const COMMANDS: [&str; 21] = [
+pub const COMMANDS: [&str; 22] = [
     "db_drivers",
     "connections",
     "import_connections",
@@ -525,6 +527,7 @@ pub const COMMANDS: [&str; 21] = [
     "session",
     "import_data",
     "apply_changes",
+    "table_op",
     "objects",
     "test",
     "catalogs",
@@ -552,6 +555,7 @@ impl Command {
             "session" => Command::Session,
             "import_data" => Command::ImportData,
             "apply_changes" => Command::ApplyChanges,
+            "table_op" => Command::TableOp,
             "objects" => Command::Objects,
             "test" => Command::Test,
             "catalogs" => Command::Catalogs,
@@ -597,6 +601,7 @@ pub async fn run(
         Command::Session => local::session(settings, out).await,
         Command::ImportData => import::import_data(settings, out, engine, cancel).await,
         Command::ApplyChanges => apply::apply_changes(settings, out, engine, cancel).await,
+        Command::TableOp => commands::table_op(settings, out, engine, cancel).await,
         Command::Objects => commands::objects(settings, out, engine).await,
         Command::Test => commands::test(settings, out, engine).await,
         Command::Catalogs => commands::catalogs(settings, out, engine).await,

@@ -100,6 +100,7 @@ pub enum EngineCommand {
     Session,
     ImportData,
     ApplyChanges,
+    TableOp,
     Objects,
     Test,
     Catalogs,
@@ -130,7 +131,7 @@ pub enum EngineCommand {
 /// This exists because the tautology shipped once. `command_names` used to read `crate::COMMANDS`
 /// directly and the test compared it with `crate::COMMANDS`, so four new commands reached the
 /// usage line and `Command` while `EngineCommand` stayed at fourteen, and nothing failed.
-pub const EVERY_COMMAND: [EngineCommand; 21] = [
+pub const EVERY_COMMAND: [EngineCommand; 22] = [
     EngineCommand::DbDrivers,
     EngineCommand::Connections,
     EngineCommand::ImportConnections,
@@ -142,6 +143,7 @@ pub const EVERY_COMMAND: [EngineCommand; 21] = [
     EngineCommand::Session,
     EngineCommand::ImportData,
     EngineCommand::ApplyChanges,
+    EngineCommand::TableOp,
     EngineCommand::Objects,
     EngineCommand::Test,
     EngineCommand::Catalogs,
@@ -169,6 +171,7 @@ impl EngineCommand {
             Self::Session => "session",
             Self::ImportData => "import_data",
             Self::ApplyChanges => "apply_changes",
+            Self::TableOp => "table_op",
             Self::Objects => "objects",
             Self::Test => "test",
             Self::Catalogs => "catalogs",
@@ -501,6 +504,7 @@ mod tests {
                 EngineCommand::Session => "session",
                 EngineCommand::ImportData => "import_data",
                 EngineCommand::ApplyChanges => "apply_changes",
+                EngineCommand::TableOp => "table_op",
                 EngineCommand::Objects => "objects",
                 EngineCommand::Test => "test",
                 EngineCommand::Catalogs => "catalogs",

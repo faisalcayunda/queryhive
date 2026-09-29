@@ -32,7 +32,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use qh_ffi::mcp::{self, Handshake, Server};
-use qh_ffi::RealEngine;
+use qh_ffi::{RealEngine, Settings};
 use qh_sync::SyncId;
 
 fn main() -> ExitCode {
@@ -81,6 +81,16 @@ fn cmd_serve(args: &[String]) -> ExitCode {
             return fail(refusal.message());
         }
     };
+
+    // Install the decision log before the first request. Every allow/refuse a tool makes goes
+    // through the same `guard` the CLI uses, and without this the MCP path would be the one
+    // caller whose decisions reach no log (ADR-0026 records it as a gap). A log that cannot be
+    // opened does not stop the server — the read-only gate still holds — but it is said out
+    // loud, because a silent gap is the one outcome an audit log must not have.
+    let log_settings = Settings::from_pairs(base_pairs.clone());
+    if let Err(error) = qh_ffi::execution_log::install_from_settings(&log_settings) {
+        eprintln!("queryhive-mcp: the execution log is not being written: {error}");
+    }
 
     let server = Server::new(token, base_pairs);
     let engine = RealEngine::new();

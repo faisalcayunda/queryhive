@@ -83,7 +83,9 @@ use qh_import::{Format as SourceFormat, Options as ReadOptions, RawRow, RowReade
 use qh_sql::{quote_ident, IdentStyle, SafeMode, StatementKind};
 use serde_json::Value as Json;
 
-use crate::commands::{connection, expand_user, guard, open, safe_mode, statement_timeout};
+use crate::commands::{
+    connection, expand_user, guard, open, record_kind, safe_mode, statement_timeout,
+};
 use crate::env::Settings;
 use crate::events::{event, Emitter};
 use crate::progress::{Progress, PROGRESS_MS_DEFAULT};
@@ -283,6 +285,12 @@ async fn import_rows_file(
     // import, and that is decided here rather than after a connection: a
     // read-only connection must not even open.
     if let Some(reason) = safe.refusal(StatementKind::Dml) {
+        // Log the decision before reporting it. This check precedes any `guard`, so without
+        // this a refusal that happens before the import ever connects would be the engine's
+        // one decision with no row. There is no statement yet — the file has not been read —
+        // so the subject is the file being imported, hashed exactly as a statement would be.
+        let subject = path.to_string_lossy();
+        record_kind(safe, StatementKind::Dml, &subject)?;
         return Err(CliError::Usage(format!(
             "SAFE_MODE={} refuses import_data: {reason}",
             safe.as_str()

@@ -421,3 +421,82 @@ async fn a_multi_statement_script_names_the_statement_it_refuses() {
     assert!(message.contains("DROP TABLE people"), "{message}");
     assert_eq!(engine.connects(), 0);
 }
+
+#[tokio::test]
+async fn table_op_is_gated_like_every_other_write() {
+    // The two operations the plan asks for "lewat konfirmasi" (§13). `TRUNCATE`/`DROP` are
+    // DDL, so `no_ddl` and `read_only` refuse them before the connection is touched, exactly
+    // as any other DDL; `confirm` asks for the caller's confirmation, which is ADR-0027's one
+    // deliberate difference from the ordinary guard.
+    let targets = [
+        ("TARGET_CATALOG", "hive"),
+        ("TARGET_SCHEMA", "default"),
+        ("TARGET_TABLE", "people"),
+    ];
+
+    // `read_only` refuses before the connection is touched.
+    let engine = CountingEngine::new();
+    let mut pairs: Vec<(&str, &str)> = vec![("SAFE_MODE", "read_only"), ("TABLE_OP", "drop")];
+    pairs.extend_from_slice(&targets);
+    let error = refuse(Command::TableOp, &engine, &pairs).await;
+    let message = usage_message(&error);
+    assert!(message.contains("read-only"), "{message}");
+    assert!(message.contains("DDL"), "{message}");
+    assert_eq!(engine.connects(), 0);
+
+    // It is DDL, so `no_ddl` refuses it too.
+    let engine = CountingEngine::new();
+    let mut pairs: Vec<(&str, &str)> = vec![("SAFE_MODE", "no_ddl"), ("TABLE_OP", "truncate")];
+    pairs.extend_from_slice(&targets);
+    let error = refuse(Command::TableOp, &engine, &pairs).await;
+    assert!(usage_message(&error).contains("no_ddl"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+
+    // `confirm` asks first...
+    let engine = CountingEngine::new();
+    let mut pairs: Vec<(&str, &str)> = vec![("SAFE_MODE", "confirm"), ("TABLE_OP", "drop")];
+    pairs.extend_from_slice(&targets);
+    let error = refuse(Command::TableOp, &engine, &pairs).await;
+    assert!(
+        usage_message(&error).contains("requires confirmation"),
+        "{error:?}"
+    );
+    assert_eq!(engine.connects(), 0);
+
+    // ...and runs once the caller answers. Reaching `connect` is the proof: this engine fails
+    // it on purpose, so only a run the guard let through gets there.
+    let mut pairs: Vec<(&str, &str)> = vec![
+        ("SAFE_MODE", "confirm"),
+        ("SAFE_MODE_CONFIRMED", "1"),
+        ("TABLE_OP", "drop"),
+    ];
+    pairs.extend_from_slice(&targets);
+    let error = refuse(Command::TableOp, &engine, &pairs).await;
+    assert!(
+        matches!(error, CliError::Connect(_)),
+        "a confirmed drop should reach the connection, got {error:?}"
+    );
+    assert_eq!(engine.connects(), 1);
+
+    // `full` runs it without asking.
+    let engine = CountingEngine::new();
+    let mut pairs: Vec<(&str, &str)> = vec![("TABLE_OP", "truncate")];
+    pairs.extend_from_slice(&targets);
+    let error = refuse(Command::TableOp, &engine, &pairs).await;
+    assert!(matches!(error, CliError::Connect(_)), "{error:?}");
+    assert_eq!(engine.connects(), 1);
+
+    // An operation nobody offers, and a missing one, are refused by name before any guard.
+    let engine = CountingEngine::new();
+    let error = refuse(Command::TableOp, &engine, &[("TABLE_OP", "vanish")]).await;
+    assert_eq!(
+        usage_message(&error),
+        "unknown TABLE_OP 'vanish'; expected drop or truncate"
+    );
+    let error = refuse(Command::TableOp, &engine, &[]).await;
+    assert_eq!(
+        usage_message(&error),
+        "TABLE_OP is required: drop or truncate"
+    );
+    assert_eq!(engine.connects(), 0);
+}
