@@ -389,9 +389,10 @@ docs/decisions/               ADRs; docs/architecture/ the blueprint and the fol
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). The workspace's Rust dependencies carry their own licences; the
-policy is the allow-list in `deny.toml`, enforced by `cargo deny check licenses` (ADR-0002,
-ADR-0011), so the list in that file — not this paragraph — is the authority.
+MIT — see [LICENSE](LICENSE). Copyright © 2026 Faisal Nugraha Cayunda. The workspace's Rust
+dependencies carry their own licences; the policy is the allow-list in `deny.toml`, enforced
+by `cargo deny check licenses` (ADR-0002, ADR-0011), so the list in that file — not this
+paragraph — is the authority.
 
 Two things the licence does **not** cover, both worth knowing before you rebrand or redistribute:
 

@@ -67,3 +67,29 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           actionlint -color
+
+  attribution:
+    name: attribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The holder is the whole of the licence's attribution clause, and the one thing here a
+      # later edit must not be able to change quietly. The string lives in four tracked files:
+      # LICENSE, Cargo.toml's workspace authors, the readme, and the app's build script, which
+      # carries it twice — the Info.plist key and the holder inside it. This fails if any of
+      # them stops agreeing with LICENSE.
+      - name: The copyright holder and the year still say what they said
+        run: |
+          set -euo pipefail
+          holder='Faisal Nugraha Cayunda'
+          year='2026'
+
+          grep -qx 'MIT License' LICENSE
+          grep -qx "Copyright (c) ${year} ${holder}" LICENSE
+          grep -qx "authors = \[\"${holder}\"\]" Cargo.toml
+          grep -q "${holder}" README.md
+          grep -q 'NSHumanReadableCopyright' app/build.sh
+          grep -q "${holder}" app/build.sh
+
+          echo "attribution intact: ${holder}, ${year}"

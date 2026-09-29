@@ -87,6 +87,7 @@ cat > "$app/Contents/Info.plist" <<'EOF'
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Faisal Nugraha Cayunda</string>
 </dict>
 </plist>
 EOF
