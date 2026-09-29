@@ -115,14 +115,53 @@ menjanjikan sesuatu yang tidak ada.
    newline, atau tanda buka, kata sebelumnya diganti bentuk kanoniknya bila ia kata kunci. Ukuran:
    sedang. Risiko: menulis ulang teks saat mengetik harus tidak merusak undo stack dan pewarnaan;
    `SQLSyntax` sudah memegang daftar kata kuncinya.
-3. **Query parameters (`:name`).** Bukan sakelar melainkan alur: editor mengenali `:name`, menanyakan
-   nilainya, mengikatnya lewat `execute_bound` (ADR-0028), lalu menjalankan. Butuh pengenalan `:name`
-   di editor, sebuah dialog nilai, dan pemetaan ke `BoundSQL`. Ukuran: besar. **Keputusan lebih
-   dulu:** apakah nilai disimpan per tab, per koneksi, atau tidak disimpan sama sekali.
-4. **Vim mode.** Lapisan modal editing: mode normal/insert/visual, operator dan motion, register, dan
-   peta tombolnya. TablePro punya; pohon ini tidak punya satu pun bagiannya. Ukuran: proyek
-   tersendiri, dan ia bersinggungan dengan `interceptKey` yang sekarang dipakai completion dan
-   shortcut. **Keputusan lebih dulu:** apakah ini memang bagian dari produk.
+3. **Query parameters (`:name`).** **Desainnya sudah diputuskan lewat advisor, 29 Sep 2026; belum
+   dikerjakan.** Intinya: ini **substitusi, bukan binding**, dan itu bukan jalan pintas melainkan yang
+   memang diminta ADR-0028 (keputusan 5: driver yang tidak bisa mengikat ditolak, pemanggil
+   meng-inline). Mengikat untuk sebuah `SELECT` tidak bisa dicapai hari ini di driver mana pun:
+   PostgreSQL menolaknya secara desain (keputusan 7, extended protocol mengembalikan biner), Trino
+   tidak punya placeholder, dan jalur `preview` tidak memanggil `execute_bound`. Mengikat hanya di
+   MySQL akan membuat semantik berbeda per koneksi, dan teks di history berhenti menjadi teks yang
+   benar-benar dijalankan. Jadi nilainya ditulis sebagai literal yang diperiksa ke dalam teks
+   statement, lalu teks itu lewat jalur `preview` biasa, sehingga `guard_for`, `RunConfirmation`, dan
+   history semuanya melihat teks final yang sama.
+
+   Keputusan yang mengikat:
+
+   - **Nilai hidup per tab, hanya di memori.** Prompt setiap kali Run, terisi nilai terakhir tab itu.
+     Tidak ikut `restoreSession`: tab dipulihkan saat launch, jadi nilai yang tersimpan berarti nilai
+     basi plus menjalankan tanpa prompt. Set per koneksi ditolak karena nama yang sama berarti hal
+     berbeda di statement berbeda, dan hasilnya jawaban salah tanpa suara.
+   - **Sintaks `:name` saja.** `$name` menabrak `$1` dan dollar quoting PostgreSQL, `@name` adalah
+     user variable MySQL, dan `{{name}}` akan menyala pada SQL dbt yang ditempel. Lexer-nya di Swift,
+     state machine yang menyalin state `crates/qh-sql/src/scan.rs:40-56`, dan hanya mengenali `:` +
+     `[A-Za-z_][A-Za-z0-9_]*` dalam state Normal. Yang dikecualikan: string `'...'`, identifier `"..."`
+     dan backtick, komentar `--` dan `/* */`, body `$tag$...$tag$`, `::` cast, isi `[...]` sehingga
+     slice `arr[lo:hi]` tidak menghasilkan `:hi`, `:=`, `:1`, dan `: name`. Batas yang diketahui: tidak
+     ada scanner di pohon ini yang memahami backslash escape `E'...'`, jadi itu dinyatakan, bukan
+     disembunyikan.
+   - **Keamanan lewat satu fungsi.** Nilai mencapai SQL hanya lewat `render(value:kind:) -> String?`,
+     dan ia mengembalikan nil (run ditolak dengan pesan) untuk yang tidak bisa direpresentasikan.
+     Tidak ada parameter mentah atau fragmen SQL. `UpdateStatements.literal` **tidak** dipakai apa
+     adanya: ia mengambil tipe dari deskripsi kolom server yang tidak dimiliki sebuah parameter. Per
+     tipe: angka dengan grammar ketat dan negatif dalam tanda kurung (`x-:n` dengan `n = -5` menjadi
+     `x--5`, yaitu komentar baris); teks dengan penggandaan `''`, dan `E'...'` bila mengandung
+     backslash di PostgreSQL, sedangkan MySQL menolak backslash karena artinya bergantung `sql_mode`;
+     `DATE '...'` dan `TIMESTAMP '...'` karena klien ini Trino-first dan Trino ketat soal varchar vs
+     date; boolean `TRUE`/`FALSE`; `NULL` dengan peringatan bila mengikuti `=`.
+   - **Yang tidak dibangun:** binding di jalur Run (termasuk yang hanya-MySQL), parameter mentah atau
+     identifier, ekspansi daftar untuk `IN (:ids)`, substitusi di dalam string literal, menjalankan
+     dengan nilai yang diingat tanpa prompt, set parameter per koneksi atau yang tersinkron, dan
+     kalimat setelan yang memakai kata "bind". Barisnya menyebut substitusi.
+4. **Vim mode.** **Ditunda atas permintaan pengguna**, 29 Sep 2026. Lapisan modal editing: mode
+   normal/insert/visual, operator dan motion, register, dan peta tombolnya. TablePro punya; pohon ini
+   tidak punya satu pun bagiannya. Ukuran: proyek tersendiri, dan ia bersinggungan dengan
+   `interceptKey` yang sekarang dipakai completion dan shortcut.
+
+5. **Memeriksa `UpdateStatements.literal` pada jalur inline Trino.** Temuan sampingan advisor, belum
+   ditelusuri ujung ke ujung: untuk penulisan inline Trino, ia menaruh teks ber-tipe numerik ke SQL
+   yang dijalankan tanpa memeriksanya. Perlu dicek apakah validasi nilainya sudah terjadi di hulu
+   (grid edit) atau belum.
 
 ### Di luar agen
 
