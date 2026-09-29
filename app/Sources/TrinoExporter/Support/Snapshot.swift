@@ -458,7 +458,7 @@ enum Snapshot {
             model.presentConnectionEditor(primary.id, previewTestCount: 56)
         case "connection":
             model.presentConnectionEditor(primary.id)
-        case "grid", "grid-selection", "grid-edits", "grid-sorted":
+        case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -518,6 +518,15 @@ enum Snapshot {
             // already in order by — so the scene shows the sort doing something.
             if scene == "grid-sorted" {
                 tab.setGridSort(GridSort(column: 2, direction: .ascending))
+            }
+            // The rendering-only column work: one column renamed, one hidden, one moved, and a
+            // cross-column search narrowing the rows. Drawn from the same model calls the UI makes,
+            // so the scene shows the feature's own state rather than a mock of it.
+            if scene == "grid-columns" {
+                tab.renameColumn(1, to: "Nama KPM")
+                tab.moveColumn(from: 6, to: 1)    // `catatan` up beside the name
+                tab.setColumnHidden(4, true)      // `aktif`
+                tab.gridSearch = "kpm"
             }
         case "grid-empty", "grid-loading", "grid-filtered-out":
             // A run whose columns are on screen and whose rows are not. Three states look exactly

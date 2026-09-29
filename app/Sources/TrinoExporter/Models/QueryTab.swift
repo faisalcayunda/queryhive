@@ -474,6 +474,15 @@ final class QueryTab: Identifiable {
     var preview: PreviewResult? {
         didSet {
             gridSort = nil
+            // A layout describes the column set it was built from: hiding "nama" in one result must
+            // not hide whatever column 1 is in the next one. Only a change in the number of columns
+            // resets it, so a repaint of the same result — a streaming run paints several times —
+            // keeps the user's hidden columns and renames.
+            if columnLayout.sourceCount != (preview?.columns.count ?? 0) {
+                columnLayout = GridColumnLayout(count: preview?.columns.count ?? 0)
+                cellSelection = nil
+            }
+            clearEditUndo()
             gridRevision += 1
         }
     }
@@ -503,6 +512,13 @@ final class QueryTab: Identifiable {
     /// would be a number that looks authoritative and is not.
     var previewedSQL: String?
 
+    /// The statement the grid's rows actually came from, before any search escalation wrapped it.
+    ///
+    /// A second escalation must wrap the user's own statement, not the first wrapper: nesting
+    /// `queryhive_search` inside itself would still run, but the scan would grow a layer per click.
+    /// Set with `previewedSQL`, and equal to it for an ordinary Run.
+    var previewBaseSQL: String?
+
     /// How many rows the statement really returns, once the user has asked. `nil` means "not
     /// asked", which is different from "fewer than the limit".
     var totalRows: Int?
@@ -519,6 +535,7 @@ final class QueryTab: Identifiable {
         didSet {
             cellSelection = nil
             cellEdits.discard()
+            clearEditUndo()
             // A filter narrows the rows a sort was an order over, so the order is dropped with the
             // selection and the edits. Kept here, beside them, because all three are the same kind
             // of state: a claim about a specific set of rows that no longer exists.
@@ -526,6 +543,39 @@ final class QueryTab: Identifiable {
             gridRevision += 1
         }
     }
+
+    /// A cross-column search over the rows already fetched, and the in-memory counterpart of the
+    /// server escalation. Empty means no search. Set through the view's field; like a filter it
+    /// narrows the rows on screen and never touches the statement, which is why the grid has to say
+    /// so and offers the escalate button beside it.
+    ///
+    /// A search is a claim about a specific set of rows, so it drops the selection, the queued edits
+    /// and the sort, exactly as a filter does.
+    var gridSearch = "" {
+        didSet {
+            guard gridSearch != oldValue else { return }
+            cellSelection = nil
+            cellEdits.discard()
+            clearEditUndo()
+            gridSort = nil
+            gridRevision += 1
+        }
+    }
+
+    var hasGridSearch: Bool { !gridSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// The grid's column presentation: order, visibility and labels. Rendering only — see
+    /// `GridColumnLayout`. Mutated through the methods below so the sort is reconciled against it.
+    private(set) var columnLayout = GridColumnLayout(count: 0)
+
+    /// The source indices the grid draws, in display order. A convenience over `columnLayout` for
+    /// the view, which needs it on nearly every render pass.
+    var visibleColumnSources: [Int] { columnLayout.visible }
+
+    /// Saved filter sets for a tab with no table to file them against. A hand-written query's
+    /// identity would change with every run, so a preset made there lives with the tab and is never
+    /// written to disk. `FilterPresetStore`'s own note carries the decision.
+    var localPresets: [FilterPreset] = []
 
     /// The order the grid is drawing the filtered rows in, or `nil` for the server's own order.
     ///
@@ -542,15 +592,209 @@ final class QueryTab: Identifiable {
         gridSort = sort
         cellSelection = nil
         cellEdits.discard()
+        clearEditUndo()
         gridRevision += 1
     }
 
-    /// A counter that changes whenever the rows, the filters or the sort change.
+    // MARK: Columns (rendering only)
+
+    /// Hide a column, or show it again.
+    ///
+    /// Hiding is not deleting: the column is still fetched, still copied and still exported, and the
+    /// queue and the filters are untouched. What it does change is what is on screen, so the block
+    /// selection goes — its columns are display positions, and hiding one shifts every position
+    /// after it. The sort is reconciled separately, in `reconcileColumns`.
+    func setColumnHidden(_ source: Int, _ hidden: Bool) {
+        guard source >= 0, source < columnLayout.sourceCount else { return }
+        if hidden { columnLayout.hide(source) } else { columnLayout.show(source) }
+        cellSelection = nil
+        reconcileColumns()
+        gridRevision += 1
+    }
+
+    func toggleColumn(_ source: Int) {
+        setColumnHidden(source, !columnLayout.isVisible(source))
+    }
+
+    /// Move the drawn column at `from` to display position `to`. Both are display positions among
+    /// the visible columns. This reorders only what is drawn.
+    ///
+    /// The sort and the filters are keyed by source index, so they follow a moved column on their
+    /// own; only the block selection, which is a rectangle of display positions, has to go.
+    func moveColumn(from: Int, to: Int) {
+        columnLayout.move(from: from, to: to)
+        cellSelection = nil
+        gridRevision += 1
+    }
+
+    /// Rename a column for display. A blank name reverts to the server's. The data, the copy and
+    /// the export never see the name, so there is nothing to reconcile here.
+    func renameColumn(_ source: Int, to name: String) {
+        columnLayout.rename(source, to: name)
+        gridRevision += 1
+    }
+
+    func showAllColumns() {
+        columnLayout.showAll()
+        cellSelection = nil
+        reconcileColumns()
+        gridRevision += 1
+    }
+
+    func resetColumnLayout() {
+        columnLayout.reset()
+        cellSelection = nil
+        reconcileColumns()
+        gridRevision += 1
+    }
+
+    /// The reconciliation the source-index identity cannot do on its own: an order whose column is
+    /// no longer drawn has no chevron to say so, so the sort goes with the column. A move or a
+    /// rename leaves it alone, because the column it names has not changed.
+    private func reconcileColumns() {
+        if let sort = gridSort, !columnLayout.isVisible(sort.column) {
+            setGridSort(nil)
+        }
+    }
+
+    // MARK: Filter presets
+
+    /// The filters currently set, as a preset keyed by column name, or `nil` when nothing is
+    /// filtered. Needs the columns, because a filter is keyed by position and a preset is not.
+    func currentFilterPreset(named name: String) -> FilterPreset? {
+        FilterPreset.from(name: name, filters: columnFilters, columns: preview?.columns ?? [])
+    }
+
+    /// Apply a saved filter set to the rows on screen, and report the column names it carries that
+    /// the current result does not have. Setting `columnFilters` drops the selection, the edits and
+    /// the sort in its own `didSet`, which is the same treatment a hand-set filter gets.
+    @discardableResult
+    func applyFilterPreset(_ preset: FilterPreset) -> [String] {
+        guard let preview else { return preset.filters.map(\.column) }
+        let (filters, missing) = preset.resolve(columns: preview.columns)
+        columnFilters = filters
+        return missing
+    }
+
+    // MARK: Queued-edit undo
+
+    /// The undo history for the grid's queued edits. One editing session becomes one step, so a
+    /// typed word undoes as a word rather than a character at a time; see `beginCellEdit`.
+    @ObservationIgnored let editUndoManager = UndoManager()
+
+    /// The cell an editor is over and the text typed into it, held here — not in the queue — until
+    /// the session ends. Replacing this buffer is the whole cost of a keystroke.
+    @ObservationIgnored private var editSession: CellEditSession?
+
+    /// One editing session: the cell, the value it started from, and the text so far.
+    private struct CellEditSession {
+        let key: CellKey
+        /// The value the cell was fetched with. The queue needs this one, not the staged value, to
+        /// decide whether the cell has been typed all the way back to where it started.
+        let original: String?
+        var text: String
+    }
+
+    /// Open an editing session over a cell, seeded with what it currently shows.
+    func beginCellEdit(at key: CellKey) {
+        let seed = cellValue(at: key) ?? ""
+        editSession = CellEditSession(key: key, original: fetchedValue(at: key), text: seed)
+    }
+
+    /// A keystroke. The buffer is replaced; nothing reaches the queue and nothing is registered with
+    /// undo until the session ends. That is the whole point: typing "hello" is one undo, not five.
+    func typeCellEdit(_ text: String) {
+        guard var session = editSession else { return }
+        session.text = text
+        editSession = session
+    }
+
+    /// The editor was dismissed without committing.
+    func cancelCellEdit() { editSession = nil }
+
+    /// End the session and stage its buffer as one queue change and one undo step.
+    ///
+    /// A buffer typed back to the value the cell was fetched with stages nothing, and because the
+    /// queue is unchanged between the two snapshots, no undo step is registered either — an undo
+    /// that visibly does nothing is worse than no undo.
+    func endCellEdit() {
+        guard let session = editSession else { return }
+        editSession = nil
+        let before = cellEdits
+        cellEdits.edit(session.text, at: session.key, original: session.original)
+        registerGridEdit(before)
+    }
+
+    /// Stage the editor's text over a whole selected block as one undo step.
+    func fillCellEdits(_ text: String, over selection: CellRange) {
+        let before = cellEdits
+        cellEdits.fill(text, over: selection, rows: displayedRows, columns: visibleColumnSources)
+        registerGridEdit(before)
+    }
+
+    /// Stage a pasted block as one undo step.
+    func pasteCellEdits(_ text: String, at origin: CellKey, columnCount: Int) {
+        let before = cellEdits
+        cellEdits.paste(text, at: origin, rows: displayedRows, columnCount: columnCount,
+                        columns: visibleColumnSources)
+        registerGridEdit(before)
+    }
+
+    /// Empty the queue as one undo step.
+    func discardCellEdits() {
+        let before = cellEdits
+        cellEdits.discard()
+        registerGridEdit(before)
+    }
+
+    func undoCellEdit() { editUndoManager.undo() }
+    func redoCellEdit() { editUndoManager.redo() }
+    var canUndoCellEdit: Bool { editUndoManager.canUndo }
+    var canRedoCellEdit: Bool { editUndoManager.canRedo }
+
+    /// What one cell shows: its staged text when it has one, the fetched value otherwise.
+    func cellValue(at key: CellKey) -> String? {
+        if let staged = cellEdits.value(at: key) { return staged }
+        return fetchedValue(at: key)
+    }
+
+    /// The value the server sent for a cell, before any staged edit.
+    func fetchedValue(at key: CellKey) -> String? {
+        guard displayedRows.indices.contains(key.row) else { return nil }
+        let row = displayedRows[key.row]
+        return row.indices.contains(key.column) ? row[key.column] : nil
+    }
+
+    /// Throw the queued-edit history away, with the queue it describes.
+    ///
+    /// Called wherever the grid invalidates the queue itself — a filter, a search, a sort, a new
+    /// result — because an undo step in that history names rows and columns on a screen that no
+    /// longer exists. Restoring such a step would put edits back onto cells the user never touched.
+    private func clearEditUndo() { editUndoManager.removeAllActions() }
+
+    /// Record a queue change as one undo step, with a matching redo. No change means no step.
+    ///
+    /// Each call is its own group rather than left to the run loop: the session that ends here is
+    /// already one user action, and grouping by event would merge two quick actions — a paste and
+    /// the next edit — into a single undo.
+    private func registerGridEdit(_ before: CellEdits) {
+        guard before != cellEdits else { return }
+        editUndoManager.beginUndoGrouping()
+        editUndoManager.registerUndo(withTarget: self) { tab in
+            let after = tab.cellEdits
+            tab.cellEdits = before
+            tab.editUndoManager.registerUndo(withTarget: tab) { redo in redo.cellEdits = after }
+        }
+        editUndoManager.setActionName("Edit Cell")
+        editUndoManager.endUndoGrouping()
+    }
+
+    /// A counter that changes whenever the rows, the filters, the search or the sort change.
     ///
     /// It exists so `displayedRows` can be cached: the grid reads that value several times per
     /// render, and filtering and sorting a large result on each read is work the user pays for on
-    /// every hover and selection. Bumped in the three places that can change what is on screen —
-    /// `preview`, `columnFilters` and `setGridSort`.
+    /// every hover and selection. Bumped in the places that can change what is on screen —
+    /// `preview`, `columnFilters`, `gridSearch` and `setGridSort`.
     private(set) var gridRevision = 0
 
     /// The cached answer, and the revision it was computed for.
@@ -565,13 +809,19 @@ final class QueryTab: Identifiable {
         if displayedCacheRevision == gridRevision, let displayedCache { return displayedCache }
         let rows: [[String?]]
         if let preview {
-            let filtered = columnFilters.isEmpty
+            var filtered = columnFilters.isEmpty
                 ? preview.rows
                 : preview.rows.filter { row in
                     columnFilters.allSatisfy { index, filter in
                         filter.matches(index < row.count ? row[index] : nil)
                     }
                 }
+            // The cross-column search narrows the same set the filters do, and before the sort for
+            // the same reason: the order is over what survives.
+            if hasGridSearch {
+                let term = gridSearch
+                filtered = filtered.filter { GridSearch.matches($0, term: term) }
+            }
             rows = gridSort.map { $0.order(filtered) } ?? filtered
         } else {
             rows = []
@@ -581,10 +831,11 @@ final class QueryTab: Identifiable {
         return rows
     }
 
-    /// The block of cells the pointer has dragged out in the grid, if any. Indices are positions
-    /// in the rows the grid is drawing (the filtered ones), which is what the pointer pointed at.
-    /// Cleared whenever new rows arrive, for the same reason the filters are: the numbers describe
-    /// rows that no longer exist.
+    /// The block of cells the pointer has dragged out in the grid, if any. Rows are positions in the
+    /// rows the grid is drawing (the filtered ones) and columns are positions among the **drawn**
+    /// columns; both are what the pointer pointed at. Cleared whenever new rows arrive, for the same
+    /// reason the filters are: the numbers describe rows that no longer exist. A queued edit, by
+    /// contrast, is keyed by the source column, because it has to survive a column being moved.
     var cellSelection: CellRange?
 
     /// The cells the user has changed but not yet written.
@@ -653,6 +904,9 @@ final class QueryTab: Identifiable {
         self.id = id
         self.title = title
         outputDirectory = ConnectionStore.defaultOutputDirectory
+        // Each registered edit is already one user action, so the manager must not merge two quick
+        // actions into one collapse. `registerGridEdit` opens and closes a group per call.
+        editUndoManager.groupsByEvent = false
     }
 
     // MARK: Derived
