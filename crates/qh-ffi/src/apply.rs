@@ -34,6 +34,17 @@
 //! a row and then inserts a row that takes it only works if the delete is first;
 //! the study records that this is why TablePro stamps a sequence on each change.
 //! This command does not reorder anything.
+//!
+//! # A failure carries a disposition, not just a message
+//!
+//! When a statement fails (or its count disagrees) the transaction is rolled back
+//! and the error says what became of the statements that already ran. That
+//! distinction is the study's `DataWritePartialCommitError`: a plan with no
+//! transaction, or whose rollback did not take effect, is [`Disposition::Written`]
+//! — the rows are in the table, and the message sends the user to the table rather
+//! than inviting a retry that would write them twice. A plan that ran inside a
+//! transaction and did not commit is [`Disposition::PendingInSessionTransaction`]:
+//! the rows were rolled back and the plan is the user's to fix and run again.
 
 use std::time::Duration;
 
@@ -56,6 +67,38 @@ struct Change {
     /// Whether the predicate is keyed. `true` uses the `actual > expected` rule;
     /// `false` uses `actual != expected`.
     keyed: bool,
+}
+
+/// What became of the statements that had already run when a plan failed.
+///
+/// This is the source study's vocabulary, and the distinction is the whole point:
+/// a failure the user can still undo is not the same as one that is already in
+/// the table, and telling them apart is what stops a blind retry from writing
+/// twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// No transaction was open, or the transaction could not be undone cleanly.
+    /// The rows are (or may be) in the table, and running the plan again would
+    /// write them a second time.
+    Written,
+    /// The plan ran inside a transaction and did not commit. The engine rolled it
+    /// back, so none of the statements are in the table, and the plan is the
+    /// caller's to fix and run again.
+    ///
+    /// QueryHive's engine owns and closes its own transaction, so unlike TablePro
+    /// there is no user session transaction left open to hold the statements; the
+    /// name is kept because it is the study's token and it still answers the one
+    /// question that matters — was anything written?
+    PendingInSessionTransaction,
+}
+
+impl Disposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Disposition::Written => "written",
+            Disposition::PendingInSessionTransaction => "pendingInSessionTransaction",
+        }
+    }
 }
 
 /// `apply_changes`: the reviewed plan, run.
@@ -87,6 +130,7 @@ pub async fn apply_changes(
     let timeout = statement_timeout(settings)?;
     let want_transaction = settings.flag("IN_TRANSACTION", true);
     let config = connection(settings, engine)?;
+    let engine_name = config.kind.as_str();
 
     out.emit(event("step").field("step", "connect").build())?;
     let (mut session, _policy) = open(settings, engine, &config).await?;
@@ -104,57 +148,81 @@ pub async fn apply_changes(
             // A stop keeps what was applied, and the transaction decides whether
             // that means anything: in a transaction this rollback discards it,
             // and without one it is already written.
-            if in_transaction {
-                let _ = run(&mut session, "ROLLBACK", timeout).await;
-            }
+            let rolled_back = rollback(&mut session, in_transaction, timeout).await;
             let _ = session.close().await;
-            return Err(CliError::Usage(
-                "the change plan was cancelled before it finished".to_owned(),
-            ));
+            let message = if rolled_back {
+                format!(
+                    "the change plan on {engine_name} was cancelled before it finished; the \
+                     transaction was rolled back, so none of the plan is in the table"
+                )
+            } else if in_transaction {
+                format!(
+                    "the change plan on {engine_name} was cancelled before it finished; the \
+                     rollback did not take effect, so the {applied} statement(s) already written \
+                     may still be in the table — look at the table before running the plan again"
+                )
+            } else {
+                format!(
+                    "the change plan on {engine_name} was cancelled before it finished; there is \
+                     no transaction to undo them, so the {applied} statement(s) already written \
+                     are in the table — look at the table before running the plan again"
+                )
+            };
+            return Err(CliError::Warned {
+                message,
+                warnings: vec![],
+            });
         }
         let affected = match run(&mut session, &change.sql, timeout).await {
             Ok(affected) => affected,
             Err(error) => {
-                if in_transaction {
-                    let _ = run(&mut session, "ROLLBACK", timeout).await;
-                }
+                let rolled_back = rollback(&mut session, in_transaction, timeout).await;
                 let _ = session.close().await;
-                return Err(CliError::Warned {
-                    message: format!(
-                        "change {} of {} failed and the plan was rolled back: {}",
-                        index + 1,
-                        changes.len(),
-                        error.message()
-                    ),
-                    warnings: vec![],
-                });
+                let cause = format!(
+                    "change {} of {} failed: {}",
+                    index + 1,
+                    changes.len(),
+                    error.message()
+                );
+                return Err(plan_failure(
+                    engine_name,
+                    in_transaction,
+                    rolled_back,
+                    applied,
+                    changes.len(),
+                    &cause,
+                ));
             }
         };
         if let Some(actual) = affected {
             if let Some(expected) = change.expected {
                 let actual = actual as i64;
-                let mismatch = verification_failed(change.keyed, actual, expected);
-                if mismatch {
-                    if in_transaction {
-                        let _ = run(&mut session, "ROLLBACK", timeout).await;
-                    }
+                if verification_failed(change.keyed, actual, expected) {
+                    let rolled_back = rollback(&mut session, in_transaction, timeout).await;
                     let _ = session.close().await;
-                    return Err(CliError::Warned {
-                        message: format!(
-                            "change {} of {} affected {actual} row(s) but the plan expected \
-                             {expected} ({}{}); the plan was rolled back",
-                            index + 1,
-                            changes.len(),
-                            if change.keyed { "keyed" } else { "keyless" },
-                            if change.keyed {
-                                ", and a keyed write must not match more than the row it was \
-                                 built from"
-                            } else {
-                                ""
-                            }
-                        ),
-                        warnings: vec![],
-                    });
+                    let cause = format!(
+                        "change {} of {} affected {actual} row(s) but the plan expected \
+                         {expected} ({}{})",
+                        index + 1,
+                        changes.len(),
+                        if change.keyed { "keyed" } else { "keyless" },
+                        if change.keyed {
+                            ", and a keyed write must not match more than the row it was \
+                             built from"
+                        } else {
+                            ""
+                        }
+                    );
+                    return Err(plan_failure(
+                        engine_name,
+                        in_transaction,
+                        rolled_back,
+                        // The statement completed — it just affected the wrong
+                        // number of rows — so it counts among those that ran.
+                        applied + 1,
+                        changes.len(),
+                        &cause,
+                    ));
                 }
             }
         }
@@ -168,7 +236,21 @@ pub async fn apply_changes(
     }
 
     if in_transaction {
-        run(&mut session, "COMMIT", timeout).await?;
+        if let Err(error) = run(&mut session, "COMMIT", timeout).await {
+            // The statements ran; whether the server kept them depends on where
+            // the commit failed, and either way this is the `written` case: the
+            // plan must not be run again blind.
+            let _ = session.close().await;
+            let cause = format!("COMMIT failed: {}", error.message());
+            return Err(plan_failure(
+                engine_name,
+                in_transaction,
+                false,
+                applied,
+                changes.len(),
+                &cause,
+            ));
+        }
     }
 
     out.emit(
@@ -176,15 +258,71 @@ pub async fn apply_changes(
             .field("applied", applied)
             .field("statements", results)
             .field("transaction", in_transaction)
-            .field(
-                "disposition",
-                if in_transaction { "pending" } else { "written" },
-            )
+            // Committed (or auto-committed) by the time `done` is emitted, so the
+            // plan is in the table whatever the transaction setting was.
+            .field("disposition", Disposition::Written.as_str())
             .field("query_id", session.query_id())
             .build(),
     )?;
     let _ = session.close().await;
     Ok(())
+}
+
+/// Undo this command's own transaction. `true` when a rollback was issued and the
+/// server accepted it; `false` when there was no transaction to undo, or the
+/// rollback itself failed, in which case the rows may still be in the table.
+async fn rollback(
+    session: &mut Box<dyn Session>,
+    in_transaction: bool,
+    timeout: Option<Duration>,
+) -> bool {
+    in_transaction && run(session, "ROLLBACK", timeout).await.is_ok()
+}
+
+/// The error a failed plan returns: how far it got, the engine it ran on, the
+/// disposition, and what the user should do next.
+///
+/// The advice is the study's, and it is deliberately not "try again": a `written`
+/// failure means retrying writes twice, so the user is sent to the table instead.
+fn plan_failure(
+    engine: &str,
+    in_transaction: bool,
+    rolled_back: bool,
+    applied: u64,
+    total: usize,
+    cause: &str,
+) -> CliError {
+    let disposition = if in_transaction && rolled_back {
+        Disposition::PendingInSessionTransaction
+    } else {
+        Disposition::Written
+    };
+    let detail = match disposition {
+        Disposition::PendingInSessionTransaction => {
+            "the transaction was rolled back, so those rows are not in the table"
+        }
+        Disposition::Written if in_transaction => {
+            "the transaction could not be undone cleanly, so those rows may still be in the table"
+        }
+        Disposition::Written => "there was no transaction to undo them",
+    };
+    let advice = match disposition {
+        Disposition::PendingInSessionTransaction => {
+            "Fix the failing statement and run the plan again when you are ready"
+        }
+        Disposition::Written => {
+            "look at the table before doing anything else, not a retry: running the plan again \
+             would write those rows a second time"
+        }
+    };
+    CliError::Warned {
+        message: format!(
+            "the change plan on {engine}: {cause}. {applied} of {total} statement(s) had completed; \
+             {detail} (disposition: {}). {advice}.",
+            disposition.as_str()
+        ),
+        warnings: vec![],
+    }
 }
 
 /// Read one statement to its end, returning the server's affected-row count.
@@ -332,5 +470,59 @@ mod tests {
     fn the_guard_refuses_a_write_on_a_read_only_connection() {
         assert!(!allows(SafeMode::ReadOnly, "UPDATE t SET a=1"));
         assert!(allows(SafeMode::ReadOnly, "SELECT 1"));
+    }
+
+    #[test]
+    fn a_match_note_comment_does_not_change_how_a_statement_is_classified() {
+        // The plan puts the columns it could not match in a trailing comment so
+        // the review sheet shows them; the guard must still see an `UPDATE`.
+        let sql = "UPDATE t SET a = 1 WHERE \"x\" = 1 /* not matched: \"geom\" (spatial values \
+                   are not comparable as text) */";
+        assert!(
+            allows(SafeMode::Full, sql),
+            "a full connection allows the write"
+        );
+        assert!(
+            !allows(SafeMode::ReadOnly, sql),
+            "a read-only one refuses it"
+        );
+    }
+
+    #[test]
+    fn a_transactional_failure_is_pending_and_a_bare_one_is_written() {
+        let pending = plan_failure("postgres", true, true, 1, 3, "change 2 of 3 failed");
+        let message = pending.message();
+        assert!(message.contains("postgres"), "{message}");
+        assert!(
+            message.contains("(disposition: pendingInSessionTransaction)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("those rows are not in the table"),
+            "{message}"
+        );
+        assert!(message.contains("run the plan again"), "{message}");
+
+        let written = plan_failure("trino", false, false, 1, 3, "change 2 of 3 failed");
+        let message = written.message();
+        assert!(message.contains("trino"), "{message}");
+        assert!(message.contains("(disposition: written)"), "{message}");
+        assert!(
+            message.contains("there was no transaction to undo them"),
+            "{message}"
+        );
+        assert!(message.contains("not a retry"), "{message}");
+        assert!(message.contains("look at the table"), "{message}");
+    }
+
+    #[test]
+    fn a_rollback_that_failed_is_written_not_pending() {
+        // The distinction the study exists for: a rollback that did not take
+        // effect leaves the rows where they are, so this is not the safe case.
+        let error = plan_failure("postgres", true, false, 2, 4, "change 3 of 4 failed");
+        let message = error.message();
+        assert!(message.contains("(disposition: written)"), "{message}");
+        assert!(message.contains("could not be undone cleanly"), "{message}");
+        assert!(message.contains("may still be in the table"), "{message}");
     }
 }

@@ -2200,7 +2200,13 @@ final class AppModel {
     /// user did not read. The engine verifies each statement's affected-row count and rolls the
     /// whole plan back if one disagrees.
     func applyChanges(_ plan: WritePlan, in tab: QueryTab) {
-        guard !plan.isEmpty, let connection = connection(for: tab) else { return }
+        // The plan says which rows it could not write, and it must not be a silent
+        // partial save: those lines go to the log before anything runs.
+        for warning in plan.warnings { tab.note(.warning, warning) }
+        guard !plan.isEmpty, let connection = connection(for: tab) else {
+            if !plan.warnings.isEmpty { tab.panel = .log }
+            return
+        }
         let env: [String: String]
         do {
             var built = try connectionEnvironment(connection)

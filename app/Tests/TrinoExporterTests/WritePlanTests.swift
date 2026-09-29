@@ -102,9 +102,11 @@ final class WritePlanTests: XCTestCase {
 
         let insert = try? XCTUnwrap(plan.statements.first)
         XCTAssertEqual(insert?.kind, .insert)
-        XCTAssertTrue(insert?.sql.contains("\"id\"") == true, insert?.sql ?? "")
+        // Only the column the user provided is named: a column left blank takes
+        // the server's own default, which writing `NULL` over would override.
+        XCTAssertTrue(insert?.sql.contains("\"nama\"") == true, insert?.sql ?? "")
+        XCTAssertFalse(insert?.sql.contains("\"id\"") == true, insert?.sql ?? "")
         XCTAssertTrue(insert?.sql.contains("'O''Brien'") == true, insert?.sql ?? "")
-        // A blank cell is NULL, the same reading the grid gives it.
-        XCTAssertTrue(insert?.sql.contains("NULL") == true, insert?.sql ?? "")
+        XCTAssertFalse(insert?.sql.contains("NULL") == true, insert?.sql ?? "")
     }
 }

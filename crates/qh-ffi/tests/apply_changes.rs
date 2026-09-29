@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use qh_core::{ColumnBatch, ColumnMeta, EngineError};
+use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Session,
@@ -30,6 +30,10 @@ struct Recording {
     /// The affected-row count each `execute` reports, in order. Empty means
     /// `Some(1)` for every statement, which is a plan that agrees with itself.
     counts: Arc<Mutex<VecDeque<Option<u64>>>>,
+    /// When set, `ROLLBACK` fails the way a server that dropped the connection
+    /// would. The statements that ran may already be in the table, which is the
+    /// distinction between `written` and `pendingInSessionTransaction`.
+    fail_rollback: Arc<Mutex<bool>>,
 }
 
 impl Recording {
@@ -120,6 +124,16 @@ impl Session for RecordingSession {
             .lock()
             .expect("record")
             .push(sql.to_owned());
+        if sql.trim().eq_ignore_ascii_case("ROLLBACK")
+            && *self.recording.fail_rollback.lock().expect("rollback")
+        {
+            return Err(EngineError::Query {
+                message: "the connection went away before the rollback".to_owned(),
+                code: None,
+                position: None,
+                kind: FailureKind::Transient,
+            });
+        }
         // Transaction control is not one of the plan's statements and does not
         // consume a scripted count; its affected count is never read.
         let control = matches!(
@@ -199,6 +213,29 @@ const CONNECTION: [(&str, &str); 4] = [
 async fn apply(recording: &Recording, changes: &str) -> Result<Capture, qh_ffi::CliError> {
     let mut pairs: Vec<(&str, &str)> = CONNECTION.to_vec();
     pairs.push(("CHANGES", changes));
+    let mut out = Capture::new();
+    run(
+        Command::ApplyChanges,
+        &settings(&pairs),
+        &mut out,
+        &RecordingEngine {
+            recording: recording.clone(),
+        },
+        &CancelFlag::new(),
+    )
+    .await?;
+    Ok(out)
+}
+
+/// `apply` with extra settings — a plan that is asked for no transaction, most often.
+async fn apply_with(
+    recording: &Recording,
+    changes: &str,
+    extra: &[(&str, &str)],
+) -> Result<Capture, qh_ffi::CliError> {
+    let mut pairs: Vec<(&str, &str)> = CONNECTION.to_vec();
+    pairs.push(("CHANGES", changes));
+    pairs.extend_from_slice(extra);
     let mut out = Capture::new();
     run(
         Command::ApplyChanges,
@@ -336,4 +373,94 @@ async fn an_unknown_expected_count_is_refused_rather_than_ignored() {
         error.message().contains("expected is not an integer"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn a_failure_inside_a_transaction_is_pending_and_names_the_engine() {
+    let recording = Recording::default();
+    recording.counts.lock().expect("counts").push_back(Some(2));
+    let changes = r#"[{"sql":"UPDATE \"public\".\"people\" SET \"name\" = 'z' WHERE \"id\" = 3","expected":1,"keyed":true}]"#;
+    let error = apply(&recording, changes).await.expect_err("must fail");
+
+    let message = error.message();
+    assert!(message.contains("postgres"), "names the engine: {message}");
+    assert!(
+        message.contains("(disposition: pendingInSessionTransaction)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("those rows are not in the table"),
+        "the rollback undid them: {message}"
+    );
+    // The rollback ran; nothing committed, so there is nothing to inspect.
+    let ran = recording.statements();
+    assert_eq!(ran.last().map(String::as_str), Some("ROLLBACK"));
+    assert!(!ran.iter().any(|sql| sql == "COMMIT"));
+}
+
+#[tokio::test]
+async fn a_failure_without_a_transaction_is_written_and_says_not_to_retry() {
+    // No transaction means every statement auto-committed as it ran: the rows are
+    // in the table, and the advice is to look, not to run the plan again.
+    let recording = Recording::default();
+    recording.counts.lock().expect("counts").push_back(Some(2));
+    let changes = r#"[{"sql":"UPDATE \"public\".\"people\" SET \"name\" = 'z' WHERE \"id\" = 3","expected":1,"keyed":true}]"#;
+    let error = apply_with(&recording, changes, &[("IN_TRANSACTION", "false")])
+        .await
+        .expect_err("must fail");
+
+    let message = error.message();
+    assert!(message.contains("postgres"), "{message}");
+    assert!(message.contains("(disposition: written)"), "{message}");
+    assert!(message.contains("there was no transaction"), "{message}");
+    assert!(message.contains("not a retry"), "{message}");
+    assert!(message.contains("look at the table"), "{message}");
+    // The statement completed — it just affected the wrong number of rows — so
+    // the count says one of one, not zero.
+    assert!(
+        message.contains("1 of 1 statement(s) had completed"),
+        "{message}"
+    );
+    let ran = recording.statements();
+    assert!(!ran.iter().any(|sql| sql == "BEGIN"), "{ran:?}");
+    assert!(!ran.iter().any(|sql| sql == "ROLLBACK"), "{ran:?}");
+}
+
+#[tokio::test]
+async fn a_rollback_that_failed_is_written() {
+    // The rollback is not a formality: when it fails, the rows may still be in
+    // the table, and calling that `pending` would invite a retry that writes
+    // twice.
+    let recording = Recording::default();
+    *recording.fail_rollback.lock().expect("rollback") = true;
+    recording.counts.lock().expect("counts").push_back(Some(2));
+    let changes = r#"[{"sql":"UPDATE t SET a=1 WHERE id=1","expected":1,"keyed":true}]"#;
+    let error = apply(&recording, changes).await.expect_err("must fail");
+
+    let message = error.message();
+    assert!(message.contains("(disposition: written)"), "{message}");
+    assert!(message.contains("could not be undone cleanly"), "{message}");
+    assert!(message.contains("may still be in the table"), "{message}");
+    let ran = recording.statements();
+    assert_eq!(ran.last().map(String::as_str), Some("ROLLBACK"));
+}
+
+#[tokio::test]
+async fn a_committed_plan_reports_itself_as_written() {
+    let recording = Recording::default();
+    let events = apply(
+        &recording,
+        r#"[{"sql":"UPDATE t SET a=1 WHERE id=1","expected":1,"keyed":true}]"#,
+    )
+    .await
+    .expect("the plan applies");
+    let done = events
+        .lines()
+        .iter()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
+        .find(|event| event["event"] == "done")
+        .expect("a done event");
+    // Committed by the time `done` is emitted, so the plan is in the table.
+    assert_eq!(done["disposition"], "written");
+    assert_eq!(done["transaction"], true);
 }

@@ -123,6 +123,7 @@ final class CellEditsTests: XCTestCase {
     private func statements(_ edits: CellEdits, table: String = "\"hive\".\"analytics\".\"people\"",
                             kind: ConnectionKind = .trino) -> [String] {
         UpdateStatements.generate(edits: edits, rows: rows, columns: columns, table: table, kind: kind)
+            .compactMap(\.sql)
     }
 
     func testOneStatementPerRowWithEveryChangedCellInOneSet() {
