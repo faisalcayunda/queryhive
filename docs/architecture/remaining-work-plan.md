@@ -168,6 +168,64 @@ dan apa yang sengaja tidak dibangun.
    yang dijalankan tanpa memeriksanya. Perlu dicek apakah validasi nilainya sudah terjadi di hulu
    (grid edit) atau belum.
 
+### Batch 6: pane Data
+
+**Setelan yang dikerjakan** (perilaku yang sudah ada, tinggal disakelar): row height, NULL display,
+show alternate row backgrounds, show row numbers, arah klik pertama pada header kolom, default view
+JSON viewer, dan clear all query history.
+
+**Status 29 Sep 2026.** Ketujuhnya mendarat sebagai store preferensi data tersendiri
+(`app/Sources/QueryHive/Support/DataPreferences.swift`), plus tombol Clear History yang sebelumnya
+tidak pernah ada — `history_clear` sudah hidup di engine sejak lama dan tidak dipanggil siapa pun.
+Dua baris menu TablePro yang lain sudah ada lebih dulu dan tidak digandakan: "Default page size"
+adalah Result rows (`defaultRowLimit`), dan "Maximum entries" adalah Rows the panel reads
+(`historyLimit`).
+
+Satu cacat ikut tertangkap tes saat arah klik pertama dibuat dapat disetel: siklus lama
+`ascending → descending → off` membuat arah `descending` sebagai klik pertama **tidak pernah bisa
+mencapai ascending**, karena klik keduanya langsung menghapus sort. Sekarang siklusnya
+"arah pertama → arah lain → off", jadi kedua arah tetap terjangkau dari titik mana pun.
+
+Deskripsi panjang di semua pane settings juga pindah ke belakang glyph `?` (`HelpHint`, di
+`Support/Theme.swift`): paragraf di bawah tiap judul membuat tiap kartu dua paragraf dalam dan
+mendorong kontrol pertama turun, sehingga jendela setelan terbaca sebagai prosa berisi kontrol.
+Teksnya tetap ada, satu hover saja.
+
+**Empat dari delapan tugas TablePro belum dibangun.** Daftar di bawah menyimpan apa yang
+masing-masing butuhkan, supaya tidak diusulkan ulang tanpa alasan.
+
+1. **Date format.** Transformasi tampilan untuk kolom tanggal dan timestamp. `ColumnFormatStore`
+   sudah memegang format **per kolom**; yang belum adalah setelan global yang dipakai kolom tanggal
+   yang belum punya format sendiri. Ukuran: sedang. Risiko: dua sumber format harus punya urutan
+   menang yang jelas, dan menambah setelan harus tidak membuat sel yang sudah diatur berubah sendiri.
+2. **Auto-show inspector saat baris dipilih.** Buka `CellValueViewer` begitu seleksi berubah.
+   Ukuran: kecil. Risiko: seleksi grid hari ini dipakai untuk salin dan untuk edit sel, jadi
+   membuka pembaca di setiap perubahan seleksi harus tidak menghalangi keduanya — karena itu ia
+   setelan, bukan perilaku tetap.
+3. **Smart value detection.** Mengenali bentuk nilai **per sel** (JSON, UUID, URL) alih-alih per
+   kolom seperti `ColumnFormat` sekarang. Ukuran: sedang. Risiko: tiap sel jadi perlu penafsiran
+   sendiri, dan itu biaya pada grid yang sudah menggambar ribuan baris.
+4. **Default row sort.** TablePro menerapkan urutan saat tabel pertama dibuka. Butuh keputusan lebih
+   dulu: sebuah setelan default tidak bisa menyebut nama kolom tabel yang belum dibuka, jadi
+   pilihannya harus struktural (tanpa urutan, primary key, kolom pertama) — dan itu keputusan produk,
+   bukan keputusan teknis.
+
+**Yang sengaja tidak dibangun:**
+
+- **Count rows if estimate less than.** Butuh estimasi jumlah baris yang belum dimiliki engine
+  (`count` yang ada menghitung persis). Membangun estimasi hanya untuk memutuskan kapan menghitung
+  persis adalah biaya yang tidak dibayar oleh manfaatnya.
+- **Query result row cap (Truncate + Row cap + Fetch All + Execute Without Limit).** Tumpang tindih
+  dengan `rowLimit` per tab yang sudah ada dan sudah dikirim sebagai `LIMIT`. Bedanya adalah cap
+  yang **tidak** mengubah teks statement; menambah jalur kedua untuk hal yang sama akan membuat dua
+  arti untuk satu angka. Perlu keputusan dulu apakah `rowLimit` yang ada cukup.
+- **Query history retention (Keep entries for + Auto cleanup).** Butuh perintah engine baru: hapus
+  baris lebih tua dari N hari. `history_clear` yang ada hanya bisa menghapus semua atau satu
+  koneksi, jadi ini pekerjaan engine (Rust) plus UI, bukan setelan yang tinggal disakelar.
+- **Data Rewind.** Memulihkan hasil save yang sudah commit. Ukuran: besar, dan TablePro sendiri
+  menggantungkannya pada lisensi — sedangkan §9 menolak lisensi. Undo sebelum commit sudah ada
+  (`CellEdits` dan penggabungan undo); yang belum adalah undo setelah commit.
+
 ### Di luar agen
 
 Rotasi key kenari, karena PROGRESS.md sudah menyatakannya bocor. Notarisasi dan kunci EdDSA Sparkle

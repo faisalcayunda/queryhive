@@ -11,7 +11,7 @@ import Foundation
 /// does not touch the statement, which is why the header has to say so: a row outside the limit is
 /// not in this order at all.
 struct GridSort: Equatable {
-    enum Direction: Equatable {
+    enum Direction: String, Equatable {
         case ascending, descending
 
         /// The glyph the header draws beside the sorted column.
@@ -28,14 +28,19 @@ struct GridSort: Equatable {
     /// The third state exists because the server's order is the only one that is not the grid's
     /// invention, and a click that could only ever add an order would leave no way back to the rows
     /// as they arrived.
-    static func next(_ current: GridSort?, clickedColumn: Int) -> GridSort? {
+    static func next(_ current: GridSort?, clickedColumn: Int,
+                     firstDirection: Direction = .ascending) -> GridSort? {
         guard let current, current.column == clickedColumn else {
-            return GridSort(column: clickedColumn, direction: .ascending)
+            return GridSort(column: clickedColumn, direction: firstDirection)
         }
-        switch current.direction {
-        case .ascending: return GridSort(column: clickedColumn, direction: .descending)
-        case .descending: return nil
-        }
+        // The cycle is: the first direction, then the other, then off. Which one is "first" is the
+        // Data pane's, and it also decides where the cycle ends — a fixed `ascending → descending →
+        // off` would make a descending start unable to reach ascending at all, because its second
+        // click would clear instead of flipping.
+        let other: Direction = firstDirection == .ascending ? .descending : .ascending
+        return current.direction == firstDirection
+            ? GridSort(column: clickedColumn, direction: other)
+            : nil
     }
 
     /// The rows in the order the grid draws them.

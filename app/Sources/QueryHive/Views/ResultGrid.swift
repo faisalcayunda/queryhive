@@ -20,7 +20,11 @@ struct ResultGrid: View {
     /// number, so it has to be the number the rows are actually drawn at — a content-sized row would
     /// make the mapping drift by a row somewhere down a long result. A uniform row height is also
     /// what a data grid wants: rows that breathe by a fraction of a point read as misaligned.
-    private let rowHeight: CGFloat = 25
+    /// The row height the Data pane asks for.
+    ///
+    /// Read while the body runs rather than held as a constant, which is what registers the
+    /// dependency: changing the height in Settings repaints the grid without a call site changing.
+    private var rowHeight: CGFloat { DataPreferences.shared.rowHeight.points }
     /// The horizontal padding a cell carries on each side, so a column is drawn at its measured
     /// width plus twice this. The drag's column mapping has to use the same number the cells are
     /// built with, or the selection lands a column off at the far end of a wide result.
@@ -93,7 +97,9 @@ struct ResultGrid: View {
         return natural.map { $0 + slack * ($0 / total) }
     }
 
-    private var gutterWidth: CGFloat { 44 + cellPadding * 2 }
+    private var gutterWidth: CGFloat {
+        DataPreferences.shared.showRowNumbers ? 44 + cellPadding * 2 : 0
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -579,7 +585,8 @@ struct ResultGrid: View {
         let label = tab.columnLayout.label(source, original: tab.preview?.columns ?? [])
         let drawn = tab.visibleColumnSources.count
         return Button {
-            tab.setGridSort(GridSort.next(tab.gridSort, clickedColumn: source))
+            tab.setGridSort(GridSort.next(tab.gridSort, clickedColumn: source,
+                                          firstDirection: DataPreferences.shared.firstSortDirection))
         } label: {
             VStack(alignment: numeric ? .trailing : .leading, spacing: 3) {
                 HStack(spacing: 3) {
@@ -683,7 +690,10 @@ struct ResultGrid: View {
             }
         }
         .frame(height: rowHeight)
-        .background(index % 2 == 1 ? Tone.ink.opacity(0.03) : Color.clear)
+        // The faint band on every other row. It was always drawn; the Data pane is where it is
+        // switched off, and off means the row is left with nothing behind it.
+        .background(index % 2 == 1 && DataPreferences.shared.alternateRows
+                    ? Tone.ink.opacity(0.03) : Color.clear)
         .contentShape(Rectangle())
         .gesture(selectionDrag(row: index, widths: widths))
     }
@@ -876,14 +886,21 @@ struct ResultGrid: View {
     }
 
     /// The row-number column, shared by the header and every row so they cannot drift apart.
+    ///
+    /// Absent entirely when the Data pane says so, rather than drawn transparent: the width it would
+    /// take is the width the columns get instead.
+    @ViewBuilder
     private func gutter(_ text: String) -> some View {
-        Text(text)
-            .font(.code(10.5))
-            .foregroundStyle(Tone.ink.opacity(0.35))
-            .frame(width: 44, alignment: .trailing)
-            .padding(.horizontal, cellPadding)
-            .padding(.vertical, 6)
-            .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1), alignment: .trailing)
+        if DataPreferences.shared.showRowNumbers {
+            Text(text)
+                .font(.code(10.5))
+                .foregroundStyle(Tone.ink.opacity(0.35))
+                .frame(width: 44, alignment: .trailing)
+                .padding(.horizontal, cellPadding)
+                .padding(.vertical, 6)
+                .overlay(Rectangle().fill(Tone.ink.opacity(0.05)).frame(width: 1),
+                         alignment: .trailing)
+        }
     }
 
     /// A NULL is not an empty string and must not look like one: it is italic and dim, the same
@@ -901,7 +918,8 @@ struct ResultGrid: View {
                     .help(value)
             }
         } else {
-            Text("null").italic().font(.mono12).foregroundStyle(Tone.ink.opacity(0.3))
+            Text(DataPreferences.shared.nullDisplay).italic().font(.mono12)
+                .foregroundStyle(Tone.ink.opacity(0.3))
         }
     }
 

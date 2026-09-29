@@ -191,12 +191,17 @@ struct SettingsView: View {
 
 // MARK: Grouping
 
-/// A titled card: a section label, an optional one-line explanation, then the controls.
+/// A titled card: a section label, the question mark that explains it when there is more to say,
+/// then the controls.
 ///
 /// The card is what gives the pane its hierarchy. Every group is the same shape, so the eye reads
 /// the pane as "a few groups" rather than as "a list of things", and the gap between cards (18)
 /// is visibly larger than the gap inside one (12) — which is the whole difference between a
 /// deliberate layout and a stack.
+///
+/// The explanation sits behind the glyph rather than under the label. Spelled out it made every
+/// card two paragraphs deep and pushed the first control down the pane, so a settings window read
+/// as prose with controls in it; the sentence is still there, one hover away.
 private struct SettingsCard<Content: View>: View {
     let title: String
     var detail: String?
@@ -204,14 +209,9 @@ private struct SettingsCard<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
                 SectionLabel(text: title)
-                if let detail {
-                    Text(detail)
-                        .font(.ui(11))
-                        .foregroundStyle(Tone.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                if let detail { HelpHint(text: detail) }
             }
             content
         }
@@ -1099,10 +1099,68 @@ struct KeyboardSettings: View {
 /// govern it belong where they can be reached rather than as constants in the code.
 struct DataSettings: View {
     @Environment(AppModel.self) private var model
+    /// Whether the clear-history confirmation is up.
+    @State private var confirmingClear = false
 
     var body: some View {
         @Bindable var model = model
+        @Bindable var prefs = DataPreferences.shared
         VStack(alignment: .leading, spacing: 18) {
+            SettingsCard(title: "Data grid",
+                         detail: "How a result is drawn. None of it changes what a query returns — the server sends the same rows either way — so this is about reading them.") {
+                dataRow("Row height") {
+                    Picker("", selection: $prefs.rowHeight) {
+                        ForEach(DataPreferences.RowHeight.allCases) { height in
+                            Text(height.title).tag(height)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+
+                RowDivider()
+
+                dataRow("NULL display") {
+                    TextField("null", text: $prefs.nullDisplay)
+                        .textFieldStyle(.plain)
+                        .font(.code(11.5))
+                        .foregroundStyle(Tone.ink)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 140)
+                }
+
+                RowDivider()
+
+                dataRow("First click sorts",
+                        hint: "The second click on a column header sorts the other way and the third "
+                            + "clears it, so this only decides where that cycle starts.") {
+                    Picker("", selection: $prefs.firstSortDirection) {
+                        Text("Ascending").tag(GridSort.Direction.ascending)
+                        Text("Descending").tag(GridSort.Direction.descending)
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+
+                RowDivider()
+                dataToggle("Show alternate row backgrounds", isOn: $prefs.alternateRows)
+                RowDivider()
+                dataToggle("Show row numbers", isOn: $prefs.showRowNumbers)
+            }
+
+            SettingsCard(title: "JSON viewer",
+                         detail: "What a cell reader opens on. Automatic is what it has always done: a JSON value opens on its tree, a byte value on its dump, anything else on its text.") {
+                dataRow("Default view") {
+                    Picker("", selection: $prefs.viewerMode) {
+                        ForEach(DataPreferences.ViewerMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+            }
+
             SettingsCard(title: "Query history",
                          detail: "Every Run is written down with its statement, its connection, how long it took, and how it ended. Export and Explain are not recorded: a plan is not a result, and a history that mixed looking at rows with writing them somewhere would answer neither question.") {
                 Toggle(isOn: $model.recordsHistory) {
@@ -1116,11 +1174,10 @@ struct DataSettings: View {
 
                 RowDivider()
 
-                HStack(spacing: 8) {
-                    Text("Rows the panel reads")
-                        .font(.ui(11.5))
-                        .foregroundStyle(Tone.ink.opacity(0.9))
-                    Spacer(minLength: 12)
+                dataRow("Rows the panel reads",
+                        hint: "A cap rather than a filter. The engine reads newest first, so lowering "
+                            + "it hides the oldest entries and keeps the recent ones. Turning "
+                            + "recording off leaves what is already written alone.") {
                     TextField("", value: $model.historyLimit, format: .number)
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
@@ -1129,21 +1186,30 @@ struct DataSettings: View {
                     Stepper("", value: $model.historyLimit, in: 50...5000, step: 50)
                         .labelsHidden()
                 }
-                .padding(.vertical, 6)
 
-                Text("A cap rather than a filter. The engine reads newest first, so lowering it hides the oldest entries and keeps the recent ones. Turning recording off leaves what is already written alone; clearing it happens in the History panel.")
-                    .font(.ui(10.5))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                RowDivider()
+
+                HStack(spacing: 8) {
+                    Text("Clear all query history")
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink.opacity(0.9))
+                    Spacer(minLength: 12)
+                    // Not disabled when the list looks empty: the panel is only read when it is
+                    // shown, so what this side knows is not what the engine holds.
+                    PillButton(title: "Clear History…", role: .destructive) {
+                        confirmingClear = true
+                    }
+                }
+                .padding(.vertical, 6)
             }
 
             SettingsCard(title: "Statement timeout",
                          detail: "How long a statement may run before the server stops it. The engine puts the bound in force with each server's own mechanism — PostgreSQL's statement_timeout, Trino's query_max_run_time, MySQL's max_execution_time — so a statement that overruns is cancelled and releases its resources even if this window is gone. A local timer would only stop the reading, not the work.") {
-                HStack(spacing: 8) {
-                    Text("Stop a statement after")
-                        .font(.ui(11.5))
-                        .foregroundStyle(Tone.ink.opacity(0.9))
-                    Spacer(minLength: 12)
+                dataRow("Stop a statement after",
+                        hint: "Zero means no bound. The setting applies to every run that reaches a "
+                            + "server — Preview, Count, Explain and Export alike — and survives a "
+                            + "restart. What a connection refuses outright is its Safe Mode, chosen "
+                            + "per connection in its editor.") {
                     TextField("", value: $model.statementTimeoutMS, format: .number)
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
@@ -1155,21 +1221,15 @@ struct DataSettings: View {
                     Stepper("", value: $model.statementTimeoutMS, in: 0...600_000, step: 5_000)
                         .labelsHidden()
                 }
-                .padding(.vertical, 6)
-
-                Text("Zero means no bound. The setting applies to every run that reaches a server — Preview, Count, Explain and Export alike — and survives a restart. What a connection refuses outright is its Safe Mode, chosen per connection in its editor.")
-                    .font(.ui(10.5))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             SettingsCard(title: "Result rows",
                          detail: "How many rows a new query fetches before it stops. A Run reads the first page and writes nothing, so this bounds how much is looked at rather than what a statement could return. Each tab keeps its own number once you change it in the grid; this is only what a new tab starts with.") {
-                HStack(spacing: 8) {
-                    Text("A new query fetches")
-                        .font(.ui(11.5))
-                        .foregroundStyle(Tone.ink.opacity(0.9))
-                    Spacer(minLength: 12)
+                dataRow("A new query fetches",
+                        hint: "The grid's own field overrides this for the tab in front, and a "
+                            + "restored session keeps each tab's number. Export is not bounded by "
+                            + "it: an export streams the whole statement to a file, which is the "
+                            + "point of it.") {
                     TextField("", value: $model.defaultRowLimit, format: .number.grouping(.never))
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
@@ -1181,13 +1241,47 @@ struct DataSettings: View {
                     Stepper("", value: $model.defaultRowLimit, in: 1...1_000_000, step: 100)
                         .labelsHidden()
                 }
-                .padding(.vertical, 6)
-
-                Text("The grid's own field overrides this for the tab in front, and a restored session keeps each tab's number. Export is not bounded by it: an export streams the whole statement to a file, which is the point of it.")
-                    .font(.ui(10.5))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // Clearing the history is the one thing on this pane that cannot be undone, so it asks.
+        .confirmationDialog("Clear all query history?", isPresented: $confirmingClear) {
+            Button("Clear History", role: .destructive) { model.clearHistory() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every recorded run is removed, on every connection. Files already exported are not "
+                 + "touched, and recording stays on.")
+        }
+    }
+
+    /// One labelled row on this pane: the name, the question mark that explains it when there is
+    /// something to explain, then the control at the trailing edge.
+    private func dataRow<Control: View>(_ label: String, hint: String? = nil,
+                                        @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+            if let hint { HelpHint(text: hint) }
+            Spacer(minLength: 12)
+            control()
+        }
+        .padding(.vertical, 6)
+    }
+
+    /// One switch on this pane, in the shape the rest of it uses.
+    private func dataToggle(_ title: String, hint: String? = nil,
+                            isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+            if let hint { HelpHint(text: hint) }
+            Spacer(minLength: 12)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+        }
+        .padding(.vertical, 6)
     }
 }

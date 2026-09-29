@@ -78,9 +78,17 @@ struct CellValueViewer: View {
         self.identity = identity
         _format = State(initialValue: identity.map { ColumnFormatStore.format($0) } ?? .raw)
         // A JSON cell opens on its tree and a byte cell on its dump, because that is the mode the
-        // cell was opened for. Text is always there to fall back to.
-        let initial: Mode = tree.isTree ? .tree : (available.contains(.hex) ? .hex : .text)
-        _mode = State(initialValue: initial)
+        // cell was opened for. Text is always there to fall back to. The Data pane can pin one
+        // instead, which is why `automatic` is a choice rather than the only behaviour.
+        let automatic: Mode = tree.isTree ? .tree : (available.contains(.hex) ? .hex : .text)
+        let preferred = DataPreferences.shared.viewerMode
+        let wanted: Mode = switch preferred {
+        case .automatic: automatic
+        case .text: .text
+        case .tree: available.contains(.tree) ? .tree : .text
+        case .hex: available.contains(.hex) ? .hex : .text
+        }
+        _mode = State(initialValue: wanted)
     }
 
     var body: some View {

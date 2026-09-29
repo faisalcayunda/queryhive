@@ -723,6 +723,26 @@ final class AppModel {
         parameterPrompt = nil
     }
 
+    /// Throw the whole history away, then re-read what is left.
+    ///
+    /// The engine answers how many rows were living when it ran, which is what the notice says
+    /// afterwards: "412 rows removed" is a fact, and "cleared" on its own is not.
+    func clearHistory() {
+        var cleared: Int?
+        _ = Engine.current.run("history_clear", env: Self.localEnvironment([:]),
+                               onEvent: { event in
+            if event.event == "history_clear" { cleared = event.cleared }
+            if event.event == "error" { self.historyError = event.message }
+        }, onExit: { _, _ in
+            self.loadHistory(search: self.historySearch)
+            if let cleared {
+                self.notice = Notice(
+                    title: "History cleared",
+                    message: cleared == 1 ? "1 row removed." : "\(cleared) rows removed.")
+            }
+        })
+    }
+
     /// Whether the workspace comes back the way it was left.
     ///
     /// On by default, which is what this app has always done. Off, a launch starts at one empty tab

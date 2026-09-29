@@ -659,6 +659,27 @@ struct SectionLabel: View {
     }
 }
 
+/// The question mark that stands in for a sentence the pane would otherwise spell out.
+///
+/// The settings panes had grown a paragraph under nearly every heading, which pushed the controls
+/// apart and left the reading order as explanations-then-settings rather than the other way round.
+/// The text is worth keeping and not worth the room, so the heading carries the glyph and the
+/// sentence arrives on hover — where whoever wants it is already looking.
+struct HelpHint: View {
+    let text: String
+    @State private var hovering = false
+
+    var body: some View {
+        Image(systemName: "questionmark.circle")
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(hovering ? Tone.ink.opacity(0.7) : Tone.secondary.opacity(0.75))
+            .frame(width: 13, height: 13)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .help(text)
+    }
+}
+
 // MARK: Illustrations
 
 /// Glossy app-tile illustration. `halo` disables the radial glow behind the tile: the small
