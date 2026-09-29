@@ -167,8 +167,66 @@ enum UpdateStatements {
     /// This is the **review** form. The executable form for a driver that binds is a placeholder,
     /// and the value is the typed `BindValue` beside it; the two are produced together.
     static func literal(_ text: String, type: String) -> String {
-        if isNumeric(type) || isBoolean(type) { return text }
-        return "'" + text.replacingOccurrences(of: "'", with: "''") + "'"
+        // A number goes in bare, which is what makes `SET n = 3` a number rather than the string
+        // '3'. It goes in bare only when it *is* a number: the inline path writes this straight
+        // into the statement, so a value that does not parse would reach the server as a word —
+        // `SET n = abc` is either a syntax error or, worse, a reference to a column called `abc`.
+        // A value that does not parse is quoted instead, so the server reports a type error against
+        // a statement that is at least well formed.
+        if isNumeric(type) { return isNumber(text) ? text : quoted(text) }
+        if isBoolean(type) { return isBooleanValue(text) ? text : quoted(text) }
+        return quoted(text)
+    }
+
+    /// A number a server will read as one.
+    ///
+    /// Deliberately strict: an optional sign, digits, at most one decimal point, and an optional
+    /// exponent. `Double(text)` would be the wrong check — it accepts `inf`, `nan` and `1e400`,
+    /// none of which is SQL — and so would a locale-aware parse, because `1,5` is two values in
+    /// every dialect this app speaks.
+    static func isNumber(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        var index = trimmed.startIndex
+        if trimmed[index] == "-" || trimmed[index] == "+" { index = trimmed.index(after: index) }
+
+        var digits = 0
+        while index < trimmed.endIndex, trimmed[index].isNumber, trimmed[index].isASCII {
+            digits += 1
+            index = trimmed.index(after: index)
+        }
+        if index < trimmed.endIndex, trimmed[index] == "." {
+            index = trimmed.index(after: index)
+            while index < trimmed.endIndex, trimmed[index].isNumber, trimmed[index].isASCII {
+                digits += 1
+                index = trimmed.index(after: index)
+            }
+        }
+        guard digits > 0 else { return false }
+
+        if index < trimmed.endIndex, trimmed[index] == "e" || trimmed[index] == "E" {
+            index = trimmed.index(after: index)
+            if index < trimmed.endIndex, trimmed[index] == "-" || trimmed[index] == "+" {
+                index = trimmed.index(after: index)
+            }
+            var exponent = 0
+            while index < trimmed.endIndex, trimmed[index].isNumber, trimmed[index].isASCII {
+                exponent += 1
+                index = trimmed.index(after: index)
+            }
+            guard exponent > 0 else { return false }
+        }
+        return index == trimmed.endIndex
+    }
+
+    /// Whether the text is the word `true` or `false`, which is what a boolean column takes bare.
+    static func isBooleanValue(_ text: String) -> Bool {
+        ["true", "false"].contains(text.trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
+    /// Text as a quoted literal, with the one escape every dialect here agrees on.
+    private static func quoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "''") + "'"
     }
 
     /// Whether a type name is one whose literals are written without quotes.
