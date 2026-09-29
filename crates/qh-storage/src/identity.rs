@@ -131,14 +131,14 @@ pub struct ProfileRecord {
 /// A constant because the table's CHECK pins it: one row, one identity, stated in the
 /// schema rather than hoped for in code.
 pub fn app_account_id() -> SyncId {
-    SyncId::parse("00000000-0000-7000-8000-000000000000")
-        .expect("the pinned account id is a UUID")
+    SyncId::parse("00000000-0000-7000-8000-000000000000").expect("the pinned account id is a UUID")
 }
 
 const ACCOUNT_COLUMNS: &str = "id, provider, subject, email, display_name, \
      signed_in_at, signed_out_at, updated_at, deleted_at, version";
 
-const PROFILE_COLUMNS: &str = "id, owner_id, kind, name, payload_json, updated_at, deleted_at, version";
+const PROFILE_COLUMNS: &str =
+    "id, owner_id, kind, name, payload_json, updated_at, deleted_at, version";
 
 impl Storage {
     /// Write the account row, replacing it.
@@ -256,9 +256,9 @@ impl Storage {
     ///
     /// What a sync would send, ordered by id so two runs agree.
     pub fn profiles_including_deleted(&self) -> Result<Vec<ProfileRecord>, StorageError> {
-        let mut statement = self
-            .conn
-            .prepare(&format!("SELECT {PROFILE_COLUMNS} FROM profile ORDER BY id ASC"))?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {PROFILE_COLUMNS} FROM profile ORDER BY id ASC"
+        ))?;
         let rows = statement.query_map([], read_profile)?;
         let mut profiles = Vec::new();
         for row in rows {
@@ -399,7 +399,9 @@ mod tests {
     #[test]
     fn the_account_row_is_a_singleton() {
         let storage = storage();
-        let account = storage.app_account_or_create(1_700_000_000_000).expect("create");
+        let account = storage
+            .app_account_or_create(1_700_000_000_000)
+            .expect("create");
         assert_eq!(account.meta.id, app_account_id());
         assert_eq!(account.provider, None);
 
@@ -420,7 +422,9 @@ mod tests {
     #[test]
     fn signing_in_fills_the_row_and_signing_out_keeps_it() {
         let storage = storage();
-        let mut account = storage.app_account_or_create(1_700_000_000_000).expect("create");
+        let mut account = storage
+            .app_account_or_create(1_700_000_000_000)
+            .expect("create");
         account.provider = Some(Provider::Google);
         account.subject = Some("10769150350006150715113082367".to_owned());
         account.email = Some("faisal@example.com".to_owned());
@@ -447,7 +451,9 @@ mod tests {
     #[test]
     fn a_profile_belongs_to_its_owner_and_nobody_else() {
         let storage = storage();
-        let owner = storage.app_account_or_create(1_700_000_000_000).expect("create");
+        let owner = storage
+            .app_account_or_create(1_700_000_000_000)
+            .expect("create");
         let mine = ProfileRecord::new(
             &owner.meta.id,
             ProfileKind::Connection,
@@ -472,7 +478,9 @@ mod tests {
     #[test]
     fn deleting_a_profile_keeps_the_row_and_the_listing_drops_it() {
         let storage = storage();
-        let owner = storage.app_account_or_create(1_700_000_000_000).expect("create");
+        let owner = storage
+            .app_account_or_create(1_700_000_000_000)
+            .expect("create");
         let record = ProfileRecord::new(
             &owner.meta.id,
             ProfileKind::SavedQuery,

@@ -463,7 +463,10 @@ pub async fn account(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
     let built = on_blocking(move || {
         let storage = open_storage(&settings)?;
         let at = qh_storage::now_millis();
-        let action = settings.text("ACCOUNT_ACTION", "load").trim().to_ascii_lowercase();
+        let action = settings
+            .text("ACCOUNT_ACTION", "load")
+            .trim()
+            .to_ascii_lowercase();
         let mut record = storage.app_account_or_create(at)?;
         match action.as_str() {
             "load" => {}
@@ -490,7 +493,9 @@ pub async fn account(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
                 )))
             }
         }
-        Ok(event("account").field("account", account_json(&record)).build())
+        Ok(event("account")
+            .field("account", account_json(&record))
+            .build())
     })
     .await?;
     out.emit(built)?;
@@ -507,7 +512,10 @@ pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), 
     let settings = settings.clone();
     let built = on_blocking(move || {
         let storage = open_storage(&settings)?;
-        let action = settings.text("PROFILE_ACTION", "list").trim().to_ascii_lowercase();
+        let action = settings
+            .text("PROFILE_ACTION", "list")
+            .trim()
+            .to_ascii_lowercase();
         match action.as_str() {
             "list" => {
                 // The account is read, not created. Listing what an account owns must not bring an
@@ -522,7 +530,7 @@ pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), 
                     .transpose()?;
                 let records = records
                     .into_iter()
-                    .filter(|record| kind.map_or(true, |kind| record.kind == kind))
+                    .filter(|record| kind.is_none_or(|kind| record.kind == kind))
                     .map(|record| profile_json(&record))
                     .collect::<Vec<_>>();
                 Ok(event("profiles").field("profiles", records).build())
@@ -564,9 +572,8 @@ pub async fn profile_save(settings: &Settings, out: &mut dyn Emitter) -> Result<
             "" => "{}".to_owned(),
             text => text.to_owned(),
         };
-        serde_json::from_str::<Json>(&payload).map_err(|error| {
-            CliError::Usage(format!("PAYLOAD_JSON is not JSON: {error}"))
-        })?;
+        serde_json::from_str::<Json>(&payload)
+            .map_err(|error| CliError::Usage(format!("PAYLOAD_JSON is not JSON: {error}")))?;
 
         let named = non_empty(&settings, "PROFILE_ID");
         let record = match named {
@@ -581,11 +588,7 @@ pub async fn profile_save(settings: &Settings, out: &mut dyn Emitter) -> Result<
                         existing.meta.touch(at);
                         existing
                     }
-                    None => {
-                        return Err(CliError::Usage(format!(
-                            "no profile with id '{text}'"
-                        )))
-                    }
+                    None => return Err(CliError::Usage(format!("no profile with id '{text}'"))),
                 }
             }
         };
@@ -658,7 +661,12 @@ pub fn open_storage(settings: &Settings) -> Result<Storage, CliError> {
 
 /// The provider named by `PROVIDER`, refused by name when it is not one this build knows.
 fn provider_of(settings: &Settings) -> Result<Provider, CliError> {
-    match settings.text("PROVIDER", "").trim().to_ascii_lowercase().as_str() {
+    match settings
+        .text("PROVIDER", "")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "google" => Ok(Provider::Google),
         "apple" => Ok(Provider::Apple),
         "github" => Ok(Provider::Github),

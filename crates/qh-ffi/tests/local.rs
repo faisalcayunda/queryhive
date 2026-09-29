@@ -1200,11 +1200,7 @@ async fn the_account_and_profile_commands_refuse_what_they_cannot_store() {
     // A provider this build does not know, refused by name.
     let error = events(
         Command::Account,
-        &[
-            base[0],
-            ("ACCOUNT_ACTION", "sign_in"),
-            ("PROVIDER", "okta"),
-        ],
+        &[base[0], ("ACCOUNT_ACTION", "sign_in"), ("PROVIDER", "okta")],
     )
     .await
     .expect_err("an unknown provider is not a provider");
@@ -1233,15 +1229,15 @@ async fn the_account_and_profile_commands_refuse_what_they_cannot_store() {
     )
     .await
     .expect_err("an unknown kind is not a kind");
-    assert!(error.message().contains("unknown KIND 'theme'"), "{error:?}");
+    assert!(
+        error.message().contains("unknown KIND 'theme'"),
+        "{error:?}"
+    );
 
     // A profile with no name.
-    let error = events(
-        Command::ProfileSave,
-        &[base[0], ("KIND", "preference")],
-    )
-    .await
-    .expect_err("a profile needs a name");
+    let error = events(Command::ProfileSave, &[base[0], ("KIND", "preference")])
+        .await
+        .expect_err("a profile needs a name");
     assert!(error.message().contains("NAME is required"), "{error:?}");
 
     // A payload that will not parse is refused at the write, not discovered by the next reader.
