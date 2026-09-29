@@ -396,4 +396,20 @@ final class EditorFindAndFoldingTests: XCTestCase {
         return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("queryhive-renders", isDirectory: true)
     }
+
+    // MARK: Size limit
+
+    func testAnOversizedDocumentIsNotFoldedAtAll() {
+        // The cap, and the reason it exists: this scanner locates each statement by re-running the
+        // statement scanner and searching for its text, which is not one pass yet, so an unbounded
+        // document would pay a superlinear cost on every keystroke. Over the limit the editor gets
+        // no regions — no fold marks and no cost — rather than a fold whose body is cut short.
+        let big = String(repeating: "SELECT 1;\n", count: SQLFolding.foldingSizeLimit / 10 + 1)
+        XCTAssertGreaterThan((big as NSString).length, SQLFolding.foldingSizeLimit)
+        XCTAssertTrue(SQLFolding.regions(in: big).isEmpty)
+
+        // Just under it still folds, so this is a limit and not a blanket refusal.
+        let small = "SELECT a,\n       b\nFROM t;"
+        XCTAssertFalse(SQLFolding.regions(in: small).isEmpty)
+    }
 }

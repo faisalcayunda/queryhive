@@ -36,6 +36,16 @@ struct FoldRegion: Equatable {
 /// Pure: it reads a string and returns ranges and offsets, with no text view and no window. The
 /// editor owns the actual hiding (`SQLFoldStyler`), which is why this file can be tested directly.
 enum SQLFolding {
+    /// The largest document this will fold, in UTF-16 units.
+    ///
+    /// Above it, `regions` answers nothing and the editor shows no fold marks — the text is left
+    /// alone, which is the same thing TablePro does above its own limit. The reason this one is
+    /// deliberately **lower** than TablePro's 2,000,000: this scanner locates each statement by
+    /// re-running the statement scanner and searching for its text, which is not a single pass yet
+    /// (plan §12.2.3), so an unbounded document would pay a superlinear cost on every keystroke.
+    /// The limit rises when the boundary list comes from `qh-sql`, which already scans once.
+    static let foldingSizeLimit = 200_000
+
     // MARK: Lines
 
     /// UTF-16 offset of each line's first character.
@@ -78,10 +88,17 @@ enum SQLFolding {
     /// statement scanner answers "which statement", not "which parentheses".
     static func regions(in sql: String) -> [FoldRegion] {
         let text = sql as NSString
+        // Over the limit the editor gets no regions at all, so no fold marks and no cost. The
+        // alternative — folding part of a document — would be a fold whose body is cut short.
+        guard text.length <= foldingSizeLimit else { return [] }
         let starts = lineStarts(in: text)
         var regions: [FoldRegion] = []
 
-        for range in statementRanges(in: sql) {
+        // One call, shared by the statements and the CTEs below. It is the expensive part, and
+        // asking twice was the previous shape.
+        let statements = statementRanges(in: sql)
+
+        for range in statements {
             let headerLine = line(containing: range.location, lineStarts: starts)
             let lastLine = line(containing: max(range.location, NSMaxRange(range) - 1), lineStarts: starts)
             guard lastLine > headerLine else { continue }
@@ -101,7 +118,7 @@ enum SQLFolding {
         // would. Keeping only the first there is what makes the gutter show one marker per line
         // instead of two markers on top of each other that fold different amounts.
         var headers = Set(regions.map(\.header))
-        for region in cteRegions(in: sql, text: text, starts: starts) where !headers.contains(region.header) {
+        for region in cteRegions(in: sql, statements: statements, text: text, starts: starts) where !headers.contains(region.header) {
             regions.append(region)
             headers.insert(region.header)
         }
@@ -141,9 +158,10 @@ enum SQLFolding {
     /// the one shape worth folding — `AS (` with a matching `)` — and gates it on a `WITH` word in
     /// the same statement. That gate is what keeps `CREATE TABLE ... AS (SELECT ...)` out, since a
     /// CTAS has no `WITH` and folding its body would be an odd thing to offer.
-    static func cteRegions(in sql: String, text: NSString, starts: [Int]) -> [FoldRegion] {
+    static func cteRegions(in sql: String, statements: [NSRange], text: NSString,
+                           starts: [Int]) -> [FoldRegion] {
         var out: [FoldRegion] = []
-        for range in statementRanges(in: sql) {
+        for range in statements {
             let statement = text.substring(with: range)
             let ns = statement as NSString
             guard containsWord("WITH", in: ns) else { continue }
