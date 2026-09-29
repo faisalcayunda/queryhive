@@ -1,108 +1,109 @@
-# 0023 — MCP resources, template prompts, and refusing an unknown protocol revision
+# 0023 — Resources MCP, prompts template, dan menolak revisi protokol yang tidak dikenal
 
-- **Status:** Accepted
-- **Date:** 29 Sep 2026 (Phase 2)
-- **Instruction context:** `docs/architecture/tablepro-source-study.md` §7 (the MCP section);
+- **Status:** Diterima
+- **Tanggal:** 29 Sep 2026 (Fase 2)
+- **Konteks instruksi:** `docs/architecture/tablepro-source-study.md` §7 (bagian MCP);
   `docs/mcp-stability.md`; `docs/decisions/0015-mcp-token-scope.md`
 
-## Context
+## Konteks
 
-Phase 2 shipped a read-only MCP server with nine tools and a token that carries a list of tool
-names and a list of connection ids (`crates/qh-ffi/src/mcp.rs`). Two parts of the protocol surface
-were still missing, and one was a stated gap:
+Fase 2 mengirim server MCP read-only dengan sembilan tool dan token yang membawa daftar nama tool dan
+daftar id koneksi (`crates/qh-ffi/src/mcp.rs`). Dua bagian permukaan protokolnya masih hilang, dan
+satu sudah dicatat sebagai celah:
 
-1. **Protocol negotiation.** `initialize` echoed the client's revision when the server knew it and
-   otherwise answered with the server's own. That fallback is friendly but hides the mismatch: a
-   client that asked for a revision nobody built cannot tell that from being understood. The
-   stability page recorded this as not done.
-2. **Resources and prompts.** `initialize` declared only `capabilities.tools`. A client that
-   expected the other two capabilities found neither.
+1. **Negosiasi protokol.** `initialize` meng-echo revisi klien bila server mengenalinya dan kalau
+   tidak menjawab dengan revisi server sendiri. Fallback itu ramah tetapi menyembunyikan
+   ketidakcocokan: klien yang meminta revisi yang tidak dibangun siapa pun tidak bisa membedakannya
+   dari dipahami. Halaman stabilitas mencatat ini sebagai belum.
+2. **Resources dan prompts.** `initialize` hanya mendeklarasikan `capabilities.tools`. Klien yang
+   mengharapkan dua kemampuan lainnya tidak menemukan keduanya.
 
-The binding constraint is ADR-0015: a token's scope is a **list of tool names**, and a connection
-may only be named if it appears on the token's **allowlist**; an empty allowlist means no
-connections. Resources and prompts must not invent a second authorisation model, and must not
-become a side door around the one the tools already enforce.
+Batasan yang mengikat adalah ADR-0015: scope sebuah token adalah **daftar nama tool**, dan sebuah
+koneksi hanya boleh disebut bila ada di **allowlist** token; allowlist kosong berarti tidak ada
+koneksi. Resources dan prompts tidak boleh mengarang model otorisasi kedua, dan tidak boleh menjadi
+pintu samping di sekitar model yang sudah ditegakkan tool.
 
-## Options considered
+## Opsi yang dipertimbangkan
 
-| Decision | Option | Upside | Downside |
+| Keputusan | Opsi | Kelebihan | Kekurangan |
 |---|---|---|---|
-| Unknown revision | **Refuse with `-32022` and `data.supported`** | A mismatch is visible; the client learns what it could ask for | Breaks a client that relied on the silent downgrade |
-| | Keep the silent fallback | Never errors | Hides the mismatch, which is exactly the recorded gap |
-| Resource gating | **Backing tool's scope + allowlist** | One authorisation model; no second copy of either rule | A resource is unreachable unless the corresponding tool is in scope |
-| | A new synthetic scope name | Independent of the tool list | Scope is tool names by ADR-0015; a non-tool scope needs a new issue rule |
-| Resource set | **Connections, and per-connection objects/tables** | Covers the read-only data a client already reaches through tools | Listing is cheap; a read can touch the network |
-| | Connections only | No network on `resources/read` | Misses the object tree the brief names as the second obvious resource |
-| Refusal | **One `-32002` for absent and not-allowed alike** | The error cannot be used to probe for connection ids | Loses the distinction between "not yours" and "gone" in the message |
-| Prompts | **Two templates, gated by the tool they name** | Honest: no server-side model; a client is never pointed at a call it cannot make | A token scoped to the tool loses the prompt when the scope changes |
-| | Empty list | Nothing to maintain | The capability is declared for no reason |
+| Revisi tak dikenal | **Tolak dengan `-32022` dan `data.supported`** | Ketidakcocokan terlihat; klien tahu apa yang bisa dimintanya | Mematahkan klien yang bersandar pada penurunan versi senyap |
+| | Pertahankan fallback senyap | Tidak pernah galat | Menyembunyikan ketidakcocokan, yang justru celah yang dicatat |
+| Gerbang resource | **Scope tool pendukung + allowlist** | Satu model otorisasi; tidak ada salinan kedua dari aturan mana pun | Resource tak terjangkau kecuali tool yang bersangkutan ada di scope |
+| | Nama scope sintetis baru | Independen dari daftar tool | Scope adalah nama tool menurut ADR-0015; scope non-tool butuh aturan penerbitan baru |
+| Himpunan resource | **Koneksi, dan objects/tables per koneksi** | Menutup data read-only yang sudah dijangkau klien lewat tool | Listing murah; sebuah read bisa menyentuh jaringan |
+| | Koneksi saja | Tidak ada jaringan di `resources/read` | Melewatkan pohon objek yang disebut brief sebagai resource kedua yang jelas |
+| Penolakan | **Satu `-32002` untuk yang tidak ada maupun yang tidak boleh** | Galatnya tidak bisa dipakai menyelidik id koneksi | Pesannya kehilangan beda antara "bukan milikmu" dan "sudah tidak ada" |
+| Prompts | **Dua template, digerbangi tool yang disebutnya** | Jujur: tidak ada model di sisi server; klien tidak pernah diarahkan ke panggilan yang tak bisa dilakukannya | Token yang di-scope ke tool itu kehilangan prompt-nya saat scope berubah |
+| | Daftar kosong | Tidak ada yang dijaga | Kemampuannya dideklarasikan tanpa alasan |
 
-## Decision
+## Keputusan
 
-**`initialize` refuses a protocol revision the server does not speak with JSON-RPC code `-32022`
-carrying `error.data.supported`, and echoes a revision it knows; `resources` and `prompts` are
-declared as capabilities; `resources/list` and `resources/read` expose only resources the token's
-scope and allowlist reach, and `prompts/list` and `prompts/get` expose pure templates with no
-server-side generation.**
+**`initialize` menolak revisi protokol yang tidak dikenal server dengan kode JSON-RPC `-32022` yang
+membawa `error.data.supported`, dan meng-echo revisi yang dikenalnya; `resources` dan `prompts`
+dideklarasikan sebagai kemampuan; `resources/list` dan `resources/read` hanya mengekspos resource
+yang terjangkau scope dan allowlist token, dan `prompts/list` serta `prompts/get` mengekspos template
+murni tanpa generasi di sisi server.**
 
-Details that bind:
+Rincian yang mengikat:
 
-1. **Resources are the connections the token may reach, and one object-tree resource per
-   connection.** `queryhive://connections` is the aggregate `connections_list` view;
-   `queryhive://connections/{id}` is one connection's hand-picked metadata;
-   `queryhive://connections/{id}/objects` and `.../tables` run the `objects`/`tables` command, so a
-   read of them is the tool's own answer. A connection's resource carries exactly the fields the
-   tool carries — `id`, `name`, `kind`, `host`, `port`, `database` — and never a user name, a
-   password, an `options_json` bag or a `secret_ref`.
-2. **A resource appears only when its backing tool is in scope.** The aggregate and per-connection
-   metadata resources need `connections_list`; the object and table resources need `objects` and
-   `tables`. The per-connection resources are built from the same filtered rows
-   `connections_list` returns, so a connection outside the allowlist is never enumerated.
-3. **A refusal says nothing about existence.** `resources/read` answers every URI outside the
-   token's reach — absent, outside the allowlist, outside scope, or simply not this server's URI
-   shape — with the same `-32002` "resource not found". The message does not contain "not allowed"
-   or "was not found", so it cannot distinguish a real id from a made-up one. The allowlist is
-   checked before any store read, exactly as on the tool path.
-4. **Prompts are templates, not conversations.** `explain_query` and `summarize_tables` substitute
-   their arguments into fixed text; nothing in the server calls a model, and nothing reads a
-   connection. Each prompt names the tool it tells a client to call, and is offered only when that
-   tool is in the token's scope.
-5. **The hand-picked connection row has one copy.** `visible_connections` builds it, and both the
-   `connections_list` tool and the connection resources read it. A field added to one path cannot
-   be missed on the other.
+1. **Resources adalah koneksi yang boleh dijangkau token, dan satu resource pohon objek per koneksi.**
+   `queryhive://connections` adalah tampilan agregat `connections_list`;
+   `queryhive://connections/{id}` adalah metadata satu koneksi yang dipilih tangan;
+   `queryhive://connections/{id}/objects` dan `.../tables` menjalankan perintah `objects`/`tables`,
+   jadi read atas keduanya adalah jawaban tool itu sendiri. Resource sebuah koneksi membawa persis
+   medan yang dibawa tool — `id`, `name`, `kind`, `host`, `port`, `database` — dan tidak pernah nama
+   user, password, kantong `options_json`, atau `secret_ref`.
+2. **Sebuah resource muncul hanya bila tool pendukungnya ada di scope.** Resource agregat dan metadata
+   per koneksi butuh `connections_list`; resource objek dan tabel butuh `objects` dan `tables`.
+   Resource per koneksi dibangun dari baris tersaring yang sama yang dikembalikan `connections_list`,
+   jadi koneksi di luar allowlist tidak pernah dienumerasi.
+3. **Penolakan tidak mengatakan apa-apa soal keberadaan.** `resources/read` menjawab setiap URI di
+   luar jangkauan token — tidak ada, di luar allowlist, di luar scope, atau sekadar bukan bentuk URI
+   server ini — dengan `-32002` "resource not found" yang sama. Pesannya tidak memuat "not allowed"
+   atau "was not found", jadi ia tidak bisa membedakan id asli dari yang dikarang. Allowlist-nya
+   diperiksa sebelum pembacaan store mana pun, persis seperti di jalur tool.
+4. **Prompts adalah template, bukan percakapan.** `explain_query` dan `summarize_tables` menyulihkan
+   argumennya ke teks tetap; tidak ada apa pun di server yang memanggil model, dan tidak ada yang
+   membaca koneksi. Setiap prompt menyebut tool yang diperintahkannya untuk dipanggil klien, dan hanya
+   ditawarkan bila tool itu ada di scope token.
+5. **Baris koneksi yang dipilih tangan hanya punya satu salinan.** `visible_connections`
+   membangunnya, dan baik tool `connections_list` maupun resource koneksi membacanya. Medan yang
+   ditambahkan ke satu jalur tidak bisa terlewat di jalur lain.
 
-## Reasons
+## Alasan
 
-1. **One authorisation model, not two.** Reusing `McpToken::allows` and `McpToken::allows_connection`
-   means a resource cannot be reached by a token the corresponding tool would refuse. A second
-   scope vocabulary would drift from the tool list the issue command validates against.
-2. **Non-disclosure is the point of the shared `-32002`.** ADR-0015 already refuses a disallowed
-   connection before reading the store, so an error cannot be used to enumerate ids. A resource
-   read that said "not allowed" for one id and "not found" for another would reopen precisely that
-   probe on a new surface.
-3. **Refusing an unknown revision is more honest than downgrading.** The client set the version it
-   speaks; answering with a different one leaves it believing it was understood. `-32022` plus the
-   supported list is the one answer that lets it retry correctly.
-4. **A template prompt cannot lie about a model the server does not have.** Rendering is `format!`
-   over fixed text; there is no generation, no tool call and no data access hiding behind
-   `prompts/get`.
-5. **The object/tables resources are the tool's own answer.** Running `Command::Objects` /
-   `Command::Tables` with the same settings the tool builds means a resource read and a tool call
-   cannot disagree about what a connection's tree looks like.
+1. **Satu model otorisasi, bukan dua.** Memakai ulang `McpToken::allows` dan
+   `McpToken::allows_connection` berarti sebuah resource tidak bisa dijangkau token yang akan ditolak
+   tool yang bersangkutan. Kosakata scope kedua akan menyimpang dari daftar tool yang divalidasi
+   perintah issue.
+2. **Non-disclosure adalah inti `-32002` bersama itu.** ADR-0015 sudah menolak koneksi yang tidak
+   diizinkan sebelum membaca store, jadi galatnya tidak bisa dipakai meng-enumerasi id. Sebuah
+   resource read yang mengatakan "not allowed" untuk satu id dan "not found" untuk id lain akan
+   membuka kembali penyelidikan itu di permukaan baru.
+3. **Menolak revisi tak dikenal lebih jujur daripada menurunkannya.** Klien menetapkan versi yang ia
+   tuturkan; menjawab dengan versi lain membiarkannya percaya bahwa ia dipahami. `-32022` plus daftar
+   dukungan adalah satu jawaban yang membiarkannya mencoba lagi dengan benar.
+4. **Prompt template tidak bisa berbohong soal model yang tidak dimiliki server.** Rendering-nya
+   `format!` atas teks tetap; tidak ada generasi, tidak ada tool call, dan tidak ada akses data yang
+   bersembunyi di balik `prompts/get`.
+5. **Resource objects/tables adalah jawaban tool itu sendiri.** Menjalankan `Command::Objects` /
+   `Command::Tables` dengan settings yang sama yang dibangun tool berarti sebuah resource read dan
+   tool call tidak bisa berbeda pendapat soal bentuk pohon sebuah koneksi.
 
-## Consequences
+## Konsekuensi
 
-- **The FFI surface is unchanged.** No `EngineCommand` variant is added; the MCP binary keeps
-  mapping onto commands that already exist (invariant #11 does not apply).
-- **`resources/read` records a token use.** It is an access to the token's data, so it sets
-  `last_used_at` like a `tools/call`; `resources/list` and the prompt methods do not.
-- **The stability page's gap note is closed in the same change.** `docs/mcp-stability.md` now states
-  the refusal, and its additive table carries resources and prompts alongside tools.
-- **The object/tables resources are lazy, not live.** `resources/list` never opens a connection;
-  only `resources/read` of an `objects`/`tables` resource does, and that read fails with the same
-  engine error the tool would return.
-- **`resources/templates/list` is not implemented.** Every URI this server publishes is concrete;
-  there is no templated family to advertise, and an empty template list would be noise.
-- **A prompt's availability follows its tool's scope.** A token that loses the `explain` scope
-  loses `explain_query` with it. That is intended: the prompt exists to drive a call the token must
-  still be allowed to make.
+- **Permukaan FFI tidak berubah.** Tidak ada varian `EngineCommand` yang ditambahkan; binari MCP tetap
+  memetakan ke perintah yang sudah ada (invariant #11 tidak berlaku).
+- **`resources/read` mencatat pemakaian token.** Ia adalah akses ke data token, jadi ia menyetel
+  `last_used_at` seperti `tools/call`; `resources/list` dan metode prompt tidak.
+- **Catatan celah di halaman stabilitas ditutup di perubahan yang sama.** `docs/mcp-stability.md` kini
+  menyatakan penolakannya, dan tabel aditifnya membawa resources dan prompts di samping tools.
+- **Resource objects/tables bersifat lazy, bukan hidup.** `resources/list` tidak pernah membuka
+  koneksi; hanya `resources/read` atas resource `objects`/`tables` yang membukanya, dan read itu gagal
+  dengan galat engine yang sama yang akan dikembalikan tool.
+- **`resources/templates/list` tidak diimplementasikan.** Setiap URI yang diterbitkan server ini
+  konkret; tidak ada keluarga bertemplate untuk diiklankan, dan daftar template kosong hanya kebisingan.
+- **Ketersediaan prompt mengikuti scope tool-nya.** Token yang kehilangan scope `explain` kehilangan
+  `explain_query` bersamanya. Itu disengaja: prompt-nya ada untuk menggerakkan panggilan yang tetap
+  harus boleh dilakukan token.

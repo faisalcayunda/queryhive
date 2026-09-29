@@ -2052,9 +2052,9 @@ sort server, **parameter binding** (keputusan trait driver; Trino tidak punya pa
 coalescing, UI peta kolom impor, pairing PKCE. Gelombang 3 (structure editor, routines/UDT, backup,
 copy object, Open Quickly, external API) butuh keputusan produk dulu.
 
-**Catatan yang harus dibaca.** ADR-0021, 0022 dan 0023 berbahasa Inggris karena brief agennya meminta
-begitu, sementara ADR lain berbahasa Indonesia; itu kesalahan brief saya, dicatat di plan §13, dan
-belum diperbaiki.
+**Catatan yang sudah ditutup.** ADR-0021, 0022 dan 0023 sempat berbahasa Inggris karena brief
+agennya meminta begitu, sementara ADR lain berbahasa Indonesia — kesalahan brief saya. Ketiganya
+sudah diterjemahkan 29 Sep 2026, jadi direktori ADR-nya konsisten lagi.
 
 Verifikasi berat 29 Sep 2026 (sesudah gelombang 1): `cargo fmt --all --check` ✅,
 `cargo clippy --workspace --all-targets -- -D warnings` ✅, `cargo test --workspace` →

@@ -884,8 +884,8 @@ keputusan trait driver tersendiri; dan undo coalescing. Lalu UI impor (peta kolo
 restore PostgreSQL, copy object antar engine, Open Quickly, external API. Sebagian tetangganya sudah
 ditolak §9 dan tidak akan dibangun tanpa membatalkan keputusan itu.
 
-**Catatan bahasa.** ADR-0021, 0022 dan 0023 ditulis dalam bahasa Inggris karena brief agen yang
-menghasilkannya memintanya begitu; ADR lain di direktori itu berbahasa Indonesia. Isinya lengkap dan
-strukturnya mengikuti 0020 — yang belum hanya bahasanya, dan itu dicatat di sini alih-alih dibiarkan
-terbaca sebagai konsisten.
+**Catatan bahasa, dan sudah diperbaiki.** ADR-0021, 0022 dan 0023 sempat ditulis dalam bahasa Inggris
+karena brief agen yang menghasilkannya memintanya begitu, sementara ADR lain di direktori itu
+berbahasa Indonesia. Ketiganya sudah diterjemahkan 29 Sep 2026 sehingga seluruh direktori konsisten;
+brief gelombang berikutnya sudah dikoreksi.
 
