@@ -13,10 +13,12 @@
 /// [`Dialect::readings`] lists every lexer a guard has to satisfy at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dialect {
-    /// PostgreSQL, Trino and the ANSI default: no backslash escapes inside a string
-    /// (`standard_conforming_strings`), `--` opens a comment whatever follows it,
+    /// The ANSI default, for a caller with no server to read it for: no backslash escapes
+    /// inside a string, `--` opens a comment whatever follows it and ends at a newline,
     /// `#` is an operator and not a comment, `/* … */` is always a comment, and
-    /// `$tag$ … $tag$` is a dollar-quoted string.
+    /// `$tag$ … $tag$` is a dollar-quoted string. No connection reads as this any more:
+    /// PostgreSQL, MySQL and Trino each have a dialect of their own, because each lexes
+    /// something differently and the difference hid a write from a guard.
     #[default]
     Generic,
     /// MySQL. Its lexical rules depend on the session's `sql_mode`, which is not
@@ -24,6 +26,19 @@ pub enum Dialect {
     /// the server can actually use (see [`Lexer`] and [`Dialect::readings`]) and refused
     /// when any of them sees something the mode forbids or when they disagree.
     Mysql,
+    /// PostgreSQL, read the way its lexer (`scan.l`) reads: `E'…'` strings honour backslash
+    /// escapes, plain `'…'` honours them only when `standard_conforming_strings` is off,
+    /// block comments nest, a `--` comment ends at `\r` as well as `\n`, `$` continues an
+    /// identifier, and a dollar quote only starts where a token starts. A setting the guard
+    /// cannot see moves where a string ends, so a PostgreSQL connection is read under every
+    /// lexer the server can be using ([`Dialect::readings`]), like MySQL.
+    Postgres,
+    /// Trino: a `--` comment ends at `\r` as well as `\n`, `/* … */` does not nest, there are
+    /// no dollar quotes and no backslash escapes (a `$` is a syntax error there, so text after
+    /// one is read as code, which can only refuse more), and a backtick is not a quote.
+    /// `X'…'` ends at its first quote, which reads the same as a doubled one here because a
+    /// plain string has no backslash.
+    Trino,
 }
 
 /// One concrete set of lexical rules: what a single scan follows.
@@ -45,8 +60,18 @@ pub enum Dialect {
 pub struct Lexer {
     /// MySQL comment rules and no dollar quoting.
     mysql_syntax: bool,
-    /// A backslash escapes the next byte inside a string.
+    /// Trino's lexer: generic, with `--` ending at `\r`, no dollar quotes and no backticks.
+    trino: bool,
+    /// PostgreSQL's lexer: nested block comments, `E'…'`/`U&'…'`/`B'…'` prefixes, `$` in an
+    /// identifier, a `--` comment ending at `\r`, string continuation across a newline, and
+    /// no backtick quoting.
+    postgres: bool,
+    /// A backslash escapes the next byte inside a plain `'…'` string (MySQL without
+    /// `NO_BACKSLASH_ESCAPES`; PostgreSQL with `standard_conforming_strings = off`).
     backslash_escapes: bool,
+    /// PostgreSQL only: `\v` counts as whitespace between the pieces of a continued string
+    /// (it does on newer servers, not on older ones).
+    vt_is_space: bool,
     /// `"…"` is a quoted identifier, so a backslash inside it is an ordinary byte.
     ansi_quotes: bool,
     /// The body of `/*! … */` is scanned as code rather than skipped as a comment.
@@ -57,6 +82,9 @@ impl Lexer {
     /// PostgreSQL, Trino and the ANSI default.
     pub const GENERIC: Lexer = Lexer {
         mysql_syntax: false,
+        trino: false,
+        postgres: false,
+        vt_is_space: false,
         backslash_escapes: false,
         ansi_quotes: false,
         executable_code: false,
@@ -69,15 +97,76 @@ impl Lexer {
     const fn mysql(backslash_escapes: bool, ansi_quotes: bool, executable_code: bool) -> Lexer {
         Lexer {
             mysql_syntax: true,
+            trino: false,
+            postgres: false,
+            vt_is_space: false,
             backslash_escapes,
             ansi_quotes,
             executable_code,
         }
     }
 
+    /// Trino.
+    pub const TRINO: Lexer = Lexer {
+        mysql_syntax: false,
+        trino: true,
+        postgres: false,
+        vt_is_space: false,
+        backslash_escapes: false,
+        ansi_quotes: false,
+        executable_code: false,
+    };
+
+    /// PostgreSQL with `standard_conforming_strings` on and a server new enough to read `\v`
+    /// as whitespace: the reading a current server uses by default.
+    pub const POSTGRES: Lexer = Lexer::postgres(false, true);
+
+    /// One PostgreSQL lexer. `backslash_escapes` is `standard_conforming_strings = off`.
+    const fn postgres(backslash_escapes: bool, vt_is_space: bool) -> Lexer {
+        Lexer {
+            mysql_syntax: false,
+            trino: false,
+            postgres: true,
+            vt_is_space,
+            backslash_escapes,
+            ansi_quotes: false,
+            executable_code: false,
+        }
+    }
+
     /// Whether `$tag$ … $tag$` is a quoted string.
     const fn dollar_quotes(self) -> bool {
-        !self.mysql_syntax
+        !self.mysql_syntax && !self.trino
+    }
+
+    /// Whether `$` continues an identifier (`a$x` is one name) instead of being punctuation.
+    const fn ident_dollar(self) -> bool {
+        self.mysql_syntax || self.postgres
+    }
+
+    /// Whether a byte at or above 0x80 belongs to an identifier.
+    const fn unicode_ident(self) -> bool {
+        self.postgres
+    }
+
+    /// Whether `` ` `` quotes an identifier (it is an operator character in PostgreSQL).
+    const fn backtick_quotes(self) -> bool {
+        !self.postgres && !self.trino
+    }
+
+    /// Whether `/* … */` nests.
+    const fn nested_comments(self) -> bool {
+        self.postgres
+    }
+
+    /// Whether a carriage return ends a `--` comment as a newline does.
+    const fn cr_ends_line(self) -> bool {
+        self.postgres || self.trino
+    }
+
+    /// Whether this is one of PostgreSQL's lexers.
+    pub(crate) const fn is_postgres(self) -> bool {
+        self.postgres
     }
 
     /// Whether `#` opens a line comment.
@@ -97,7 +186,7 @@ impl Lexer {
 
     /// Whether a backslash escapes the next byte inside `"…"`.
     const fn double_backslash(self) -> bool {
-        self.backslash_escapes && !self.ansi_quotes
+        self.backslash_escapes && !self.ansi_quotes && !self.postgres
     }
 }
 
@@ -108,12 +197,17 @@ impl From<Dialect> for Lexer {
         match dialect {
             Dialect::Generic => Lexer::GENERIC,
             Dialect::Mysql => Lexer::MYSQL,
+            Dialect::Postgres => Lexer::POSTGRES,
+            Dialect::Trino => Lexer::TRINO,
         }
     }
 }
 
 /// The one reading a generic connection must satisfy.
 static GENERIC_READINGS: [Lexer; 1] = [Lexer::GENERIC];
+
+/// The one reading a Trino connection must satisfy.
+static TRINO_READINGS: [Lexer; 1] = [Lexer::TRINO];
 
 /// Every lexer a MySQL server can be using, so a guard can satisfy all of them at once.
 ///
@@ -130,14 +224,27 @@ static MYSQL_READINGS: [Lexer; 6] = [
     Lexer::mysql(false, false, false),
 ];
 
+/// Every lexer a PostgreSQL server can be using: `standard_conforming_strings` {on, off}
+/// (a session can change it, and the guard cannot see it) × `\v` {whitespace, not} (a
+/// server-version difference that only matters between the pieces of a continued string).
+static POSTGRES_READINGS: [Lexer; 4] = [
+    Lexer::postgres(false, true),
+    Lexer::postgres(true, true),
+    Lexer::postgres(false, false),
+    Lexer::postgres(true, false),
+];
+
 impl Dialect {
     /// The lexers a guard must satisfy at once for a connection of this dialect.
-    /// Generic has one; MySQL has six, because the server's `sql_mode` and version are
-    /// not knowable before the guard runs and they move where a string or a comment ends.
+    /// Generic has one; MySQL has six and PostgreSQL four, because the server's settings
+    /// and version are not knowable before the guard runs and they move where a string or
+    /// a comment ends.
     pub const fn readings(self) -> &'static [Lexer] {
         match self {
             Dialect::Generic => &GENERIC_READINGS,
             Dialect::Mysql => &MYSQL_READINGS,
+            Dialect::Postgres => &POSTGRES_READINGS,
+            Dialect::Trino => &TRINO_READINGS,
         }
     }
 }
@@ -235,6 +342,12 @@ enum State {
     BlockComment,
     /// Inside `$tag$ ... $tag$`, Postgres' dollar quoting.
     DollarQuoted,
+    /// Inside PostgreSQL's `E'...'`: a backslash escapes the next byte, always.
+    EscapeQuoted,
+    /// Inside PostgreSQL's `U&'...'`: a doubled quote is a quote, and a backslash is text.
+    UnicodeQuoted,
+    /// Inside PostgreSQL's `B'...'` or `X'...'`: the first quote ends it, doubled or not.
+    BitQuoted,
 }
 
 /// Scan one possibly multi-statement string, using generic (ANSI) lexical rules.
@@ -258,6 +371,8 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
     let mut scan = Scan::default();
     let mut state = State::Normal;
     let mut dollar_tag: Vec<u8> = Vec::new();
+    // How many `/*` are open, for a lexer whose block comments nest.
+    let mut comment_depth = 0usize;
     let mut index = 0;
 
     while index < bytes.len() {
@@ -272,7 +387,7 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     state = State::DoubleQuoted;
                     index += 1;
                 }
-                b'`' => {
+                b'`' if lexer.backtick_quotes() => {
                     state = State::BacktickQuoted;
                     index += 1;
                 }
@@ -291,6 +406,7 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                 }
                 b'/' if bytes.get(index + 1) == Some(&b'*') => {
                     state = State::BlockComment;
+                    comment_depth = 1;
                     index += 2;
                 }
                 b';' => {
@@ -298,9 +414,11 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     index += 1;
                 }
                 // MySQL has no dollar quoting: `$` is an identifier character there, so
-                // `$tag$ ; DELETE … $tag$` is code the server runs, not a string.
+                // `$tag$ ; DELETE … $tag$` is code the server runs, not a string. In
+                // PostgreSQL a `$` seen here starts a token (an identifier swallows its own
+                // `$`), so it can open a dollar quote.
                 b'$' if lexer.dollar_quotes() => {
-                    if let Some((tag, next)) = read_dollar_tag(bytes, index) {
+                    if let Some((tag, next)) = read_dollar_tag(bytes, index, lexer) {
                         dollar_tag = tag;
                         state = State::DollarQuoted;
                         index = next;
@@ -308,15 +426,34 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                         index += 1;
                     }
                 }
-                byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                byte if is_ident_start(byte, lexer) => {
                     let start = index;
-                    // `$` continues an identifier in MySQL (`a$update` is one name).
-                    while index < bytes.len()
-                        && (bytes[index].is_ascii_alphanumeric()
-                            || bytes[index] == b'_'
-                            || (bytes[index] == b'$' && !lexer.dollar_quotes()))
-                    {
+                    // `$` continues an identifier in MySQL and PostgreSQL (`a$update` is
+                    // one name, and so is `a$x$`).
+                    while index < bytes.len() && is_ident_cont(bytes[index], lexer) {
                         index += 1;
+                    }
+                    if lexer.postgres && index - start == 1 {
+                        // A one-letter prefix directly followed by a quote is a different
+                        // kind of string, not an identifier: `E'…'`, `B'…'`, `X'…'`, and
+                        // `U&'…'`. (`N'…'` is `N` and then an ordinary string.)
+                        let next = match bytes[start].to_ascii_lowercase() {
+                            b'e' if bytes.get(index) == Some(&b'\'') => {
+                                Some((State::EscapeQuoted, 1))
+                            }
+                            b'b' | b'x' if bytes.get(index) == Some(&b'\'') => {
+                                Some((State::BitQuoted, 1))
+                            }
+                            b'u' if bytes[index..].starts_with(b"&'") => {
+                                Some((State::UnicodeQuoted, 2))
+                            }
+                            _ => None,
+                        };
+                        if let Some((quoted, width)) = next {
+                            state = quoted;
+                            index += width;
+                            continue;
+                        }
                     }
                     scan.keywords.push(sql[start..index].to_ascii_uppercase());
                 }
@@ -334,6 +471,52 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     // A doubled quote is an escaped quote, not the end.
                     if bytes.get(index + 1) == Some(&b'\'') {
                         index += 2;
+                    } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
+                        index = next;
+                    } else {
+                        state = State::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::EscapeQuoted => {
+                if byte == b'\\' {
+                    index += 2;
+                } else if byte == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
+                        index = next;
+                    } else {
+                        state = State::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::UnicodeQuoted => {
+                if byte == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
+                        index = next;
+                    } else {
+                        state = State::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::BitQuoted => {
+                // No doubling here: `B'1''0'` is two literals, and the second starts a
+                // plain string under whatever rule plain strings follow.
+                if byte == b'\'' {
+                    if let Some(next) = string_continuation(bytes, index + 1, lexer) {
+                        index = next;
                     } else {
                         state = State::Normal;
                         index += 1;
@@ -371,17 +554,22 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                 }
             }
             State::LineComment => {
-                if byte == b'\n' {
+                if ends_line(byte, lexer) {
                     state = State::Normal;
                 }
                 index += 1;
             }
             State::BlockComment => {
-                // Not nested. Postgres allows nesting and MySQL does not; no
-                // driver here needs it, and pretending otherwise would silently
-                // mis-scan the MySQL case.
-                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    state = State::Normal;
+                // PostgreSQL nests `/* /* */ */`; MySQL and generic SQL do not, and reading
+                // one as the other hides or invents a comment end.
+                if lexer.nested_comments() && byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    comment_depth += 1;
+                    index += 2;
+                } else if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    comment_depth -= 1;
+                    if comment_depth == 0 {
+                        state = State::Normal;
+                    }
                     index += 2;
                 } else {
                     index += 1;
@@ -403,13 +591,84 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
     scan
 }
 
+/// Whether `byte` starts an identifier under `lexer`.
+fn is_ident_start(byte: u8, lexer: Lexer) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || (lexer.unicode_ident() && byte >= 0x80)
+}
+
+/// Whether `byte` continues an identifier under `lexer`.
+fn is_ident_cont(byte: u8, lexer: Lexer) -> bool {
+    byte.is_ascii_alphanumeric()
+        || byte == b'_'
+        || (byte == b'$' && lexer.ident_dollar())
+        || (lexer.unicode_ident() && byte >= 0x80)
+}
+
+/// Whether `byte` ends a `--`/`#` line comment under `lexer`.
+fn ends_line(byte: u8, lexer: Lexer) -> bool {
+    byte == b'\n' || (lexer.cr_ends_line() && byte == b'\r')
+}
+
+/// PostgreSQL's string continuation: `'a'` + whitespace containing a newline + `'b'` is one
+/// string, and the second piece is read under the *first* piece's rules (so an `E'…'`
+/// string continues as an `E` string whatever the plain-string setting is). `after` is the
+/// offset just past the closing quote; the result is the offset just past the continuing
+/// quote. Only PostgreSQL's lexers continue a string this way.
+///
+/// The whitespace is `scan.l`'s `quotecontinue`: horizontal whitespace or `--` comments, a
+/// newline, then any whitespace and comments that each end in a newline. Measured against a
+/// PostgreSQL 17 server, where `\v` counts as whitespace on both sides of the newline.
+fn string_continuation(bytes: &[u8], after: usize, lexer: Lexer) -> Option<usize> {
+    if !lexer.postgres {
+        return None;
+    }
+    let mut index = after;
+    let is_newline = |byte: u8| byte == b'\n' || byte == b'\r';
+    let skip_comment = |mut at: usize| {
+        while at < bytes.len() && !is_newline(bytes[at]) {
+            at += 1;
+        }
+        at
+    };
+    // Horizontal whitespace and comments, then the mandatory newline.
+    loop {
+        match bytes.get(index) {
+            Some(b' ' | b'\t' | b'\x0c') => index += 1,
+            Some(b'\x0b') if lexer.vt_is_space => index += 1,
+            Some(b'-') if bytes.get(index + 1) == Some(&b'-') => index = skip_comment(index + 2),
+            _ => break,
+        }
+    }
+    if !bytes.get(index).is_some_and(|byte| is_newline(*byte)) {
+        return None;
+    }
+    index += 1;
+    // Whitespace, and comments that end in a newline.
+    loop {
+        match bytes.get(index) {
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => index += 1,
+            Some(b'\x0b') if lexer.vt_is_space => index += 1,
+            Some(b'-') if bytes.get(index + 1) == Some(&b'-') => {
+                let end = skip_comment(index + 2);
+                if end >= bytes.len() {
+                    return None;
+                }
+                index = end + 1;
+            }
+            _ => break,
+        }
+    }
+    (bytes.get(index) == Some(&b'\'')).then_some(index + 1)
+}
+
 /// Read a `$tag$` opener at `start`, returning the tag (including both `$`) and
 /// the offset just past it.
 ///
 /// The tag must be followed by end-of-input or a non-identifier byte, so that a
 /// `$1` placeholder — which Postgres uses for parameters and which is not a
-/// dollar quote — is not mistaken for one.
-fn read_dollar_tag(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+/// dollar quote — is not mistaken for one. PostgreSQL's own rule is stricter about the
+/// tag: it may not start with a digit, and a byte at or above 0x80 is a letter.
+fn read_dollar_tag(bytes: &[u8], start: usize, lexer: Lexer) -> Option<(Vec<u8>, usize)> {
     debug_assert_eq!(bytes.get(start), Some(&b'$'));
     let mut index = start + 1;
     while index < bytes.len() {
@@ -418,9 +677,54 @@ fn read_dollar_tag(bytes: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
                 let tag = bytes[start..=index].to_vec();
                 return Some((tag, index + 1));
             }
+            byte if lexer.postgres => {
+                let letter = byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80;
+                if letter || (index > start + 1 && byte.is_ascii_digit()) {
+                    index += 1;
+                } else {
+                    return None;
+                }
+            }
             byte if byte.is_ascii_alphanumeric() || byte == b'_' => index += 1,
             _ => return None,
         }
+    }
+    None
+}
+
+/// If a comment starts at `index`, the offset just past it (a line comment stops at its
+/// newline, which is left for the caller).
+fn comment_end(bytes: &[u8], index: usize, lexer: Lexer) -> Option<usize> {
+    let line_end = |mut at: usize| {
+        while at < bytes.len() && !ends_line(bytes[at], lexer) {
+            at += 1;
+        }
+        at
+    };
+    if dash_opens_comment(bytes, index, lexer) {
+        return Some(line_end(index + 2));
+    }
+    if bytes[index] == b'#' && lexer.hash_comment() {
+        return Some(line_end(index + 1));
+    }
+    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+        let mut depth = 1usize;
+        let mut at = index + 2;
+        while at < bytes.len() {
+            if lexer.nested_comments() && bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+                depth += 1;
+                at += 2;
+            } else if bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/') {
+                depth -= 1;
+                at += 2;
+                if depth == 0 {
+                    return Some(at);
+                }
+            } else {
+                at += 1;
+            }
+        }
+        return Some(at);
     }
     None
 }
@@ -445,38 +749,29 @@ fn leading_keyword(sql: &str, lexer: Lexer) -> Option<String> {
         }
         // Skip comments, repeatedly: `/* a */ -- b\n SELECT 1` has a keyword
         // after two of them.
-        if dash_opens_comment(bytes, index, lexer) {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if bytes[index] == b'#' && lexer.hash_comment() {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index < bytes.len() {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    index += 2;
-                    break;
-                }
-                index += 1;
-            }
+        if let Some(next) = comment_end(bytes, index, lexer) {
+            index = next;
             continue;
         }
         break;
     }
 
     let start = index;
-    while index < bytes.len() && (bytes[index].is_ascii_alphabetic() || bytes[index] == b'_') {
-        index += 1;
-    }
-    if index == start {
-        return None;
+    if lexer.postgres {
+        // The whole identifier, so `select$x` and `select1` are names and not `SELECT`.
+        while index < bytes.len() && is_ident_cont(bytes[index], lexer) {
+            index += 1;
+        }
+        if index == start || !is_ident_start(bytes[start], lexer) {
+            return None;
+        }
+    } else {
+        while index < bytes.len() && (bytes[index].is_ascii_alphabetic() || bytes[index] == b'_') {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
     }
     Some(sql[start..index].to_ascii_uppercase())
 }
@@ -517,27 +812,8 @@ pub(crate) fn first_significant(sql: &str, dialect: impl Into<Lexer>) -> Option<
             index = next;
             continue;
         }
-        if dash_opens_comment(bytes, index, lexer) {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if byte == b'#' && lexer.hash_comment() {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index < bytes.len() {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    index += 2;
-                    break;
-                }
-                index += 1;
-            }
+        if let Some(next) = comment_end(bytes, index, lexer) {
+            index = next;
             continue;
         }
         return Some(index);
@@ -1032,5 +1308,319 @@ mod tests {
             separators("SELECT $tag$ unterminated;"),
             Vec::<usize>::new()
         );
+    }
+
+    // W3-T0b: PostgreSQL is read the way `scan.l` lexes it. Each expectation below was
+    // checked against a live PostgreSQL 17 server (`SELECT` the text, or run it with a
+    // marker `INSERT` after it and see whether the row appeared), not read off the manual.
+
+    fn pg(sql: &str) -> Scan {
+        scan_dialect(sql, Lexer::POSTGRES)
+    }
+
+    /// `standard_conforming_strings = off`.
+    fn pg_off(sql: &str) -> Scan {
+        scan_dialect(sql, Dialect::Postgres.readings()[1])
+    }
+
+    fn has(scan: &Scan, word: &str) -> bool {
+        scan.keywords.iter().any(|found| found == word)
+    }
+
+    #[test]
+    fn the_postgres_readings_are_four_distinct_lexers_and_the_default_is_first() {
+        let readings = Dialect::Postgres.readings();
+        assert_eq!(readings.len(), 4);
+        for (index, lexer) in readings.iter().enumerate() {
+            assert!(lexer.is_postgres());
+            for other in &readings[index + 1..] {
+                assert_ne!(lexer, other);
+            }
+        }
+        assert_eq!(readings[0], Lexer::POSTGRES);
+        assert_eq!(Lexer::from(Dialect::Postgres), Lexer::POSTGRES);
+        assert!(!readings.contains(&Lexer::GENERIC));
+        assert!(!Lexer::GENERIC.is_postgres() && !Lexer::MYSQL.is_postgres());
+    }
+
+    #[test]
+    fn an_e_string_honours_backslash_escapes_under_every_postgres_reading() {
+        // `E'x\' AS a, '` is one string, so the `;` after it is a separator and the
+        // DELETE is code. Generic reads `\'` as a backslash and a closing quote.
+        let payload = "SELECT E'x\\' AS a, '; DELETE FROM t; --'";
+        assert!(!has(&scan(payload), "DELETE"), "generic misreads it");
+        for lexer in Dialect::Postgres.readings() {
+            let scanned = scan_dialect(payload, *lexer);
+            assert!(has(&scanned, "DELETE"), "{lexer:?}");
+            assert_eq!(scanned.separators.len(), 2, "{lexer:?}");
+        }
+        // Lower case, and inside a longer statement.
+        assert!(has(
+            &pg("SELECT e'x\\' AS a, '; DELETE FROM t; --'"),
+            "DELETE"
+        ));
+        // `E` only prefixes a string when it is a whole token: `xE'…'` is the name `xE`
+        // followed by an ordinary string, where a backslash is text.
+        assert!(has(&pg("SELECT xE'\\'; DELETE FROM t; --'"), "DELETE"));
+        assert_eq!(pg("SELECT xE'a\\'").keywords, vec!["SELECT", "XE"]);
+        // A backslash pair keeps the quote after it live.
+        assert_eq!(pg("SELECT E'a\\\\'; SELECT 2").separators.len(), 1);
+    }
+
+    #[test]
+    fn a_plain_string_honours_a_backslash_only_when_standard_conforming_strings_is_off() {
+        let payload = "SELECT 'x\\' AS a, '; DELETE FROM t; --'";
+        // on: `\` is a byte, so `'x\'` is a string, ` AS a, ` is code, and the tail is a
+        // second string: the DELETE is hidden.
+        assert!(!has(&pg(payload), "DELETE"));
+        assert!(pg(payload).separators.is_empty());
+        // off: `\'` is an escaped quote, `'x\' AS a, '` is one string, and the DELETE is
+        // code the server runs. This is why a guard has to read both.
+        assert!(has(&pg_off(payload), "DELETE"));
+        assert_eq!(pg_off(payload).separators.len(), 2);
+        // Both agree when no backslash precedes a quote.
+        assert_eq!(
+            pg("SELECT 'a\\nb'").keywords,
+            pg_off("SELECT 'a\\nb'").keywords
+        );
+    }
+
+    #[test]
+    fn a_unicode_string_never_honours_a_backslash_escape_of_the_quote() {
+        // `U&'…'` is lexed as its own string kind: the `\` is the unicode escape
+        // character, so `'\'` is complete even where a plain string would run on.
+        let sql = "SELECT U&'\\'; DELETE FROM t; --'";
+        for lexer in Dialect::Postgres.readings() {
+            assert!(has(&scan_dialect(sql, *lexer), "DELETE"), "{lexer:?}");
+        }
+        // A doubled quote is still a quote, and a lower-case prefix works.
+        assert!(scan_dialect("SELECT u&'it''s; ok'", Lexer::POSTGRES)
+            .separators
+            .is_empty());
+        // `U&"…"` is a quoted identifier.
+        assert!(pg("SELECT U&\"a;b\" FROM t").separators.is_empty());
+        // A bare `U` and `&` are not a string prefix.
+        assert!(has(&pg("SELECT u & 'a'; DELETE FROM t"), "DELETE"));
+    }
+
+    #[test]
+    fn a_bit_string_ends_at_its_first_quote_and_a_doubled_one_starts_another_string() {
+        // `B'1''0'` is two literals on the server (a syntax error, but one that reads the
+        // second as a plain string). A `\` in the bit string is text.
+        assert_eq!(pg("SELECT B'1\\'; DELETE FROM t; --'").separators.len(), 2);
+        assert!(has(&pg("SELECT x'1F\\'; DELETE FROM t; --'"), "DELETE"));
+        // After the doubled quote the new string follows the plain-string rule.
+        let sql = "SELECT B'1''\\'; DELETE FROM t; --'";
+        assert!(has(&pg(sql), "DELETE"));
+        assert!(!has(&pg_off(sql), "DELETE"));
+    }
+
+    #[test]
+    fn a_string_continues_across_a_newline_under_the_rules_of_its_first_piece() {
+        // `'a'` + newline + `'b'` is one string, and an E string stays an E string: the
+        // second piece honours the backslash even where a plain string would not.
+        let sql = "SELECT E'a'\n'x\\'y'; DELETE FROM t; --'";
+        for lexer in Dialect::Postgres.readings() {
+            let scanned = scan_dialect(sql, *lexer);
+            assert!(has(&scanned, "DELETE"), "{lexer:?}");
+            assert_eq!(scanned.separators.len(), 2, "{lexer:?}");
+        }
+        // The mirror: on the server this is one string to the very last quote.
+        let mirror = "SELECT E'a'\n'\\'; DELETE FROM t; --'";
+        assert!(!has(&pg(mirror), "DELETE"));
+        assert!(pg(mirror).separators.is_empty());
+        // Comments and `\r` count as the newline's company; a missing newline is no
+        // continuation.
+        for joined in [
+            "SELECT E'a' -- c\n'\\'; DELETE FROM t; --'",
+            "SELECT E'a'\r'\\'; DELETE FROM t; --'",
+            "SELECT E'a' \n -- c\n\t'\\'; DELETE FROM t; --'",
+        ] {
+            assert!(!has(&pg(joined), "DELETE"), "{joined:?}");
+        }
+        let apart = "SELECT E'a' '\\'; DELETE FROM t; --'";
+        assert!(has(&pg(apart), "DELETE"));
+        // `\v` is whitespace on a server that reads it so, and not on one that does not.
+        let vt = "SELECT E'a'\n\x0b'\\'; DELETE FROM t; --'";
+        assert!(!has(
+            &scan_dialect(vt, Dialect::Postgres.readings()[0]),
+            "DELETE"
+        ));
+        assert!(has(
+            &scan_dialect(vt, Dialect::Postgres.readings()[2]),
+            "DELETE"
+        ));
+    }
+
+    #[test]
+    fn a_postgres_block_comment_nests() {
+        let payload = "SELECT 1 /* /* */ ' */; DELETE FROM t; --'";
+        assert!(!has(&scan(payload), "DELETE"), "generic does not nest");
+        for lexer in Dialect::Postgres.readings() {
+            let scanned = scan_dialect(payload, *lexer);
+            assert!(has(&scanned, "DELETE"), "{lexer:?}");
+            assert_eq!(scanned.separators.len(), 2, "{lexer:?}");
+        }
+        // Balanced nesting hides everything inside it; an unclosed level hides the rest.
+        let closed = "SELECT 1 /* a /* b; */ c; */ ;";
+        assert_eq!(pg(closed).separators, vec![closed.len() - 1]);
+        assert!(pg("SELECT 1 /* a /* b */ ; DELETE FROM t")
+            .separators
+            .is_empty());
+        // `/*/` does not close, `/**/` is empty, and `*/` first does not open one.
+        assert!(pg("SELECT 1 /*/ ; */ ;").separators == vec![18]);
+        assert!(pg("SELECT 1 /**/ ;").separators == vec![14]);
+        assert!(pg("SELECT 1 /* /*/ */ ; */ ;").separators == vec![24]);
+        // The leading keyword and the first significant byte skip a nested comment too.
+        assert_eq!(
+            pg("/* a /* b */ c */ select 1").leading_keyword.as_deref(),
+            Some("SELECT")
+        );
+        assert_eq!(
+            first_significant("/* a /* b */ c */ x", Lexer::POSTGRES),
+            Some(18)
+        );
+    }
+
+    #[test]
+    fn a_postgres_line_comment_ends_at_a_carriage_return() {
+        let payload = "SELECT 1 -- x\r; DELETE FROM t";
+        assert!(has(&pg(payload), "DELETE"));
+        assert_eq!(pg(payload).separators.len(), 1);
+        assert!(
+            !has(&scan(payload), "DELETE"),
+            "generic waits for a newline"
+        );
+        assert_eq!(
+            pg("-- c\r select 1").leading_keyword.as_deref(),
+            Some("SELECT")
+        );
+        assert_eq!(first_significant("-- c\r x", Lexer::POSTGRES), Some(6));
+        // `--` is a comment wherever it follows, unlike MySQL.
+        assert!(pg("SELECT 1--x\n;").separators == vec![12]);
+    }
+
+    #[test]
+    fn a_dollar_continues_a_postgres_identifier_so_it_cannot_open_a_quote() {
+        let payload = "SELECT 1 AS a$x$; DELETE FROM t; --$x$";
+        assert!(
+            !has(&scan(payload), "DELETE"),
+            "generic reads a$x$ as a dollar quote"
+        );
+        for lexer in Dialect::Postgres.readings() {
+            let scanned = scan_dialect(payload, *lexer);
+            assert!(has(&scanned, "DELETE"), "{lexer:?}");
+            assert!(has(&scanned, "A$X$"), "{lexer:?}");
+        }
+        assert_eq!(
+            pg("SELECT foo$bar, a$1").keywords,
+            vec!["SELECT", "FOO$BAR", "A$1"]
+        );
+        // A non-ASCII letter is an identifier byte too, as are digits after one.
+        let unicode = "SELECT 1 AS é$x$; DELETE FROM t; --$x$";
+        assert!(has(&pg(unicode), "DELETE"));
+        assert_eq!(pg("SELECT éa1$b").keywords, vec!["SELECT", "éA1$B"]);
+        // A number is not an identifier, so a dollar quote can start straight after one,
+        // after a string, a parameter, a quoted identifier and an operator.
+        for opener in ["1", "'a'", "$1", "\"a\"", "+", ")"] {
+            let sql = format!("SELECT {opener}$q$; DELETE FROM t; $q$");
+            assert!(!has(&pg(&sql), "DELETE"), "{opener}");
+        }
+    }
+
+    #[test]
+    fn a_postgres_dollar_quote_follows_the_servers_tag_rules() {
+        // `$$`, `$tag$`, tags with digits after the first letter, `_`, non-ASCII letters.
+        for sql in [
+            "SELECT $$a;b$$",
+            "SELECT $a$ ; DELETE FROM t $a$",
+            "SELECT $a1_$ ; DELETE FROM t $a1_$",
+            "SELECT $é$ ; DELETE FROM t $é$",
+            "SELECT $_$ ; DELETE FROM t $_$",
+        ] {
+            let scanned = pg(sql);
+            assert!(scanned.separators.is_empty(), "{sql}");
+            assert_eq!(scanned.keywords, vec!["SELECT"], "{sql}");
+        }
+        // A tag is case sensitive, and a longer delimiter that merely ends in the tag
+        // does not close it: the last `$` of `$b$a$` is where `$a$` starts.
+        assert!(pg("SELECT $a$ x $A$ ; $a$ y").separators.is_empty());
+        assert_eq!(pg("SELECT $a$ $b$a$ ; y").separators.len(), 1);
+        // A tag cannot start with a digit: `$1$` is the parameter `$1` and a lone `$`.
+        assert!(has(&pg("SELECT $1$ ; DELETE FROM t ; $1$"), "DELETE"));
+        assert_eq!(pg("SELECT $1, $2").separators.len(), 0);
+        assert_eq!(pg("SELECT $1; SELECT $2").separators.len(), 1);
+        // No closing `$` means no quote: `$abc` is a `$` and a word.
+        assert!(has(&pg("SELECT $abc ; DELETE FROM t"), "DELETE"));
+        // A space inside the would-be tag ends the attempt.
+        assert!(has(&pg("SELECT $a b$ ; DELETE FROM t"), "DELETE"));
+    }
+
+    #[test]
+    fn a_backtick_is_an_operator_in_postgres_not_a_quote() {
+        let sql = "SELECT ` ; DELETE FROM t ; -- `";
+        assert!(
+            !has(&scan(sql), "DELETE"),
+            "generic quotes an identifier with it"
+        );
+        for lexer in Dialect::Postgres.readings() {
+            assert!(has(&scan_dialect(sql, *lexer), "DELETE"), "{lexer:?}");
+        }
+    }
+
+    #[test]
+    fn a_postgres_quoted_identifier_holds_anything_and_doubles_its_quote() {
+        assert!(pg("SELECT \"a;b\" FROM t").separators.is_empty());
+        assert!(pg("SELECT \"a\"\";b\" FROM t").separators.is_empty());
+        // A backslash is an ordinary byte in an identifier, under both settings.
+        for lexer in Dialect::Postgres.readings() {
+            assert!(has(
+                &scan_dialect("SELECT \"a\\\"; DELETE FROM t", *lexer),
+                "DELETE"
+            ));
+        }
+        // `N'…'` is `N` and then an ordinary string, so it follows the plain rule.
+        assert!(has(&pg("SELECT N'\\'; DELETE FROM t; --'"), "DELETE"));
+        assert!(!has(&pg_off("SELECT N'\\'; DELETE FROM t; --'"), "DELETE"));
+    }
+
+    #[test]
+    fn a_postgres_leading_keyword_is_a_whole_identifier() {
+        assert_eq!(
+            pg("select$x 1").leading_keyword.as_deref(),
+            Some("SELECT$X")
+        );
+        assert_eq!(pg("select1").leading_keyword.as_deref(), Some("SELECT1"));
+        assert_eq!(pg("éx").leading_keyword.as_deref(), Some("éX"));
+        assert_eq!(pg("SELECT 1").leading_keyword.as_deref(), Some("SELECT"));
+        // Generic and MySQL are untouched.
+        assert_eq!(scan("select1").leading_keyword.as_deref(), Some("SELECT"));
+    }
+
+    #[test]
+    fn postgres_scanning_never_panics_or_hangs_on_a_broken_string() {
+        for sql in [
+            "SELECT E'",
+            "SELECT E'\\",
+            "SELECT U&'",
+            "SELECT B'",
+            "SELECT 'a'\n",
+            "SELECT 'a'\n--",
+            "SELECT 'a' --\n",
+            "SELECT /*",
+            "SELECT /* /*",
+            "SELECT $",
+            "SELECT $a",
+            "SELECT $a$",
+            "SELECT é",
+            "É",
+            "\u{feff}SELECT 1",
+            "SELECT '\u{e9}\\\u{e9}'",
+            "SELECT E'\u{e9}\\\u{e9}' ; DROP TABLE t",
+        ] {
+            for lexer in Dialect::Postgres.readings() {
+                let _ = scan_dialect(sql, *lexer);
+            }
+        }
     }
 }

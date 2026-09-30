@@ -537,6 +537,29 @@ pub trait Session: Send {
     /// was told and sends whatever it needs (`USE`) before its next statement. The default
     /// does nothing, for a driver whose connection is not bound to a context.
     fn set_context(&mut self, _database: Option<&str>, _schema: Option<&str>) {}
+
+    /// The statement that makes this session refuse writes on the server, or `None` for a
+    /// driver with no such switch (Trino).
+    ///
+    /// Safe Mode `read_only` reads the caller's text, and a reading can be wrong: a lexer the
+    /// server has and the guard lacks, or a session setting that moves where a string ends. This
+    /// is the layer that does not depend on the reading. It is session state, so a pool's
+    /// [`reset`](Self::reset) clears it before the next run.
+    fn read_only_statement(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Make the session refuse writes on the server, when the driver can. Called once per run
+    /// under `read_only`, before the run's own statements; a session that cannot be made
+    /// read-only is an error, never a silent pass.
+    async fn enforce_read_only(&mut self) -> Result<(), EngineError> {
+        let Some(sql) = self.read_only_statement() else {
+            return Ok(());
+        };
+        let mut cursor = self.execute(sql, &ExecuteOptions::default()).await?;
+        while cursor.next_batch(1).await?.is_some() {}
+        Ok(())
+    }
 }
 
 /// Rows, in batches.

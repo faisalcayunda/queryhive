@@ -189,28 +189,551 @@ async fn read_only_refuses_a_mysql_dollar_tag_hiding_a_write_before_connecting()
     }
 }
 
-/// The dollar-tag text is one dollar-quoted string on PostgreSQL and Trino, so their guard
-/// is unchanged: it reads as a single read and reaches the connect step.
+/// The dollar-tag text is one dollar-quoted string on PostgreSQL, so its guard reads it as a
+/// single read and it reaches the connect step. Trino has no dollar quotes (a `$` is a syntax
+/// error there), so its reading takes what follows as code and refuses the write: this test used
+/// to say Trino read it as one string, which was the generic reading's claim and not Trino's.
 #[tokio::test]
-async fn a_dollar_quoted_string_is_still_one_read_on_postgres_and_trino() {
-    for kind in ["postgres", "trino"] {
+async fn a_dollar_quoted_string_is_one_read_on_postgres_and_code_on_trino() {
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("SAFE_MODE", "read_only"),
+            ("SQL", "SELECT $a$ ; DELETE FROM t ; $a$"),
+        ],
+    )
+    .await;
+    assert!(
+        !matches!(error, CliError::Usage(ref message) if message.contains("read-only")),
+        "postgres: {error:?}"
+    );
+    assert_eq!(engine.connects(), 1, "postgres reaches the connect step");
+
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("DB_KIND", "trino"),
+            ("SAFE_MODE", "read_only"),
+            ("SQL", "SELECT $a$ ; DELETE FROM t ; $a$"),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("read-only"), "{error:?}");
+    assert_eq!(engine.connects(), 0, "trino refuses before connecting");
+}
+
+/// The PostgreSQL Safe Mode bypasses W3-T0b closed. The generic reading is fooled by three
+/// spellings PostgreSQL lexes differently: `E'…'` strings honour a backslash, block comments
+/// nest, and `$` continues an identifier so `a$x$` is a name and not a dollar quote. Each is
+/// one harmless SELECT to the generic reading and a SELECT plus a `DELETE` to the server, and
+/// the only thing that stopped it was the driver's prepare refusing a second statement. The
+/// guard must refuse them itself, in every command that takes SQL, before connecting.
+const POSTGRES_PAYLOADS: [&str; 6] = [
+    "SELECT E'x\\' AS a, '; DELETE FROM t; --'",
+    "SELECT 1 /* /* */ ' */; DELETE FROM t; --'",
+    "SELECT 1 AS a$x$; DELETE FROM t; --$x$",
+    // `standard_conforming_strings` off: a plain string honours the backslash too, and the
+    // guard cannot see the setting, so it refuses what the two settings read differently.
+    "SELECT 'x\\' AS a, '; DELETE FROM t; --'",
+    // A carriage return ends a `--` comment.
+    "SELECT 1 -- x\r; DELETE FROM t",
+    // A continued E string keeps honouring the backslash.
+    "SELECT E'a'\n'x\\'y'; DELETE FROM t; --'",
+];
+
+#[tokio::test]
+async fn read_only_refuses_a_postgres_lexing_injection_before_connecting() {
+    let postgres = |sql: &'static str| {
+        vec![
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "postgres.invalid"),
+            ("DB_PORT", "5432"),
+            ("DB_USER", "queryhive"),
+            ("SAFE_MODE", "read_only"),
+            ("SQL", sql),
+            ("FORMAT", "csv"),
+            ("OUT_DIR", "/tmp"),
+        ]
+    };
+    for payload in POSTGRES_PAYLOADS {
+        for command in [
+            Command::Preview,
+            Command::Count,
+            Command::Explain,
+            Command::Export,
+        ] {
+            let engine = CountingEngine::new();
+            let error = refuse(command, &engine, &postgres(payload)).await;
+            let message = usage_message(&error);
+            assert!(
+                message.contains("read-only") || message.contains("could not tell"),
+                "{command:?} {payload:?}: {message}"
+            );
+            assert_eq!(
+                engine.connects(),
+                0,
+                "{command:?}: the write must be refused before the server is reached: {payload:?}"
+            );
+        }
+    }
+}
+
+/// A URL-only PostgreSQL connection (no `DB_KIND`) is read as PostgreSQL too, so the scheme
+/// is enough to get the PostgreSQL guard, and `confirm` and `no_ddl` refuse the same text.
+#[tokio::test]
+async fn a_postgres_url_and_the_other_modes_get_the_postgres_guard_too() {
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("DB_KIND", ""),
+            ("DB_URL", "postgresql://queryhive@postgres.invalid:5432/app"),
+            ("SAFE_MODE", "read_only"),
+            ("SQL", POSTGRES_PAYLOADS[0]),
+        ],
+    )
+    .await;
+    assert!(usage_message(&error).contains("read-only"), "{error:?}");
+    assert_eq!(engine.connects(), 0);
+
+    for (mode, ddl) in [("confirm", false), ("no_ddl", true)] {
+        let sql = if ddl {
+            POSTGRES_PAYLOADS[2].replace("DELETE FROM t", "DROP TABLE t")
+        } else {
+            POSTGRES_PAYLOADS[2].to_owned()
+        };
         let engine = CountingEngine::new();
         let error = refuse(
             Command::Preview,
             &engine,
             &[
-                ("DB_KIND", kind),
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "postgres.invalid"),
+                ("DB_USER", "queryhive"),
+                ("SAFE_MODE", mode),
+                ("SQL", &sql),
+            ],
+        )
+        .await;
+        let message = usage_message(&error);
+        assert!(message.contains(mode), "{mode}: {message}");
+        assert_eq!(engine.connects(), 0, "{mode}");
+    }
+}
+
+/// The bulk paths guard with the same PostgreSQL reading: a plan and a script that hide a
+/// DDL statement from the generic reading are refused, and no statement of them runs.
+#[tokio::test]
+async fn a_postgres_plan_and_a_postgres_script_are_guarded_by_the_postgres_reading() {
+    let ddl = "SELECT 1 AS a$x$; DROP TABLE t; --$x$";
+    let engine = CountingEngine::new();
+    let changes = format!(r#"[{{"sql":{}}}]"#, serde_json::to_string(ddl).unwrap());
+    let error = refuse(
+        Command::ApplyChanges,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "postgres.invalid"),
+            ("DB_USER", "queryhive"),
+            ("SAFE_MODE", "no_ddl"),
+            ("CHANGES", &changes),
+        ],
+    )
+    .await;
+    let message = usage_message(&error);
+    assert!(message.contains("change 1 was refused"), "{message}");
+    assert!(message.contains("DDL"), "{message}");
+    assert_eq!(engine.connects(), 0);
+
+    let path = std::env::temp_dir().join(format!("qh-safe-mode-pg-{}.sql", std::process::id()));
+    std::fs::write(&path, format!("SELECT 1;\n{ddl}\n")).expect("write the script");
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::ImportData,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "postgres.invalid"),
+            ("DB_USER", "queryhive"),
+            ("SAFE_MODE", "no_ddl"),
+            ("IMPORT_PATH", path.to_str().expect("utf-8 path")),
+        ],
+    )
+    .await;
+    let _ = std::fs::remove_file(&path);
+    let message = usage_message(&error);
+    assert!(message.contains("no_ddl"), "{message}");
+    assert_eq!(engine.connects(), 0);
+}
+
+/// What a PostgreSQL read looks like must still reach the server: escape strings, nested
+/// comments with nothing behind them, parameters, dollar-quoted text, and identifiers with a
+/// `$`.
+#[tokio::test]
+async fn ordinary_postgres_reads_reach_the_connect_step_under_read_only() {
+    for sql in [
+        "SELECT E'\\n', E'it\\'s'",
+        "SELECT 1 /* a /* b */ c */ -- tail",
+        "SELECT $1::int, $2::int",
+        "SELECT $$a;b$$",
+        "SELECT foo$bar FROM t; -- trailing",
+    ] {
+        let engine = CountingEngine::new();
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "postgres.invalid"),
+                ("DB_USER", "queryhive"),
                 ("SAFE_MODE", "read_only"),
-                ("SQL", "SELECT $a$ ; DELETE FROM t ; $a$"),
+                ("SQL", sql),
             ],
         )
         .await;
         assert!(
-            !matches!(error, CliError::Usage(ref message) if message.contains("read-only")),
-            "{kind}: {error:?}"
+            !matches!(error, CliError::Usage(ref message) if message.contains("read-only")
+                || message.contains("could not tell")),
+            "{sql:?}: {error:?}"
         );
-        assert_eq!(engine.connects(), 1, "{kind} reaches the connect step");
+        assert_eq!(engine.connects(), 1, "{sql:?} reaches the connect step");
     }
+}
+
+/// Trino has its own reading: a `--` comment ends at a carriage return there (live:
+/// `SELECT 1 -- c\r, 2` returns two columns), where the generic reading waits for a newline. So
+/// `EXPLAIN -- note\r ANALYZE INSERT …` was one harmless EXPLAIN to the guard and a write to the
+/// server, and a `read_only` Trino connection wrote a row. The guard must refuse it, in every
+/// command that takes SQL, before connecting.
+#[tokio::test]
+async fn read_only_refuses_a_trino_carriage_return_comment_before_connecting() {
+    let payloads = [
+        "EXPLAIN /* n */ -- note\r ANALYZE INSERT INTO memory.default.t VALUES (1)",
+        "SELECT 1 -- note\r; DELETE FROM memory.default.t",
+    ];
+    for payload in payloads {
+        for command in [
+            Command::Preview,
+            Command::Count,
+            Command::Explain,
+            Command::Export,
+        ] {
+            let engine = CountingEngine::new();
+            let error = refuse(
+                command,
+                &engine,
+                &[
+                    ("SAFE_MODE", "read_only"),
+                    ("SQL", payload),
+                    ("FORMAT", "csv"),
+                    ("OUT_DIR", "/tmp"),
+                ],
+            )
+            .await;
+            let message = usage_message(&error);
+            assert!(
+                message.contains("read-only") || message.contains("could not tell"),
+                "{command:?} {payload:?}: {message}"
+            );
+            assert_eq!(engine.connects(), 0, "{command:?} {payload:?}");
+        }
+    }
+}
+
+/// What Trino reads as one harmless statement still reaches the server: its block comments do
+/// not nest, and a newline still ends a `--` comment.
+#[tokio::test]
+async fn ordinary_trino_reads_reach_the_connect_step_under_read_only() {
+    for sql in [
+        "SELECT 1 /* a */ , 2 -- DELETE\r\n",
+        "SELECT 1 -- note\n, 2",
+        "SELECT 'a\\' , 'b'",
+        "SHOW CATALOGS",
+    ] {
+        let engine = CountingEngine::new();
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[("SAFE_MODE", "read_only"), ("SQL", sql)],
+        )
+        .await;
+        assert!(
+            !matches!(error, CliError::Usage(ref message) if message.contains("read-only")
+                || message.contains("could not tell")),
+            "{sql:?}: {error:?}"
+        );
+        assert_eq!(engine.connects(), 1, "{sql:?}");
+    }
+}
+
+/// Text that can switch the PostgreSQL session's `client_encoding` is refused below `full`: in a
+/// multibyte encoding whose second byte can be a backslash, a later `E'…'` string ends somewhere
+/// no reading predicts, and a script runs on one session.
+#[tokio::test]
+async fn a_postgres_encoding_switch_is_refused_before_connecting() {
+    let payloads = [
+        "SELECT set_config('client_encoding', 'SJIS', false)",
+        "SELECT pg_catalog.\"set_config\"('client_encoding', 'GBK', false)",
+        "SELECT U&\"set\\005fconfig\"('a', 'b', false)",
+    ];
+    for payload in payloads {
+        for mode in ["read_only", "confirm", "no_ddl"] {
+            let engine = CountingEngine::new();
+            let error = refuse(
+                Command::Preview,
+                &engine,
+                &[
+                    ("DB_KIND", "postgres"),
+                    ("DB_HOST", "postgres.invalid"),
+                    ("DB_USER", "queryhive"),
+                    ("SAFE_MODE", mode),
+                    ("SQL", payload),
+                ],
+            )
+            .await;
+            assert!(
+                matches!(error, CliError::Usage(_)),
+                "{mode} {payload:?}: {error:?}"
+            );
+            assert_eq!(engine.connects(), 0, "{mode} {payload:?}");
+        }
+    }
+    // The import path the review used: a script runs on one session.
+    let path = std::env::temp_dir().join(format!("qh-safe-mode-enc-{}.sql", std::process::id()));
+    std::fs::write(
+        &path,
+        "SELECT set_config('client_encoding', 'SJIS', false);\nSELECT E'\\x83\\'; DELETE FROM t; --';\n",
+    )
+    .expect("write the script");
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::ImportData,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "postgres.invalid"),
+            ("DB_USER", "queryhive"),
+            ("SAFE_MODE", "read_only"),
+            ("IMPORT_PATH", path.to_str().expect("utf-8 path")),
+        ],
+    )
+    .await;
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        usage_message(&error).contains("could not tell"),
+        "{error:?}"
+    );
+    assert_eq!(engine.connects(), 0);
+    // `full` refuses nothing.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "postgres.invalid"),
+            ("DB_USER", "queryhive"),
+            ("SQL", payloads[0]),
+        ],
+    )
+    .await;
+    assert!(matches!(error, CliError::Connect(_)), "{error:?}");
+}
+
+/// `EXECUTE`, `DO`, `CALL` and `COPY … PROGRAM` are unclassified, so `no_ddl` refuses them too.
+#[tokio::test]
+async fn no_ddl_refuses_the_opaque_statements() {
+    for sql in [
+        "EXECUTE p(1)",
+        "DO $$ BEGIN NULL; END $$",
+        "CALL p()",
+        "COPY t TO PROGRAM 'id'",
+        "ANALYSE t",
+        "SELECT * FROM t FOR SHARE",
+    ] {
+        let engine = CountingEngine::new();
+        let mode = if sql.contains("FOR SHARE") {
+            "read_only"
+        } else {
+            "no_ddl"
+        };
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[("DB_KIND", "postgres"), ("SAFE_MODE", mode), ("SQL", sql)],
+        )
+        .await;
+        assert!(
+            matches!(error, CliError::Usage(_)),
+            "{mode} {sql:?}: {error:?}"
+        );
+        assert_eq!(engine.connects(), 0, "{sql:?}");
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// the server-enforced read-only layer: `open()` asks the session to refuse writes
+// --------------------------------------------------------------------------- //
+
+/// A session that records every statement, and whose read-only switch is a statement it can
+/// be seen sending.
+struct RecordingSession {
+    inner: Box<dyn Driver>,
+    statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct EmptyCursor;
+
+#[async_trait]
+impl qh_driver::Cursor for EmptyCursor {
+    fn columns(&self) -> &[qh_core::ColumnMeta] {
+        &[]
+    }
+
+    async fn next_batch(
+        &mut self,
+        _max_rows: usize,
+    ) -> Result<Option<qh_core::ColumnBatch>, EngineError> {
+        Ok(None)
+    }
+
+    fn affected_rows(&self) -> Option<u64> {
+        None
+    }
+}
+
+#[async_trait]
+impl Session for RecordingSession {
+    fn capabilities(&self) -> qh_driver::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn query_id(&self) -> Option<String> {
+        None
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        _options: &qh_driver::ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
+        self.statements.lock().unwrap().push(sql.to_owned());
+        Ok(Box::new(EmptyCursor))
+    }
+
+    async fn browse(
+        &mut self,
+        _level: qh_driver::BrowseLevel,
+        _path: &qh_driver::ObjectPath,
+        _include_system: bool,
+    ) -> Result<Vec<String>, EngineError> {
+        Ok(Vec::new())
+    }
+
+    async fn objects(
+        &mut self,
+        _path: &qh_driver::ObjectPath,
+    ) -> Result<qh_driver::ObjectsPage, EngineError> {
+        Ok(qh_driver::ObjectsPage::default())
+    }
+
+    fn explain_statement(&self, sql: &str) -> String {
+        format!("EXPLAIN {sql}")
+    }
+
+    async fn cancel(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn read_only_statement(&self) -> Option<&'static str> {
+        Some("SET SESSION READ ONLY (test)")
+    }
+}
+
+struct RecordingEngine {
+    inner: RealEngine,
+    statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Engine for RecordingEngine {
+    fn kinds(&self) -> Vec<DriverKind> {
+        self.inner.kinds()
+    }
+
+    fn driver(&self, kind: DriverKind) -> &dyn Driver {
+        self.inner.driver(kind)
+    }
+
+    async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+        let _ = config;
+        Ok(Box::new(RecordingSession {
+            inner: Box::new(qh_driver_postgres::PostgresDriver::new()),
+            statements: self.statements.clone(),
+        }))
+    }
+}
+
+async fn statements_sent(extra: &[(&str, &str)]) -> Vec<String> {
+    let statements = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let engine = RecordingEngine {
+        inner: RealEngine::new(),
+        statements: statements.clone(),
+    };
+    let mut pairs: Vec<(&str, &str)> = vec![
+        ("DB_KIND", "postgres"),
+        ("DB_HOST", "postgres.invalid"),
+        ("DB_USER", "queryhive"),
+        ("SQL", "SELECT 1"),
+    ];
+    pairs.extend_from_slice(extra);
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &settings(&pairs),
+        &mut out,
+        &engine,
+        &CancelFlag::new(),
+    )
+    .await
+    .expect("the preview runs on the recording session");
+    let sent = statements.lock().unwrap().clone();
+    sent
+}
+
+#[tokio::test]
+async fn a_read_only_run_asks_the_session_to_refuse_writes_before_its_own_statement() {
+    // Under `read_only`, and under a read-only connection floor, the switch goes first.
+    for extra in [
+        &[("SAFE_MODE", "read_only")][..],
+        &[("DB_READ_ONLY", "1")][..],
+        &[("SAFE_MODE", "no_ddl"), ("SAFE_MODE_FLOOR", "read_only")][..],
+    ] {
+        assert_eq!(
+            statements_sent(extra).await,
+            vec!["SET SESSION READ ONLY (test)", "SELECT 1"],
+            "{extra:?}"
+        );
+    }
+    // No other level asks: `full`, `no_ddl` and `confirm` write, so the server may too.
+    for mode in ["full", "no_ddl", "confirm"] {
+        assert_eq!(
+            statements_sent(&[("SAFE_MODE", mode)]).await,
+            vec!["SELECT 1"],
+            "{mode}"
+        );
+    }
+    assert_eq!(statements_sent(&[]).await, vec!["SELECT 1"]);
 }
 
 /// A `#` comment holding words that look like writes is a comment on MySQL under every

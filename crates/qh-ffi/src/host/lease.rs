@@ -48,10 +48,10 @@ fn rerunnable(sql: &str, kind: DriverKind) -> bool {
     if trimmed.eq_ignore_ascii_case("BEGIN") || trimmed.eq_ignore_ascii_case("START TRANSACTION") {
         return true;
     }
-    let dialect = if kind == DriverKind::Mysql {
-        Dialect::Mysql
-    } else {
-        Dialect::Generic
+    let dialect = match kind {
+        DriverKind::Mysql => Dialect::Mysql,
+        DriverKind::Postgres => Dialect::Postgres,
+        DriverKind::Trino => Dialect::Trino,
     };
     qh_sql::classify_readings(sql, dialect.readings()) == StatementKind::ReadOnly
 }
@@ -129,6 +129,9 @@ pub(crate) struct LeaseState {
     unsettled: bool,
     /// An earlier cursor of this lease was left before the server ended it.
     dirty: bool,
+    /// The run asked for a server-enforced read-only session, which a replacement connection has
+    /// to be given again.
+    read_only: bool,
     /// `cancel` takes `&self`, hence the atomic.
     cancelled: AtomicBool,
     last_cursor: Option<Arc<CursorEnd>>,
@@ -154,6 +157,7 @@ impl LeaseState {
             broken: false,
             unsettled: false,
             dirty: false,
+            read_only: false,
             cancelled: AtomicBool::new(false),
             last_cursor: None,
         }
@@ -282,10 +286,13 @@ impl Held {
         // Before the first await: a future dropped mid-connect leaves this set, and the session is
         // closed at checkin instead of going back half-replaced.
         lease.broken = true;
-        let (session, tunnel) = lease
+        let (mut session, tunnel) = lease
             .pool
             .reconnect(&lease.entry, &lease.config, &lease.settings)
             .await?;
+        if lease.read_only {
+            session.enforce_read_only().await?;
+        }
         // The old session is dropped, not closed: its socket is what is gone.
         drop(self.inner.get_mut().replace(session));
         self.tunnel = tunnel;
@@ -527,5 +534,13 @@ impl Session for Held {
 
     fn set_context(&mut self, database: Option<&str>, schema: Option<&str>) {
         self.session().set_context(database, schema);
+    }
+
+    async fn enforce_read_only(&mut self) -> Result<(), EngineError> {
+        self.session().enforce_read_only().await?;
+        if let Some(lease) = self.lease.as_mut() {
+            lease.read_only = true;
+        }
+        Ok(())
     }
 }

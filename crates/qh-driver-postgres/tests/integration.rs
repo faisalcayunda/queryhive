@@ -761,3 +761,85 @@ async fn a_bound_statement_sends_the_value_out_of_band() {
 
     session.close().await.expect("close");
 }
+
+// --------------------------------------------------------------------------- //
+// server-enforced read-only (W3-T0b): the layer that does not depend on reading the text
+// --------------------------------------------------------------------------- //
+
+async fn run_all(session: &mut Box<dyn Session>, sql: &str) -> Result<(), EngineError> {
+    let mut cursor = session.execute(sql, &ExecuteOptions::default()).await?;
+    while cursor.next_batch(100).await?.is_some() {}
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_only_session_refuses_writes_on_the_server_until_it_is_reset() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let table = format!("qh_w3t0b_ro_{}", std::process::id());
+    let sequence = format!("{table}_seq");
+    run_all(&mut session, &format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop leftovers");
+    run_all(&mut session, &format!("DROP SEQUENCE IF EXISTS {sequence}"))
+        .await
+        .expect("drop leftovers");
+    run_all(&mut session, &format!("CREATE TABLE {table} (id INT)"))
+        .await
+        .expect("create");
+    run_all(&mut session, &format!("CREATE SEQUENCE {sequence}"))
+        .await
+        .expect("create sequence");
+    run_all(&mut session, &format!("INSERT INTO {table} VALUES (1)"))
+        .await
+        .expect("seed");
+    // A function that writes, called from a SELECT: the shape the guard reads as a plain read.
+    run_all(
+        &mut session,
+        &format!(
+            "CREATE OR REPLACE FUNCTION {table}_f() RETURNS int LANGUAGE sql AS \
+             $$ INSERT INTO {table} VALUES (2) RETURNING id $$"
+        ),
+    )
+    .await
+    .expect("create function");
+
+    assert!(session.read_only_statement().is_some());
+    session.enforce_read_only().await.expect("switch it on");
+
+    for sql in [
+        format!("INSERT INTO {table} VALUES (3)"),
+        format!("DELETE FROM {table}"),
+        format!("SELECT nextval('{sequence}')"),
+        format!("SELECT {table}_f()"),
+        format!("CREATE TABLE {table}_x (a int)"),
+    ] {
+        let error = run_all(&mut session, &sql)
+            .await
+            .expect_err(&format!("the server must refuse {sql}"));
+        assert!(
+            error.to_string().contains("read-only transaction"),
+            "{sql}: {error}"
+        );
+    }
+    // Reads still work, and a user's `SET` cannot be what turns it off: the guard refuses it,
+    // and what the guard would let through (`SELECT`) cannot reach the setting.
+    run_all(&mut session, &format!("SELECT count(*) FROM {table}"))
+        .await
+        .expect("a read still runs");
+
+    // The pool's reset gives the next run a normal session.
+    session.reset().await.expect("reset");
+    run_all(&mut session, &format!("INSERT INTO {table} VALUES (4)"))
+        .await
+        .expect("after the reset a write runs again");
+    run_all(&mut session, &format!("SELECT nextval('{sequence}')"))
+        .await
+        .expect("and so does nextval");
+
+    let _ = run_all(&mut session, &format!("DROP FUNCTION {table}_f()")).await;
+    let _ = run_all(&mut session, &format!("DROP TABLE {table}")).await;
+    let _ = run_all(&mut session, &format!("DROP SEQUENCE {sequence}")).await;
+}

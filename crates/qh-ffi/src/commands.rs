@@ -183,12 +183,18 @@ fn parse_safe_mode(raw: &str, key: &str) -> Result<SafeMode, CliError> {
 /// one read-only statement under generic rules and a read plus a `DELETE` under MySQL's, so
 /// a MySQL connection has to be read as MySQL or a `read_only` connection would run the
 /// write (W3-T0). The kind is taken from [`crate::config::build`] rather than raw `DB_KIND`
-/// so a URL-only MySQL connection (no `DB_KIND`, a `mysql://` URL) still reads as MySQL; a
-/// config that cannot resolve, and every other kind, reads as [`Dialect::Generic`].
+/// so a URL-only MySQL connection (no `DB_KIND`, a `mysql://` URL) still reads as MySQL. The
+/// same goes for PostgreSQL, whose lexer disagrees with the generic one on `E'…'` strings, nested
+/// block comments, `$` in identifiers and more (W3-T0b), and Trino ends a `--` comment at a
+/// carriage return where the generic reading waits for a newline, so it has its own dialect too
+/// (it has no dollar quotes and no `E'…'` strings, and its block comments do not nest). Only a
+/// config that cannot resolve reads as [`Dialect::Generic`].
 pub(crate) fn dialect(settings: &Settings) -> Dialect {
     match crate::config::build(settings).map(|config| config.kind) {
         Ok(DriverKind::Mysql) => Dialect::Mysql,
-        _ => Dialect::Generic,
+        Ok(DriverKind::Postgres) => Dialect::Postgres,
+        Ok(DriverKind::Trino) => Dialect::Trino,
+        Err(_) => Dialect::Generic,
     }
 }
 
@@ -663,7 +669,16 @@ pub(crate) async fn open(
     config: &ConnectionConfig,
 ) -> Result<(Box<dyn Session>, RetryPolicy), CliError> {
     let policy = RetryPolicy::from_settings(settings)?;
-    let session = retry::connect(engine, config, &policy).await?;
+    let mut session = retry::connect(engine, config, &policy).await?;
+    // The server enforces what the classifier only reads: under `read_only` the session itself
+    // refuses a write, so a statement the guard misread (a lexer the server disagrees with) still
+    // cannot change data. Fails closed: a session that could not be made read-only is not used.
+    if safe_mode(settings, engine)? == SafeMode::ReadOnly {
+        if let Err(error) = session.enforce_read_only().await {
+            let _ = session.close().await;
+            return Err(error.into());
+        }
+    }
     Ok((session, policy))
 }
 
@@ -1910,20 +1925,31 @@ pub async fn count(
     let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
-    // With more than one reading (MySQL), `count` wraps the caller's statement, so it must
-    // be one statement that every reading delimits the same way; otherwise the wrap would
-    // run something the readings disagree about. A single reading (PostgreSQL, Trino)
-    // skips this, so its error texts stay exactly what `count_statement` says.
+    // With more than one reading (MySQL, PostgreSQL), `count` wraps the caller's statement,
+    // so it must be one statement that every reading delimits the same way; otherwise the
+    // wrap would run something the readings disagree about. A single reading (Trino) skips
+    // this, so its error texts stay exactly what `count_statement` says.
     let dialect = dialect(settings);
     if dialect.readings().len() > 1 {
         let single = qh_sql::statements_agreeing(&sql, dialect.readings())
             .is_some_and(|statements| statements.len() == 1);
         if !single {
             return Err(CliError::Usage(
-                "count wraps exactly one statement, but MySQL string escaping and comments \
-                 depend on the server's sql_mode and this text does not read as one \
-                 statement under every mode; write quotes inside strings as '' instead of \\'"
-                    .to_owned(),
+                match dialect {
+                    Dialect::Postgres => {
+                        "count wraps exactly one statement, but PostgreSQL string escaping \
+                         depends on standard_conforming_strings and this text does not read as \
+                         one statement under both settings; write quotes inside strings as '' \
+                         instead of \\'"
+                    }
+                    _ => {
+                        "count wraps exactly one statement, but MySQL string escaping and \
+                         comments depend on the server's sql_mode and this text does not read \
+                         as one statement under every mode; write quotes inside strings as '' \
+                         instead of \\'"
+                    }
+                }
+                .to_owned(),
             ));
         }
     }

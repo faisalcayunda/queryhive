@@ -1312,3 +1312,60 @@ async fn a_capped_statement_on_a_killed_connection_is_reported_and_not_resent() 
         admin.query_drop(sql).await.expect(sql);
     }
 }
+
+// --------------------------------------------------------------------------- //
+// server-enforced read-only (W3-T0b): the layer that does not depend on reading the text
+// --------------------------------------------------------------------------- //
+
+async fn run_all(session: &mut Box<dyn Session>, sql: &str) -> Result<(), EngineError> {
+    let mut cursor = session.execute(sql, &ExecuteOptions::default()).await?;
+    while cursor.next_batch(100).await?.is_some() {}
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_only_session_refuses_writes_on_the_server_until_it_is_reset() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let table = format!("qh_w3t0b_ro_{}", std::process::id());
+    run_all(&mut session, &format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop leftovers");
+    run_all(&mut session, &format!("CREATE TABLE {table} (id INT)"))
+        .await
+        .expect("create");
+    run_all(&mut session, &format!("INSERT INTO {table} VALUES (1)"))
+        .await
+        .expect("seed");
+
+    assert!(session.read_only_statement().is_some());
+    session.enforce_read_only().await.expect("switch it on");
+
+    // Statements the guard would never let through: the server layer is what refuses them.
+    for sql in [
+        format!("INSERT INTO {table} VALUES (2)"),
+        format!("DELETE FROM {table}"),
+        format!("UPDATE {table} SET id = 9"),
+        format!("CREATE TABLE {table}_x (a int)"),
+    ] {
+        let error = run_all(&mut session, &sql)
+            .await
+            .expect_err(&format!("the server must refuse {sql}"));
+        assert!(
+            error.to_string().to_lowercase().contains("read only"),
+            "{sql}: {error}"
+        );
+    }
+    run_all(&mut session, &format!("SELECT count(*) FROM {table}"))
+        .await
+        .expect("a read still runs");
+
+    // The pool's reset (`COM_RESET_CONNECTION`) gives the next run a normal session.
+    session.reset().await.expect("reset");
+    run_all(&mut session, &format!("INSERT INTO {table} VALUES (3)"))
+        .await
+        .expect("after the reset a write runs again");
+    let _ = run_all(&mut session, &format!("DROP TABLE {table}")).await;
+}

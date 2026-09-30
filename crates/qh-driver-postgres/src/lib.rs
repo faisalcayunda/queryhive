@@ -101,7 +101,7 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
 };
-use qh_sql::strip_terminator;
+use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
 use rustls::client::danger::ServerCertVerifier;
 use tokio_postgres::types::private::BytesMut;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type};
@@ -664,7 +664,10 @@ impl Session for PostgresSession {
         // PostgreSQL rejects `EXPLAIN SELECT 1;`, so the terminator goes — and
         // only a real one: a `;` inside a literal is text. `strip_terminator`
         // knows the difference, which is why it is shared rather than reimplemented.
-        format!("EXPLAIN {}", strip_terminator(sql))
+        format!(
+            "EXPLAIN {}",
+            strip_terminator_dialect(sql, Dialect::Postgres)
+        )
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
@@ -697,6 +700,14 @@ impl Session for PostgresSession {
     ///
     /// The three messages go out before any answer is read (`try_join3` polls in order, and
     /// each request is queued when first polled), so the whole reset costs one round trip.
+    /// Server-side read-only: every later statement of this session runs in a read-only
+    /// transaction, so a write (and `nextval`, and a function that writes) fails with the
+    /// server's own error. `reset` clears it (`RESET ALL`), and the guard keeps a user's `SET`
+    /// from turning it back off.
+    fn read_only_statement(&self) -> Option<&'static str> {
+        Some("SET SESSION default_transaction_read_only = on")
+    }
+
     async fn reset(&mut self) -> Result<(), EngineError> {
         self.ensure_open()?;
         let client = &self.client;
@@ -993,7 +1004,12 @@ fn map_describe_error(
     // A multi-statement script is the one case worth naming, because the server's
     // own message does not say what to do about it.
     if let Some(db_error) = error.as_db_error() {
-        if db_error.code().code() == "42601" && qh_sql::statement_count(sql, &qh_sql::scan(sql)) > 1
+        if db_error.code().code() == "42601"
+            && statement_count_dialect(
+                sql,
+                &scan_dialect(sql, Dialect::Postgres),
+                Dialect::Postgres,
+            ) > 1
         {
             return EngineError::Usage {
                 message: "this statement holds more than one command, and a driver can only \
@@ -1308,7 +1324,12 @@ mod tests {
 
     #[test]
     fn explain_drops_a_terminator_but_not_a_semicolon_inside_text() {
-        let session = |sql: &str| format!("EXPLAIN {}", strip_terminator(sql));
+        let session = |sql: &str| {
+            format!(
+                "EXPLAIN {}",
+                strip_terminator_dialect(sql, Dialect::Postgres)
+            )
+        };
         assert_eq!(session("SELECT 1"), "EXPLAIN SELECT 1");
         // PostgreSQL rejects `EXPLAIN SELECT 1;`.
         assert_eq!(session("SELECT 1;"), "EXPLAIN SELECT 1");

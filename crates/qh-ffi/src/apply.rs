@@ -515,10 +515,14 @@ fn parse_parameters(value: Option<&Json>, index: usize) -> Result<Vec<Parameter>
 
 /// The safe mode is re-checked against each statement before it runs (in `apply_changes`,
 /// through `guard`); this is the test-side helper for plans built directly. It reads under
-/// the strictest set of readings, MySQL's, so a statement it allows every dialect allows.
+/// both the MySQL and the PostgreSQL readings, so a statement it allows every dialect allows.
 #[cfg(test)]
 fn allows(mode: SafeMode, sql: &str) -> bool {
-    qh_sql::check_confirmed_readings(mode, false, sql, qh_sql::Dialect::Mysql.readings()).is_ok()
+    [qh_sql::Dialect::Mysql, qh_sql::Dialect::Postgres]
+        .iter()
+        .all(|dialect| {
+            qh_sql::check_confirmed_readings(mode, false, sql, dialect.readings()).is_ok()
+        })
 }
 
 #[cfg(test)]

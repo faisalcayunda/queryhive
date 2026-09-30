@@ -479,7 +479,13 @@ pub fn classify(sql: &str) -> StatementKind {
 
 /// [`classify`] under `dialect`'s lexical rules.
 pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
-    let scan = scan_dialect(sql, dialect);
+    let lexer: Lexer = dialect.into();
+    let scan = scan_dialect(sql, lexer);
+    // The text names something that can change what the next bytes mean: a session setting
+    // the classifier's own reading depends on. Unclassifiable, so refused below `full`.
+    if lexer.is_postgres() && changes_session_encoding(sql) {
+        return StatementKind::Unknown;
+    }
     let Some(leading) = scan.leading_keyword.as_deref() else {
         // No word at all: an empty fragment, a bare operator, a comment. Nothing to
         // recognise, so nothing is claimed.
@@ -493,15 +499,49 @@ pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
         // A read starter, but one that can hide a write further in: `WITH x AS (DELETE
         // …) SELECT`, `SELECT … FOR UPDATE`, `SELECT … INTO new_table`, `EXPLAIN
         // ANALYZE …`. Every bare word is checked.
-        "SELECT" | "VALUES" | "TABLE" | "WITH" | "EXPLAIN" => scan
-            .keywords
-            .iter()
-            .find_map(|word| write_kind(word))
-            .unwrap_or(StatementKind::ReadOnly),
+        "SELECT" | "VALUES" | "TABLE" | "WITH" | "EXPLAIN" => {
+            // The strictest word wins, not the first: `DO` (Unknown) before `DELETE` (Dml)
+            // must not lower the answer.
+            let word_kind = scan
+                .keywords
+                .iter()
+                .filter_map(|word| write_kind(word))
+                .max_by_key(|kind| kind_rank(*kind));
+            let lock_kind = locking_clause(&scan.keywords).then_some(StatementKind::Dml);
+            [word_kind, lock_kind]
+                .into_iter()
+                .flatten()
+                .max_by_key(|kind| kind_rank(*kind))
+                .unwrap_or(StatementKind::ReadOnly)
+        }
+        // A `COPY` that runs a program on the server host is not a row write, it is code
+        // execution the classifier will not vouch for.
+        "COPY" if scan.keywords.iter().any(|word| word == "PROGRAM") => StatementKind::Unknown,
         // Anything else is judged by its own leading word: a statement that *starts*
         // with `INSERT` is a write even if it contains no other write word.
         other => write_kind(other).unwrap_or(StatementKind::Unknown),
     }
+}
+
+/// Whether the words hold a row-locking clause beyond `FOR UPDATE` (which `UPDATE` catches):
+/// `FOR SHARE`, `FOR KEY SHARE` and `FOR NO KEY UPDATE` take row locks like `FOR UPDATE` does.
+/// A column named `key`, `no` or `share` right after a `FOR` is a false positive, and a refused
+/// read is the cheap side of that.
+fn locking_clause(words: &[String]) -> bool {
+    words
+        .windows(2)
+        .any(|pair| pair[0] == "FOR" && matches!(pair[1].as_str(), "SHARE" | "KEY" | "NO"))
+}
+
+/// Whether PostgreSQL text could switch the session's `client_encoding`, or hides the name of
+/// the function that does. In a multibyte client encoding whose second byte can be `\`, a later
+/// `E'…'` string ends somewhere no reading here predicts, so text that can move the encoding is
+/// not read-only however it looks. Textual and case-insensitive on purpose: `"set_config"` and
+/// `pg_catalog.set_config` are the same function, so a keyword scan that skips quoted
+/// identifiers is not enough, and a `U&"…"` identifier can spell any name through an escape.
+fn changes_session_encoding(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("set_config") || lower.contains("client_encoding") || lower.contains("u&\"")
 }
 
 /// Whether one bare word names a write, and which kind.
@@ -515,6 +555,9 @@ fn write_kind(word: &str) -> Option<StatementKind> {
     if DDL_WORDS.contains(&word) {
         return Some(StatementKind::Ddl);
     }
+    if OPAQUE_WORDS.contains(&word) {
+        return Some(StatementKind::Unknown);
+    }
     None
 }
 
@@ -523,14 +566,19 @@ fn write_kind(word: &str) -> Option<StatementKind> {
 /// `COPY` and `LOAD` are here because both can write, `CALL` and `DO` because a routine
 /// body can do anything, and `REPLACE`/`UPSERT` because two engines spell the write that
 /// way. `INTO` is not here: it is DDL, for `SELECT … INTO`.
-const DML_WORDS: [&str; 10] = [
-    "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT", "COPY", "LOAD", "CALL", "DO",
+const DML_WORDS: [&str; 8] = [
+    "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT", "COPY", "LOAD",
 ];
 
+/// Words that run code the classifier cannot read, or a statement prepared elsewhere: a `DO`
+/// block or a `CALL` runs a routine body that can do anything, and `EXECUTE` runs a statement
+/// prepared earlier, so none of them is a row write `no_ddl` should let through.
+const OPAQUE_WORDS: [&str; 3] = ["DO", "CALL", "EXECUTE"];
+
 /// Statements that change structure, or that a read-only connection must not run.
-const DDL_WORDS: [&str; 17] = [
+const DDL_WORDS: [&str; 18] = [
     "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE", "COMMENT", "RENAME", "REINDEX",
-    "VACUUM", "CLUSTER", "ANALYZE", "REFRESH", "ATTACH", "DETACH", "LOCK", "INTO",
+    "VACUUM", "CLUSTER", "ANALYZE", "ANALYSE", "REFRESH", "ATTACH", "DETACH", "LOCK", "INTO",
 ];
 
 /// Check a whole script against a Safe Mode, with no confirmation given.
@@ -606,13 +654,32 @@ macro_rules! ambiguous_reason {
     };
 }
 
-/// [`ambiguous_reason!`] for `mode`, or `None` for `full`, which refuses nothing.
-fn ambiguous_reason(mode: SafeMode) -> Option<&'static str> {
-    match mode {
-        SafeMode::Full => None,
-        SafeMode::NoDdl => Some(ambiguous_reason!("a no_ddl connection")),
-        SafeMode::Confirm => Some(ambiguous_reason!("a confirm connection")),
-        SafeMode::ReadOnly => Some(ambiguous_reason!("a read-only connection")),
+/// [`ambiguous_reason!`] for PostgreSQL, whose string escaping depends on
+/// `standard_conforming_strings` instead.
+macro_rules! ambiguous_reason_postgres {
+    ($who:literal) => {
+        concat!(
+            "the classifier could not tell where this statement ends or what it does, because \
+             PostgreSQL reads a backslash in a plain string differently depending on \
+             standard_conforming_strings (write a quote inside a string as '' instead of \\', \
+             or use an E'' string), and ",
+            $who,
+            " refuses an unclassified statement"
+        )
+    };
+}
+
+/// [`ambiguous_reason!`] for `mode`, or `None` for `full`, which refuses nothing. `postgres`
+/// picks the PostgreSQL wording.
+fn ambiguous_reason(mode: SafeMode, postgres: bool) -> Option<&'static str> {
+    match (mode, postgres) {
+        (SafeMode::Full, _) => None,
+        (SafeMode::NoDdl, false) => Some(ambiguous_reason!("a no_ddl connection")),
+        (SafeMode::Confirm, false) => Some(ambiguous_reason!("a confirm connection")),
+        (SafeMode::ReadOnly, false) => Some(ambiguous_reason!("a read-only connection")),
+        (SafeMode::NoDdl, true) => Some(ambiguous_reason_postgres!("a no_ddl connection")),
+        (SafeMode::Confirm, true) => Some(ambiguous_reason_postgres!("a confirm connection")),
+        (SafeMode::ReadOnly, true) => Some(ambiguous_reason_postgres!("a read-only connection")),
     }
 }
 
@@ -626,13 +693,14 @@ pub fn decisions_readings<'a>(
     sql: &'a str,
     readings: &[Lexer],
 ) -> Vec<StatementDecision<'a>> {
+    let postgres = readings.iter().any(|lexer| lexer.is_postgres());
     let Some(statements) = statements_agreeing(sql, readings) else {
         return vec![StatementDecision {
             index: 1,
             kind: StatementKind::Unknown,
             statement: sql.trim(),
             decision: mode.decision(StatementKind::Unknown),
-            reason: ambiguous_reason(mode),
+            reason: ambiguous_reason(mode, postgres),
         }];
     };
     statements
@@ -652,7 +720,7 @@ pub fn decisions_readings<'a>(
                 statement,
                 decision: mode.decision(kind),
                 reason: if ambiguous {
-                    ambiguous_reason(mode)
+                    ambiguous_reason(mode, postgres)
                 } else {
                     mode.refusal(kind)
                 },
@@ -1145,9 +1213,13 @@ mod tests {
             ("VACUUM people", StatementKind::Ddl),
             ("EXPLAIN ANALYZE SELECT 1", StatementKind::Ddl),
             // A routine call can write whatever its body writes, and an anonymous
-            // block can do anything.
-            ("CALL do_something()", StatementKind::Dml),
-            ("DO $$ BEGIN DELETE FROM people; END $$", StatementKind::Dml),
+            // block can do anything: neither is a row write the classifier can vouch for,
+            // so both are unclassified and `no_ddl` refuses them too (W3-T0b).
+            ("CALL do_something()", StatementKind::Unknown),
+            (
+                "DO $$ BEGIN DELETE FROM people; END $$",
+                StatementKind::Unknown,
+            ),
             ("GRANT SELECT ON people TO reader", StatementKind::Ddl),
         ] {
             assert_eq!(classify(sql), kind, "{sql}");
@@ -1393,5 +1465,447 @@ mod tests {
             floor.resolve(),
             Some((SafeMode::ReadOnly, FloorSource::Policy))
         );
+    }
+
+    // W3-T0b: PostgreSQL. Three payloads a review found hid a write from the generic
+    // reading, and the readings a PostgreSQL connection must satisfy now refuse them.
+    const POSTGRES_INJECTIONS: [&str; 3] = [
+        // `E'…'` honours the backslash, so `\'` does not close the string.
+        "SELECT E'x\\' AS a, '; DELETE FROM t; --'",
+        // PostgreSQL block comments nest, so `/* /* */ ' */` is one comment.
+        "SELECT 1 /* /* */ ' */; DELETE FROM t; --'",
+        // `$` continues an identifier, so `a$x$` is a name and not a dollar quote.
+        "SELECT 1 AS a$x$; DELETE FROM t; --$x$",
+    ];
+
+    fn pg_check(mode: SafeMode, sql: &str) -> Result<(), SafeModeError> {
+        check_confirmed_readings(mode, false, sql, Dialect::Postgres.readings())
+    }
+
+    fn pg_read_only(sql: &str) -> Result<(), SafeModeError> {
+        pg_check(SafeMode::ReadOnly, sql)
+    }
+
+    #[test]
+    fn a_postgres_injection_is_refused_by_every_mode_that_refuses_a_write() {
+        for sql in POSTGRES_INJECTIONS {
+            // The generic reading is the bug: each of these is one harmless SELECT to it.
+            assert_eq!(classify(sql), StatementKind::ReadOnly, "{sql:?}");
+            // The PostgreSQL reading sees the DELETE.
+            for lexer in Dialect::Postgres.readings() {
+                assert_eq!(
+                    classify_dialect(sql, *lexer),
+                    StatementKind::Dml,
+                    "{lexer:?} {sql:?}"
+                );
+            }
+            assert_eq!(
+                classify_readings(sql, Dialect::Postgres.readings()),
+                StatementKind::Dml
+            );
+            assert!(matches!(
+                pg_read_only(sql),
+                Err(SafeModeError::Refused {
+                    kind: StatementKind::Dml,
+                    index: 2,
+                    ..
+                })
+            ));
+            assert!(pg_check(SafeMode::Confirm, sql).is_err(), "{sql:?}");
+            // `no_ddl` lets a write run, so only the DDL variant of the payload is refused.
+            assert!(pg_check(SafeMode::NoDdl, sql).is_ok(), "{sql:?}");
+            let ddl = sql.replace("DELETE FROM t", "DROP TABLE t");
+            assert!(pg_check(SafeMode::NoDdl, &ddl).is_err(), "{ddl:?}");
+            assert!(pg_read_only(&ddl).is_err(), "{ddl:?}");
+            // `full` refuses nothing, by design.
+            assert!(pg_check(SafeMode::Full, sql).is_ok());
+            // And the dialect entry points agree with the readings.
+            assert!(check_dialect(SafeMode::ReadOnly, sql, Dialect::Postgres).is_err());
+        }
+    }
+
+    #[test]
+    fn more_postgres_payloads_are_refused_under_read_only() {
+        for sql in [
+            // Lower-case `e`, and a write in the same statement as the E string.
+            "SELECT e'x\\' AS a, '; DELETE FROM t; --'",
+            "SELECT E'\\'' AS a; UPDATE t SET a = 1; --'",
+            // A `--` comment ends at a carriage return.
+            "SELECT 1 -- x\r; DELETE FROM t",
+            // A backtick is an operator character, not a quote.
+            "SELECT ` ; DELETE FROM t ; -- `",
+            // A non-ASCII letter is part of an identifier, so `é$x$` is one name.
+            "SELECT 1 AS é$x$; DELETE FROM t; --$x$",
+            "SELECT 1 AS a1$$; DELETE FROM t; --$$",
+            // A dollar quote that starts straight after a number closes where it says.
+            "SELECT 1$q$ $q$; DELETE FROM t",
+            // Nested comments, deeper.
+            "SELECT 1 /* /* /* */ */ */ ; DELETE FROM t; /* ' */",
+            "SELECT 1 /* a /* b */ ' c */; INSERT INTO t VALUES (1); --'",
+            // A continued E string keeps honouring the backslash in its second piece.
+            "SELECT E'a'\n'x\\'y'; DELETE FROM t; --'",
+            "SELECT E'a' -- c\n'x\\'y'; DROP TABLE t; --'",
+            // A bit string has no backslash, and a doubled quote in it starts a new string.
+            "SELECT B'1\\'; DELETE FROM t; --'",
+            "SELECT U&'\\'; DELETE FROM t; --'",
+            // The write is the first statement, or the second, or after a comment.
+            "DELETE FROM t; SELECT 1",
+            "/* /* */ */ DELETE FROM t",
+            "SELECT 1; /* /* */ */ DELETE FROM t",
+            // A write in the dollar-quoted body is text, but a write after it is code.
+            "SELECT $a$ x $a$; DELETE FROM t",
+            // A write inside a CTE.
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * INTO u FROM t",
+            // A keyword that only *starts* like a read is a name, so it cannot be classified.
+            "select$x 1",
+        ] {
+            assert!(pg_read_only(sql).is_err(), "read_only must refuse {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_postgres_string_the_two_settings_read_differently_is_refused_and_says_why() {
+        // Under `standard_conforming_strings = on` the DELETE is inside a string; under
+        // `off` it is code. The server the guard cannot see decides, so the guard refuses.
+        let sql = "SELECT 'x\\' AS a, '; DELETE FROM t; --'";
+        let error = pg_read_only(sql).expect_err("ambiguous text is refused");
+        let SafeModeError::Refused { kind, reason, .. } = error else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(kind, StatementKind::Unknown);
+        assert!(reason.contains("standard_conforming_strings"), "{reason}");
+        assert!(!reason.contains("sql_mode"), "{reason}");
+        // The default reading alone would have let it through: that is the bug this closes.
+        assert!(check_dialect(SafeMode::ReadOnly, sql, Dialect::Postgres).is_ok());
+        assert!(pg_check(SafeMode::NoDdl, sql).is_err());
+        assert!(pg_check(SafeMode::Confirm, sql).is_err());
+        // `full` still runs it, and MySQL keeps its own wording.
+        assert!(pg_check(SafeMode::Full, sql).is_ok());
+        let mysql = check_confirmed_readings(
+            SafeMode::ReadOnly,
+            false,
+            "SELECT '\\'; DELETE FROM t; -- '",
+            Dialect::Mysql.readings(),
+        );
+        assert!(
+            matches!(mysql, Err(SafeModeError::Refused { reason, .. }) if reason.contains("sql_mode"))
+        );
+        // A Windows path that ends in a backslash is the cost: valid with the setting on,
+        // and with a second statement after it ambiguous across both settings, so it is
+        // refused rather than guessed at.
+        assert!(pg_read_only("SELECT 'C:\\dir\\'; SELECT 2").is_err());
+        assert!(pg_read_only("SELECT 'C:\\\\dir\\\\'").is_ok());
+        assert!(pg_read_only("SELECT E'C:\\\\dir\\\\'").is_ok());
+        assert!(pg_read_only("SELECT 'a\\nb'").is_ok());
+    }
+
+    #[test]
+    fn ordinary_postgres_reads_still_pass() {
+        for sql in [
+            "SELECT 1",
+            "SELECT 1;",
+            "SELECT 1; -- trailing",
+            "SELECT 1; /* trailing */",
+            "SELECT 1 ; ; -- two terminators",
+            // Escape strings.
+            "SELECT E'\\n'",
+            "SELECT E'it\\'s'",
+            "select e'a\\\\b', E'tab\\t'",
+            "SELECT E'\\\\'",
+            // Comments, nested and not, with no payload.
+            "SELECT 1 /* a */",
+            "SELECT 1 /* a /* b */ c */",
+            "SELECT /* /* x */ */ 1 -- note",
+            "/* header /* nested */ */ SELECT 1",
+            "SELECT 1 /* it's ; not code */",
+            "-- a comment; DELETE\nSELECT 1",
+            "SELECT 1 -- DELETE FROM t\r\n",
+            // Parameters.
+            "SELECT $1, $2 FROM t WHERE a = $1",
+            "SELECT * FROM t WHERE a = $1 AND b = $2; -- done",
+            // Dollar quotes.
+            "SELECT $$a;b$$",
+            "SELECT $q$ DELETE FROM t; $q$",
+            "SELECT $é$x;y$é$, $a1_$z$a1_$",
+            "SELECT $a$ $b$a$ ; SELECT 1",
+            // Identifiers with a dollar or a non-ASCII letter.
+            "SELECT foo$bar FROM t",
+            "SELECT a$1, b$$ FROM t",
+            "SELECT é, naïve$x FROM t",
+            "SELECT \"a;b\", \"c\"\"d\" FROM t",
+            "SELECT \"a\\\" FROM t",
+            // Strings.
+            "SELECT 'a;b'",
+            "SELECT 'it''s; ok'",
+            "SELECT 'a'\n'b'",
+            "SELECT B'101', X'1F', N'x', U&'d\\0061t'",
+            "SELECT * FROM t WHERE updated_at > 1 AND dropped = 2 AND created_at IS NULL",
+            // Non-SELECT reads.
+            "SHOW search_path",
+            "EXPLAIN SELECT 1",
+            "VALUES (1), (2)",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+        ] {
+            assert!(
+                pg_read_only(sql).is_ok(),
+                "read_only must allow {sql:?}: {:?}",
+                pg_read_only(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn a_postgres_script_is_refused_when_any_statement_is_a_write_or_unreadable() {
+        assert!(pg_read_only("SELECT 1; SELECT 2").is_ok());
+        assert!(pg_read_only("SELECT 1; SET x = 1").is_err());
+        assert!(pg_read_only("SELECT 1; DELETE FROM t").is_err());
+        assert!(pg_read_only("SELECT 1; SELECT $$ ; DELETE FROM t $$").is_ok());
+        // Unterminated text cannot be classified as a read by a reading that sees a write.
+        assert!(pg_read_only("SELECT E'a\\'; DELETE FROM t").is_ok());
+        assert!(pg_read_only("SELECT 'a\\'; DELETE FROM t").is_err());
+        // Only trivia is nothing to run, and the classifier says so.
+        assert!(pg_read_only("-- nothing").is_ok());
+        assert!(pg_read_only("/* /* */ */").is_ok());
+    }
+
+    #[test]
+    fn postgres_readings_fail_closed_on_every_kind_and_every_mode() {
+        for sql in [
+            "SELECT 1; DROP TABLE t",
+            "SET x = 1",
+            "SELECT $a$ ; $a$",
+            "SELECT 'a\\'; DELETE FROM t; --'",
+            "COPY t FROM STDIN",
+        ] {
+            for mode in [SafeMode::ReadOnly, SafeMode::Confirm] {
+                let decisions = decisions_readings(mode, sql, Dialect::Postgres.readings());
+                if sql == "SELECT $a$ ; $a$" {
+                    assert!(decisions.iter().all(|d| d.decision == Decision::Allow));
+                } else {
+                    assert!(
+                        decisions.iter().any(|d| d.decision != Decision::Allow),
+                        "{mode:?} must not allow {sql:?}"
+                    );
+                }
+            }
+            assert!(pg_check(SafeMode::Full, sql).is_ok());
+        }
+    }
+
+    #[test]
+    fn postgres_statements_split_where_the_server_splits() {
+        let sql = "SELECT E'a;b'; SELECT 1 /* ; /* ; */ ; */; SELECT $$;$$";
+        for lexer in Dialect::Postgres.readings() {
+            assert_eq!(
+                statements_dialect(sql, *lexer),
+                vec![
+                    "SELECT E'a;b'",
+                    "SELECT 1 /* ; /* ; */ ; */",
+                    "SELECT $$;$$"
+                ],
+                "{lexer:?}"
+            );
+        }
+        // The lines follow the same split, past a nested header comment.
+        let lines: Vec<usize> = statements_with_lines_dialect(
+            "/* a /* b */ */\nSELECT 1;\n-- c\r\nSELECT 2",
+            Dialect::Postgres,
+        )
+        .iter()
+        .map(|statement| statement.line)
+        .collect();
+        assert_eq!(lines, vec![2, 4]);
+        // Two readings that split differently are not a script anyone can read.
+        assert!(
+            statements_agreeing("SELECT 'x\\'; SELECT 1; --'", Dialect::Postgres.readings())
+                .is_none()
+        );
+        assert!(
+            statements_agreeing("SELECT 'x'; SELECT 1", Dialect::Postgres.readings()).is_some()
+        );
+    }
+
+    #[test]
+    fn generic_scanning_is_unchanged_for_trino_and_the_other_callers() {
+        // Trino keeps the generic reading: it has no dollar quotes and no `E'…'` strings
+        // (a `$` is a syntax error there), block comments do not nest, and it runs one
+        // statement per request. A regression here would change a connection this task
+        // does not touch.
+        for sql in POSTGRES_INJECTIONS {
+            assert_eq!(
+                classify_dialect(sql, Dialect::Generic),
+                StatementKind::ReadOnly
+            );
+        }
+        assert_eq!(Dialect::Generic.readings().len(), 1);
+        assert_eq!(Dialect::default(), Dialect::Generic);
+    }
+
+    // W3-T0b, second pass: what the review's two blocking bypasses and the cheap fixes named.
+
+    fn trino_read_only(sql: &str) -> Result<(), SafeModeError> {
+        check_confirmed_readings(SafeMode::ReadOnly, false, sql, Dialect::Trino.readings())
+    }
+
+    #[test]
+    fn a_trino_carriage_return_ends_a_line_comment() {
+        // Live on Trino: `SELECT 1 -- c\r, 2` returns two columns, so the comment ended at the
+        // `\r`. The generic reading waits for a newline and hid the write behind it.
+        let payload = "EXPLAIN /* x */ -- note\r ANALYZE INSERT INTO t VALUES (1)";
+        assert_eq!(
+            classify(payload),
+            StatementKind::ReadOnly,
+            "generic misreads it"
+        );
+        assert_ne!(
+            classify_dialect(payload, Dialect::Trino),
+            StatementKind::ReadOnly
+        );
+        assert!(trino_read_only(payload).is_err());
+        assert!(trino_read_only("SELECT 1 -- c\r; DELETE FROM t").is_err());
+        assert!(check_dialect(SafeMode::NoDdl, payload, Dialect::Trino).is_err());
+    }
+
+    #[test]
+    fn trino_reads_still_pass() {
+        for sql in [
+            "SELECT 1",
+            "SELECT 1 -- note\n, 2",
+            "SELECT 1 /* a */ , 2 -- DELETE\r\n",
+            "SELECT 'it''s; ok', \"a;b\" FROM t",
+            "SELECT 'a\\' , 'b'",
+            "SELECT X'ab', U&'d\\0061t' FROM t",
+            "SHOW CATALOGS",
+            "EXPLAIN SELECT 1",
+            "SELECT 1; -- trailing\r",
+        ] {
+            assert!(
+                trino_read_only(sql).is_ok(),
+                "{sql:?}: {:?}",
+                trino_read_only(sql)
+            );
+        }
+        // Trino does not nest block comments (live: `/* /* */ , 2 */` is a syntax error), so
+        // the inner `*/` closes the comment and the write after it is code.
+        assert!(trino_read_only("SELECT 1 /* /* */ ; DELETE FROM t /* */ */").is_err());
+        // No dollar quotes: a `$` is a syntax error there, and what follows it is read as code.
+        assert!(trino_read_only("SELECT 1 $x$; DELETE FROM t; $x$").is_err());
+        assert_eq!(Dialect::Trino.readings().len(), 1);
+        assert_eq!(Dialect::Trino.readings()[0], Lexer::TRINO);
+    }
+
+    #[test]
+    fn text_that_can_switch_the_postgres_encoding_is_not_a_read() {
+        for sql in [
+            "SELECT set_config('client_encoding', 'SJIS', false)",
+            "SELECT pg_catalog.set_config('client_encoding', 'GBK', false)",
+            "SELECT \"set_config\"('a', 'b', false)",
+            "SELECT pg_catalog.\"SET_CONFIG\"('a', 'b', false)",
+            "SELECT U&\"set\\005fconfig\"('a', 'b', false)",
+            "SELECT 'client_encoding'",
+            "SELECT 1 /* client_encoding */",
+            "SELECT SET_CONFIG ('x', 'y', true)",
+        ] {
+            for lexer in Dialect::Postgres.readings() {
+                assert_eq!(
+                    classify_dialect(sql, *lexer),
+                    StatementKind::Unknown,
+                    "{sql}"
+                );
+            }
+            for mode in [SafeMode::ReadOnly, SafeMode::Confirm, SafeMode::NoDdl] {
+                assert!(pg_check(mode, sql).is_err(), "{mode:?} {sql}");
+            }
+            assert!(pg_check(SafeMode::Full, sql).is_ok());
+        }
+        // Only PostgreSQL has the function; the other dialects are not made stricter for it.
+        assert_eq!(
+            classify_dialect("SELECT set_config FROM t", Dialect::Mysql),
+            StatementKind::ReadOnly
+        );
+        // `SET` itself was always refused.
+        assert!(pg_read_only("SET client_encoding = 'SJIS'").is_err());
+        assert!(pg_read_only("SELECT current_setting('client_encoding')").is_err());
+    }
+
+    #[test]
+    fn the_cheap_classifier_fixes() {
+        for (sql, kind) in [
+            // EXECUTE runs a statement prepared elsewhere: anywhere in the text.
+            ("EXECUTE p(1)", StatementKind::Unknown),
+            ("EXPLAIN ANALYZE EXECUTE p(1)", StatementKind::Unknown),
+            ("EXPLAIN EXECUTE p(1)", StatementKind::Unknown),
+            (
+                "SELECT 1 FROM (SELECT execute FROM t) x",
+                StatementKind::Unknown,
+            ),
+            ("PREPARE p AS DELETE FROM t", StatementKind::Unknown),
+            // ANALYSE is ANALYZE.
+            ("ANALYSE people", StatementKind::Ddl),
+            ("EXPLAIN ANALYSE SELECT 1", StatementKind::Ddl),
+            // DO, CALL and COPY … PROGRAM are code the classifier cannot read.
+            ("DO $$ BEGIN NULL; END $$", StatementKind::Unknown),
+            ("CALL p()", StatementKind::Unknown),
+            ("COPY t TO PROGRAM 'id'", StatementKind::Unknown),
+            ("COPY (SELECT 1) TO PROGRAM 'id'", StatementKind::Unknown),
+            ("COPY t FROM STDIN", StatementKind::Dml),
+            ("COPY t TO '/tmp/x'", StatementKind::Dml),
+            // A stricter word does not lose to an earlier, milder one.
+            (
+                "WITH x AS (SELECT 1) SELECT call, delete FROM t",
+                StatementKind::Unknown,
+            ),
+            (
+                "WITH x AS (SELECT 1) SELECT delete, call FROM t",
+                StatementKind::Unknown,
+            ),
+            // Every row-locking clause is a write.
+            ("SELECT * FROM t FOR UPDATE", StatementKind::Dml),
+            ("SELECT * FROM t FOR SHARE", StatementKind::Dml),
+            ("SELECT * FROM t FOR KEY SHARE", StatementKind::Dml),
+            ("SELECT * FROM t FOR NO KEY UPDATE", StatementKind::Dml),
+            (
+                "SELECT * FROM t FOR NO KEY UPDATE SKIP LOCKED",
+                StatementKind::Dml,
+            ),
+            (
+                "SELECT * FROM t /* c */ FOR /* c */ SHARE NOWAIT",
+                StatementKind::Dml,
+            ),
+            // A plain FOR is not a lock.
+            (
+                "SELECT substring(a FROM 1 FOR 2) FROM t",
+                StatementKind::ReadOnly,
+            ),
+            (
+                "SELECT * FROM t WHERE a = 'FOR SHARE'",
+                StatementKind::ReadOnly,
+            ),
+        ] {
+            for dialect in [
+                Dialect::Generic,
+                Dialect::Postgres,
+                Dialect::Mysql,
+                Dialect::Trino,
+            ] {
+                assert_eq!(classify_dialect(sql, dialect), kind, "{dialect:?} {sql}");
+            }
+        }
+        // no_ddl lets a row write through, so it must refuse the opaque ones by name.
+        for sql in [
+            "DO $$ BEGIN NULL; END $$",
+            "CALL p()",
+            "EXECUTE p",
+            "COPY t TO PROGRAM 'x'",
+            "ANALYSE t",
+        ] {
+            assert!(check(SafeMode::NoDdl, sql).is_err(), "{sql}");
+            assert!(check(SafeMode::Confirm, sql).is_err(), "{sql}");
+            assert!(check(SafeMode::ReadOnly, sql).is_err(), "{sql}");
+            assert!(check(SafeMode::Full, sql).is_ok(), "{sql}");
+        }
+        assert!(check(SafeMode::NoDdl, "COPY t FROM STDIN").is_ok());
     }
 }

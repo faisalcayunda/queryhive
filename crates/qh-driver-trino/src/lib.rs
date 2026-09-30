@@ -90,7 +90,7 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
 };
-use qh_sql::strip_terminator;
+use qh_sql::{strip_terminator_dialect, Dialect};
 use serde::Deserialize;
 use serde_json::Value as Json;
 
@@ -1394,7 +1394,7 @@ fn objects_sql(catalog: &str, schema: &str) -> Result<String, EngineError> {
 /// so a caller who ended their statement the way SQL allows got a syntax error for
 /// it. Only a real terminator goes — a `;` inside a literal is data.
 fn explain_sql(sql: &str) -> String {
-    format!("EXPLAIN {}", strip_terminator(sql))
+    format!("EXPLAIN {}", strip_terminator_dialect(sql, Dialect::Trino))
 }
 
 /// A string literal with single quotes doubled, which is SQL's own escaping.

@@ -987,3 +987,407 @@ async fn a_failed_mysql_change_plan_rolls_back_what_it_wrote() {
         "the plan reported a rollback and left rows behind"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// the PostgreSQL Safe Mode bypasses W3-T0b closed: a read-only connection must not
+// run a write hidden in an E string, a nested comment or a `$` identifier
+// --------------------------------------------------------------------------- //
+
+const POSTGRES_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "postgres"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "55432"),
+    ("DB_USER", "qh"),
+    ("DB_PASSWORD", "qh-dev-only"),
+    ("DB_DATABASE", "qh"),
+    ("DB_SCHEMA", "public"),
+    ("DB_SSLMODE", "disable"),
+];
+
+/// Run one statement against the dev PostgreSQL, under `safe_mode` when given (the default is
+/// `full`, which the scratch-table setup and teardown use).
+async fn postgres_run(
+    sql: &str,
+    safe_mode: Option<&str>,
+) -> (Result<(), qh_ffi::CliError>, Vec<Json>) {
+    let mut pairs: Vec<(String, String)> = POSTGRES_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SQL".to_owned(), sql.to_owned()));
+    if let Some(mode) = safe_mode {
+        pairs.push(("SAFE_MODE".to_owned(), mode.to_owned()));
+    }
+    let mut out = Capture::new();
+    let result = run(
+        Command::Preview,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await;
+    (result, out.lines)
+}
+
+async fn postgres_count(table: &str) -> i64 {
+    let (result, lines) = postgres_run(&format!("SELECT count(*) FROM {table}"), None).await;
+    result.expect("the checker runs");
+    data(&lines)[0][0]
+        .as_str()
+        .expect("a count is text")
+        .parse()
+        .expect("an integer")
+}
+
+/// A read-only PostgreSQL connection asked to run an injection must not delete the scratch
+/// row. The guard refuses each text before the connection opens (the pre-fix guard read every
+/// one as a single harmless SELECT, and only the driver's prepare, which refuses a second
+/// statement, stood in the way); `full` mode has no guard, so that backstop is what keeps the
+/// row alive there, and it is asserted too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_postgres_connection_does_not_run_an_injected_delete() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+
+    let table = format!(
+        "qh_w3t0b_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let (dropped, _) = postgres_run(&format!("DROP TABLE IF EXISTS {table}"), None).await;
+    dropped.expect("drop any leftover");
+    let (created, _) =
+        postgres_run(&format!("CREATE TABLE {table} (id INT PRIMARY KEY)"), None).await;
+    created.expect("create scratch table");
+    let (seeded, _) = postgres_run(&format!("INSERT INTO {table} VALUES (1)"), None).await;
+    seeded.expect("seed one row");
+    assert_eq!(
+        postgres_count(&table).await,
+        1,
+        "the seed row is there to start"
+    );
+
+    let payloads = [
+        // The three the review found.
+        format!("SELECT E'x\\' AS a, '; DELETE FROM {table}; --'"),
+        format!("SELECT 1 /* /* */ ' */; DELETE FROM {table}; --'"),
+        format!("SELECT 1 AS a$x$; DELETE FROM {table}; --$x$"),
+        // The same idea through the other spellings the server lexes its own way.
+        format!("SELECT e'x\\' AS a, '; DELETE FROM {table}; --'"),
+        format!("SELECT 1 AS é$x$; DELETE FROM {table}; --$x$"),
+        format!("SELECT 1 -- x\r; DELETE FROM {table}"),
+        format!("SELECT 1 /* /* /* */ */ */ ; DELETE FROM {table}; /* ' */"),
+        format!("SELECT E'a'\n'x\\'y'; DELETE FROM {table}; --'"),
+        // `standard_conforming_strings = off` reads a plain string this way.
+        format!("SELECT 'x\\' AS a, '; DELETE FROM {table}; --'"),
+        format!("SELECT ` ; DELETE FROM {table} ; -- `"),
+    ];
+    for payload in &payloads {
+        let (result, lines) = postgres_run(payload, Some("read_only")).await;
+        let error = result.expect_err(&format!(
+            "a read-only connection must refuse {payload:?}, got {lines:?}"
+        ));
+        let message = error.message();
+        assert!(
+            message.contains("read-only") || message.contains("could not tell"),
+            "{payload:?} was refused for the wrong reason: {message}"
+        );
+        assert_eq!(
+            postgres_count(&table).await,
+            1,
+            "the injected DELETE must not have run for {payload:?}"
+        );
+    }
+
+    // `full` refuses nothing, so what keeps the row is the driver's prepare, which refuses a
+    // second statement: the backstop this task leaves as it is.
+    for payload in &payloads[..3] {
+        let (result, _) = postgres_run(payload, None).await;
+        assert!(
+            result.is_err(),
+            "the driver must refuse {payload:?} in full mode"
+        );
+        assert_eq!(postgres_count(&table).await, 1, "full mode: {payload:?}");
+    }
+
+    let (dropped, _) = postgres_run(&format!("DROP TABLE {table}"), None).await;
+    dropped.expect("clean up the scratch table");
+}
+
+/// A read-only PostgreSQL connection still runs the reads the new reading has to keep: an
+/// escape string, a nested comment with nothing behind it, a dollar-quoted body holding a `;`,
+/// and an identifier that contains a `$`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_postgres_connection_runs_ordinary_reads() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    for (sql, expected) in [
+        ("SELECT E'a\\nb' = (chr(97) || chr(10) || chr(98))", "true"),
+        ("SELECT E'it\\'s' = 'it''s'", "true"),
+        ("SELECT 1 /* a /* b */ c */ + 1", "2"),
+        ("SELECT $$a;b$$", "a;b"),
+        ("SELECT $q$ DELETE FROM t; $q$", " DELETE FROM t; "),
+        ("SELECT 1 AS foo$bar", "1"),
+        ("SELECT 1; -- trailing", "1"),
+        ("SELECT 'a'\n'b'", "ab"),
+    ] {
+        let (result, events) = postgres_run(sql, Some("read_only")).await;
+        result.unwrap_or_else(|error| panic!("{sql:?} must run: {}", error.message()));
+        assert_eq!(
+            data(&events)[0][0].as_str(),
+            Some(expected),
+            "{sql:?}: {}",
+            lines(&events)
+        );
+    }
+}
+
+/// What the guard reads as a plain read but the server runs as a write is stopped by the
+/// server itself under `read_only`: the session is switched to refuse writes before the run's
+/// own statements. `nextval` and a function that writes are the two the guard cannot see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_postgres_run_makes_the_server_refuse_what_the_guard_cannot_see() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let name = format!(
+        "qh_w3t0b_srv_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    for setup in [
+        format!("DROP TABLE IF EXISTS {name}"),
+        format!("CREATE TABLE {name} (id INT)"),
+        format!("INSERT INTO {name} VALUES (1)"),
+        format!("CREATE SEQUENCE {name}_seq"),
+        format!(
+            "CREATE FUNCTION {name}_f() RETURNS int LANGUAGE sql AS \
+             $$ INSERT INTO {name} VALUES (2) RETURNING id $$"
+        ),
+    ] {
+        let (result, _) = postgres_run(&setup, None).await;
+        result.unwrap_or_else(|error| panic!("{setup}: {}", error.message()));
+    }
+
+    for sql in [
+        format!("SELECT nextval('{name}_seq')"),
+        format!("SELECT {name}_f()"),
+    ] {
+        // Under `full` it runs (the control), so the refusal below is the mode's doing.
+        // `nextval` is only a control on the first call, and the function is a control that
+        // adds a row, which is counted and removed again.
+        let (result, _) = postgres_run(&sql, None).await;
+        result.unwrap_or_else(|error| panic!("{sql} must run under full: {}", error.message()));
+    }
+    let (result, _) = postgres_run(&format!("DELETE FROM {name} WHERE id = 2"), None).await;
+    result.expect("remove the control's row");
+    let rows_before = postgres_count(&name).await;
+    assert_eq!(rows_before, 1);
+
+    for sql in [
+        format!("SELECT nextval('{name}_seq')"),
+        format!("SELECT {name}_f()"),
+    ] {
+        let (result, events) = postgres_run(&sql, Some("read_only")).await;
+        let error = result.expect_err(&format!(
+            "the server must refuse {sql} under read_only: {events:?}"
+        ));
+        assert!(
+            error.message().contains("read-only transaction"),
+            "{sql}: {}",
+            error.message()
+        );
+    }
+    assert_eq!(postgres_count(&name).await, 1, "the function wrote nothing");
+    let (result, events) = postgres_run(&format!("SELECT last_value FROM {name}_seq"), None).await;
+    result.expect("read the sequence");
+    assert_eq!(
+        data(&events)[0][0].as_str(),
+        Some("1"),
+        "the sequence moved once, under full, and not under read_only"
+    );
+
+    for cleanup in [
+        format!("DROP FUNCTION {name}_f()"),
+        format!("DROP SEQUENCE {name}_seq"),
+        format!("DROP TABLE {name}"),
+    ] {
+        let (result, _) = postgres_run(&cleanup, None).await;
+        result.expect("clean up");
+    }
+}
+
+/// The review's encoding attack: `set_config('client_encoding', …)` classifies as a read, and a
+/// script (import) runs on one session, so a later `E'…'` string could hide a write from every
+/// reading. The guard now refuses the encoding switch, and the write cannot land either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_postgres_import_that_switches_the_encoding_writes_nothing() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let table = format!(
+        "qh_w3t0b_enc_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    for setup in [
+        format!("DROP TABLE IF EXISTS {table}"),
+        format!("CREATE TABLE {table} (id INT)"),
+        format!("INSERT INTO {table} VALUES (1)"),
+    ] {
+        let (result, _) = postgres_run(&setup, None).await;
+        result.expect("setup");
+    }
+    // SJIS-like: the second byte of a two-byte character can be a backslash, so the string
+    // below ends where no single-byte reading expects.
+    let script = format!(
+        "SELECT set_config('client_encoding', 'SJIS', false);\n\
+         SELECT E'\\x83\\\\' AS a, '; INSERT INTO {table} VALUES (99); --';\n"
+    );
+    let path = std::env::temp_dir().join(format!("{table}.sql"));
+    std::fs::write(&path, script).expect("write the script");
+    let mut pairs: Vec<(String, String)> = POSTGRES_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SAFE_MODE".to_owned(), "read_only".to_owned()));
+    pairs.push((
+        "IMPORT_PATH".to_owned(),
+        path.to_str().expect("utf-8 path").to_owned(),
+    ));
+    let mut out = Capture::new();
+    let result = run(
+        Command::ImportData,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await;
+    let _ = std::fs::remove_file(&path);
+    let error = result.expect_err("the import must be refused");
+    assert!(
+        error.message().contains("could not tell"),
+        "{}",
+        error.message()
+    );
+    assert_eq!(postgres_count(&table).await, 1, "nothing was written");
+    let (result, _) = postgres_run(&format!("DROP TABLE {table}"), None).await;
+    result.expect("clean up");
+}
+
+const TRINO_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "trino"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "58080"),
+    ("DB_USER", "queryhive"),
+    ("DB_DATABASE", "memory"),
+    ("DB_SCHEMA", "default"),
+];
+
+async fn trino_run(
+    sql: &str,
+    safe_mode: Option<&str>,
+) -> (Result<(), qh_ffi::CliError>, Vec<Json>) {
+    let mut pairs: Vec<(String, String)> = TRINO_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SQL".to_owned(), sql.to_owned()));
+    if let Some(mode) = safe_mode {
+        pairs.push(("SAFE_MODE".to_owned(), mode.to_owned()));
+    }
+    let mut out = Capture::new();
+    let result = run(
+        Command::Preview,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await;
+    (result, out.lines)
+}
+
+async fn trino_count(table: &str) -> i64 {
+    let (result, events) = trino_run(&format!("SELECT count(*) FROM {table}"), None).await;
+    result.expect("the checker runs");
+    let cell = &data(&events)[0][0];
+    cell.as_i64()
+        .or_else(|| cell.as_str().and_then(|text| text.parse().ok()))
+        .expect("an integer count")
+}
+
+/// On Trino a `--` comment ends at a carriage return (`SELECT 1 -- c\r, 2` has two columns), so
+/// `EXPLAIN … -- note\r ANALYZE INSERT …` is a write the generic reading called one EXPLAIN. A
+/// read-only Trino connection must refuse it and the scratch table must keep its rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_trino_connection_does_not_run_a_carriage_return_hidden_insert() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_TRINO").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_TRINO=1 with deploy/dev/up.sh running");
+        return;
+    }
+    let table = format!(
+        "memory.default.qh_w3t0b_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    for setup in [
+        format!("DROP TABLE IF EXISTS {table}"),
+        format!("CREATE TABLE {table} (a integer)"),
+        format!("INSERT INTO {table} VALUES (1)"),
+    ] {
+        let (result, _) = trino_run(&setup, None).await;
+        result.unwrap_or_else(|error| panic!("{setup}: {}", error.message()));
+    }
+    assert_eq!(trino_count(&table).await, 1);
+
+    for payload in [
+        format!("EXPLAIN /* n */ -- note\r ANALYZE INSERT INTO {table} VALUES (2)"),
+        format!("EXPLAIN -- note\r ANALYZE DELETE FROM {table}"),
+    ] {
+        let (result, events) = trino_run(&payload, Some("read_only")).await;
+        let error = result.expect_err(&format!(
+            "a read-only connection must refuse {payload:?}, got {events:?}"
+        ));
+        assert!(
+            error.message().contains("read-only") || error.message().contains("could not tell"),
+            "{payload:?}: {}",
+            error.message()
+        );
+        assert_eq!(
+            trino_count(&table).await,
+            1,
+            "nothing was written for {payload:?}"
+        );
+    }
+    // The control: a plain read with the same comment still runs.
+    let (result, events) = trino_run("SELECT 1 -- note\n, 2", Some("read_only")).await;
+    result.unwrap_or_else(|error| panic!("a read runs: {} {events:?}", error.message()));
+
+    let (result, _) = trino_run(&format!("DROP TABLE {table}"), None).await;
+    result.expect("clean up");
+}

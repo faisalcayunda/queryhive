@@ -929,6 +929,13 @@ impl Session for MysqlSession {
     fn set_context(&mut self, database: Option<&str>, _schema: Option<&str>) {
         self.wanted_db = database.map(str::to_owned);
     }
+
+    /// Server-side read-only for every later transaction of this session, autocommit statements
+    /// included. `COM_RESET_CONNECTION` clears it, and the guard keeps a user's `SET` from
+    /// turning it back off.
+    fn read_only_statement(&self) -> Option<&'static str> {
+        Some("SET SESSION TRANSACTION READ ONLY")
+    }
 }
 
 // --------------------------------------------------------------------------- //

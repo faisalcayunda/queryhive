@@ -1287,6 +1287,57 @@ async fn postgres_search_path_does_not_leak_between_runs() {
     pool.settle().await;
 }
 
+/// The server-enforced read-only switch is session state, so the pool's reset has to clear it:
+/// a run under `read_only` must not leave the next (writing) run on the same session read-only.
+#[tokio::test]
+async fn postgres_read_only_does_not_survive_a_checkin() {
+    let Some(config) = live_pg() else {
+        eprintln!("{PG_SKIP}");
+        return;
+    };
+    let host = EngineHost::new();
+    let pool = host.pool();
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    let table = format!("qh_w3t0b_pool_{}", std::process::id());
+
+    let mut setup = lease(&*engine, &config).await;
+    one(&mut setup, &format!("DROP TABLE IF EXISTS {table}")).await;
+    one(&mut setup, &format!("CREATE TABLE {table} (i int)")).await;
+    setup.close().await.expect("close");
+    pool.settle().await;
+
+    let mut a = lease(&*engine, &config).await;
+    let pid = one(&mut a, "SELECT pg_backend_pid()").await;
+    a.enforce_read_only().await.expect("switch it on");
+    let refused = query(
+        &mut a,
+        &format!("INSERT INTO {table} VALUES (1)"),
+        &no_options(),
+    )
+    .await;
+    assert!(
+        format!("{refused:?}").contains("read-only transaction"),
+        "{refused:?}"
+    );
+    a.close().await.expect("close");
+    pool.settle().await;
+
+    let mut b = lease(&*engine, &config).await;
+    assert_eq!(
+        one(&mut b, "SELECT pg_backend_pid()").await,
+        pid,
+        "the session was reused"
+    );
+    assert_eq!(
+        one(&mut b, "SHOW default_transaction_read_only").await,
+        "off"
+    );
+    one(&mut b, &format!("INSERT INTO {table} VALUES (2)")).await;
+    one(&mut b, &format!("DROP TABLE {table}")).await;
+    b.close().await.expect("close");
+    pool.settle().await;
+}
+
 #[tokio::test]
 async fn postgres_a_failed_transaction_is_rolled_back_before_reuse() {
     let Some(config) = live_pg() else {
