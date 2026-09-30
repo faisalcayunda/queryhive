@@ -4,14 +4,15 @@ QueryHive is a macOS database client: a SwiftUI app (`app/`) over a Rust engine 
 
 ## Current work: the perf-parity run
 
-Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused on 2026-09-30 after W2 (W0-W2 committed; W3-T0 implemented but uncommitted).
+Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-09-30 in the middle of W3. Committed: W0-W2, W3-T0, W3-T0b, W3-T1, W3-A1, W3-D, W3-T2 commit 1 (`c96c6d6`). Several of these are marked pending review in the ledger.
 
 Resume in this order, one task at a time:
 
-1. Read `docs/architecture/development-plan.md` (task IDs such as `W3-T1`, files each task owns, gates, review tier) and `PROGRESS.md` (what landed). Read `target/run/ledger.md` if it exists: it holds task status, backlog `B-*`, incidents `I-*` and the pause point.
-2. **W3-T0** (MySQL Safe Mode bypass, security): the fix sits uncommitted in `crates/qh-sql`, `crates/qh-driver-mysql`, `crates/qh-ffi`. Review it (security + database reviewers), run its gates, then commit.
-3. **Close W2**: one exclusive bench session (nothing else running) for the Fase 1 and 4A axes, then the heavy gate, then commit the bench records.
-4. Continue with **W3** as `development-plan.md` §5 lists it, using the blueprints in `docs/architecture/blueprints/`.
+1. Read `docs/architecture/development-plan.md` (task IDs such as `W3-T2`, files each task owns, gates, review tier) and `PROGRESS.md`. Read `target/run/ledger.md`: it holds task status, backlog `B-*`, incidents `I-*`, the owner's decisions O-14 to O-20, and "PAUSE POINT 2" (the latest).
+2. **W3-T2 commit 2** (`crates/qh-editor`, plus its member in `Cargo.toml` and `Cargo.lock`) is implemented but **uncommitted and unreviewed**. Its gates were green at pause (970 tests). Re-run the gates and the bench (`cargo run --release -p qh-editor --example editor_bench`), give it one review, then commit. The ledger row lists two missed bench targets and the open decision about a resumable `walk` in `qh-sql`.
+3. Then **W3-T3** (exclusive Fase 2 bench), **W3-C** (cleanup, backlog), the W3 heavy gate, and **W4** onward per `development-plan.md` §5, using the blueprints in `docs/architecture/blueprints/`.
+
+Review policy in force (owner decision O-20): implementation, docs, bench and cleanup run on cheaper models; only review uses the strongest model, for **one** round. After a blocking finding, fix it, verify with the gates, commit, and record "pending review" in the ledger.
 
 A task is **done** when its files match the task's ownership list, every gate the task names is green, its review tier is satisfied, and it is committed on `work/perf-parity`. Report pending items separately from done ones.
 
