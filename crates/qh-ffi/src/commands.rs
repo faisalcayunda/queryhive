@@ -1969,6 +1969,17 @@ pub async fn count(
             rows = row_of(&batch, 0);
         }
     }
+    // Read on to the end, though there is nothing left to read: a session goes back to a pool only
+    // when its result was seen through to the server's own end, and a cursor left one call short
+    // of that would cost the session for a statement that returned one row. The second call
+    // answers at once.
+    while until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH))
+        .await
+        .transpose()?
+        .flatten()
+        .is_some()
+    {}
+    drop(cursor);
     let _ = session.close().await;
 
     out.emit(event("count").field("rows", count_value(&rows)?).build())?;

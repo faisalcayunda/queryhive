@@ -542,6 +542,185 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
+ * The engine, for the app's whole lifetime.
+ *
+ * It holds the session pool and the local SQLite handle, and nothing else. Creating one does no
+ * I/O: the pool is empty, SQLite opens on the first local command, and the runtime is built the
+ * first time something needs it.
+ */
+public protocol EngineHostProtocol: AnyObject, Sendable {
+    
+    /**
+     * Run one command, sending each event to `sink` as it is produced.
+     *
+     * The contract the free `run` had, kept as it was: blocks until the command has ended, events
+     * go to `sink` on the calling thread, and a failure is one more event (`error`), never a
+     * thrown error. `cancel` is the caller's own handle, made before the call, because the
+     * thread blocked here is not the one that presses Stop. Not for the main thread.
+     */
+    func run(command: EngineCommand, settings: [Setting], sink: EventSink, cancel: RunCancel) 
+    
+    /**
+     * Open one session in the background for the connection these settings describe, when it has
+     * none, so the first Run finds it warm. Returns at once; a failure is dropped and the Run
+     * that follows reports the same error on its normal path. It connects and sends no query.
+     */
+    func warmUp(settings: [Setting]) 
+    
+}
+/**
+ * The engine, for the app's whole lifetime.
+ *
+ * It holds the session pool and the local SQLite handle, and nothing else. Creating one does no
+ * I/O: the pool is empty, SQLite opens on the first local command, and the runtime is built the
+ * first time something needs it.
+ */
+open class EngineHost: EngineHostProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_qh_ffi_fn_clone_enginehost(self.handle, $0) }
+    }
+public convenience init() {
+    let handle =
+        try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_constructor_enginehost_new(uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_qh_ffi_fn_free_enginehost(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Run one command, sending each event to `sink` as it is produced.
+     *
+     * The contract the free `run` had, kept as it was: blocks until the command has ended, events
+     * go to `sink` on the calling thread, and a failure is one more event (`error`), never a
+     * thrown error. `cancel` is the caller's own handle, made before the call, because the
+     * thread blocked here is not the one that presses Stop. Not for the main thread.
+     */
+open func run(command: EngineCommand, settings: [Setting], sink: EventSink, cancel: RunCancel)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_run(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEngineCommand_lower(command),
+        FfiConverterSequenceTypeSetting.lower(settings),
+        FfiConverterTypeEventSink_lower(sink),
+        FfiConverterTypeRunCancel_lower(cancel),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Open one session in the background for the connection these settings describe, when it has
+     * none, so the first Run finds it warm. Returns at once; a failure is dropped and the Run
+     * that follows reports the same error on its normal path. It connects and sends no query.
+     */
+open func warmUp(settings: [Setting])  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_warm_up(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeSetting.lower(settings),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEngineHost: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = EngineHost
+
+    public static func lift(_ handle: UInt64) throws -> EngineHost {
+        return EngineHost(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: EngineHost) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EngineHost {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: EngineHost, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineHost_lift(_ handle: UInt64) throws -> EngineHost {
+    return try FfiConverterTypeEngineHost.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEngineHost_lower(_ value: EngineHost) -> UInt64 {
+    return FfiConverterTypeEngineHost.lower(value)
+}
+
+
+
+
+
+
+/**
  * Where an engine's events go, implemented on the far side of the FFI.
  *
  * One method, called once per event, in the order the engine produced them, with the event as
@@ -762,13 +941,13 @@ public func FfiConverterTypeEventSink_lower(_ value: EventSink) -> UInt64 {
 
 
 /**
- * The handle that stops a run, built by the caller and handed to [`run`].
+ * The handle that stops a run, built by the caller and handed to [`EngineHost::run`](crate::host::EngineHost::run).
  *
  * A handle rather than a function that cancels "whatever is running", because this crate can
  * have more than one command in flight in one process (the app runs each tab's command on its
  * own queue), and a global cancel would stop the wrong one.
  *
- * Built by the caller rather than returned, because [`run`] does not return until the command is
+ * Built by the caller rather than returned, because [`EngineHost::run`](crate::host::EngineHost::run) does not return until the command is
  * over: the caller has to be holding the handle while the run is still going. The app's own
  * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
  * queue while the FFI call blocks on another.
@@ -797,13 +976,13 @@ public protocol RunCancelProtocol: AnyObject, Sendable {
     
 }
 /**
- * The handle that stops a run, built by the caller and handed to [`run`].
+ * The handle that stops a run, built by the caller and handed to [`EngineHost::run`](crate::host::EngineHost::run).
  *
  * A handle rather than a function that cancels "whatever is running", because this crate can
  * have more than one command in flight in one process (the app runs each tab's command on its
  * own queue), and a global cancel would stop the wrong one.
  *
- * Built by the caller rather than returned, because [`run`] does not return until the command is
+ * Built by the caller rather than returned, because [`EngineHost::run`](crate::host::EngineHost::run) does not return until the command is
  * over: the caller has to be holding the handle while the run is still going. The app's own
  * `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
  * queue while the FFI call blocks on another.
@@ -1327,31 +1506,6 @@ public func engineVersion() -> String  {
     )
 })
 }
-/**
- * Run one command, sending each event to `sink` as it is produced.
- *
- * `cancel` is the caller's own handle, the one it made before this call and keeps calling
- * `request_cancel()` on while this one is blocked: nothing here can hand a handle back in time to
- * stop the run it names (see the module note and [`RunCancel`]).
- *
- * Returns nothing, which is not an omission: a run that could not be *started* is reported
- * through the sink, exactly as the CLI reports it with an `error` line, so the app keeps one
- * failure path. A run that starts and then fails does the same.
- *
- * The call blocks until the command has ended, so it belongs off the main thread. The sink's
- * callbacks run on the calling thread, inside the run, and the app hops to the main queue
- * itself — the same split `DatabaseEngine`'s implementation already makes.
- */
-public func run(command: EngineCommand, settings: [Setting], sink: EventSink, cancel: RunCancel)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_qh_ffi_fn_func_run(
-        FfiConverterTypeEngineCommand_lower(command),
-        FfiConverterSequenceTypeSetting.lower(settings),
-        FfiConverterTypeEventSink_lower(sink),
-        FfiConverterTypeRunCancel_lower(cancel),uniffiCallStatus
-    )
-}
-}
 
 private enum InitializationResult {
     case ok
@@ -1374,7 +1528,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_func_engine_version() != 54811) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_qh_ffi_checksum_func_run() != 54515) {
+    if (uniffi_qh_ffi_checksum_method_enginehost_run() != 23792) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_enginehost_warm_up() != 10635) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_eventsink_on_event() != 4791) {
@@ -1384,6 +1541,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_runcancel_request_cancel() != 1756) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_constructor_enginehost_new() != 32183) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_constructor_runcancel_new() != 8044) {

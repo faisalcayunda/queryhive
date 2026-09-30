@@ -47,6 +47,7 @@
 
 use std::path::PathBuf;
 
+use qh_core::{EngineError, FailureKind};
 use qh_driver::{ConnectionConfig, TunnelAuth, TunnelConfig};
 use thiserror::Error;
 
@@ -193,6 +194,30 @@ pub fn bastion(
         auth,
         known_hosts_path(config)?,
     ))
+}
+
+/// Open the tunnel a connection's bastion description asks for, towards `target`.
+///
+/// The one place `SSH_*` settings become a running tunnel, shared by a connection that owns its
+/// tunnel ([`crate::RealEngine`]) and by a pool that shares one across sessions
+/// ([`crate::host`]), so the two cannot disagree about what an unknown host or a bad key means.
+/// A refused host key is [`FailureKind::Permanent`]: retrying without a person's answer would
+/// present the same fingerprint to the same refusal, so the retry layer must not see it as
+/// transient.
+pub async fn open(
+    description: &TunnelConfig,
+    settings: &Settings,
+    target: qh_tunnel::Target,
+) -> Result<qh_tunnel::Tunnel, EngineError> {
+    let bastion = bastion(description, settings).map_err(|error| EngineError::Usage {
+        message: error.to_string(),
+    })?;
+    qh_tunnel::Tunnel::open(&bastion, target)
+        .await
+        .map_err(|error| EngineError::Connect {
+            message: describe(&error),
+            kind: FailureKind::Permanent,
+        })
 }
 
 /// The message a refused connection carries.

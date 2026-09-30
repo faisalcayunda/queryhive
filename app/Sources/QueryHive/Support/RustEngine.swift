@@ -51,6 +51,14 @@ import QueryHiveFFI
 /// same keys the CLI reads, so the app's existing environment is already the FFI's input. That is
 /// the one part of this engine that needed no decision.
 struct RustEngine: DatabaseEngine {
+    /// The one engine host of the process, for as long as the app runs.
+    ///
+    /// It keeps what is expensive between runs: a small pool of database sessions per connection
+    /// (reset between runs, so one run's `SET` or open transaction never reaches the next), the SSH
+    /// tunnel they ride on, and the local database handle. Creating it does no I/O. Every command
+    /// goes through it (`run`, `runBlocking`), so nothing bypasses the pool.
+    private static let host = EngineHost()
+
     /// Where the blocking FFI calls run: concurrent, so two tabs can run at once, and
     /// `.userInitiated` because the user is waiting on the result.
     private static let runQueue = DispatchQueue(label: "queryhive.engine.run", qos: .userInitiated,
@@ -146,7 +154,7 @@ struct RustEngine: DatabaseEngine {
             // No `do`/`catch`: the FFI has no failure to throw. A command that fails emits one
             // `error` event through the sink, so there is exactly one failure path for the caller
             // to read — the same one the CLI writes.
-            QueryHiveFFI.run(command: named, settings: settings, sink: sink, cancel: cancel)
+            Self.host.run(command: named, settings: settings, sink: sink, cancel: cancel)
 
             // Every event has already been handed to the sink's queue by now, so this lands after
             // the last one: the queue is serial and the sink hopped to it first.
@@ -164,8 +172,20 @@ struct RustEngine: DatabaseEngine {
         // only once the row is written.
         guard let named = Self.commands[command] else { return }
         let settings = env.map { Setting(key: $0.key, value: $0.value) }
-        QueryHiveFFI.run(command: named, settings: settings,
-                         sink: DiscardingSink(), cancel: RunCancel())
+        Self.host.run(command: named, settings: settings,
+                      sink: DiscardingSink(), cancel: RunCancel())
+    }
+
+    /// Asks the host to open a session for this connection in the background.
+    ///
+    /// Hopped off the calling thread onto a utility queue: the first call builds the process's
+    /// runtime, and a selection in the UI must not wait for that. The host connects and sends no
+    /// query, and drops a failure (the run that follows reports the same error itself).
+    func warmUp(env: [String: String]) {
+        let settings = env.map { Setting(key: $0.key, value: $0.value) }
+        DispatchQueue.global(qos: .utility).async {
+            Self.host.warmUp(settings: settings)
+        }
     }
 
     func terminateAll() {

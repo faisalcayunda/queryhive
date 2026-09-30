@@ -96,6 +96,9 @@ pub mod events;
 /// `qh-storage`'s; this is the process-scoped sink the binaries install. A library
 /// caller installs nothing, so a test run writes no decisions.
 pub mod execution_log;
+/// The engine host and its session pool: what the app keeps for as long as it runs. The CLI, the
+/// MCP server and the golden harness do not use it; they call [`run`] with a [`RealEngine`].
+pub mod host;
 pub mod import;
 pub mod local;
 /// The MCP server's protocol, tools, scope rules and handshake (Fase 2). A separate
@@ -358,169 +361,24 @@ impl Engine for RealEngine {
             return self.driver(config.kind).connect(config).await;
         };
 
-        let bastion =
-            tunnel::bastion(description, &self.settings).map_err(|error| EngineError::Usage {
-                message: error.to_string(),
-            })?;
-        let opened = qh_tunnel::Tunnel::open(
-            &bastion,
+        let tunnel = tunnel::open(
+            description,
+            &self.settings,
             qh_tunnel::Target::new(config.host.clone(), config.port),
         )
-        .await;
-        let tunnel = match opened {
-            Ok(tunnel) => tunnel,
-            // A refused host key is permanent by definition: retrying without a
-            // person's answer would present the same fingerprint to the same
-            // refusal, so the retry layer must not see this as transient.
-            Err(error) => {
-                return Err(EngineError::Connect {
-                    message: tunnel::describe(&error),
-                    kind: qh_core::FailureKind::Permanent,
-                })
-            }
-        };
-        // The tunnel is open and forwarding: the driver now talks to the loopback
-        // endpoint, and the tunnel forwards to the database the config named.
-        // `retarget` reads the target off the config before rewriting it, so the
-        // two cannot disagree.
+        .await?;
+        // The tunnel is open and forwarding: the driver now talks to the loopback endpoint, and
+        // the tunnel forwards to the database the config named. `retarget` reads the target off
+        // the config before rewriting it, so the two cannot disagree.
         let mut through = config.clone();
         let _ = tunnel::retarget(&mut through, tunnel.local_port());
         let session = self.driver(config.kind).connect(&through).await?;
-        // The tunnel is handed to the session, not closed here: a driver with a
-        // persistent connection (PostgreSQL's pool, MySQL's connection) reconnects
-        // for cancel and for pooled checkout for as long as the session lives, and
-        // every one of those connections must arrive through the tunnel. The
-        // session owns it now, and its drop stops the forwarding.
-        Ok(Box::new(TunnelledSession::new(session, tunnel)))
-    }
-}
-
-/// A session reached through an SSH tunnel.
-///
-/// The wrapper exists to own the tunnel's lifetime, and for almost nothing else:
-/// every method delegates, so the session the commands drive is the driver's own,
-/// unchanged. The tunnel closes after the inner session does — struct fields drop
-/// in declaration order — so no forward is asked of a bastion connection that is
-/// already gone.
-///
-/// The session sits behind a tokio mutex for one mechanical reason:
-/// `Session::cancel` takes `&self`, and an `async` `&self` method's future must be
-/// `Send`, which needs the wrapper to be `Sync` — and `Box<dyn Session>` is only
-/// `Send`. The lock never serialises anything in practice, because safe Rust
-/// already forbids holding `&mut self` (an `execute`) and `&self` (a `cancel`) on
-/// one session at the same time; a driver's cancel reaches the server through a
-/// *separate* connection for exactly that reason (see the module note in
-/// `retry.rs`). The mutex is the compiler's evidence of what aliasing already
-/// guaranteed, chosen over an `unsafe impl Sync` because this crate forbids unsafe
-/// code.
-struct TunnelledSession {
-    inner: tokio::sync::Mutex<Box<dyn Session>>,
-    // Mirrored at construction: `capabilities` is documented on the trait as
-    // readable before connecting, so it cannot change with session state, and the
-    // `&self` accessor cannot lock — `blocking_lock` panics inside a runtime and
-    // these are called from async code (`retry.rs:250`). `query_id` is the one
-    // accessor that genuinely moves, and it is mirrored after every `execute` —
-    // the only method that changes it.
-    capabilities: qh_driver::Capabilities,
-    query_id: Option<String>,
-    #[allow(dead_code)] // Held for its Drop, never read.
-    tunnel: qh_tunnel::Tunnel,
-}
-
-impl TunnelledSession {
-    fn new(inner: Box<dyn Session>, tunnel: qh_tunnel::Tunnel) -> Self {
-        let capabilities = inner.capabilities();
-        Self {
-            capabilities,
-            query_id: None,
-            inner: tokio::sync::Mutex::new(inner),
-            tunnel,
-        }
-    }
-}
-
-#[async_trait]
-impl Session for TunnelledSession {
-    fn capabilities(&self) -> qh_driver::Capabilities {
-        self.capabilities.clone()
-    }
-
-    fn query_id(&self) -> Option<String> {
-        self.query_id.clone()
-    }
-
-    async fn execute(
-        &mut self,
-        sql: &str,
-        options: &qh_driver::ExecuteOptions,
-    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
-        let cursor = self.inner.lock().await.execute(sql, options).await?;
-        // The id arrived with the statement: mirror it so `query_id` stays
-        // lock-free for the events that report it.
-        self.query_id = self.inner.lock().await.query_id();
-        Ok(cursor)
-    }
-
-    /// Forwarded, not inherited.
-    ///
-    /// The trait's default refuses a non-empty parameter list, which is the right default for a
-    /// driver that cannot bind — but a wrapper is not a driver. Without this, every bound statement
-    /// through an SSH tunnel (the only production wrapper) is refused, and `apply_changes` on a
-    /// tunnelled PostgreSQL or MySQL connection stops working for no reason the caller can see.
-    async fn execute_bound(
-        &mut self,
-        sql: &str,
-        parameters: &[qh_driver::Parameter],
-        options: &qh_driver::ExecuteOptions,
-    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
-        let cursor = self
-            .inner
-            .lock()
-            .await
-            .execute_bound(sql, parameters, options)
-            .await?;
-        self.query_id = self.inner.lock().await.query_id();
-        Ok(cursor)
-    }
-
-    async fn browse(
-        &mut self,
-        level: qh_driver::BrowseLevel,
-        path: &qh_driver::ObjectPath,
-        include_system: bool,
-    ) -> Result<Vec<String>, EngineError> {
-        self.inner
-            .lock()
-            .await
-            .browse(level, path, include_system)
-            .await
-    }
-
-    async fn objects(
-        &mut self,
-        path: &qh_driver::ObjectPath,
-    ) -> Result<qh_driver::ObjectsPage, EngineError> {
-        self.inner.lock().await.objects(path).await
-    }
-
-    fn explain_statement(&self, sql: &str) -> String {
-        match self.inner.try_lock() {
-            Ok(session) => session.explain_statement(sql),
-            // Contended is unreachable in practice: a caller cannot hold `&mut
-            // self` (an `execute` in flight) and `&self` (this call) on one
-            // session at the same time. If that ever changed, the statement is
-            // still spelled the way all three drivers spell it rather than not at
-            // all — and the contended case is the one to revisit, not the spelling.
-            Err(_) => format!("EXPLAIN {sql}"),
-        }
-    }
-
-    async fn cancel(&self) -> Result<(), EngineError> {
-        self.inner.lock().await.cancel().await
-    }
-
-    async fn close(self: Box<Self>) -> Result<(), EngineError> {
-        self.inner.into_inner().close().await
+        // The tunnel is handed to the session, not closed here: a driver with a persistent
+        // connection (PostgreSQL's pool, MySQL's connection) reconnects for cancel and for pooled
+        // checkout for as long as the session lives, and every one of those connections must
+        // arrive through the tunnel. The session owns it now, and its drop stops the forwarding.
+        let tunnel: Arc<dyn host::TunnelHandle> = Arc::new(tunnel);
+        Ok(Box::new(host::lease::Held::new(session, Some(tunnel))))
     }
 }
 
@@ -646,20 +504,35 @@ pub async fn run(
     engine: &dyn Engine,
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
+    run_with(command, settings, out, engine, cancel, None).await
+}
+
+/// [`run`], with the local database handle a long-lived host shares between commands.
+///
+/// `None` is what the CLI, the MCP server and the tests pass: each local command then opens the
+/// database for itself, as it always has.
+pub async fn run_with(
+    command: Command,
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    engine: &dyn Engine,
+    cancel: &CancelFlag,
+    storage: Option<local::SharedStorage>,
+) -> Result<(), CliError> {
     match command {
         Command::DbDrivers => commands::db_drivers(out, engine).await,
-        Command::Connections => local::connections(settings, out).await,
-        Command::ImportConnections => local::import_connections(settings, out).await,
+        Command::Connections => local::connections(settings, out, storage).await,
+        Command::ImportConnections => local::import_connections(settings, out, storage).await,
         Command::Credential => local::credential(settings, out).await,
-        Command::History => local::history(settings, out).await,
-        Command::HistoryAdd => local::history_add(settings, out).await,
-        Command::HistoryClear => local::history_clear(settings, out).await,
-        Command::SavedQueries => local::saved_queries(settings, out).await,
-        Command::Session => local::session(settings, out).await,
-        Command::Account => local::account(settings, out).await,
-        Command::Profiles => local::profiles(settings, out).await,
-        Command::ProfileSave => local::profile_save(settings, out).await,
-        Command::ProfileDelete => local::profile_delete(settings, out).await,
+        Command::History => local::history(settings, out, storage).await,
+        Command::HistoryAdd => local::history_add(settings, out, storage).await,
+        Command::HistoryClear => local::history_clear(settings, out, storage).await,
+        Command::SavedQueries => local::saved_queries(settings, out, storage).await,
+        Command::Session => local::session(settings, out, storage).await,
+        Command::Account => local::account(settings, out, storage).await,
+        Command::Profiles => local::profiles(settings, out, storage).await,
+        Command::ProfileSave => local::profile_save(settings, out, storage).await,
+        Command::ProfileDelete => local::profile_delete(settings, out, storage).await,
         Command::ImportData => import::import_data(settings, out, engine, cancel).await,
         Command::ApplyChanges => apply::apply_changes(settings, out, engine, cancel).await,
         Command::TableOp => commands::table_op(settings, out, engine, cancel).await,

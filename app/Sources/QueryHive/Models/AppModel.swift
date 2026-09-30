@@ -647,6 +647,36 @@ final class AppModel {
         // produces something (Run, Explain, opening a table) already sets `panelCollapsed = false`.
         panelCollapsed = true
         saveSession()
+        warmUp(for: tab)
+    }
+
+    /// Asks the engine to have a database session ready for this tab's connection.
+    ///
+    /// Sends what a run would send (the same environment, and the tab's own database and schema, so
+    /// the engine's connection key matches the run's), and nothing else: no query, no prefetch. The
+    /// Keychain is read on a utility queue and never prompts, so selecting a tab neither blocks the
+    /// main thread nor raises a dialog; a password that cannot be read that way just means no warm
+    /// session, and the run reports whatever is wrong itself.
+    private func warmUp(for tab: QueryTab?) {
+        guard let tab, let connection = connection(for: tab) else { return }
+        let database = database(for: tab)
+        let schema = schema(for: tab)
+        let timeout = statementTimeoutMS
+        DispatchQueue.global(qos: .utility).async {
+            // No saved password is a normal answer (an empty one is what a run sends); a Keychain
+            // that refuses without a prompt is not, and skips the warm-up.
+            let password: String?
+            do {
+                password = try Self.benchPassword ?? ConnectionKeychain.getWithoutPrompt(for: connection.id)
+            } catch {
+                return
+            }
+            var env = Self.connectionEnvironment(connection, password: password)
+            env["STATEMENT_TIMEOUT_MS"] = String(timeout)
+            env["DB_DATABASE"] = database
+            env["DB_SCHEMA"] = schema
+            Engine.current.warmUp(env: env)
+        }
     }
 
     /// Whether the panel has anything to show for this tab, which is what decides whether it is
@@ -793,6 +823,7 @@ final class AppModel {
             selectedNodeID = node.id
         }
         saveSession()
+        warmUp(for: selectedTab)
     }
 
     func rememberDestination(_ tab: QueryTab) {

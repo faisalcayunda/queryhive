@@ -137,6 +137,11 @@ const DEFAULT_PRODUCER_BATCH: usize = 1024;
 /// refused rather than waited for.
 const HAND_BACK_WAIT: Duration = Duration::from_millis(250);
 
+/// How long a reset waits for the previous statement's connection to come back. The pool
+/// bounds the whole reset as well; this only stops a producer that never finishes from
+/// holding the reset for all of it.
+const RESET_WAIT: Duration = Duration::from_secs(2);
+
 /// What a statement does to the session's transaction, read from its first words.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum TxnEffect {
@@ -314,6 +319,8 @@ impl Driver for MysqlDriver {
             connection_id,
             idle: Some(conn),
             flight: None,
+            wanted_db: config.database.clone(),
+            current_db: config.database.clone(),
             in_transaction: false,
             transaction_lost: false,
             // Nothing has been asked of the server yet, so the session must not send a
@@ -373,6 +380,14 @@ struct MysqlSession {
     idle: Option<Conn>,
     /// The statement that currently holds the connection, if any.
     flight: Option<Arc<Flight>>,
+    /// The database the next run is about, from [`Session::set_context`]. `USE` is sent
+    /// before the next statement when it differs from `current_db`, so a pooled session moves
+    /// between databases without a new handshake.
+    wanted_db: Option<String>,
+    /// The database this session's connection is in, as far as the driver knows. A `USE` in
+    /// a user's own SQL changes it behind the driver's back, which is why `reset` asks the
+    /// server instead of trusting this.
+    current_db: Option<String>,
     /// A `BEGIN` was sent and no `COMMIT` or `ROLLBACK` since.
     in_transaction: bool,
     /// The connection that held the open transaction is gone, so the server has already
@@ -433,12 +448,41 @@ impl MysqlSession {
         Ok(conn)
     }
 
+    /// Move the connection into the database the run asked for, when it is somewhere else.
+    ///
+    /// `opts` follows, so a connection opened later in this session (after a lost one) starts
+    /// in the same database rather than in the one the session first connected to.
+    async fn use_wanted_database(&mut self, conn: &mut Conn) -> Result<(), EngineError> {
+        let Some(wanted) = self.wanted_db.clone() else {
+            return Ok(());
+        };
+        if self.current_db.as_deref() == Some(wanted.as_str()) {
+            return Ok(());
+        }
+        let statement = format!(
+            "USE {}",
+            qh_sql::quote_ident(qh_sql::IdentStyle::Mysql, &wanted)
+        );
+        conn.query_drop(&statement)
+            .await
+            .map_err(|error| map_query_error(error, &statement, None))?;
+        self.current_db = Some(wanted.clone());
+        self.opts = OptsBuilder::from_opts(self.opts.clone())
+            .db_name(Some(wanted))
+            .into();
+        Ok(())
+    }
+
     /// Run one of our own statements and read every cell as text.
     ///
     /// Used by browse and objects, which are our statements with a known shape —
     /// unlike a user's query, they do not need the streaming path.
     async fn text_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, EngineError> {
         let mut conn = self.connection(false).await?;
+        if let Err(error) = self.use_wanted_database(&mut conn).await {
+            self.idle = Some(conn);
+            return Err(error);
+        }
         let outcome = async {
             let rows: Vec<mysql_async::Row> = conn
                 .query(sql)
@@ -511,6 +555,11 @@ impl MysqlSession {
                 self.transaction_lost = false;
             }
             TxnEffect::None => {}
+        }
+
+        if let Err(error) = self.use_wanted_database(&mut conn).await {
+            self.idle = Some(conn);
+            return Err(error);
         }
 
         // The bound is a server setting, so it reaches the server before the statement
@@ -757,6 +806,84 @@ impl Session for MysqlSession {
             let _ = conn.disconnect().await;
         }
         Ok(())
+    }
+
+    /// `COM_RESET_CONNECTION`, then a look at which database the connection is in.
+    ///
+    /// The connection has to be back with the session: a statement that ended cleanly hands it
+    /// back before its cursor says so (module note, "one session, one connection"), and one
+    /// that did not (a limit reached, the cursor dropped) never does, so there is nothing to
+    /// reset and the pool closes the session. The wait is bounded by the caller.
+    ///
+    /// A server without `COM_RESET_CONNECTION` (older than 5.7.3, and MariaDB before 10.2.4)
+    /// answers `false`, and `COM_CHANGE_USER` does the same job there.
+    async fn reset(&mut self) -> Result<(), EngineError> {
+        let lost = || EngineError::Connect {
+            message: "the connection was not handed back, so it cannot be reset".to_owned(),
+            kind: FailureKind::Transient,
+        };
+        let mut conn = match self.idle.take() {
+            Some(conn) => conn,
+            None => {
+                let flight = self.flight.take().ok_or_else(lost)?;
+                if !flight.wait_finished(RESET_WAIT).await {
+                    self.flight = Some(flight);
+                    return Err(lost());
+                }
+                flight.take_conn().ok_or_else(lost)?
+            }
+        };
+        let reset = async {
+            let reset = conn
+                .reset()
+                .await
+                .map_err(|error| map_query_error(error, "COM_RESET_CONNECTION", None))?;
+            if !reset {
+                conn.change_user(mysql_async::ChangeUserOpts::default())
+                    .await
+                    .map_err(|error| map_query_error(error, "COM_CHANGE_USER", None))?;
+            }
+            // The reset drops the connection's charset and collation back to the server's
+            // globals; mysql_async only states them in the handshake. Restated here exactly as
+            // the handshake does (utf8mb4 / utf8mb4_general_ci, or utf8 before 5.5.3), so a
+            // reused connection compares and encodes text like a fresh one.
+            let names = if conn.server_version() < (5, 5, 3) {
+                "SET NAMES utf8 COLLATE utf8_general_ci"
+            } else {
+                "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci"
+            };
+            conn.query_drop(names)
+                .await
+                .map_err(|error| map_query_error(error, names, None))?;
+            conn.query_first::<Option<String>, _>("SELECT DATABASE()")
+                .await
+                .map_err(|error| map_query_error(error, "SELECT DATABASE()", None))
+        }
+        .await;
+        let current = match reset {
+            Ok(current) => current.flatten(),
+            // A connection that failed to reset is dropped, not offered again.
+            Err(error) => return Err(error),
+        };
+        // Whatever the session was connected with is what a session with no `USE` starts in.
+        // A connection that ended up in a database the run never asked for (`USE` in user SQL,
+        // and a server whose reset keeps it) cannot go back to "none", so it is not reused.
+        if self.opts.db_name().is_none() && current.is_some() {
+            return Err(EngineError::Internal {
+                message: "a session opened without a database cannot leave the one it is in"
+                    .to_owned(),
+            });
+        }
+        self.current_db = current;
+        self.idle = Some(conn);
+        self.in_transaction = false;
+        self.transaction_lost = false;
+        self.statement_timeout = None;
+        Ok(())
+    }
+
+    fn set_context(&mut self, database: Option<&str>, _schema: Option<&str>) {
+        self.wanted_db = database.map(str::to_owned);
     }
 }
 

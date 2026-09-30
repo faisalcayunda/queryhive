@@ -641,6 +641,20 @@ enum ConnectionKeychain {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// `get`, but never shows a prompt: an item that would need the user's approval is reported as
+    /// not available. For background work (warming a session) that must not put a dialog up.
+    static func getWithoutPrompt(for id: UUID) throws -> String? {
+        var search = query(for: id)
+        search[kSecReturnData as String] = true
+        search[kSecMatchLimit as String] = kSecMatchLimitOne
+        search[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        var result: AnyObject?
+        let status = SecItemCopyMatching(search as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw KeychainError(status: status) }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     static func delete(for id: UUID) throws {
         let status = SecItemDelete(query(for: id) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }

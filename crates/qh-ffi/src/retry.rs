@@ -162,7 +162,7 @@ fn again(policy: &RetryPolicy, attempt: u32, error: &EngineError) -> bool {
 /// module note on the page the server answers with an error. A server's answer always
 /// carries its code ([`EngineError::code`]), and a failure before anything was parsed
 /// never does.
-fn produced_no_page(error: &EngineError) -> bool {
+pub(crate) fn produced_no_page(error: &EngineError) -> bool {
     match error {
         // The request never reached a coordinator, so no body was read and no page was
         // parsed. Trino's own cursor reports page failures as `Query`, but a driver

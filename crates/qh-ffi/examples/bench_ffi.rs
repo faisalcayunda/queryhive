@@ -1,4 +1,4 @@
-//! In-process FFI bench: calls `uniffi_api::run`, the entry the app uses, with a sink that
+//! In-process FFI bench: calls `EngineHost::run`, the entry the app uses, with a sink that
 //! counts and timestamps events (performance-plan.md section 4, item 0.2).
 //!
 //! ```bash
@@ -18,11 +18,12 @@
 //! (`--axis` is not needed: each sample carries its own).
 //!
 //! - `local-loop` (scenario `ffi-local-loop`): `call_p50_ms`, `call_p95_ms` over 100
-//!   `connections` calls, each building its own tokio runtime.
+//!   `connections` calls through one host, so the local database is opened once and the
+//!   runtime is the process's own.
 //! - `emit-only` (scenario `ffi-emit-only`): `page_ms`, the mean time to build, JSON-encode and
 //!   hand one page (200 rows x 30 text columns) to the sink.
 //! - `preview-wide` (scenario `ffi-preview-wide`, no axis: an in-process engine number, not the grid number axis 2 grades): `ttfr_ms` (run start to first `rows`
-//!   event), `total_ms` (run start to return, runtime build and connect included),
+//!   event), `total_ms` (run start to return, connect included),
 //!   `rows_per_s` (rows / first `rows` event to `done`, so it excludes connect),
 //!   `sink_ms` (time inside `on_event`), `sink_share_ratio` (`sink_ms / total_ms`). The sink
 //!   only counts, so the share is a floor for a real sink.
@@ -30,11 +31,19 @@
 //! A run that reports an `error` event, or a `preview-wide` run that returns no rows, prints
 //! the reason on stderr and exits 1 without printing any sample.
 
-use qh_ffi::uniffi_api::{run, EngineCommand, EventSink, RunCancel, Setting};
+use qh_ffi::host::EngineHost;
+use qh_ffi::uniffi_api::{EngineCommand, EventSink, RunCancel, Setting};
 use serde_json::{json, Value as Json};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+/// One host for the whole process, as the app has: the pool and the local database handle
+/// persist between runs, so what is measured is the path a Run takes after the first.
+fn host() -> &'static Arc<EngineHost> {
+    static HOST: OnceLock<Arc<EngineHost>> = OnceLock::new();
+    HOST.get_or_init(EngineHost::new)
+}
 
 /// Counts events, timestamps the first `rows` and the `done` event, keeps the first `error`,
 /// and times its own body.
@@ -123,7 +132,7 @@ fn local_loop(repeat: u32) {
             setting("LEGACY_PATH", &legacy.to_string_lossy()),
         ];
         let t = Instant::now();
-        run(
+        host().run(
             EngineCommand::Connections,
             settings,
             probe.clone(),
@@ -185,7 +194,7 @@ fn preview_wide(repeat: u32) {
         setting("SQL", "SELECT * FROM wide_500k"),
         setting("LIMIT", "10000000"),
     ];
-    run(
+    host().run(
         EngineCommand::Preview,
         settings,
         probe.clone(),

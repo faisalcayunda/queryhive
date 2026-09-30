@@ -304,6 +304,21 @@ impl PostgresSession {
         PostgresDriver.capabilities()
     }
 
+    /// Refuse before sending anything when the connection is already gone.
+    ///
+    /// A pool hands out sessions that sat idle, and an idle socket can die (NAT timeout, a
+    /// restarted server). Saying so here, as a connection error and before a byte is sent,
+    /// is what lets the layer above tell "never reached the server" from "the server said no".
+    fn ensure_open(&self) -> Result<(), EngineError> {
+        if self.client.is_closed() {
+            return Err(EngineError::Connect {
+                message: format!("the connection to {} was closed", self.config.redacted()),
+                kind: FailureKind::Transient,
+            });
+        }
+        Ok(())
+    }
+
     /// Run `sql` and collect the first column of every row as text.
     ///
     /// Used by the browse and objects calls, which are our own statements with a
@@ -506,6 +521,7 @@ impl Session for PostgresSession {
         // The bound is a server setting, so it has to reach the server before the
         // statement does. Applied only when it changed: `SET` is a round trip, and the
         // value already in force is already in force.
+        self.ensure_open()?;
         apply_statement_timeout(
             &self.client,
             self.statement_timeout,
@@ -553,6 +569,7 @@ impl Session for PostgresSession {
         }
         // The bound is a server setting, so it reaches the server before the
         // statement does — the same rule `execute` follows, for the same reason.
+        self.ensure_open()?;
         apply_statement_timeout(
             &self.client,
             self.statement_timeout,
@@ -643,6 +660,53 @@ impl Session for PostgresSession {
     async fn close(self: Box<Self>) -> Result<(), EngineError> {
         // Dropping the client ends the connection; the spawned connection future
         // returns once the socket closes.
+        Ok(())
+    }
+
+    /// `ROLLBACK`, then `DISCARD ALL` taken apart, in one round trip.
+    ///
+    /// `tokio-postgres` exposes no transaction status, so the rollback is always sent (outside
+    /// a transaction the server only warns). `DISCARD ALL` itself is not sent: it includes
+    /// `DEALLOCATE ALL`, and that would delete the `typeinfo` statements the client prepared
+    /// for itself and left the next enum, domain or extension type failing with `prepared
+    /// statement "sN" does not exist`. Its other components are sent one by one instead, and
+    /// the statements a user made with SQL `PREPARE` are found and dropped by name, which
+    /// leaves the protocol-level statements alone.
+    ///
+    /// The three messages go out before any answer is read (`try_join3` polls in order, and
+    /// each request is queued when first polled), so the whole reset costs one round trip.
+    async fn reset(&mut self) -> Result<(), EngineError> {
+        self.ensure_open()?;
+        let client = &self.client;
+        let (_, _, prepared) = futures_util::future::try_join3(
+            client.batch_execute("ROLLBACK"),
+            client.batch_execute(
+                "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; \
+                 SELECT pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; \
+                 DISCARD SEQUENCES",
+            ),
+            client.simple_query("SELECT name FROM pg_prepared_statements WHERE from_sql"),
+        )
+        .await
+        .map_err(|error| map_query_error(error, "reset", None))?;
+
+        let deallocate: String = prepared
+            .iter()
+            .filter_map(|message| match message {
+                tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+                _ => None,
+            })
+            .map(|name| format!("DEALLOCATE \"{}\"; ", name.replace('"', "\"\"")))
+            .collect();
+        if !deallocate.is_empty() {
+            client
+                .batch_execute(&deallocate)
+                .await
+                .map_err(|error| map_query_error(error, "reset", None))?;
+        }
+        // `RESET ALL` put `statement_timeout` back to the role's default, which is what a new
+        // connection has, and the tracker must say the same or the next run skips its `SET`.
+        self.statement_timeout = None;
         Ok(())
     }
 }
@@ -982,19 +1046,32 @@ async fn apply_statement_timeout(
     current: Option<Duration>,
     wanted: Option<Duration>,
 ) -> Result<(), EngineError> {
-    if current == wanted {
+    let Some(statement) = timeout_statement(current, wanted) else {
         return Ok(());
-    }
-    let milliseconds = wanted.map_or(0, |limit| {
-        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
-    });
-    let statement = format!("SET statement_timeout = {milliseconds}");
+    };
     client
         .batch_execute(&statement)
         .await
         // The bound is in force from here, so a failure setting it is reported as what
         // it is: the timeout is not on, and the caller must not be told it is.
         .map_err(|error| map_query_error(error, &statement, wanted))
+}
+
+/// The `SET` that takes the server from `current` to `wanted`, or `None` when they agree.
+///
+/// Clamped to what the setting can hold (an `int` of milliseconds): a longer bound sent as is
+/// would make the `SET` itself fail on range, and the statement would then run with no bound
+/// at all, which is the opposite of what was asked.
+fn timeout_statement(current: Option<Duration>, wanted: Option<Duration>) -> Option<String> {
+    if current == wanted {
+        return None;
+    }
+    let milliseconds = wanted.map_or(0, |limit| {
+        u64::try_from(limit.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(i32::MAX as u64)
+    });
+    Some(format!("SET statement_timeout = {milliseconds}"))
 }
 
 /// A short, single-line rendering of a statement for an error message.
@@ -1011,6 +1088,28 @@ fn snippet(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_timeout_set_is_only_sent_when_it_changes_and_never_overflows() {
+        let second = Some(Duration::from_secs(1));
+        assert_eq!(timeout_statement(second, second), None);
+        assert_eq!(timeout_statement(None, None), None);
+        assert_eq!(
+            timeout_statement(None, second).as_deref(),
+            Some("SET statement_timeout = 1000")
+        );
+        // Back to no bound is an explicit zero, the server's own word for it.
+        assert_eq!(
+            timeout_statement(second, None).as_deref(),
+            Some("SET statement_timeout = 0")
+        );
+        // A bound longer than the setting can hold is clamped instead of failing the `SET`
+        // and leaving the statement with no bound at all.
+        assert_eq!(
+            timeout_statement(None, Some(Duration::from_secs(u64::MAX / 4))).as_deref(),
+            Some("SET statement_timeout = 2147483647")
+        );
+    }
 
     #[test]
     fn this_driver_is_postgres_and_says_so() {

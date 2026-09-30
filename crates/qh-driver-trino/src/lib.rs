@@ -623,6 +623,48 @@ struct TrinoSession {
 }
 
 impl TrinoSession {
+    /// `DELETE` the page URI of the query in flight, which is how Trino stops one.
+    ///
+    /// Shared by `cancel` (a user's Stop) and `reset` (a result nobody finished reading).
+    async fn delete_running(&self) -> Result<(), EngineError> {
+        let running = self.running.lock().expect("running state").clone();
+
+        // Nothing running is not an error: the button can be pressed after the
+        // query finished, and reporting that as a failure would be noise.
+        let Some(running) = running else {
+            return Ok(());
+        };
+
+        // `DELETE` on the page URI is how Trino cancels. A non-2xx answer means the
+        // query was already gone, which is the outcome that was wanted.
+        let target = if running.next_uri.is_empty() {
+            format!("{}/v1/statement/{}", self.base, running.id)
+        } else {
+            running.next_uri
+        };
+        let response = with_shared_headers(self.client.delete(&target), &self.credentials)
+            .send()
+            .await
+            .map_err(|error| EngineError::Query {
+                message: format!("could not send the cancel: {error}"),
+                code: None,
+                kind: FailureKind::Transient,
+                position: None,
+            })?;
+
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            *self.running.lock().expect("running state") = None;
+            return Ok(());
+        }
+
+        Err(EngineError::Query {
+            message: format!("the server refused the cancel: {}", response.status()),
+            code: Some(response.status().as_u16().to_string()),
+            kind: FailureKind::Transient,
+            position: None,
+        })
+    }
+
     /// Resolve a path's catalog and schema, falling back to the connection's own.
     ///
     /// A browse call may carry a catalog even when the connection did not, which
@@ -993,42 +1035,7 @@ impl Session for TrinoSession {
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
-        let running = self.running.lock().expect("running state").clone();
-
-        // Nothing running is not an error: the button can be pressed after the
-        // query finished, and reporting that as a failure would be noise.
-        let Some(running) = running else {
-            return Ok(());
-        };
-
-        // `DELETE` on the page URI is how Trino cancels. A non-2xx answer means the
-        // query was already gone, which is the outcome that was wanted.
-        let target = if running.next_uri.is_empty() {
-            format!("{}/v1/statement/{}", self.base, running.id)
-        } else {
-            running.next_uri
-        };
-        let response = with_shared_headers(self.client.delete(&target), &self.credentials)
-            .send()
-            .await
-            .map_err(|error| EngineError::Query {
-                message: format!("could not send the cancel: {error}"),
-                code: None,
-                kind: FailureKind::Transient,
-                position: None,
-            })?;
-
-        if response.status().is_success() || response.status().as_u16() == 404 {
-            *self.running.lock().expect("running state") = None;
-            return Ok(());
-        }
-
-        Err(EngineError::Query {
-            message: format!("the server refused the cancel: {}", response.status()),
-            code: Some(response.status().as_u16().to_string()),
-            kind: FailureKind::Transient,
-            position: None,
-        })
+        self.delete_running().await
     }
 
     async fn close(self: Box<Self>) -> Result<(), EngineError> {
@@ -1037,6 +1044,23 @@ impl Session for TrinoSession {
         // while a query runs may well want it to finish and be cached, and
         // silently killing it would be a surprise.
         Ok(())
+    }
+    /// Nothing on the connection to clean: a Trino session is a client and a few strings.
+    /// What a run can leave is a query nobody finished reading (a capped preview), and that
+    /// is stopped here so the coordinator does not keep it. A failed `DELETE` is ignored:
+    /// nothing on our side is dirty, and Trino abandons the query on its own.
+    async fn reset(&mut self) -> Result<(), EngineError> {
+        let _ = self.delete_running().await;
+        *self.running.lock().expect("running state") = None;
+        self.last_id = None;
+        Ok(())
+    }
+
+    /// The catalog is this driver's `database` slot. Empty means "the connection names none",
+    /// which is what a session with no context starts with.
+    fn set_context(&mut self, database: Option<&str>, schema: Option<&str>) {
+        self.catalog = database.unwrap_or_default().to_owned();
+        self.schema = schema.unwrap_or_default().to_owned();
     }
 }
 

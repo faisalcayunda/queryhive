@@ -129,11 +129,23 @@ impl Target {
 }
 
 /// A running tunnel. Dropping it stops forwarding; [`Tunnel::close`] also waits.
-#[derive(Debug)]
 pub struct Tunnel {
     local_port: u16,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    /// A second handle on the bastion connection, kept only to ask whether it is still open.
+    /// It is dropped with the tunnel, after the accept loop has let go of its own.
+    session: Arc<Mutex<client::Handle<HostKeyVerifier>>>,
+}
+
+impl std::fmt::Debug for Tunnel {
+    // By hand: the session handle has no `Debug`, and the port is what a log line wants.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Tunnel")
+            .field("local_port", &self.local_port)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Tunnel {
@@ -176,6 +188,7 @@ impl Tunnel {
         let local_port = listener.local_addr()?.port();
         let (shutdown, mut shutdown_rx) = oneshot::channel();
         let handle = Arc::new(Mutex::new(handle));
+        let session = Arc::clone(&handle);
 
         let task = tokio::spawn(async move {
             loop {
@@ -203,7 +216,22 @@ impl Tunnel {
             local_port,
             shutdown: Some(shutdown),
             task: Some(task),
+            session,
         })
+    }
+
+    /// Whether the bastion connection is still open.
+    ///
+    /// A pool that keeps a tunnel across runs asks this before reusing it: an SSH connection
+    /// that idled out or whose bastion restarted is closed, and every database connection
+    /// forwarded through it is dead with it. A lock that happens to be held (a channel being
+    /// opened) means the connection is in use, so it is reported alive rather than waited for.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        match self.session.try_lock() {
+            Ok(handle) => !handle.is_closed(),
+            Err(_) => true,
+        }
     }
 
     /// The loopback port a driver connects to: `127.0.0.1:<local_port>`.

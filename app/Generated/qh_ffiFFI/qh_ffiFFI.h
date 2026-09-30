@@ -259,6 +259,32 @@ typedef struct UniffiVTableCallbackInterfaceEventSink {
 } UniffiVTableCallbackInterfaceEventSink;
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_ENGINEHOST
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_ENGINEHOST
+uint64_t uniffi_qh_ffi_fn_clone_enginehost(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_ENGINEHOST
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_ENGINEHOST
+void uniffi_qh_ffi_fn_free_enginehost(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_ENGINEHOST_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_ENGINEHOST_NEW
+uint64_t uniffi_qh_ffi_fn_constructor_enginehost_new(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN
+void uniffi_qh_ffi_fn_method_enginehost_run(uint64_t ptr, RustBuffer command, RustBuffer settings, uint64_t sink, uint64_t cancel, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_WARM_UP
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_WARM_UP
+void uniffi_qh_ffi_fn_method_enginehost_warm_up(uint64_t ptr, RustBuffer settings, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EVENTSINK
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EVENTSINK
 uint64_t uniffi_qh_ffi_fn_clone_eventsink(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -315,11 +341,6 @@ RustBuffer uniffi_qh_ffi_fn_func_command_names(RustCallStatus *_Nonnull out_stat
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_ENGINE_VERSION
 RustBuffer uniffi_qh_ffi_fn_func_engine_version(RustCallStatus *_Nonnull out_status
     
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_RUN
-#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_RUN
-void uniffi_qh_ffi_fn_func_run(RustBuffer command, RustBuffer settings, uint64_t sink, uint64_t cancel, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_QH_FFI_RUSTBUFFER_ALLOC
@@ -594,9 +615,15 @@ uint16_t uniffi_qh_ffi_checksum_func_engine_version(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_RUN
-#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_RUN
-uint16_t uniffi_qh_ffi_checksum_func_run(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_run(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_WARM_UP
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_WARM_UP
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_warm_up(void
     
 );
 #endif
@@ -615,6 +642,12 @@ uint16_t uniffi_qh_ffi_checksum_method_runcancel_is_cancelled(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
 uint16_t uniffi_qh_ffi_checksum_method_runcancel_request_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_ENGINEHOST_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_ENGINEHOST_NEW
+uint16_t uniffi_qh_ffi_checksum_constructor_enginehost_new(void
     
 );
 #endif

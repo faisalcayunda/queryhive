@@ -29,8 +29,10 @@
 //! and the emitter stays on this side: an event is never written from a thread the
 //! runtime does not know about.
 
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use qh_credentials::{account_key, KeychainStore, MemoryStore, SecretStore};
 use qh_storage::import::{self, ImportReport};
@@ -52,10 +54,14 @@ use crate::CliError;
 /// Deleted rows are not listed — `Storage::connections` is the living set — and the shape
 /// still carries `deleted`, so a decoder written here keeps working when a command that
 /// includes tombstones arrives.
-pub async fn connections(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn connections(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let listed = open_storage(&settings)?
+        let listed = acquire(&settings, shared.as_ref())?
             .connections()?
             .iter()
             .map(connection_json)
@@ -77,10 +83,11 @@ pub async fn connections(settings: &Settings, out: &mut dyn Emitter) -> Result<(
 pub async fn import_connections(
     settings: &Settings,
     out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
 ) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let source = legacy_source(&settings);
         let Some(source) = source else {
             // No `LEGACY_PATH` and no Application Support directory to look in — there is
@@ -177,7 +184,11 @@ pub async fn credential(settings: &Settings, out: &mut dyn Emitter) -> Result<()
 ///
 /// `HISTORY_LIMIT` caps the list and `CONNECTION_ID` narrows it to one connection. Both are
 /// optional: the common question is "what did I just run", and it names no connection.
-pub async fn history(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn history(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
         let limit = history_limit(&settings)?;
@@ -185,7 +196,7 @@ pub async fn history(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
         // Blank means "no search", the same convention `CONNECTION_ID` follows, so the app can set
         // the key unconditionally as it clears the field.
         let search = settings.text("HISTORY_SEARCH", "");
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let entries = if search.trim().is_empty() {
             match filter {
                 Some(id) => storage.history_for_connection(&id, limit)?,
@@ -214,7 +225,11 @@ pub async fn history(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
 /// setting's own default is 0, so 0 is what "the caller did not say" looks like here. No real run
 /// happened at the epoch, so nothing is lost by that reading, but it is worth knowing before someone
 /// replays a hundred rows through a loop that forgot to pass the key.
-pub async fn history_add(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn history_add(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
         let sql = settings.text("SQL", "");
@@ -239,7 +254,7 @@ pub async fn history_add(settings: &Settings, out: &mut dyn Emitter) -> Result<(
             Some(error_text)
         };
 
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let written = storage.record_history(&record)?;
         Ok(event("history_entry")
             .field("id", written.as_str())
@@ -255,10 +270,14 @@ pub async fn history_add(settings: &Settings, out: &mut dyn Emitter) -> Result<(
 ///
 /// The count is of rows that were living, so calling it twice reports zero the second time.
 /// The rows stay as tombstones, which is what every deletion in this database does.
-pub async fn history_clear(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn history_clear(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let filter = connection_filter(&settings)?;
         let cleared = storage.clear_history(filter.as_ref(), qh_storage::now_millis())?;
         Ok(event("history_clear").field("cleared", cleared).build())
@@ -273,11 +292,15 @@ pub async fn history_clear(settings: &Settings, out: &mut dyn Emitter) -> Result
 /// One command with an action rather than five commands, for the same reason `credential`
 /// is one: the app sets settings rather than building an argv, and five names would put
 /// five entries in the usage line to describe one thing the user thinks of as one thing.
-pub async fn saved_queries(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn saved_queries(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
         let action = saved_action_of(&settings)?;
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let at = qh_storage::now_millis();
         match action.as_str() {
             "list" => Ok(event("saved_queries")
@@ -387,11 +410,15 @@ pub async fn saved_queries(settings: &Settings, out: &mut dyn Emitter) -> Result
 /// `load` answers with `saved:false` when there is nothing, rather than an empty list. A fresh
 /// install has no session, and that is a normal answer the app turns into one blank tab; an
 /// `error` there would make every first launch look like a failure.
-pub async fn session(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn session(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
         let action = session_action_of(&settings)?;
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         match action.as_str() {
             "save" => {
                 let tabs = settings.text("TABS_JSON", "");
@@ -458,10 +485,14 @@ pub async fn session(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
 /// Local, so there is no Safe Mode here, exactly as `connections` and `saved_queries` have none:
 /// Safe Mode governs what reaches a **database**, and this row never does. Whether an
 /// application identity is ever presented to a database is the decision ADR-0029 left open.
-pub async fn account(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn account(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let at = qh_storage::now_millis();
         let action = settings
             .text("ACCOUNT_ACTION", "load")
@@ -508,10 +539,14 @@ pub async fn account(settings: &Settings, out: &mut dyn Emitter) -> Result<(), C
 /// optionally narrowed by `KIND`, and `get` answers with the one `PROFILE_ID` names. The
 /// `PAYLOAD_JSON` a profile carries is per-kind and opaque to this layer, the same way
 /// `connection.options_json` is opaque to SQL: a new field in a kind is not a migration.
-pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn profiles(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let action = settings
             .text("PROFILE_ACTION", "list")
             .trim()
@@ -560,10 +595,14 @@ pub async fn profiles(settings: &Settings, out: &mut dyn Emitter) -> Result<(), 
 /// `PAYLOAD_JSON` are the body. The payload must be JSON, and it is refused when it is not, for
 /// the same reason `session` refuses a `TABS_JSON` that will not parse: a profile that cannot be
 /// read back is better reported at the write than discovered by whoever reads it next.
-pub async fn profile_save(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn profile_save(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let at = qh_storage::now_millis();
         let owner = storage.app_account_or_create(at)?.meta.id;
         let kind = profile_kind_of(&required(&settings, "KIND", "to save a profile")?)?;
@@ -609,10 +648,14 @@ pub async fn profile_save(settings: &Settings, out: &mut dyn Emitter) -> Result<
 /// A soft delete, like every other deletion in this database: the identity, the revision and the
 /// timestamp stay, so a future sync can carry the deletion and a restore is a revision like any
 /// other. Deleting what is not there is not an error, it is a no-op that answers `deleted:false`.
-pub async fn profile_delete(settings: &Settings, out: &mut dyn Emitter) -> Result<(), CliError> {
+pub async fn profile_delete(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    shared: Option<SharedStorage>,
+) -> Result<(), CliError> {
     let settings = settings.clone();
     let built = on_blocking(move || {
-        let storage = open_storage(&settings)?;
+        let storage = acquire(&settings, shared.as_ref())?;
         let id = profile_id(&settings)?;
         let deleted = storage.soft_delete_profile(&id, qh_storage::now_millis())?;
         Ok(event("profile")
@@ -640,6 +683,77 @@ where
         // binary's own `catch_unwind` cannot see it: it happened on another thread.
         Err(error) => Err(CliError::Internal(error.to_string())),
     }
+}
+
+/// The one SQLite handle a long-lived host keeps, so a local command is a query and not an
+/// open, a `PRAGMA` round and a migration check.
+///
+/// Keyed by the path `DB_PATH` names (empty is the default database): a command for another path
+/// opens that one and replaces the handle. Only the engine host passes one; the CLI and the MCP
+/// server pass none and open per command, as they always have. `qh-storage` runs in WAL mode with
+/// a busy timeout, so a handle that stays open is safe beside a CLI or MCP process writing the
+/// same file.
+#[derive(Clone, Default)]
+pub struct SharedStorage(Arc<SharedInner>);
+
+#[derive(Default)]
+struct SharedInner {
+    slot: Mutex<Option<(String, Storage)>>,
+    opens: AtomicUsize,
+}
+
+impl SharedStorage {
+    /// How many times a database has been opened and migrated through this handle.
+    #[doc(hidden)]
+    pub fn opens(&self) -> usize {
+        self.0.opens.load(Ordering::SeqCst)
+    }
+}
+
+/// A database for one command: opened just for it, or borrowed from a [`SharedStorage`].
+pub(crate) enum StorageRef<'a> {
+    Owned(Storage),
+    Shared(MutexGuard<'a, Option<(String, Storage)>>),
+}
+
+impl Deref for StorageRef<'_> {
+    type Target = Storage;
+
+    fn deref(&self) -> &Storage {
+        match self {
+            StorageRef::Owned(storage) => storage,
+            StorageRef::Shared(slot) => slot
+                .as_ref()
+                .map(|(_, storage)| storage)
+                .expect("a shared slot is filled before it is handed out"),
+        }
+    }
+}
+
+/// The database a command works on: the shared handle when there is one, [`open_storage`]'s
+/// per-command open otherwise.
+pub(crate) fn acquire<'a>(
+    settings: &Settings,
+    shared: Option<&'a SharedStorage>,
+) -> Result<StorageRef<'a>, CliError> {
+    let Some(shared) = shared else {
+        return open_storage(settings).map(StorageRef::Owned);
+    };
+    let raw = settings.text("DB_PATH", "");
+    let key = if raw.is_empty() {
+        String::new()
+    } else {
+        expand_user(&raw).to_string_lossy().into_owned()
+    };
+    // A poisoned lock means a command panicked while holding the database; the handle itself is
+    // still a valid connection, and refusing every later command would turn one defect into all.
+    let mut slot = shared.0.slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if slot.as_ref().is_none_or(|(open, _)| *open != key) {
+        let storage = open_storage(settings)?;
+        shared.0.opens.fetch_add(1, Ordering::SeqCst);
+        *slot = Some((key, storage));
+    }
+    Ok(StorageRef::Shared(slot))
 }
 
 /// The database the commands work on: `DB_PATH` when the caller named one, the

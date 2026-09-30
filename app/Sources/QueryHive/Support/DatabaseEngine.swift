@@ -48,6 +48,16 @@ protocol DatabaseEngine: Sendable {
     /// Synchronous by necessity, so it is deliberately not the general path: everything that can
     /// wait uses `run`, which keeps the main thread free.
     func runBlocking(_ command: String, env: [String: String])
+
+    /// Hints that a run against this connection is likely soon, so an engine that keeps sessions
+    /// can open one now. Returns at once and reports nothing: it is an optimisation, and the run
+    /// that follows behaves the same without it. `env` is what a run would send.
+    func warmUp(env: [String: String])
+}
+
+extension DatabaseEngine {
+    /// Most engines have nothing to warm; `MockEngine` and any other conformer inherit this.
+    func warmUp(env: [String: String]) {}
 }
 
 /// A handle to one running operation. Callers only ever stop it, so stopping it is all this

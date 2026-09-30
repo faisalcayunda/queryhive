@@ -7,7 +7,7 @@
 //!
 //! # Why the events are JSON lines
 //!
-//! A `run` call hands back the same NDJSON the CLI writes. That is not laziness: the app already
+//! A `run` call (on [`EngineHost`](crate::host::EngineHost)) hands back the same NDJSON the CLI writes. That is not laziness: the app already
 //! parses exactly these events — the previous engine wrote them to stdout and `Engine.swift`
 //! decodes them — so this surface replaces the process boundary without touching a single call
 //! site. Typed events are still the next step, and doing them before there is an app-side
@@ -33,7 +33,7 @@
 //!
 //! # Every call takes a sink and a cancel handle
 //!
-//! [`run`] is the shape an FFI caller can write: hand over a sink, hand over the handle that
+//! [`EngineHost::run`] is the shape an FFI caller can write: hand over a sink, hand over the handle that
 //! stops the run, and the events arrive as the engine produces them rather than in one lump at
 //! the end. Two reasons that pairing is the whole surface rather than a convenience:
 //!
@@ -42,7 +42,7 @@
 //!   `Vec<String>` kept every event and lost only *when* it was delivered, which is invisible in
 //!   a test and obvious to someone watching a long export.
 //! - **Cancel is the caller's own handle, made before the call**, because it has to reach a run
-//!   that is already in flight. [`run`] blocks until the command has ended, so a handle it
+//!   that is already in flight. [`EngineHost::run`](crate::host::EngineHost::run) blocks until the command has ended, so a handle it
 //!   returned could only ever be used once there was nothing left to stop; the caller builds the
 //!   [`RunCancel`], hands it in, and calls `request_cancel()` from wherever its Stop button lives.
 //!   `request()` sets a flag the engine reads between rows and between statements, so a stopped
@@ -54,7 +54,7 @@
 //! process's one runtime ([`qh_rt::build_main`], built on first use), and what matters to the
 //! caller is that one FFI call must not run on the main thread. The app decides that, and it is
 //! also why the handle is a separate object: the
-//! thread that is blocked in [`run`] cannot be the thread that presses Stop.
+//! thread that is blocked in [`EngineHost::run`](crate::host::EngineHost::run) cannot be the thread that presses Stop.
 //!
 //! # The events are the same events, and the order is the same order
 //!
@@ -70,7 +70,8 @@ use std::sync::{Arc, OnceLock};
 use serde_json::Value as Json;
 
 use crate::events::{event, Emitter};
-use crate::{run as run_command, CancelFlag, CliError, Command, Engine, RealEngine, Settings};
+use crate::local::SharedStorage;
+use crate::{run_with as run_command, CancelFlag, CliError, Command, Engine, Settings};
 
 /// One setting, as the environment would have carried it.
 ///
@@ -200,7 +201,7 @@ impl EngineCommand {
     }
 
     /// The command, as the engine's own dispatch table knows it.
-    fn as_command(self) -> Command {
+    pub(crate) fn as_command(self) -> Command {
         Command::parse(self.name()).expect("every variant names a command the engine knows")
     }
 }
@@ -220,8 +221,14 @@ pub trait EventSink: Send + Sync {
 }
 
 /// Every event, to the caller's sink.
-struct SinkEmitter {
+pub(crate) struct SinkEmitter {
     sink: Arc<dyn EventSink>,
+}
+
+impl SinkEmitter {
+    pub(crate) fn new(sink: Arc<dyn EventSink>) -> Self {
+        Self { sink }
+    }
 }
 
 impl Emitter for SinkEmitter {
@@ -239,13 +246,13 @@ impl Emitter for SinkEmitter {
     }
 }
 
-/// The handle that stops a run, built by the caller and handed to [`run`].
+/// The handle that stops a run, built by the caller and handed to [`EngineHost::run`](crate::host::EngineHost::run).
 ///
 /// A handle rather than a function that cancels "whatever is running", because this crate can
 /// have more than one command in flight in one process (the app runs each tab's command on its
 /// own queue), and a global cancel would stop the wrong one.
 ///
-/// Built by the caller rather than returned, because [`run`] does not return until the command is
+/// Built by the caller rather than returned, because [`EngineHost::run`](crate::host::EngineHost::run) does not return until the command is
 /// over: the caller has to be holding the handle while the run is still going. The app's own
 /// `EngineRun` already has that shape — it makes the handle, keeps it, and stops it from the main
 /// queue while the FFI call blocks on another.
@@ -260,6 +267,13 @@ impl Emitter for SinkEmitter {
 #[derive(Debug, Clone, Default, uniffi::Object)]
 pub struct RunCancel {
     flag: CancelFlag,
+}
+
+impl RunCancel {
+    /// The engine-side flag this handle raises.
+    pub(crate) fn flag(&self) -> &CancelFlag {
+        &self.flag
+    }
 }
 
 #[uniffi::export]
@@ -283,51 +297,29 @@ impl RunCancel {
     }
 }
 
-/// Run one command, sending each event to `sink` as it is produced.
-///
-/// `cancel` is the caller's own handle, the one it made before this call and keeps calling
-/// `request_cancel()` on while this one is blocked: nothing here can hand a handle back in time to
-/// stop the run it names (see the module note and [`RunCancel`]).
-///
-/// Returns nothing, which is not an omission: a run that could not be *started* is reported
-/// through the sink, exactly as the CLI reports it with an `error` line, so the app keeps one
-/// failure path. A run that starts and then fails does the same.
-///
-/// The call blocks until the command has ended, so it belongs off the main thread. The sink's
-/// callbacks run on the calling thread, inside the run, and the app hops to the main queue
-/// itself — the same split `DatabaseEngine`'s implementation already makes.
-#[uniffi::export]
-pub fn run(
-    command: EngineCommand,
-    settings: Vec<Setting>,
-    sink: Arc<dyn EventSink>,
-    cancel: Arc<RunCancel>,
-) {
-    let settings = Settings::from_pairs(
+/// The settings a caller passed as data, as the engine reads them.
+pub(crate) fn settings_of(settings: Vec<Setting>) -> Settings {
+    Settings::from_pairs(
         settings
             .into_iter()
             .map(|setting| (setting.key, setting.value)),
-    );
-
-    let mut out = SinkEmitter { sink };
-    let engine = RealEngine::with_settings(settings.clone());
-    run_with(
-        command.as_command(),
-        &settings,
-        &mut out,
-        &engine,
-        &cancel.flag,
-    );
+    )
 }
 
-/// [`run`] with the engine handed in, so a test can put a misbehaving one behind the same
-/// guard the app gets.
-fn run_with(
+/// Run one command on the process's runtime, with the engine handed in, so a test can put a
+/// misbehaving one behind the same guard the app gets.
+///
+/// Returns nothing, which is not an omission: a run that could not be *started* is reported through
+/// the sink, exactly as the CLI reports it with an `error` line, so the app keeps one failure path.
+/// A run that starts and then fails does the same. The call blocks until the command has ended, so
+/// it belongs off the main thread; the sink's callbacks run on the calling thread, inside the run.
+pub(crate) fn run_with(
     command: Command,
     settings: &Settings,
     out: &mut SinkEmitter,
     engine: &dyn Engine,
     cancel: &CancelFlag,
+    storage: Option<SharedStorage>,
 ) {
     // One runtime for the process, entered from whichever dispatch thread the caller runs on.
     // Blocking on it from one of its own workers would deadlock, so that is a bug, not a case.
@@ -353,7 +345,9 @@ fn run_with(
     // the app's process (ADR-0009) and leave the sink with a truncated protocol; `main.rs`
     // makes the same catch for the CLI.
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(run_command(command, settings, &mut *out, engine, cancel))
+        runtime.block_on(run_command(
+            command, settings, &mut *out, engine, cancel, storage,
+        ))
     }));
     match outcome {
         Ok(Ok(())) => {}
@@ -397,7 +391,7 @@ fn fail(out: &mut dyn Emitter, error: &CliError) {
 ///
 /// Only a success is kept: a build that failed (out of threads, say) is tried again on the
 /// next call rather than failing every run for the rest of the process.
-fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+pub(crate) fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     if let Some(runtime) = RUNTIME.get() {
         return Ok(runtime);
@@ -431,6 +425,16 @@ mod tests {
 
     use super::*;
     use crate::events::JsonLines;
+
+    /// The host's blocking run, one host per call: these tests are about the surface, not the pool.
+    fn run(
+        command: EngineCommand,
+        settings: Vec<Setting>,
+        sink: Arc<dyn EventSink>,
+        cancel: Arc<RunCancel>,
+    ) {
+        crate::host::EngineHost::new().run(command, settings, sink, cancel);
+    }
 
     fn setting(key: &str, value: &str) -> Setting {
         Setting {
@@ -737,6 +741,7 @@ mod tests {
             },
             &PanickingEngine,
             &CancelFlag::new(),
+            None,
         );
         let events = sink.events();
         let last = events.last().expect("something was reported");

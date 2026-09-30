@@ -401,7 +401,7 @@ impl fmt::Debug for ConnectionConfig {
 }
 
 /// Whether and how to encrypt the connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TlsMode {
     /// Do not use TLS.
     Disable,
@@ -512,6 +512,31 @@ pub trait Session: Send {
     async fn cancel(&self) -> Result<(), EngineError>;
 
     async fn close(self: Box<Self>) -> Result<(), EngineError>;
+
+    /// Put the session back to the state a new connection starts in, so a pool can hand it to
+    /// the next run.
+    ///
+    /// Everything one run can leave behind on the server side has to be gone afterwards: a
+    /// changed `search_path` or session variable, an open or failed transaction, temporary
+    /// tables, advisory locks, prepared statements the user made, a statement bound. What the
+    /// **client** keeps for its own use (its statement and type caches) stays.
+    ///
+    /// The default refuses, so a driver, or a test double, that has not said how to reset is
+    /// never reused: the pool closes a session whose reset fails. An `Err` means "do not reuse
+    /// this session", not "the user must be told".
+    async fn reset(&mut self) -> Result<(), EngineError> {
+        Err(EngineError::Usage {
+            message: "this session cannot be reset, so it cannot be reused".to_owned(),
+        })
+    }
+
+    /// Point the session at the database (or catalog) and schema the next run is about.
+    ///
+    /// Called by a pool on every checkout, with `None` when the run names none, so nothing of
+    /// the previous run's context is carried over. It does no I/O: a driver records what it
+    /// was told and sends whatever it needs (`USE`) before its next statement. The default
+    /// does nothing, for a driver whose connection is not bound to a context.
+    fn set_context(&mut self, _database: Option<&str>, _schema: Option<&str>) {}
 }
 
 /// Rows, in batches.
@@ -894,6 +919,25 @@ mod tests {
         // Then the end, reported as None rather than as an empty batch.
         assert!(cursor.next_batch(10).await.unwrap().is_none());
 
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_session_that_does_not_say_how_to_reset_is_never_reused() {
+        // The default is a refusal, so a driver (or a test double) that has not implemented
+        // `reset` can never be handed to a second run by a pool.
+        let driver = FakeDriver {
+            kind: DriverKind::Trino,
+            connects: Arc::new(AtomicUsize::new(0)),
+        };
+        let config = ConnectionConfig::new(DriverKind::Trino, "127.0.0.1", 8080, "qh");
+        let mut session = driver.connect(&config).await.unwrap();
+        assert!(matches!(
+            session.reset().await,
+            Err(EngineError::Usage { .. })
+        ));
+        // Naming a context is harmless by default: there is nothing to point.
+        session.set_context(Some("catalog"), Some("schema"));
         session.close().await.unwrap();
     }
 

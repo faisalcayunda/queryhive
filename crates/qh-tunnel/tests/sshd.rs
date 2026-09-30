@@ -388,6 +388,7 @@ async fn password_authentication_reaches_the_same_place() {
     .await
     .expect("open with a password");
     assert_ne!(tunnel.local_port(), 0);
+    assert!(tunnel.is_alive(), "a tunnel that has just opened is alive");
     tunnel.close().await;
 }
 
