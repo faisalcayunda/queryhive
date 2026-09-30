@@ -82,3 +82,27 @@ Rincian yang mengikat:
 - **`Capabilities::statement_timeout` adalah janji yang bisa dites.** Ketiga driver menjawab `true`
   karena ketiganya memakai mekanisme server; menambah driver keempat berarti menjawab pertanyaan itu,
   bukan mewarisi jawaban.
+
+## Addendum 2026-09-30: sesi yang dipakai ulang dan reset
+
+Keputusan di atas ditulis untuk sesi yang hidup satu Run. Sejak `EngineHost` (ADR-0031 bagian 2,
+commit `d2bfe6b`), sesi driver dipinjam dari pool dan dipakai ulang lintas Run, sedangkan batas waktu
+tetap dikirim per Run (app selalu mengirim `STATEMENT_TIMEOUT_MS`, default 60.000 ms). Mekanisme
+server, `Capabilities::statement_timeout`, `EngineError::Timeout`, dan default `0` di engine tidak
+berubah. Yang ditambahkan hanya cara batas itu bertahan atau hilang di antara Run:
+
+1. **Reset menghapus batas yang sedang berlaku.** PostgreSQL (`RESET ALL`) dan MySQL
+   (`COM_RESET_CONNECTION`) mengembalikan `statement_timeout` dan `max_execution_time` ke default
+   server, dan Trino tidak menyimpan state karena `query_max_run_time` dikirim di setiap `POST`.
+   Batas satu Run tidak pernah terbawa ke Run berikutnya.
+2. **Pelacak sesi harus ikut kembali.** Driver mengirim `SET` hanya bila batas berubah. Karena itu
+   `reset` di PostgreSQL dan MySQL mengosongkan pelacaknya (`None`), sama dengan sesi baru. Bila
+   tidak, Run sesudah reset akan melewati `SET` dan berjalan tanpa batas. Di MySQL, pelacak
+   `sql_select_limit` (batas baris preview) diperlakukan sama dan digabung dalam `SET` yang sama.
+3. **Setiap Run sesudah reset membayar satu `SET`** untuk memasang batasnya lagi, karena app selalu
+   mengirim batas. Itu bagian dari biaya pool, dan bukan alasan menahan batas di sesi.
+4. **Sesi MySQL kini satu koneksi.** Sebelum perbaikan `a8174f8`, tiap statement membuka koneksi baru,
+   sehingga pelacak mencatat nilai yang dikirim ke koneksi pertama dan statement kedua berjalan tanpa
+   `max_execution_time`. Batas kini berlaku pada statement berikutnya di sesi yang sama.
+5. **Batasan MySQL tetap.** `max_execution_time` masih tidak mencakup write, dan itu masih dinyatakan,
+   bukan disembunyikan.
