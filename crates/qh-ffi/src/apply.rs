@@ -49,10 +49,11 @@
 use std::time::Duration;
 
 use qh_driver::{ExecuteOptions, Parameter, Session};
+#[cfg(test)]
 use qh_sql::SafeMode;
 use serde_json::Value as Json;
 
-use crate::commands::{connection, guard, open, safe_mode, statement_timeout};
+use crate::commands::{connection, dialect, guard, open, safe_mode, statement_timeout};
 use crate::env::Settings;
 use crate::events::{event, Emitter};
 use crate::{CancelFlag, CliError, Engine};
@@ -119,11 +120,12 @@ pub async fn apply_changes(
         ));
     }
     let safe = safe_mode(settings, engine)?;
+    let dialect = dialect(settings);
     // Guarded before the connect step, so a read-only connection refuses the
     // whole plan without opening one — the same order every other write command
     // follows.
     for (index, change) in changes.iter().enumerate() {
-        guard(safe, &change.sql).map_err(|error| {
+        guard(safe, &change.sql, dialect).map_err(|error| {
             CliError::Usage(format!(
                 "change {} was refused: {}",
                 index + 1,
@@ -511,11 +513,12 @@ fn parse_parameters(value: Option<&Json>, index: usize) -> Result<Vec<Parameter>
         .collect()
 }
 
-/// The safe mode is re-checked against each statement before it runs; this is
-/// used only by the tests that build a plan directly.
-#[allow(dead_code)]
+/// The safe mode is re-checked against each statement before it runs (in `apply_changes`,
+/// through `guard`); this is the test-side helper for plans built directly. It reads under
+/// the strictest set of readings, MySQL's, so a statement it allows every dialect allows.
+#[cfg(test)]
 fn allows(mode: SafeMode, sql: &str) -> bool {
-    qh_sql::check(mode, sql).is_ok()
+    qh_sql::check_confirmed_readings(mode, false, sql, qh_sql::Dialect::Mysql.readings()).is_ok()
 }
 
 #[cfg(test)]

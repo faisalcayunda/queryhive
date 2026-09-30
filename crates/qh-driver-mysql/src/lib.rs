@@ -85,8 +85,24 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
 };
-use qh_sql::strip_terminator;
+use qh_sql::{statements_dialect, strip_terminator_dialect, Dialect};
 use tokio::sync::mpsc;
+
+/// Whether `sql` is at most one statement under **every** lexer the server might be using.
+///
+/// The server's `sql_mode` (`NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`) and version decide where
+/// a string or a comment ends, and none of it is knowable here. The lexer that matches the
+/// server is one of [`Dialect::readings`], so if every one of them sees at most one
+/// statement, the server does too. This is the same reading set the engine's Safe Mode guard
+/// classifies under; unlike the guard it does not need the readings to agree on the text of
+/// the statement, only that none of them finds a second one, so a trailing `;` after a
+/// string the readings scan differently is not refused for that alone.
+fn is_single_statement(sql: &str) -> bool {
+    Dialect::Mysql
+        .readings()
+        .iter()
+        .all(|lexer| statements_dialect(sql, *lexer).len() <= 1)
+}
 
 /// Rows the producer may run ahead by, in batches.
 ///
@@ -305,6 +321,25 @@ impl MysqlSession {
         options: &ExecuteOptions,
         params: Vec<mysql_async::Value>,
     ) -> Result<Box<dyn Cursor>, EngineError> {
+        // Defence in depth (W3-T0). mysql_async always negotiates
+        // `CLIENT_MULTI_STATEMENTS` (opts/mod.rs:1096), so the text protocol below would
+        // run every statement in a `SELECT '\''; DELETE …` string that a misread Safe
+        // Mode classifier let through — the server, not this driver, splits it. The
+        // engine already splits and approves one statement at a time; a text that any
+        // lexer the server might be using reads as more than one statement is refused
+        // here, before it is sent, so no unapproved second statement ever reaches the
+        // server. The bound path (`exec_iter`, COM_STMT_PREPARE) rejects multiples
+        // server-side too; this closes the text path.
+        if !is_single_statement(sql) {
+            return Err(EngineError::Usage {
+                message: "this connection runs one statement per request; the text given holds \
+                          more than one, or MySQL string escaping and comments could read it as \
+                          more than one depending on the server's sql_mode (write a quote \
+                          inside a string as '' instead of \\')"
+                    .to_owned(),
+            });
+        }
+
         let mut conn = self.connection().await?;
 
         // The bound is a server setting, so it reaches the server before the statement
@@ -491,8 +526,9 @@ impl Session for MysqlSession {
 
     fn explain_statement(&self, sql: &str) -> String {
         // MySQL also rejects a trailing terminator, and a `;` inside a literal is
-        // data — `strip_terminator` is what knows the difference.
-        format!("EXPLAIN {}", strip_terminator(sql))
+        // data — `strip_terminator` is what knows the difference. Read under MySQL's
+        // own rules, so a `;` inside a `'\;'` backslash escape stays data.
+        format!("EXPLAIN {}", strip_terminator_dialect(sql, Dialect::Mysql))
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
@@ -1315,11 +1351,65 @@ mod tests {
 
     #[test]
     fn explain_drops_a_terminator_but_not_a_semicolon_inside_text() {
-        let session = |sql: &str| format!("EXPLAIN {}", strip_terminator(sql));
+        // The same expression `explain_statement` builds.
+        let session =
+            |sql: &str| format!("EXPLAIN {}", strip_terminator_dialect(sql, Dialect::Mysql));
         assert_eq!(session("SELECT 1"), "EXPLAIN SELECT 1");
         assert_eq!(session("SELECT 1;"), "EXPLAIN SELECT 1");
         // A `;` inside a literal is data and must survive.
         assert_eq!(session("SELECT 'a;b;'"), "EXPLAIN SELECT 'a;b;'");
+        // Read under MySQL's rules: a `;` after a backslash-escaped quote is inside the
+        // string, so it stays data rather than becoming a terminator to peel.
+        assert_eq!(session("SELECT '\\';'"), "EXPLAIN SELECT '\\';'");
+    }
+
+    #[test]
+    fn a_multi_statement_request_is_rejected_before_it_is_sent() {
+        // The backstop `run_statement` applies (W3-T0): a text any lexer the server might
+        // use reads as more than one statement never reaches the always-multi-statement
+        // text protocol.
+        assert!(is_single_statement("SELECT 1"));
+        assert!(is_single_statement("SELECT 1;"));
+        assert!(is_single_statement("SELECT 'a;b'"));
+        // The engine allows a single read with a trailing comment; so does the backstop.
+        assert!(is_single_statement("SELECT 1; -- note"));
+        assert!(is_single_statement("SELECT 1 # note; more"));
+        assert!(is_single_statement("SELECT 5--2"));
+        assert!(is_single_statement("SELECT /*+ NO_INDEX(t) */ 1"));
+        // A backslash-escaped quote and a trailing `;` is one statement under every reading.
+        assert!(is_single_statement("INSERT INTO t VALUES ('it\\'s');"));
+        assert!(!is_single_statement("SELECT '\\''; DELETE FROM t; -- '"));
+        assert!(!is_single_statement("SELECT '\\''; DELETE FROM t; # '"));
+        assert!(!is_single_statement("SELECT '\\'; DELETE FROM t; -- '"));
+        assert!(!is_single_statement(
+            "SELECT 1 \"\\\" ; DELETE FROM t ; -- \""
+        ));
+        assert!(!is_single_statement("SELECT 1; SELECT 2"));
+        assert!(!is_single_statement("SELECT 1 --x; DELETE FROM t"));
+        assert!(!is_single_statement("SELECT 1 /*! ; DROP TABLE t */"));
+        assert!(!is_single_statement("SELECT 1 /*!50000 ; DROP TABLE t */"));
+        assert!(!is_single_statement(
+            "SELECT 1 /*!99999 ' */ ; DROP TABLE t ; -- '"
+        ));
+    }
+
+    #[test]
+    fn a_dollar_tag_does_not_hide_a_statement_from_the_backstop() {
+        // MySQL has no dollar quoting: `$` is an identifier character, so the `;` between
+        // two `$tag$` markers separates statements the server runs. A reading that treated
+        // the markers as a string would call these one statement.
+        assert!(!is_single_statement(
+            "SELECT 1 AS x$a$ ; DELETE FROM t ; $a$"
+        ));
+        assert!(!is_single_statement("SELECT $a$ ; DELETE FROM t ; $a$"));
+        assert!(!is_single_statement("SELECT $$; DELETE FROM t; $$"));
+        assert!(!is_single_statement("SELECT 1 $tag$; DROP TABLE t; $tag$"));
+        assert!(!is_single_statement("SELECT $a$ ; SELECT 2 ; $a$"));
+        // A `$` inside an identifier or a string is nothing special.
+        assert!(is_single_statement("SELECT a$b FROM t$1"));
+        assert!(is_single_statement(
+            "SELECT JSON_EXTRACT(doc, '$.a') FROM t"
+        ));
     }
 
     #[test]

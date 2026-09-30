@@ -31,7 +31,8 @@ use qh_driver::{
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
 use qh_sql::{
-    Decision, FloorSource, SafeMode, SafeModeFloor, StatementDecision, StatementKind, SAFE_MODES,
+    Decision, Dialect, FloorSource, SafeMode, SafeModeFloor, StatementDecision, StatementKind,
+    SAFE_MODES,
 };
 use serde_json::{json, Value as Json};
 
@@ -175,6 +176,22 @@ fn parse_safe_mode(raw: &str, key: &str) -> Result<SafeMode, CliError> {
     })
 }
 
+/// The lexical dialect a run's SQL is read under, resolved the way the connection will be.
+///
+/// The classifier and the scanner have to agree with the server about where a string ends
+/// and a comment starts, and MySQL disagrees with the others: `SELECT '\''; DELETE …` is
+/// one read-only statement under generic rules and a read plus a `DELETE` under MySQL's, so
+/// a MySQL connection has to be read as MySQL or a `read_only` connection would run the
+/// write (W3-T0). The kind is taken from [`crate::config::build`] rather than raw `DB_KIND`
+/// so a URL-only MySQL connection (no `DB_KIND`, a `mysql://` URL) still reads as MySQL; a
+/// config that cannot resolve, and every other kind, reads as [`Dialect::Generic`].
+pub(crate) fn dialect(settings: &Settings) -> Dialect {
+    match crate::config::build(settings).map(|config| config.kind) {
+        Ok(DriverKind::Mysql) => Dialect::Mysql,
+        _ => Dialect::Generic,
+    }
+}
+
 /// Whether this run carries the caller's explicit confirmation.
 ///
 /// `SAFE_MODE_CONFIRMED=1` is the whole of a confirmation as far as the engine can see it:
@@ -189,8 +206,8 @@ pub(crate) fn safe_mode_confirmed(settings: &Settings) -> bool {
 /// This is the shape every caller that predates the `confirm` level uses, including the
 /// bulk `apply_changes` and `import_data` paths: a single confirmation cannot cover a whole
 /// plan, so a `confirm` connection refuses them until the caller raises the level.
-pub(crate) fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
-    guard_confirmed(mode, false, sql)
+pub(crate) fn guard(mode: SafeMode, sql: &str, dialect: Dialect) -> Result<(), CliError> {
+    guard_confirmed(mode, false, sql, dialect)
 }
 
 /// Refuse a script the connection's Safe Mode does not allow, recording every decision.
@@ -200,8 +217,13 @@ pub(crate) fn guard(mode: SafeMode, sql: &str) -> Result<(), CliError> {
 /// decided before the network is touched, so a read-only connection refuses a `DROP`
 /// without opening one. Each decision reaches the execution log, and a failed log write is
 /// a failure: an audit record that could not be written is not quietly skipped.
-pub(crate) fn guard_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Result<(), CliError> {
-    for statement in qh_sql::decisions(mode, sql) {
+pub(crate) fn guard_confirmed(
+    mode: SafeMode,
+    confirmed: bool,
+    sql: &str,
+    dialect: Dialect,
+) -> Result<(), CliError> {
+    for statement in qh_sql::decisions_readings(mode, sql, dialect.readings()) {
         if let Some(error) = record_decision(
             mode,
             confirmed,
@@ -266,7 +288,7 @@ fn record_decision(
 /// caller sent `SAFE_MODE_CONFIRMED=1` for and asks otherwise. The bulk paths keep the
 /// unconfirmed [`guard`] deliberately: one confirmation does not cover a plan.
 pub(crate) fn guard_for(settings: &Settings, mode: SafeMode, sql: &str) -> Result<(), CliError> {
-    guard_confirmed(mode, safe_mode_confirmed(settings), sql)
+    guard_confirmed(mode, safe_mode_confirmed(settings), sql, dialect(settings))
 }
 
 /// Why a destructive table operation is a question on a `confirm` connection.
@@ -293,7 +315,7 @@ pub(crate) fn guard_destructive(
     engine: &dyn Engine,
     statement: &str,
 ) -> Result<(), CliError> {
-    let kind = qh_sql::classify(statement);
+    let kind = qh_sql::classify_readings(statement, dialect(settings).readings());
     let mode = destructive_mode(settings, engine)?;
     let (decision, reason) = match mode {
         SafeMode::Full => (Decision::Allow, None),
@@ -1877,7 +1899,24 @@ pub async fn count(
     let mode = safe_mode(settings, engine)?;
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
-    let statement = qh_sql::count_statement(&sql)?;
+    // With more than one reading (MySQL), `count` wraps the caller's statement, so it must
+    // be one statement that every reading delimits the same way; otherwise the wrap would
+    // run something the readings disagree about. A single reading (PostgreSQL, Trino)
+    // skips this, so its error texts stay exactly what `count_statement` says.
+    let dialect = dialect(settings);
+    if dialect.readings().len() > 1 {
+        let single = qh_sql::statements_agreeing(&sql, dialect.readings())
+            .is_some_and(|statements| statements.len() == 1);
+        if !single {
+            return Err(CliError::Usage(
+                "count wraps exactly one statement, but MySQL string escaping and comments \
+                 depend on the server's sql_mode and this text does not read as one \
+                 statement under every mode; write quotes inside strings as '' instead of \\'"
+                    .to_owned(),
+            ));
+        }
+    }
+    let statement = qh_sql::count_statement_dialect(&sql, dialect)?;
     let config = connection(settings, engine)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;

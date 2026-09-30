@@ -15,7 +15,7 @@
 //!
 //! # Statements
 //!
-//! A `.sql` file is read whole and split by [`qh_sql::statements_with_lines`] —
+//! A `.sql` file is read whole and split by [`qh_sql::statements_with_lines_dialect`] —
 //! the same scanner `qh_sql::check` and the classifier use, never a second
 //! splitter that could disagree about where a `;` inside a literal or a
 //! dollar-quoted body ends a statement. Statements are sent one at a time, each
@@ -80,11 +80,11 @@ use std::time::Duration;
 use qh_core::ColumnMeta;
 use qh_driver::{DriverKind, ExecuteOptions, Session};
 use qh_import::{Format as SourceFormat, Options as ReadOptions, RawRow, RowReader};
-use qh_sql::{quote_ident, IdentStyle, SafeMode, StatementKind};
+use qh_sql::{quote_ident, Dialect, IdentStyle, SafeMode, StatementKind};
 use serde_json::Value as Json;
 
 use crate::commands::{
-    connection, expand_user, guard, open, record_kind, safe_mode, statement_timeout,
+    connection, dialect, expand_user, guard, open, record_kind, safe_mode, statement_timeout,
 };
 use crate::env::Settings;
 use crate::events::{event, Emitter};
@@ -281,6 +281,7 @@ async fn import_rows_file(
     let config = connection(settings, engine)?;
     let style = SlotStyle::of(config.kind);
     let safe = safe_mode(settings, engine)?;
+    let dialect = dialect(settings);
     // Importing writes. A mode that refuses a DML statement refuses the whole
     // import, and that is decided here rather than after a connection: a
     // read-only connection must not even open.
@@ -376,6 +377,7 @@ async fn import_rows_file(
         timeout,
         in_transaction,
         safe,
+        dialect,
         cancel,
         out,
         &mut progress,
@@ -471,6 +473,9 @@ async fn import_statements(
     let mode = mode_of(settings)?;
     let config = connection(settings, engine)?;
     let safe = safe_mode(settings, engine)?;
+    // The script is split and classified under the connection's own dialect, so a MySQL
+    // `.sql` file's escapes and comments are read the way its server will read them.
+    let dialect = dialect(settings);
     let fk = fk_checks(settings, config.kind)?;
     let timeout = statement_timeout(settings)?;
 
@@ -480,7 +485,7 @@ async fn import_statements(
             path.display()
         ))
     })?;
-    let statements = qh_sql::statements_with_lines(&text);
+    let statements = qh_sql::statements_with_lines_dialect(&text, dialect);
     if statements.is_empty() {
         return Err(CliError::Usage(format!(
             "IMPORT_PATH '{}' has no SQL statements",
@@ -490,7 +495,7 @@ async fn import_statements(
     // The whole script is checked once before the connection opens, so a Safe Mode
     // that refuses one statement refuses the import and names it without touching
     // the server — the same order the row family follows for its DML check.
-    guard(safe, &text)?;
+    guard(safe, &text, dialect)?;
 
     out.emit(event("step").field("step", "connect").build())?;
     let (mut session, _policy) = open(settings, engine, &config).await?;
@@ -524,6 +529,7 @@ async fn import_statements(
         timeout,
         in_transaction,
         safe,
+        dialect,
         cancel,
         out,
         &mut progress,
@@ -608,6 +614,7 @@ async fn import_statements_loop(
     timeout: Option<Duration>,
     in_transaction: bool,
     safe: SafeMode,
+    dialect: Dialect,
     cancel: &CancelFlag,
     out: &mut dyn Emitter,
     progress: &mut Progress,
@@ -627,7 +634,7 @@ async fn import_statements_loop(
         // Guarded again here, statement by statement: the door check refused the
         // whole script, and this is the statement that actually runs — the same
         // rule the row family's `send_batch` follows.
-        let failure = match guard(safe, statement.text) {
+        let failure = match guard(safe, statement.text, dialect) {
             Ok(()) => run(session, statement.text, timeout).await.map(|_| ()),
             Err(error) => Err(error),
         };
@@ -698,6 +705,7 @@ async fn import_rows(
     timeout: Option<Duration>,
     in_transaction: bool,
     safe: SafeMode,
+    dialect: Dialect,
     cancel: &CancelFlag,
     out: &mut dyn Emitter,
     progress: &mut Progress,
@@ -731,6 +739,7 @@ async fn import_rows(
                     &batch,
                     timeout,
                     safe,
+                    dialect,
                     &mut outcome,
                     out,
                     progress,
@@ -757,6 +766,7 @@ async fn import_rows(
                 &batch,
                 timeout,
                 safe,
+                dialect,
                 &mut outcome,
                 out,
                 progress,
@@ -788,6 +798,7 @@ async fn import_rows(
             &batch,
             timeout,
             safe,
+            dialect,
             &mut outcome,
             out,
             progress,
@@ -817,6 +828,7 @@ async fn flush(
     batch: &[(usize, Vec<String>)],
     timeout: Option<Duration>,
     safe: SafeMode,
+    dialect: Dialect,
     outcome: &mut Outcome,
     out: &mut dyn Emitter,
     progress: &mut Progress,
@@ -824,7 +836,7 @@ async fn flush(
     if batch.is_empty() {
         return Ok(None);
     }
-    match send_batch(session, plan, batch, timeout, safe).await {
+    match send_batch(session, plan, batch, timeout, safe, dialect).await {
         Ok(count) => {
             outcome.written += count;
             progress.emit(outcome.written, out)?;
@@ -841,12 +853,13 @@ async fn send_batch(
     batch: &[(usize, Vec<String>)],
     timeout: Option<Duration>,
     safe: SafeMode,
+    dialect: Dialect,
 ) -> Result<u64, (usize, String)> {
     let line = line_of(batch);
     let statement = insert_statement(plan, batch.iter().map(|(_, cells)| cells));
     // Guarded here as well as at the door: this is the statement that runs, and
     // the same rule `to_table` follows.
-    if let Err(error) = guard(safe, &statement) {
+    if let Err(error) = guard(safe, &statement, dialect) {
         return Err((line, error.message()));
     }
     match run(session, &statement, timeout).await {

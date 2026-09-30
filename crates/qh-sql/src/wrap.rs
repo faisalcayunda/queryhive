@@ -9,7 +9,9 @@
 
 use thiserror::Error;
 
-use crate::scan::{has_significant_text, scan, statement_count};
+use crate::scan::{
+    has_significant_text_dialect, scan_dialect, statement_count_dialect, Dialect, Lexer,
+};
 
 /// Why a statement could not be wrapped.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -48,8 +50,15 @@ pub enum SqlError {
 /// A `;` inside a literal is never touched: `SELECT 'a;b;'` is returned
 /// unchanged, because those characters are data.
 pub fn strip_terminator(sql: &str) -> String {
+    strip_terminator_dialect(sql, Dialect::Generic)
+}
+
+/// [`strip_terminator`] under `dialect`'s lexical rules, so a MySQL `EXPLAIN` prefix is
+/// added to a statement whose `;` inside a backslash-escaped string stays data.
+pub fn strip_terminator_dialect(sql: &str, dialect: impl Into<Lexer>) -> String {
+    let dialect: Lexer = dialect.into();
     let trimmed = sql.trim();
-    let scan = scan(trimmed);
+    let scan = scan_dialect(trimmed, dialect);
 
     let Some(&first_separator) = scan.separators.first() else {
         return if scan.ends_with_terminator {
@@ -64,7 +73,7 @@ pub fn strip_terminator(sql: &str) -> String {
 
     // Another statement follows: leave the caller's text alone rather than
     // guessing which statement they meant.
-    if has_significant_text(rest) {
+    if has_significant_text_dialect(rest, dialect) {
         return trimmed.to_owned();
     }
 
@@ -99,9 +108,16 @@ fn drop_trailing_terminator(text: &str) -> String {
 /// `WITH` (wrapping it would change what runs), and more than one statement (the
 /// caller asked about one).
 pub fn count_statement(sql: &str) -> Result<String, SqlError> {
+    count_statement_dialect(sql, Dialect::Generic)
+}
+
+/// [`count_statement`] under `dialect`'s lexical rules, so a MySQL count reads a MySQL
+/// escape and refuses a second statement MySQL would run.
+pub fn count_statement_dialect(sql: &str, dialect: impl Into<Lexer>) -> Result<String, SqlError> {
+    let dialect: Lexer = dialect.into();
     let trimmed = sql.trim();
-    let scan = scan(trimmed);
-    let count = statement_count(trimmed, &scan);
+    let scan = scan_dialect(trimmed, dialect);
+    let count = statement_count_dialect(trimmed, &scan, dialect);
 
     if count == 0 {
         return Err(SqlError::Blank);
@@ -121,7 +137,7 @@ pub fn count_statement(sql: &str) -> Result<String, SqlError> {
 
     Ok(format!(
         "SELECT COUNT(*) FROM ({}) AS queryhive_count",
-        strip_terminator(trimmed)
+        strip_terminator_dialect(trimmed, dialect)
     ))
 }
 

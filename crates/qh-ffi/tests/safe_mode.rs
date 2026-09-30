@@ -97,6 +97,154 @@ fn usage_message(error: &CliError) -> String {
     }
 }
 
+/// The MySQL Safe Mode bypass W3-T0 found: `SELECT '\''; DELETE …` is one read-only
+/// SELECT under a generic scan, so a `read_only` MySQL connection classified it as safe and
+/// the server — which always has multi-statements enabled — ran the DELETE. The guard must
+/// read a MySQL connection under MySQL's rules and refuse the write before connecting.
+///
+/// On the code before the fix this test fails: the payload reached `connect`
+/// (`connects() == 1`) instead of being refused. After the fix it is a `read-only` usage
+/// refusal the server never saw.
+#[tokio::test]
+async fn read_only_refuses_a_mysql_string_escape_injection_before_connecting() {
+    let payloads = [
+        "SELECT '\\''; DELETE FROM t; -- '",
+        "SELECT '\\''; DELETE FROM t; # '",
+        "SELECT \"\\\"\"; DELETE FROM t; # \"",
+        // The no-doubling spellings, where the server's `sql_mode` (`NO_BACKSLASH_ESCAPES`
+        // or `ANSI_QUOTES`) makes the string close earlier than the MySQL reading thinks,
+        // so the generic reading sees the write the MySQL reading misses.
+        "SELECT '\\'; DELETE FROM t; -- '",
+        "SELECT 1 \"\\\" ; DELETE FROM t ; -- \"",
+    ];
+    for payload in payloads {
+        let engine = CountingEngine::new();
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", "mysql"),
+                ("DB_HOST", "mysql.invalid"),
+                ("DB_PORT", "3306"),
+                ("DB_USER", "queryhive"),
+                ("SAFE_MODE", "read_only"),
+                ("SQL", payload),
+            ],
+        )
+        .await;
+        let message = usage_message(&error);
+        assert!(message.contains("read-only"), "{payload:?}: {message}");
+        assert_eq!(
+            engine.connects(),
+            0,
+            "the write must be refused before the server is reached: {payload:?}"
+        );
+    }
+}
+
+/// MySQL has no dollar quoting: `$` is an identifier character, so the `;` and the write
+/// between two `$tag$` markers are code the server runs. The guard must read them as code on
+/// a MySQL connection, in every command that takes SQL, and refuse before connecting.
+#[tokio::test]
+async fn read_only_refuses_a_mysql_dollar_tag_hiding_a_write_before_connecting() {
+    let payloads = [
+        "SELECT 1 AS x$a$ ; DELETE FROM t ; $a$",
+        "SELECT $a$ ; DELETE FROM t ; $a$",
+        "SELECT $$; DROP TABLE t; $$",
+        "SELECT $x$ DELETE FROM t $x$",
+        "SELECT 1 $tag$; INSERT INTO t VALUES (1); $tag$",
+    ];
+    let mysql = |sql: &'static str, safe: &'static str| {
+        vec![
+            ("DB_KIND", "mysql"),
+            ("DB_HOST", "mysql.invalid"),
+            ("DB_PORT", "3306"),
+            ("DB_USER", "queryhive"),
+            ("SAFE_MODE", safe),
+            ("SQL", sql),
+            ("FORMAT", "csv"),
+            ("OUT_DIR", "/tmp"),
+        ]
+    };
+    for payload in payloads {
+        for command in [
+            Command::Preview,
+            Command::Count,
+            Command::Explain,
+            Command::Export,
+        ] {
+            let engine = CountingEngine::new();
+            let error = refuse(command, &engine, &mysql(payload, "read_only")).await;
+            let message = usage_message(&error);
+            assert!(
+                message.contains("read-only") || message.contains("could not tell"),
+                "{command:?} {payload:?}: {message}"
+            );
+            assert_eq!(
+                engine.connects(),
+                0,
+                "{command:?}: the write must be refused before the server is reached: {payload:?}"
+            );
+        }
+    }
+}
+
+/// The dollar-tag text is one dollar-quoted string on PostgreSQL and Trino, so their guard
+/// is unchanged: it reads as a single read and reaches the connect step.
+#[tokio::test]
+async fn a_dollar_quoted_string_is_still_one_read_on_postgres_and_trino() {
+    for kind in ["postgres", "trino"] {
+        let engine = CountingEngine::new();
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", kind),
+                ("SAFE_MODE", "read_only"),
+                ("SQL", "SELECT $a$ ; DELETE FROM t ; $a$"),
+            ],
+        )
+        .await;
+        assert!(
+            !matches!(error, CliError::Usage(ref message) if message.contains("read-only")),
+            "{kind}: {error:?}"
+        );
+        assert_eq!(engine.connects(), 1, "{kind} reaches the connect step");
+    }
+}
+
+/// A `#` comment holding words that look like writes is a comment on MySQL under every
+/// sql_mode, so a read-only connection lets the read through to the server.
+#[tokio::test]
+async fn read_only_lets_a_mysql_hash_comment_read_through() {
+    for sql in [
+        "SELECT 1 # plain hash comment",
+        "SELECT 1 # remember to update this later",
+        "SELECT 'a#b', 'a--b' -- delete me",
+    ] {
+        let engine = CountingEngine::new();
+        let error = refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", "mysql"),
+                ("DB_HOST", "mysql.invalid"),
+                ("DB_PORT", "3306"),
+                ("DB_USER", "queryhive"),
+                ("SAFE_MODE", "read_only"),
+                ("SQL", sql),
+            ],
+        )
+        .await;
+        assert!(
+            !matches!(error, CliError::Usage(ref message) if message.contains("read-only")
+                || message.contains("could not tell")),
+            "{sql:?}: {error:?}"
+        );
+        assert_eq!(engine.connects(), 1, "{sql:?} reaches the connect step");
+    }
+}
+
 #[tokio::test]
 async fn read_only_refuses_a_drop_before_the_engine_connects() {
     let engine = CountingEngine::new();

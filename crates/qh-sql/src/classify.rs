@@ -61,7 +61,7 @@
 
 use thiserror::Error;
 
-use crate::scan::{first_significant, has_significant_text, scan};
+use crate::scan::{first_significant, has_significant_text_dialect, scan_dialect, Dialect, Lexer};
 
 /// What one statement does, as far as reading its text can say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,11 +445,22 @@ impl StatementDecision<'_> {
 /// decisions (the engine) needs to say which statement stopped the script and would
 /// otherwise have to classify a second time to find out.
 pub fn decisions(mode: SafeMode, sql: &str) -> Vec<StatementDecision<'_>> {
-    statements(sql)
+    decisions_dialect(mode, sql, Dialect::Generic)
+}
+
+/// [`decisions`] under `dialect`'s lexical rules, so a MySQL connection reads a MySQL
+/// string escape and a MySQL comment the way its server will.
+pub fn decisions_dialect(
+    mode: SafeMode,
+    sql: &str,
+    dialect: impl Into<Lexer>,
+) -> Vec<StatementDecision<'_>> {
+    let dialect: Lexer = dialect.into();
+    statements_dialect(sql, dialect)
         .into_iter()
         .enumerate()
         .map(|(offset, statement)| {
-            let kind = classify(statement);
+            let kind = classify_dialect(statement, dialect);
             StatementDecision {
                 index: offset + 1,
                 kind,
@@ -461,9 +472,14 @@ pub fn decisions(mode: SafeMode, sql: &str) -> Vec<StatementDecision<'_>> {
         .collect()
 }
 
-/// What one statement does, by reading its text.
+/// What one statement does, by reading its text (generic lexical rules).
 pub fn classify(sql: &str) -> StatementKind {
-    let scan = scan(sql);
+    classify_dialect(sql, Dialect::Generic)
+}
+
+/// [`classify`] under `dialect`'s lexical rules.
+pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
+    let scan = scan_dialect(sql, dialect);
     let Some(leading) = scan.leading_keyword.as_deref() else {
         // No word at all: an empty fragment, a bare operator, a comment. Nothing to
         // recognise, so nothing is claimed.
@@ -526,6 +542,15 @@ pub fn check(mode: SafeMode, sql: &str) -> Result<(), SafeModeError> {
     check_confirmed(mode, false, sql)
 }
 
+/// [`check`] under `dialect`'s lexical rules.
+pub fn check_dialect(
+    mode: SafeMode,
+    sql: &str,
+    dialect: impl Into<Lexer>,
+) -> Result<(), SafeModeError> {
+    check_confirmed_dialect(mode, false, sql, dialect)
+}
+
 /// Check a whole script against a Safe Mode, with the caller's confirmation.
 ///
 /// Every statement is classified, and the script is refused if **any** of them is not
@@ -534,10 +559,145 @@ pub fn check(mode: SafeMode, sql: &str) -> Result<(), SafeModeError> {
 /// mode would run only after a confirmation is refused when `confirmed` is `false`, with
 /// [`SafeModeError::NeedsConfirmation`] so the caller can tell the two apart.
 pub fn check_confirmed(mode: SafeMode, confirmed: bool, sql: &str) -> Result<(), SafeModeError> {
-    decisions(mode, sql)
+    check_confirmed_dialect(mode, confirmed, sql, Dialect::Generic)
+}
+
+/// [`check_confirmed`] under `dialect`'s lexical rules.
+pub fn check_confirmed_dialect(
+    mode: SafeMode,
+    confirmed: bool,
+    sql: &str,
+    dialect: impl Into<Lexer>,
+) -> Result<(), SafeModeError> {
+    decisions_dialect(mode, sql, dialect)
         .into_iter()
         .find_map(|statement| statement.refusal_error(mode, confirmed))
         .map_or(Ok(()), Err)
+}
+
+/// [`check_confirmed_dialect`] over several readings at once.
+pub fn check_confirmed_readings(
+    mode: SafeMode,
+    confirmed: bool,
+    sql: &str,
+    readings: &[Lexer],
+) -> Result<(), SafeModeError> {
+    decisions_readings(mode, sql, readings)
+        .into_iter()
+        .find_map(|statement| statement.refusal_error(mode, confirmed))
+        .map_or(Ok(()), Err)
+}
+
+/// The refusal reason when the lexers a MySQL server might be using read a script
+/// differently, worded for the mode that refuses it.
+///
+/// The one place the refusal names the cause: the same bytes are one statement or two, or
+/// a read or a write, depending on a server `sql_mode` the guard cannot see, and a user who
+/// only read "could not tell" would not know that rewriting a quote is the way out.
+macro_rules! ambiguous_reason {
+    ($who:literal) => {
+        concat!(
+            "the classifier could not tell where this statement ends or what it does, because \
+             MySQL string escaping and comments depend on the server's sql_mode (write a quote \
+             inside a string as '' instead of \\' and avoid unusual comments), and ",
+            $who,
+            " refuses an unclassified statement"
+        )
+    };
+}
+
+/// [`ambiguous_reason!`] for `mode`, or `None` for `full`, which refuses nothing.
+fn ambiguous_reason(mode: SafeMode) -> Option<&'static str> {
+    match mode {
+        SafeMode::Full => None,
+        SafeMode::NoDdl => Some(ambiguous_reason!("a no_ddl connection")),
+        SafeMode::Confirm => Some(ambiguous_reason!("a confirm connection")),
+        SafeMode::ReadOnly => Some(ambiguous_reason!("a read-only connection")),
+    }
+}
+
+/// [`decisions_dialect`] over several readings at once.
+///
+/// Fails closed: when the readings disagree about where the statements are, a single
+/// `Unknown` decision for the whole text is returned, which every mode but `full` refuses;
+/// otherwise each statement takes the strictest kind any reading gives it.
+pub fn decisions_readings<'a>(
+    mode: SafeMode,
+    sql: &'a str,
+    readings: &[Lexer],
+) -> Vec<StatementDecision<'a>> {
+    let Some(statements) = statements_agreeing(sql, readings) else {
+        return vec![StatementDecision {
+            index: 1,
+            kind: StatementKind::Unknown,
+            statement: sql.trim(),
+            decision: mode.decision(StatementKind::Unknown),
+            reason: ambiguous_reason(mode),
+        }];
+    };
+    statements
+        .into_iter()
+        .enumerate()
+        .map(|(offset, statement)| {
+            let kind = classify_readings(statement, readings);
+            // Unknown because the readings differ (one says read, another cannot say) is
+            // the ambiguity case; Unknown because the statement is `SET …` is not.
+            let ambiguous = kind == StatementKind::Unknown
+                && readings
+                    .iter()
+                    .any(|lexer| classify_dialect(statement, *lexer) != StatementKind::Unknown);
+            StatementDecision {
+                index: offset + 1,
+                kind,
+                statement,
+                decision: mode.decision(kind),
+                reason: if ambiguous {
+                    ambiguous_reason(mode)
+                } else {
+                    mode.refusal(kind)
+                },
+            }
+        })
+        .collect()
+}
+
+/// The refusal rank of a kind, so the strictest reading wins: ReadOnly < Dml < Ddl <
+/// Unknown.
+fn kind_rank(kind: StatementKind) -> u8 {
+    match kind {
+        StatementKind::ReadOnly => 0,
+        StatementKind::Dml => 1,
+        StatementKind::Ddl => 2,
+        StatementKind::Unknown => 3,
+    }
+}
+
+/// The strictest kind any reading gives `sql`. Rank: ReadOnly < Dml < Ddl < Unknown, so
+/// a merged kind is always at least as refused as every reading's own. No readings at all
+/// is `Unknown`: nothing was checked, so nothing is claimed.
+pub fn classify_readings(sql: &str, readings: &[Lexer]) -> StatementKind {
+    let mut merged = None;
+    for lexer in readings {
+        let kind = classify_dialect(sql, *lexer);
+        if merged.is_none_or(|current| kind_rank(kind) > kind_rank(current)) {
+            merged = Some(kind);
+        }
+    }
+    merged.unwrap_or(StatementKind::Unknown)
+}
+
+/// The statements of `sql`, when every reading delimits them identically; `None` when
+/// the readings disagree (or there are none). W3-T0.
+pub fn statements_agreeing<'a>(sql: &'a str, readings: &[Lexer]) -> Option<Vec<&'a str>> {
+    let mut readings = readings.iter();
+    let first = readings.next()?;
+    let expected = statements_dialect(sql, *first);
+    for lexer in readings {
+        if statements_dialect(sql, *lexer) != expected {
+            return None;
+        }
+    }
+    Some(expected)
 }
 
 /// One statement of a script, and the 1-based line it starts on.
@@ -564,17 +724,27 @@ pub struct ScriptStatement<'a> {
 /// whitespace and comments is not a statement and does not get a line — which is why this
 /// is the list a refusal counts, and not [`crate::statement_count`].
 pub fn statements_with_lines(sql: &str) -> Vec<ScriptStatement<'_>> {
-    if !has_significant_text(sql) {
+    statements_with_lines_dialect(sql, Dialect::Generic)
+}
+
+/// [`statements_with_lines`] under `dialect`'s lexical rules, so a MySQL import splits on
+/// the separators MySQL sees and not the ones a generic scan would.
+pub fn statements_with_lines_dialect(
+    sql: &str,
+    dialect: impl Into<Lexer>,
+) -> Vec<ScriptStatement<'_>> {
+    let dialect: Lexer = dialect.into();
+    if !has_significant_text_dialect(sql, dialect) {
         return Vec::new();
     }
-    let scan = scan(sql);
+    let scan = scan_dialect(sql, dialect);
     let mut found = Vec::new();
     let mut start = 0;
     for &separator in &scan.separators {
-        push_with_line(&mut found, sql, start, separator);
+        push_with_line(&mut found, sql, start, separator, dialect);
         start = separator + 1;
     }
-    push_with_line(&mut found, sql, start, sql.len());
+    push_with_line(&mut found, sql, start, sql.len(), dialect);
     found
 }
 
@@ -583,7 +753,12 @@ pub fn statements_with_lines(sql: &str) -> Vec<ScriptStatement<'_>> {
 /// The text-only view of [`statements_with_lines`], kept because most callers
 /// classify and never ask where a statement is.
 pub fn statements(sql: &str) -> Vec<&str> {
-    statements_with_lines(sql)
+    statements_dialect(sql, Dialect::Generic)
+}
+
+/// [`statements`] under `dialect`'s lexical rules.
+pub fn statements_dialect(sql: &str, dialect: impl Into<Lexer>) -> Vec<&str> {
+    statements_with_lines_dialect(sql, dialect)
         .into_iter()
         .map(|statement| statement.text)
         .collect()
@@ -594,11 +769,12 @@ fn push_with_line<'a>(
     sql: &'a str,
     start: usize,
     end: usize,
+    dialect: Lexer,
 ) {
     let piece = &sql[start..end];
     // The line of the first significant byte, so a piece that opens with a header
     // comment is still reported on the line its statement really starts on.
-    let Some(leading) = first_significant(piece) else {
+    let Some(leading) = first_significant(piece, dialect) else {
         return;
     };
     found.push(ScriptStatement {
@@ -632,6 +808,302 @@ fn snippet(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The Safe Mode bypass W3-T0 found: a MySQL string escape and a MySQL comment hide a
+    // write from a generic scan, so a read-only connection ran the write. These pin the
+    // fix — the classifier reads the write under `Dialect::Mysql`, and `read_only` refuses
+    // it.
+    const MYSQL_INJECTIONS: [&str; 4] = [
+        // `'\''` is one quote in MySQL, so `; DELETE …; ` after it is code.
+        "SELECT '\\''; DELETE FROM t; -- '",
+        // The `#` comment variant.
+        "SELECT '\\''; DELETE FROM t; # '",
+        // Through a double-quoted string, which MySQL's default reads as a string.
+        "SELECT \"\\\"\"; DELETE FROM t; # \"",
+        // A write hidden inside an executable comment the server runs.
+        "SELECT 1 /*! ; DROP TABLE t */",
+    ];
+
+    #[test]
+    fn a_mysql_injection_is_a_write_under_the_mysql_dialect() {
+        for sql in MYSQL_INJECTIONS {
+            let kind = classify_dialect(sql, Dialect::Mysql);
+            assert!(
+                matches!(kind, StatementKind::Dml | StatementKind::Ddl),
+                "MySQL must see the write in {sql:?}, saw {kind:?}"
+            );
+            // And a read-only connection refuses the whole script.
+            assert!(
+                check_dialect(SafeMode::ReadOnly, sql, Dialect::Mysql).is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+        // The generic scan is why it slipped through: it reads the first two as one
+        // harmless SELECT. This documents the vulnerability the dialect closes; it is not
+        // a behaviour to keep.
+        assert_eq!(
+            classify(MYSQL_INJECTIONS[0]),
+            StatementKind::ReadOnly,
+            "generic misreads the injection — the bug the dialect fixes"
+        );
+    }
+
+    #[test]
+    fn a_mysql_connection_is_refused_when_the_readings_disagree() {
+        for sql in [
+            "SELECT '\\'; DELETE FROM t; -- '",
+            "SELECT 1 \"\\\" ; DELETE FROM t ; -- \"",
+        ] {
+            assert!(
+                check_confirmed_readings(SafeMode::ReadOnly, false, sql, Dialect::Mysql.readings())
+                    .is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mysql_connection_refuses_the_default_mode_injections_too() {
+        for sql in MYSQL_INJECTIONS {
+            assert!(
+                check_confirmed_readings(SafeMode::ReadOnly, false, sql, Dialect::Mysql.readings())
+                    .is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mysql_connection_accepts_a_plain_read() {
+        let agreeing = statements_agreeing("SELECT 1; -- note", Dialect::Mysql.readings());
+        assert_eq!(agreeing.as_ref().map(Vec::len), Some(1));
+        assert!(statements_agreeing("SELECT 1", Dialect::Mysql.readings()).is_some());
+    }
+
+    /// The verdict a `read_only` MySQL connection gives `sql`: the guard's readings, all
+    /// of them at once.
+    fn mysql_read_only(sql: &str) -> Result<(), SafeModeError> {
+        check_confirmed_readings(SafeMode::ReadOnly, false, sql, Dialect::Mysql.readings())
+    }
+
+    #[test]
+    fn a_mysql_dollar_tag_hides_nothing() {
+        // MySQL has no dollar quoting, so what sits between two `$tag$` markers is code the
+        // server runs. Every one of these carried a `;` or a write past the old readings.
+        for sql in [
+            "SELECT 1 AS x$a$ ; DELETE FROM t ; $a$",
+            "SELECT $a$ ; DELETE FROM t ; $a$",
+            "SELECT $$; DELETE FROM t; $$",
+            "SELECT $x$ DELETE FROM t $x$",
+            "SELECT $x$ DROP TABLE t $x$",
+            "SELECT 1 $tag$; INSERT INTO t VALUES (1); $tag$",
+            "SELECT $a$ ; SELECT 2 ; $a$",
+            "SELECT 1; $a$ ; DELETE FROM t ; $a$",
+        ] {
+            assert!(
+                mysql_read_only(sql).is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+        // The same text on PostgreSQL is one dollar-quoted string: unchanged.
+        assert!(check(SafeMode::ReadOnly, "SELECT $a$ ; DELETE FROM t ; $a$").is_ok());
+        assert!(check(SafeMode::ReadOnly, "SELECT $x$ DELETE FROM t $x$").is_ok());
+        assert!(check_confirmed_readings(
+            SafeMode::ReadOnly,
+            false,
+            "SELECT $a$ ; DELETE FROM t ; $a$",
+            Dialect::Generic.readings()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_mysql_hash_comment_is_not_a_write() {
+        // The over-refusals of the old Generic stand-in: `#` is a comment on MySQL under
+        // every sql_mode, so the words after it are text.
+        for sql in [
+            "SELECT 1 # plain hash comment",
+            "SELECT 1 # remember to update this later",
+            "SELECT 1 # drop table t",
+            "SELECT 1 -- delete everything\n# and update it",
+            "SELECT a FROM t # insert here\nWHERE a = 1",
+        ] {
+            assert!(mysql_read_only(sql).is_ok(), "a read: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_dash_comment_needs_whitespace() {
+        assert!(mysql_read_only("SELECT 1 -- x").is_ok());
+        assert!(mysql_read_only("SELECT 1 --\tx").is_ok());
+        assert!(mysql_read_only("SELECT 1 --").is_ok());
+        assert!(mysql_read_only("SELECT 1; -- trailing").is_ok());
+        assert!(mysql_read_only("SELECT 5--2").is_ok());
+        assert!(mysql_read_only("SELECT 5 - -2").is_ok());
+        // `--x` is not a comment: the `;` after it separates and the write runs.
+        assert!(mysql_read_only("SELECT 1 --x; DELETE FROM t").is_err());
+        assert!(mysql_read_only("SELECT 1 --x\n; DROP TABLE t").is_err());
+        // The `#` line ends at the newline and what follows is code.
+        assert!(mysql_read_only("SELECT 1 # x\n; DELETE FROM t").is_err());
+    }
+
+    #[test]
+    fn a_mysql_executable_comment_is_refused_when_it_holds_a_write() {
+        for sql in [
+            "SELECT 1 /*! DELETE FROM t */",
+            "SELECT 1 /*! ; DROP TABLE t */",
+            "SELECT 1 /*!50000 ; DELETE FROM t */",
+            "SELECT 1 /*!50000 DELETE FROM t */",
+            // A gate above the server's version is skipped by MySQL; the guard cannot know
+            // the version, so a lexer that runs it refuses.
+            "SELECT 1 /*!99999 ; DELETE FROM t */",
+            "/*!50000 DELETE FROM t */",
+            // An unbalanced quote inside a body one lexer skips and another runs.
+            "SELECT 1 /*!99999 ' */ ; DELETE FROM t ; -- '",
+            "SELECT 1 /*!' */ ; DELETE FROM t ; -- '",
+            "SELECT 1 /*!99999 \" */ ; DROP TABLE t ; -- \"",
+        ] {
+            assert!(
+                mysql_read_only(sql).is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mysql_executable_comment_that_is_only_a_read_passes() {
+        for sql in [
+            "SELECT /*!40001 SQL_NO_CACHE */ * FROM t",
+            "SELECT /*!50000 1 */",
+            "SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM t",
+            "SELECT /*+ NO_INDEX(t) */ 1",
+            "SELECT 1 /* update this */",
+            // MariaDB's spelling is a plain comment on MySQL, whatever its body says.
+            "SELECT 1 /*M! DELETE FROM t */",
+            "SELECT 1 /*M! ; DROP TABLE t */",
+            "/*M! DELETE FROM t */ SELECT 1",
+        ] {
+            assert!(mysql_read_only(sql).is_ok(), "a read: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_backslash_or_ansi_quotes_payload_is_refused() {
+        for sql in [
+            // NO_BACKSLASH_ESCAPES: the string ends at the backslash's quote.
+            "SELECT '\\'; DELETE FROM t; -- '",
+            "SELECT '\\'; DELETE FROM t; # '",
+            "SELECT 'a\\'; DROP TABLE t; -- '",
+            // Default mode: `\'` is one quote and the string runs on to the `; DELETE`.
+            "SELECT '\\''; DELETE FROM t; -- '",
+            "SELECT '\\''; DELETE FROM t; # '",
+            // ANSI_QUOTES: `"…"` is an identifier, so a backslash does not escape.
+            "SELECT 1 \"\\\" ; DELETE FROM t ; -- \"",
+            "SELECT \"\\\"; DELETE FROM t; -- \"",
+            "SELECT \"\\\"\"; DELETE FROM t; # \"",
+            // Escapes hiding a `;` alone.
+            "SELECT '\\'; SELECT 2; -- '",
+        ] {
+            assert!(
+                mysql_read_only(sql).is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_mysql_reads_still_pass() {
+        for sql in [
+            "SELECT 1",
+            "SELECT 1;",
+            "SELECT 'a#b', 'a--b', 'a;b' FROM t",
+            "SELECT * FROM t WHERE a LIKE 'a\\_b'",
+            "SELECT * FROM t WHERE a LIKE 'a\\_b%' ESCAPE '\\\\'",
+            "SELECT JSON_EXTRACT(doc, '$.a.b') FROM t",
+            "SELECT doc->>'$.name', doc->'$.tags[0]' FROM t",
+            "SELECT 'it''s' AS a, \"say \"\"hi\"\"\" AS b",
+            "SELECT `a;b`, `c#d` FROM t",
+            "SELECT a$b FROM t$1",
+            "SELECT 5--2",
+            "SELECT 1; -- trailing",
+            "SELECT 1 /* c */ ;",
+            "WITH x AS (SELECT 1) SELECT * FROM x # note",
+            "SHOW CREATE TABLE t",
+            "EXPLAIN SELECT * FROM t",
+            "SELECT * FROM t WHERE updated_at > '2020-01-01' -- created_at",
+        ] {
+            assert!(
+                mysql_read_only(sql).is_ok(),
+                "a read: {sql:?}: {:?}",
+                mysql_read_only(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn a_mysql_script_is_refused_when_any_statement_is_a_write_or_unreadable() {
+        for sql in [
+            "SELECT 1; DELETE FROM t",
+            "DELETE FROM t",
+            "SET sql_mode = ''",
+            "SELECT 1; SET @a = 1",
+        ] {
+            assert!(
+                mysql_read_only(sql).is_err(),
+                "read_only must refuse {sql:?}"
+            );
+        }
+        // Whole-script refusal names the ambiguity when the readings disagree.
+        let error = mysql_read_only("SELECT '\\'; DELETE FROM t; -- '").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("could not tell"), "{message}");
+        assert!(message.contains("MySQL string escaping"), "{message}");
+        assert!(message.contains("''"), "{message}");
+        // A plain unclassified word is not blamed on escaping.
+        let error = mysql_read_only("SET sql_mode = ''").unwrap_err();
+        assert!(
+            !error.to_string().contains("MySQL string escaping"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mysql_readings_fail_closed_on_every_kind_and_every_mode() {
+        for sql in [
+            "SELECT $a$ ; DELETE FROM t ; $a$",
+            "SELECT 1 /*! DELETE FROM t */",
+            "SELECT '\\'; DELETE FROM t; -- '",
+        ] {
+            for mode in [SafeMode::Confirm, SafeMode::ReadOnly] {
+                let decisions = decisions_readings(mode, sql, Dialect::Mysql.readings());
+                assert!(
+                    decisions.iter().any(|d| d.decision != Decision::Allow),
+                    "{mode:?} must not allow {sql:?}"
+                );
+            }
+            // `full` refuses nothing, by design.
+            assert!(check_confirmed_readings(
+                SafeMode::Full,
+                false,
+                sql,
+                Dialect::Mysql.readings()
+            )
+            .is_ok());
+        }
+        // The Generic set is byte-identical to the single-dialect path.
+        for sql in [
+            "SELECT 1; DROP TABLE t",
+            "SET x = 1",
+            "SELECT $a$ ; $a$",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                decisions_readings(SafeMode::ReadOnly, sql, Dialect::Generic.readings()),
+                decisions_dialect(SafeMode::ReadOnly, sql, Dialect::Generic),
+                "{sql}"
+            );
+        }
+    }
 
     #[test]
     fn a_plain_read_is_read_only() {

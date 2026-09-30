@@ -724,3 +724,208 @@ async fn a_stop_in_the_middle_of_a_mysql_export_kills_the_statement() {
     )
     .await;
 }
+
+// --------------------------------------------------------------------------- //
+// the MySQL Safe Mode bypass W3-T0 found: a read-only connection must not run a
+// write hidden in a string escape or a comment
+// --------------------------------------------------------------------------- //
+
+/// Run one statement against the dev MySQL under `SAFE_MODE=full`, for the scratch-table
+/// setup and teardown. Returns the run's result so a caller can assert it ran.
+async fn mysql_run(sql: &str) -> Result<(), qh_ffi::CliError> {
+    let mut out = Capture::new();
+    run(
+        Command::Preview,
+        &env_pairs(MYSQL_ENV, sql, Some("1")),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await
+}
+
+/// The count of rows the scratch table holds now.
+async fn mysql_count(table: &str) -> i64 {
+    mysql_scalar(&format!("SELECT COUNT(*) FROM {table}")).await
+}
+
+/// A read-only MySQL connection asked to run a string-escape or comment injection must not
+/// delete the scratch row: the write is refused (in the engine's guard or, failing that, in
+/// the driver before it reaches the always-multi-statement text protocol) and the row
+/// survives.
+///
+/// On the code before W3-T0 this fails: the payload classifies as one read-only SELECT, the
+/// server runs the DELETE, and the row is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_mysql_connection_does_not_run_an_injected_delete() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_MYSQL=1 with deploy/dev/up.sh running");
+        return;
+    }
+
+    // A table nobody else touches, so a stray DELETE here is unambiguous.
+    let table = format!(
+        "qh_w3t0_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    mysql_run(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop any leftover");
+    mysql_run(&format!("CREATE TABLE {table} (id INT PRIMARY KEY)"))
+        .await
+        .expect("create scratch table");
+    mysql_run(&format!("INSERT INTO {table} VALUES (1)"))
+        .await
+        .expect("seed one row");
+    assert_eq!(
+        mysql_count(&table).await,
+        1,
+        "the seed row is there to start"
+    );
+
+    // Both the `-- ` and the `#` comment variants, each hiding a DELETE of the scratch
+    // table behind a backslash-escaped quote, plus the no-doubling spellings where the
+    // server's `sql_mode` closes the string earlier than the MySQL reading thinks.
+    let payloads = [
+        format!("SELECT '\\''; DELETE FROM {table}; -- '"),
+        format!("SELECT '\\''; DELETE FROM {table}; # '"),
+        format!("SELECT '\\'; DELETE FROM {table}; -- '"),
+        format!("SELECT 1 \"\\\" ; DELETE FROM {table} ; -- \""),
+        // MySQL has no dollar quoting: the `;` between two markers separates statements.
+        // The form the server really runs (verified on 8.4): the first statement is valid
+        // because `x$a$` is one identifier, and the DELETE follows.
+        format!("SELECT 1 AS x$a$ ; DELETE FROM {table} ; $a$"),
+        format!("SELECT 1 $a$ ; DELETE FROM {table} ; $a$"),
+        format!("SELECT $$; DELETE FROM {table}; $$"),
+    ];
+    for payload in payloads {
+        let mut pairs: Vec<(String, String)> = MYSQL_ENV
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+        pairs.push(("SAFE_MODE".to_owned(), "read_only".to_owned()));
+        pairs.push(("SQL".to_owned(), payload.clone()));
+        let mut out = Capture::new();
+        let result = run(
+            Command::Preview,
+            &Settings::from_pairs(pairs),
+            &mut out,
+            &RealEngine::new(),
+            &CancelFlag::new(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a read-only connection must refuse {payload:?}, got {:?}",
+            out.lines
+        );
+        assert_eq!(
+            mysql_count(&table).await,
+            1,
+            "the injected DELETE must not have run for {payload:?}"
+        );
+    }
+
+    mysql_run(&format!("DROP TABLE {table}"))
+        .await
+        .expect("clean up the scratch table");
+}
+
+/// With Safe Mode `full` the engine's guard refuses nothing, so the driver's own backstop
+/// is the last line: a text that any lexer the server might use reads as two statements
+/// never reaches the always-multi-statement text protocol. The dollar-tag text is the case
+/// the old readings called one statement while the server ran two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mysql_driver_refuses_a_dollar_tag_second_statement_even_in_full_mode() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_MYSQL=1 with deploy/dev/up.sh running");
+        return;
+    }
+
+    let table = format!(
+        "qh_w3t0_full_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    mysql_run(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop any leftover");
+    mysql_run(&format!("CREATE TABLE {table} (id INT PRIMARY KEY)"))
+        .await
+        .expect("create scratch table");
+    mysql_run(&format!("INSERT INTO {table} VALUES (1)"))
+        .await
+        .expect("seed one row");
+
+    for payload in [
+        format!("SELECT 1 AS x$a$ ; DELETE FROM {table} ; $a$"),
+        format!("SELECT 1 $a$ ; DELETE FROM {table} ; $a$"),
+        format!("SELECT $$; DELETE FROM {table}; $$"),
+        format!("SELECT 1 $tag$; DELETE FROM {table}; $tag$"),
+    ] {
+        let result = mysql_run(&payload).await;
+        assert!(
+            result.is_err(),
+            "the driver must refuse the two-statement text {payload:?}"
+        );
+        assert_eq!(
+            mysql_count(&table).await,
+            1,
+            "the second statement must not have run for {payload:?}"
+        );
+    }
+
+    mysql_run(&format!("DROP TABLE {table}"))
+        .await
+        .expect("clean up the scratch table");
+}
+
+/// A read-only MySQL connection still runs an ordinary read whose comment mentions a write
+/// keyword: `#` is a comment under every sql_mode, so there is nothing to refuse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_only_mysql_connection_runs_a_read_with_a_hash_comment() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_MYSQL=1 with deploy/dev/up.sh running");
+        return;
+    }
+    for sql in [
+        "SELECT 41 + 1 AS answer # remember to update this later",
+        "SELECT 42 AS answer -- delete me\n# drop table t",
+        "SELECT 42 AS answer /*M! DELETE FROM nothing */",
+    ] {
+        let mut pairs: Vec<(String, String)> = MYSQL_ENV
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+        pairs.push(("SAFE_MODE".to_owned(), "read_only".to_owned()));
+        pairs.push(("SQL".to_owned(), sql.to_owned()));
+        let mut out = Capture::new();
+        run(
+            Command::Preview,
+            &Settings::from_pairs(pairs),
+            &mut out,
+            &RealEngine::new(),
+            &CancelFlag::new(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("a read-only connection must run {sql:?}: {error:?}"));
+        let row = &data(&out.lines)[0];
+        assert_eq!(
+            row.as_array()
+                .and_then(|cells| cells.last())
+                .and_then(Json::as_str),
+            Some("42"),
+            "{sql:?}"
+        );
+    }
+}

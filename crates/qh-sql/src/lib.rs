@@ -23,10 +23,17 @@ mod scan;
 mod wrap;
 
 pub use classify::{
-    check, check_confirmed, classify, decisions, statements, statements_with_lines, Decision,
-    FloorSource, SafeMode, SafeModeError, SafeModeFloor, ScriptStatement, StatementDecision,
-    StatementKind, SAFE_MODES,
+    check, check_confirmed, check_confirmed_dialect, check_confirmed_readings, check_dialect,
+    classify, classify_dialect, classify_readings, decisions, decisions_dialect,
+    decisions_readings, statements, statements_agreeing, statements_dialect, statements_with_lines,
+    statements_with_lines_dialect, Decision, FloorSource, SafeMode, SafeModeError, SafeModeFloor,
+    ScriptStatement, StatementDecision, StatementKind, SAFE_MODES,
 };
 pub use ident::{quote_ident, IdentStyle};
-pub use scan::{has_significant_text, scan, statement_count, Scan};
-pub use wrap::{count_statement, strip_terminator, SqlError};
+pub use scan::{
+    has_significant_text, scan, scan_dialect, statement_count, statement_count_dialect, Dialect,
+    Lexer, Scan,
+};
+pub use wrap::{
+    count_statement, count_statement_dialect, strip_terminator, strip_terminator_dialect, SqlError,
+};
