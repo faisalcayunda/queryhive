@@ -1,6 +1,6 @@
 # Rencana performa: melampaui TablePro di setiap sumbu
 
-- **Status:** rencana kerja, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..93c864b`, 30 Sep 2026); berikutnya W3. Rincian di `PROGRESS.md` §"Run perf-parity".
+- **Status:** rencana kerja, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan, lalu W3. Rincian di `PROGRESS.md` §"Run perf-parity".
 - **Konteks:** hasil audit statis QueryHive dan TablePro. Setiap klaim yang dipakai di sini sudah diperiksa ulang terhadap kode di pohon ini, dan path serta nomor barisnya disebut. Pemilik melonggarkan batasnya. ADR lama diperlakukan sebagai catatan, dan rencana ini boleh membatalkannya asal menyebut yang mana (§14). Penggantian data plane masuk lingkup sekarang.
 - **Pasangan:** `docs/benchmarks.md` (angka), `docs/architecture/remaining-work-plan.md` Batch 7 (sort dan search ke server), dan `docs/architecture/tablepro-adoption-plan.md` §12.2 dan §13 (dicatat di §15, mana yang diserap dan mana yang digantikan).
 
@@ -323,26 +323,31 @@ Prasyarat P (`SQLEditor.swift` dan `HighlightBandTests.swift` ada di pekerjaan y
 5. **Indeks baris ruler inkremental** dari `textStorage(_:didProcessEditing:range:changeInLength:)`, menggantikan hitungan karakter penuh (`:1164-1170`) dan `lineStarts` untuk run marks (`:266`).
 6. `statementRanges`, region lipatan, dan run marks dihitung off-main setelah debounce, sampai 4B menggantinya.
 
-**4B: analisis editor di Rust (ADR-0033).**
+**4B: analisis editor dengan tree-sitter di Rust (ADR-0033, O-14).** Rincian ada di `blueprints/fase-4b-editor-analysis.md`.
 
-- **Modul baru `crates/qh-sql/src/editor.rs`.**
-  - Dokumen inkremental: UTF-8 dengan indeks baris UTF-8 ↔ UTF-16.
-  - Lexer: port aturan `SQLSyntax` apa adanya. Enam kelas token; daftar kata kunci yang sama; deteksi fungsi dengan lookahead hanya melewati spasi. Aturan EOF untuk kutip atau komentar yang tidak tertutup meniru perilaku regex hari ini: pasangkan dengan penutup berikutnya, dan bila tidak ada, karakter itu dilewati.
-  - Checkpoint state per N baris, lalu lex ulang dari checkpoint sampai state konvergen.
-  - Batas statement dari `scan.rs` yang sudah dipakai engine.
-  - Region lipatan: port `SQLFolding.regions`.
-- **Permukaan FFI.** Objek UniFFI `EditorDocument` dengan `replace(start_utf16, len_utf16, text) -> revision` dan `analysis(revision, visible) -> bytes` (span dalam UTF-16, statement, lipatan). Rentang terlihat dikerjakan di pool `USER_INITIATED`, sisanya di `UTILITY` (ADR-0010). Swift menerapkan hasilnya di main bila revisinya masih terkini, Penjaga IME ada di sisi penerapan, bukan di sisi kirim: edit tetap dikirim selama `hasMarkedText`, dan `apply` serta penjadwal idle menunggu komposisi selesai (ADR-0033, D-9).
-- **Yang dihapus.** Pemindaian regex di `SQLSyntax` (palet tetap), bagian statement di `SQLScanner.swift` (duplikat `scan.rs`), dan pemindaian di `SQLFolding`.
+- **Dua crate baru.** `crates/qh-editor` berisi analisis murni (`forbid(unsafe_code)`). `crates/qh-sql-grammar` mengurung grammar tree-sitter SQL yang di-vendor beserta perbaikan scanner PR #361, dan menjadi satu-satunya tempat C dan `unsafe`. Hanya `qh-ffi` yang bergantung pada `qh-editor`, jadi driver dan `qh-import` tidak mengompilasi C.
+- **Satu pohon per statement `scan.rs`.** Batas statement tetap satu jawaban untuk engine, Run, dan editor. Pohon hanya mengisi isi statement: kelas warna, lipatan (CTE, subquery, badan `$tag$`), dan alias. Celah ERROR dan statement di atas 256 KiB diwarnai `qh_sql::lex`, sehingga warna akhir selalu fungsi dari teks. Cache pohon dibatasi LRU.
+- **Warna sebagai atribut sementara `NSLayoutManager`.** Storage hanya memuat atribut dasar dan italic komentar. `apply` melewati run yang sudah benar. Setiap kunci atribut sementara punya satu pemilik (tabel §7.4 blueprint): find memakai `.backgroundColor` dan tidak menyentuh `.foregroundColor`.
+- **Permukaan FFI.** Objek UniFFI `EditorDocument` dengan `replace(start_utf16, len_utf16, text) -> revision` dan `analysis(revision, visible) -> bytes` (span dalam UTF-16, statement, lipatan). Rentang terlihat dikerjakan di pool `USER_INITIATED`, sisanya di `UTILITY` (ADR-0010). Swift menerapkan hasilnya di main bila revisinya masih terkini. Penjaga IME ada di sisi penerapan, bukan di sisi kirim: edit tetap dikirim selama `hasMarkedText`, dan `apply` serta penjadwal idle menunggu komposisi selesai (ADR-0033).
+- **Diagnostik.** Yang ditampilkan hanya masalah leksikal dari `scan.rs` dan posisi galat dari server. Galat sintaks dari pohon tidak ditampilkan secara default (positif palsu 14–47% di SQL valid).
+- **Yang dihapus.** Pemindaian regex di `SQLSyntax` (palet tetap), isi pemindaian di `SQLFolding`, dan jalur painter 4A di `SQLEditor`. `Models/SQLScanner.swift` tetap: ia hanya membawa `:name` dan region opaque untuk parameter dan `KeywordCase`, dan tidak punya bagian statement.
 - **Batas naik** dari 200.000 ke 2.000.000 karakter, sama dengan plafon TablePro. Rentang terlihat diwarnai lebih dulu, sisanya bertahap di latar.
+- **Prasyarat W3-T0.** Refaktor `scan.rs` (`walk`, `lex`) baru boleh mulai sesudah W3-T0 menutup celah Safe Mode MySQL (escape backslash, komentar `#`), supaya salinan beku G4 membekukan pemindai yang sudah benar dan `walk` lahir dengan mode MySQL.
 
 **Gate.**
 
-- Sumbu 5 terpenuhi.
-- Paritas lexer 100%: span Rust == span `SQLSyntax.attributes`, dari tes Swift yang memanggil FFI atas korpus nyata, korpus sintetis, dan proptest di Rust. Paritas ini harus lulus **sebelum** regex Swift dihapus.
+- Sumbu 5 terpenuhi untuk interval `keystroke` **dan** interval `apply` (giliran yang menggambar ulang baris dengan warna baru). Ambang NFR-P5 berlaku untuk masing-masing.
+- Gate "paritas lexer 100%" diganti: G1 sampai G3 (fixture capture emas, diferensial inkremental tanpa reset, konvergensi), G4 (refaktor `scan.rs` membandingkan seluruh `Scan` dan `decisions` untuk keempat mode Safe Mode), G5 sampai G8, dan perubahan tampilan yang didaftar sebagai V-12 (PRD §6.5).
 - Tes yang ada tetap hijau: `EditorFindAndFoldingTests`, `HighlightBandTests`, run button, auto-uppercase, `:name`.
-- Paritas visual scene editor. Verdict `architect-reviewer` untuk 4B. Gate standar.
+- Verdict `architect-reviewer` untuk 4B. Gate standar.
 
-**Risiko.** Warna tertinggal satu frame. Bug pemetaan UTF-16 (surrogate pair, CRLF) ditutup dengan proptest. Undo dan IME. Highlight find bar tetap memakai temporary attribute, jadi tidak tersentuh.
+**Risiko.**
+
+- Gambar ulang baris berwarna 4–5 ms bisa meleset dari NFR-P5. Urutan pengungkitnya ada di §14 blueprint.
+- Bug pemetaan UTF-16 (surrogate pair, CRLF) ditutup uji acak berbenih.
+- Undo dan IME.
+- C di dalam proses (parser dan scanner): diterima dan dicatat di ADR-0033.
+- Sorotan find bertahan karena kunci atributnya berbeda dari warna sintaks (tabel pemilik kunci, §7.4 blueprint).
 
 ## 9. Fase 5: grid NSTableView dengan sel yang digambar (L)
 
@@ -402,16 +407,16 @@ Prasyarat P dan Fase 3. Blueprint `code-architect` dibuat lebih dulu. Pendekatan
 
 Blueprint `code-architect` dibuat lebih dulu. **Tujuan:** sumbu 1 S2, sumbu 2 (interim), dan sumbu 3. Sort, filter, dan search in-memory berpindah ke Rust sebagai fallback Batch 7.
 
-1. **Codec baru di `qh-result-store`** (ADR-0008 diamandemen). API store, spill, indeks kumulatif, dan tesnya dipertahankan.
-   - **Kolom bertipe per chunk**, satu chunk sampai 64k baris hasil penggabungan batch driver.
+1. **Store Arrow di `qh-result-store` dan `qh-columnar`** (ADR-0008 digantikan 0030). API store, indeks kumulatif, dan tesnya dipertahankan.
+   - **`RecordBatch` Arrow per chunk**, satu chunk sampai 64k baris hasil penggabungan batch driver, dengan encoding per chunk-kolom.
      - Fixed-width: i64/u64/f64/i128+scale/date/time/timestamp+flag offset, dengan bitmap validitas.
-     - Teks/JSON/bytes: offset `u32` + byte.
-     - Kolom komposit atau tak dikenal tetap memakai encoding bertag yang sekarang.
+     - Teks/JSON/bytes: array Arrow `Utf8`/`Binary`.
+     - Kolom campuran, komposit, atau tak dikenal memakai `Binary` bertag, sehingga round trip `Value` tanpa kehilangan.
    - **Flag openable per sel** di bitmap. Dihitung saat ingest hanya untuk sel yang karakter non-spasi pertamanya `{` atau `[`, dengan parse ≤ `parseLimit`. Semantiknya sama dengan `isOpenable` hari ini, karena parse tetap dilakukan.
    - **Jendela merender teks tampilan** lewat `qh_core::render::to_text`, renderer yang satu itu. Renderer `ColumnFormat` (Raw/Text/UUID/Unix/JSON) di-port ke Rust dengan tes paritas. Teksnya dipotong ke 256 unit UTF-16 untuk layout, dan nilai penuh dibaca sesuai permintaan.
-   - **Spill tetap `pread`**, dengan LRU 8 chunk yang sudah di-decode.
+   - **Spill = IPC Arrow + AES-256-GCM**, tetap `pread`, dengan LRU 8 chunk yang sudah di-decode. Satu kunci per proses yang menulis spill.
 2. **Engine.** App menjalankan `preview` dengan `RESULT_SINK=store` (hanya app yang memasangnya). Baris masuk store yang terdaftar di `EngineHost`. Event yang dikirim hanya `columns`, `progress {rows}` (≤ 1 per 16 ms), dan `done`. CLI, MCP, dan golden tidak berubah.
-3. **FFI.** Objek UniFFI `ResultHandle`, sebuah `Arc`. Saat di-drop, store dilepas dan spill-nya dihapus. Handle memakai generation, dan handle basi menjadi galat `StaleHandle`. Metodenya:
+3. **FFI.** Objek UniFFI `ResultHandle`, sebuah `Arc`. Saat di-drop, store dilepas dan spill-nya dihapus. Handle memakai `StoreId(u64)` yang tidak pernah dipakai ulang, dan handle basi menjadi galat `StaleHandle`. Metodenya:
    - `row_count()`: load atomik;
    - `window(view, rows, cols, formats) -> bytes`: satu buffer terkemas;
    - `cell_text(...)`;
@@ -458,7 +463,7 @@ Blueprint `code-architect` dibuat lebih dulu. **Tujuan:** sumbu 1 S2, sumbu 2 (i
 
 Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya tanpa regresi di sumbu lain. Satu commit per item.
 
-1. **Builder tanpa alokasi.** `qh_core::ColumnarBuilder` menulis langsung ke layout chunk store. `Cursor::next_into(&mut builder, max_rows)` punya implementasi default lewat `next_batch`, jadi penulis ekspor tidak tersentuh.
+1. **Builder tanpa alokasi.** `qh_columnar::ChunkBuilder` menulis langsung ke array Arrow chunk store. `Cursor::next_chunk(&mut ChunkBuilder, max_rows)` punya implementasi default lewat `next_batch`, jadi penulis ekspor tidak tersentuh.
    - PostgreSQL mem-parse teks langsung ke builder, dan `Vec<Vec<Value>>` + transpose (`qh-driver-postgres/src/lib.rs:703-748`) dihapus.
    - MySQL serupa.
    - Trino: `DeserializeSeed` streaming untuk `data`, tanpa pohon `serde_json::Value`.
@@ -479,7 +484,7 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
 ## 12. Fase 8: eskalasi, hanya bila gate gagal
 
 - **C ABI untuk jalur `window`** bila p99 UniFFI > 0,5 ms: `extern "C"` tulisan tangan, `catch_unwind` per panggilan (ADR-0009), dan buffer dari pemanggil. Ongkosnya permukaan `unsafe`, firewall panic manual, dan mekanisme binding kedua.
-- **TextKit 2, atau CodeEditTextView/CodeEditSourceEditor upstream** (lisensi diverifikasi dari repo CodeEditApp) bila Fase 4 gagal di 2M karakter. Ongkosnya menulis ulang find, fold, ruler, run marks, completion, auto-uppercase, dan jalur `interceptKey` yang dibutuhkan Vim.
+- **TextKit 2, atau CodeEditTextView/CodeEditSourceEditor upstream** (lisensi diverifikasi dari repo CodeEditApp) bila Fase 4 gagal di 2M karakter, dan hanya sesudah spike gambar-baris-berwarna < 50% dan keputusan pemilik. Paketnya menarik dependensi transitif TextStory (BSD-3-Clause), swift-collections (Apache-2.0), dan SwiftLintPlugin, sehingga butuh tinjauan NFR-L. Ongkosnya menulis ulang find, fold, ruler, run marks, completion, auto-uppercase, dan jalur `interceptKey` yang dibutuhkan Vim.
 - **Grid Metal** bila Fase 5 gagal di 120 Hz pada 500 kolom. Aksesibilitas, IME, kualitas teks, dan seleksi semuanya ditulis sendiri.
 - **Cap PostgreSQL berbasis portal** (`DECLARE CURSOR` atau `Execute max_rows`) bila Run ulang setelah preview terpotong terasa membayar reconnect.
 
@@ -488,11 +493,12 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
 | Opsi | Putusan | Di mana | Alasan |
 |---|---|---|---|
 | Sort/filter/search in-memory di Rust dengan **rayon** | **Ya** | Fase 6 | Kolom bertipe, off-main, permutasi murah. Perannya fallback dan pelengkap Batch 7, bukan default. |
-| **DataFusion** | Tidak | — | Menyeret arrow dan ratusan crate, butuh konversi ke `RecordBatch`, kolasinya byte-order (tidak cocok dengan `localizedStandardCompare`), dan SQL atas hasil bukan fitur yang diminta. |
-| Group-by atas hasil | Tidak | — | Bukan fitur yang ada. View permutasi Fase 6 adalah fondasinya bila suatu hari diminta. |
+| **DataFusion** | Ya, sebagai helper terpisah yang diunduh saat pertama dipakai (O-15, O-18) | W13-T8a–b | SQL atas hasil dan berkas lokal. Bukan untuk view grid: semantik paritas Swift bukan SQL, dan grid harus jalan tanpa helper. |
+| arrow-rs sebagai format store | Ya | W4-T3 | `RecordBatch` per chunk, encoding per chunk-kolom, spill IPC terenkripsi. |
+| Group-by atas hasil | Mesin di W13-T8a–b, UI kemudian | W13 | Lewat SQL di helper (FR-ANL-02). View permutasi Fase 6 tetap khusus grid. |
 | Data tampilan dihitung di Rust (teks terpotong, lebar, flag openable) | **Ya** | Fase 6 (Fase 5 memakai cache Swift sementara) | Swift menggambar tanpa memformat, dan parse JSON per render hilang. |
-| Analisis editor di Rust | **Ya**, sebagai port aturan lexer ke `qh-sql` | Fase 4B | Satu scanner untuk engine dan editor, off-main, dan duplikat `SQLScanner.swift` terhapus. |
-| **tree-sitter** | Tidak | — | Klasifikasi token akan berbeda, jadi highlight berubah di layar dan melanggar paritas visual. Ditambah build C dan pemeliharaan grammar. |
+| Analisis editor di Rust | **Ya**, sebagai crate `qh-editor` di atas mesin `scan.rs` dan `qh-sql` | Fase 4B | Satu pemecah statement untuk engine, Run, dan editor, dan analisis off-main. |
+| **tree-sitter** | **Ya (O-14)** | Fase 4B | Satu pohon per statement `scan.rs`, grammar di-vendor di `crates/qh-sql-grammar`. Highlight berubah di layar dan didaftar sebagai V-12. Ongkosnya C di dalam proses dan pemeliharaan grammar (ADR-0033). |
 | PostgreSQL `COPY ... TO STDOUT` teks | Ya, bersyarat angka | Fase 7.2 | Jalur massal tercepat yang tetap teks. |
 | `COPY BINARY` / hasil biner | Bersyarat | Fase 7.3 | Hanya bila semua OID bisa di-decode dan output teks server terbukti dominan. |
 | mimalloc, PGO | Bersyarat | Fase 7.5 | Diukur dulu, termasuk dampaknya ke memori. |
@@ -518,7 +524,7 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
 5. **Stop membatalkan query di server.** Server mencatat "canceling statement due to user request", dan app memetakannya ke `cancelled`, bukan galat (ADR-0016 sudah membedakan cancel dari timeout).
 6. **Sesi dipakai ulang tetapi di-reset per Run.** Rekomendasinya tidak mengubah semantik. Bila pemilik memilih sesi yang lengket, `SET`, `USE`, dan tabel temp akan bertahan di antara Run.
 7. **Batas `rowLimit`.** 100.000 dulu, lalu 5.000.000 setelah Fase 6.
-8. **Editor.** Pewarnaan dan folding sekarang bekerja di atas 200k karakter. Karakter yang baru diketik bisa berwarna dasar selama ≤ 1 frame.
+8. **Editor.** Pewarnaan dan folding sekarang bekerja di atas 200k karakter, dan tampilan warnanya berubah (V-12, PRD §6.5). Karakter yang baru diketik mewarisi warna tetangga selama ≤ 1 frame, dengan aturan §7.5 blueprint 4B.
 9. **Grid.** Tooltip AppKit (sistem yang sama dengan `.help` SwiftUI), dan nilainya penuh. Field editor AppKit menggantikan `TextField` SwiftUI, dengan perilaku Return, Esc, dan undo yang dikunci tes. Kolom tidak bisa di-drag untuk dipindah, sama seperti hari ini.
 10. **Sort dan search dengan edit tertunda ditolak** dengan pesan (Fase 3).
 11. **Pemecahan statement di editor mengikuti `scan.rs`** (4B, dan W4-T2b untuk Run), jadi editor sepakat dengan engine. Perbedaan terhadap `sqlStatements` Swift hari ini:
@@ -527,7 +533,7 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
     - potongan yang hanya komentar (`SELECT 1; -- akhir`) bukan statement lagi, jadi tanpa band dan run mark;
     - teks CRLF yang memuat `--`: komentar baris berakhir di LF, bukan tidak pernah berakhir;
     - potongan yang hanya NBSP, U+2028, atau VT dianggap signifikan (`is_ascii_whitespace`), tidak lagi dibuang.
-12. **Karakter yang baru diketik mewarisi warna tetangga** selama ≤ 1 frame sampai pewarnaan asinkron tiba (typing attributes, bukan warna dasar). Mengetik di dalam komentar atau string tidak berkedip.
+12. **Karakter yang baru diketik mewarisi warna tetangga** selama ≤ 1 frame sampai pewarnaan asinkron tiba, dengan aturan §7.5 blueprint 4B (bukan typing attributes, bukan warna dasar). Mengetik di dalam komentar atau string tidak berkedip. Warna parameter (`:name`, `?`, `$1`) memakai warna `literal` dan mengikuti aturan `SQLScanner`: `:n` di dalam `[…]` (slice) tidak berwarna parameter.
 
 ## 15. ADR yang dibatalkan, diamandemen, atau dibuat
 
@@ -537,18 +543,22 @@ Nomor baru adalah nomor kosong berikutnya saat ditulis.
 |---|---|---|
 | 0003 grid NSTableView | Diamandemen oleh 0032 | Kembali ke NSTableView, tetapi sel digambar CoreText (`viewFor` nil), view aksesibilitas yang lazy, edit lewat field editor overlay, syarat eskalasi Metal. Konsekuensi "sort/filter di Rust" tetap, sebagai fallback Batch 7. |
 | 0004 UniFFI control plane | Diamandemen oleh 0030 | Data plane = objek UniFFI `ResultHandle` dengan satu buffer terender per jendela. Baris app tidak lagi lewat event. C ABI hanya eskalasi. Event tetap berupa callback. |
-| 0008 store kolumnar kustom | Diamandemen | Codec bertipe per chunk. Jendela mengembalikan teks terender, bukan `Vec<Vec<Value>>`. mmap ditolak. Alasan menolak Arrow diganti menjadi "renderer tunggal di Rust". |
+| 0008 store kolumnar kustom | **Digantikan** oleh 0030 | Store kustom tidak dibangun: `RecordBatch` Arrow per chunk (`qh-columnar`). Jendela mengembalikan teks terender, bukan `Vec<Vec<Value>>`. mmap ditolak. Spill = IPC Arrow + AES-256-GCM. |
 | 0009 panic unwind | Tetap | Semua ekspor baru throwing. Relevan untuk eskalasi C ABI. |
-| 0010 QoS | Diterapkan + addendum | Runtime app memakai `build_main`. Pool rayon P-core `USER_INITIATED`. Antrean Swift `.userInitiated`. |
+| 0007 tanpa App Sandbox | Addendum (W13-D) | App tetap tanpa sandbox. Helper analitik dikurung `sandbox-exec`. |
+| 0010 QoS | Diterapkan + addendum | Runtime app memakai `build_main`. Pool rayon P-core `USER_INITIATED`. Antrean Swift `.userInitiated`. Runtime tokio helper analitik ber-QoS `USER_INITIATED`. |
+| 0014 entitlement app | Addendum (W13-D) | Helper tidak butuh entitlement apa pun. |
 | 0013 throughput terikat JSON | **Digantikan** oleh 0030 | Protokol baris app diganti sekarang. NDJSON tetap untuk CLI, MCP, dan golden. Klaim 99,6% diganti hasil profil Fase 0.1. |
 | 0016 timeout statement | Tetap + addendum | Sesi pool menerapkan timeout per run (PostgreSQL sudah melacaknya). |
 | 0028 binding parameter | Mungkin diamandemen oleh 0035 | Hanya bila hasil biner diadopsi di Fase 7.3. |
 | baru 0030 | Dibuat | Data plane app lewat result store. |
 | baru 0031 | Dibuat | `EngineHost`: runtime persisten, pool sesi dan semantik reset, cancel preemptif + server-side. |
 | baru 0032 | Dibuat | Grid dengan sel yang digambar. |
-| baru 0033 | Dibuat | Analisis editor di Rust (`qh-sql`), tanpa tree-sitter. |
-| baru 0034 | Dibuat | View in-memory di Rust (rayon, kunci kolasi). DataFusion ditolak. |
+| baru 0033 | Dibuat | Analisis editor dengan tree-sitter per statement di Rust (`qh-editor`, grammar di-vendor). |
+| baru 0034 | Dibuat | View in-memory di Rust (rayon, kunci kolasi). DataFusion untuk SQL di helper opsional, bukan untuk view. |
 | baru 0035, 0036 | Bersyarat | Protokol per driver (COPY/biner); allocator dan PGO. |
+| baru 0037 | Dibuat, diperluas | Spill terenkripsi dengan kunci efemeral per proses: satu kunci per proses yang menulis spill, kunci tidak pernah menyeberang proses. |
+| baru 0045 | Dibuat | DataFusion sebagai komponen analitik terpisah yang diunduh saat pertama dipakai (O-15, O-18). Ditambah perluasan 0037 dan adendum 0007, 0010, 0014. |
 
 ## 16. Hubungan dengan rencana lain
 
@@ -570,6 +580,11 @@ Nomor baru adalah nomor kosong berikutnya saat ditulis.
 
 | Dependensi | Lisensi | Fase | Keterangan |
 |---|---|---|---|
+| `tree-sitter` (=0.26.13), `tree-sitter-language` (=0.1.7) | MIT | 4B | runtime C di dalam proses; dipatok `=` karena versi berikutnya butuh Rust 1.90 |
+| `streaming-iterator` | MIT OR Apache-2.0 | 4B | transitif `tree-sitter` |
+| Grammar `tree-sitter-sql` (DerekStride, crate `tree-sitter-sequel` 0.3.11) | MIT | 4B | di-vendor di `crates/qh-sql-grammar` dengan patch PR #361; di luar jangkauan `cargo deny`, dicatat di `PROVENANCE.md` dan `THIRD-PARTY-NOTICES.md` |
+| `arrow-array`, `-schema`, `-buffer`, `-ipc` (59.3) | Apache-2.0 (`arrow-array`: Apache-2.0 AND MIT) | 6 | app; sejajar `parquet` 59.3 |
+| `datafusion` (55.1, fitur minimal) plus `arrow-cast` | Apache-2.0 | W13-T8a | hanya workspace helper `helpers/analytics`; `recursive_protection` dan `compression` mati; lisensi per blueprint Fase 6 §24 |
 | `rayon` | MIT OR Apache-2.0 | 6 | pool dikonfigurasi `qh-rt` |
 | `unicode-segmentation` | MIT OR Apache-2.0 | 6 | hitungan grapheme untuk lebar kolom |
 | `memchr` | Unlicense OR MIT (MIT dipakai) | 7 | kemungkinan sudah transitif |
@@ -577,10 +592,10 @@ Nomor baru adalah nomor kosong berikutnya saat ditulis.
 | `sonic-rs` | Apache-2.0 | 7, bersyarat | |
 | `cargo-pgo`, `samply` | MIT OR Apache-2.0 | 0, 7 | alat, tidak dikirim |
 | toxiproxy | MIT | 0 | container dev saja |
-| CodeEditTextView, CodeEditSourceEditor (upstream CodeEditApp) | MIT menurut salinan lisensi di pohon TablePro; **wajib diverifikasi dari repo aslinya** | 8, eskalasi | fork TablePro dilarang |
-| Ditolak: DataFusion, `arrow` (Apache-2.0), tree-sitter + `tree-sitter-sequel` (MIT) | — | — | ditolak karena alasan teknis, bukan lisensi |
+| CodeEditTextView, CodeEditSourceEditor (upstream CodeEditApp) | MIT menurut salinan lisensi di pohon TablePro; **wajib diverifikasi dari repo aslinya** | 8, eskalasi | fork TablePro dilarang; menarik TextStory (BSD-3-Clause), swift-collections (Apache-2.0), dan SwiftLintPlugin |
+| Ditolak: SwiftTreeSitter (paket SwiftPM baru, grammar C dibangun dua kali) dan grammar `main` upstream (tiga kali lebih besar) | — | — | alasan teknis, bukan lisensi (blueprint 4B §1.2 dan D-3) |
 
-Semua lisensi di atas masuk allow-list `deny.toml` (MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, Zlib). Framework Apple (CoreText, ScreenCaptureKit, `xctrace`) adalah bagian sistem.
+Semua lisensi di atas masuk allow-list `deny.toml` (MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, Zlib). Grammar SQL yang di-vendor (C, MIT) tidak terjangkau `cargo deny`, jadi provenance dan lisensinya dicatat di `crates/qh-sql-grammar/PROVENANCE.md` dan `THIRD-PARTY-NOTICES.md`. Workspace helper juga lulus `cargo deny`. Framework Apple (CoreText, ScreenCaptureKit, `xctrace`) adalah bagian sistem.
 
 ## 18. Risiko lintas fase
 
@@ -590,6 +605,9 @@ Semua lisensi di atas masuk allow-list `deny.toml` (MIT, Apache-2.0, BSD-3-Claus
 - **Permukaan UniFFI tumbuh.** Invariant #1 dan #11: `app/Generated` diregenerasi dan di-commit, dan `RustEngineTests` menjaga daftar perintah.
 - **Semantik sesi yang dipakai ulang.** Tes reset di Fase 2.
 - **Lingkup merayap.** Tidak ada fitur baru di dalam fase performa. Yang ditolak di §13 tetap ditolak.
+- **Safe Mode MySQL (W3-T0).** `scan.rs` belum mengenal escape backslash dan komentar `#` MySQL, dan `CLIENT_MULTI_STATEMENTS` menyala, jadi `SELECT '\''; DELETE FROM t; -- '` dibaca satu `SELECT`. Untuk MCP itu celah keamanan (NFR-S6). W3-T0 menulis kedua contoh sebagai tes yang gagal lebih dulu, memperbaiki pemindai, dan mendahului refaktor `scan.rs` 4B.
+- **Proses helper analitik.** Unduhan tidak tersedia, `sandbox-exec` yang usang, throughput pipa, `SIGPIPE`, dan beda versi helper dengan app (R-30 sampai R-34, blueprint Fase 6 §25). Semua fungsi di luar analitik jalan tanpa helper.
+- **C di dalam proses (4B).** Crash di parser atau scanner tidak tertangkap `panic = "unwind"`. Diterima, dicatat di ADR-0033, dan diperiksa SEC.
 
 ## 19. Pertanyaan terbuka untuk pemilik
 

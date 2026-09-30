@@ -1,770 +1,740 @@
-# Blueprint Fase 4B: analisis editor di Rust
+# Blueprint Fase 4B: analisis editor dengan tree-sitter
 
-- **Status:** blueprint W2-A2, 30 Sep 2026. Belum ada kode. Diperiksa `architect-reviewer` 30 Sep 2026: **disetujui dengan koreksi**, yang sudah diterapkan di dokumen ini dan ditandai "(koreksi AR)". Verdict ada di bagian terakhir.
-- **Untuk:** W3-T2 (inti Rust, fixture yang diekspor dari Swift) dan W4-T2 (FFI dan integrasi Swift).
-- **Sumber:** `performance-plan.md` §8 (4A dan 4B); PRD FR-PERF-04, FR-ED-09, FR-ED-06 (hanya titik kait), NFR-V, NFR-P5, P-10; kebutuhan W11-T6 di `development-plan.md` §5; dan kode di pohon ini pada `9892ddb`.
-- **Cara membaca klaim.** Setiap klaim tentang kode menyebut berkas dan barisnya. Perilaku regex di §3 sudah dijalankan ulang terhadap pola aslinya dengan skrip Swift kecil di scratchpad, dan hasilnya dikutip apa adanya. Yang belum terverifikasi ditandai `[perlu verifikasi]`.
-- **Kontrak.** Aturan token (§3), aturan statement dan lipatan (§4), desain inkremental (§5), dan API FFI (§6) mengikat W3-T2 dan W4-T2. Struktur Swift di §7 mengikat sejauh 4A (W2-T3) tidak mengubah titik kaitnya. Bila 4A mendarat dengan bentuk lain, bentuk 4A yang berlaku untuk Swift, sedangkan kontrak Rust dan FFI di sini tetap.
+- **Status:** revisi 30 Sep 2026 untuk keputusan pemilik O-14 (tree-sitter dipakai untuk analisis editor; paritas visual dengan pewarnaan regex tidak lagi dituntut). Menggantikan blueprint lexer regex di `dc4186f`, yang verdict AR-nya disimpan di bagian terakhir sebagai riwayat. Belum ada kode. **Diperiksa `architect-reviewer` 30 Sep 2026: disetujui dengan koreksi** (verdict di bagian "Verdict architect-reviewer (tree-sitter)"; koreksinya ditandai "(koreksi AR-TS)"). Langkah 2 W3-T2 (refaktor `scan.rs`) menunggu W3-T0 (§15).
+- **Untuk:** W3-T2 (inti Rust), W4-T2 (FFI dan integrasi Swift), W4-T2b (Run memakai pemecah yang sama). Titik kait untuk W10-T6 (diagnostik), W10-T7 (pasangan kurung), W11-T6 (alias dan tabel), W12-T1 (formatter).
+- **Sumber:** `performance-plan.md` §8 dan §13; PRD FR-PERF-04, FR-ED-01, FR-ED-05, FR-ED-06, FR-ED-09, NFR-A1, NFR-L, NFR-P5, NFR-V, P-10; `development-plan.md` W3-T2, W4-T2, W4-T2b, W10-T6, W10-T7, W11-T6, W12-T1; kode di `work/perf-parity` sesudah 4A (`93c864b`, dengan `2e6f7ef` di atasnya); masukan profil reviewer 4A lewat orkestrator (73% waktu `insertText` adalah pembetulan atribut TextKit 1, berbanding lurus dengan jumlah run atribut).
+- **Cara membaca klaim.** Setiap angka di §1 diukur di mesin ini (Mac16,12, M4, 10 core) dengan crate buangan di `target/run/ts-bench/` (gitignored) dan spike Swift di `target/run/ts-bench/spike/`. Perintah ulangnya ada di §1.1. Beban mesin dicatat karena agen lain sedang membangun di mesin yang sama; angka yang diambil di bawah beban tinggi ditandai. Yang belum diukur ditulis **[belum diukur]**.
+- **Kontrak.** Pilihan grammar (§3), unit parse per statement (§4), pemetaan kelas ke warna (§5), API FFI (§6), dan penerapan lewat atribut sementara (§7) mengikat W3-T2 dan W4-T2. Angka ambang (batas statement besar, anggaran cache pohon) boleh disetel ulang oleh W3-T2 dari bench-nya sendiri, dengan angka dicatat di laporan.
 
 ## Ringkasan
 
-Hari ini setiap ketikan menjalankan satu regex atas seluruh dokumen (`Views/SQLSyntax.swift:79-101`), memindai ulang statement dan lipatan (`Views/SQLEditor.swift:666-691`, `Support/SQLFolding.swift:89-134`), dan mematikan pewarnaan di atas 200.000 unit UTF-16 (`SQLSyntax.swift:36`, `SQLFolding.swift:47`). 4B memindahkan analisis itu ke `crates/qh-sql` sebagai dokumen inkremental:
+Tree-sitter dipakai di Rust, bukan di Swift, di crate baru `qh-editor`, dengan grammar `tree-sitter-sql` milik DerekStride (crate `tree-sitter-sequel` 0.3.11, MIT, diverifikasi dari repo upstream). Parser C-nya di-vendor ke crate kecil `qh-sql-grammar` bersama satu perbaikan scanner dari upstream, karena versi crates.io bocor sekitar 74 byte per edit di dalam badan `$tag$`.
 
-- Rust memegang cermin teks dalam UTF-8, beserta indeks baris dan indeks potongan untuk pemetaan UTF-16.
-- Lexer warna adalah port regex apa adanya, termasuk keanehannya. Checkpoint dipasang per 64 baris atau 4 KB, dan lex ulang berhenti begitu state konvergen.
-- Statement diambil dari mesin `scan.rs` yang sudah dipakai engine. Lipatan adalah port `SQLFolding`.
-- Swift hanya mengirim edit dan menerapkan hasilnya: rentang kotor yang beririsan dengan layar (±2 layar) lebih dulu, sisanya dalam potongan saat idle, dan hanya bila revisinya masih terkini.
+Keputusan yang paling menentukan: **satu pohon per statement, bukan satu pohon per dokumen.** Batas statement tetap diambil dari `qh_sql::scan`, pemecah yang sama dengan engine dan Safe Mode. Dengan pohon per statement, reparse satu ketikan turun dari 0,85–5,3 ms p50 (sampai 7,5 ms p99) pada pohon dokumen 0,4–2 MB ke 0,02–0,03 ms p50 (≤ 0,09 ms p99), dan warna pertama dokumen 2M hanya butuh parse statement yang terlihat (3–4 ms), bukan seluruh dokumen (130–770 ms).
 
-Plafon naik ke 2.000.000 unit UTF-16. Tidak ada tree-sitter dan tidak ada dependensi baru. Regex Swift baru dihapus setelah tes paritas lewat FFI lulus.
+Warna diterapkan sebagai **atribut sementara `NSLayoutManager`** (`.foregroundColor`), bukan atribut storage. Storage hanya membawa atribut dasar dan font italic komentar. Di spike 195k karakter, `insertText` di tengah dokumen turun dari 3,7 ms ke 0,5 ms, layout rentang terlihat dari 3,5 ms ke 0,04 ms, dan piksel yang digambar identik (0 dari 2,8 juta piksel berbeda, gelap dan terang).
 
-## 1. Keputusan desain
+Tiga butir di daftar pemilik tidak diikuti apa adanya, dengan bukti di §0.2: batas statement dan run mark tetap dari `scan.rs` (pohon hanya mengisi isi statement); galat sintaks dari pohon tidak ditampilkan secara default karena 14–47% statement valid per dialek ditandai ERROR; dan formatter tidak mengambil token dari pohon.
+
+## 0. Keputusan pemilik dan posisi blueprint ini
+
+### 0.1 Yang berubah dari blueprint regex
+
+| Topik | Blueprint regex (`dc4186f`) | Blueprint ini |
+|---|---|---|
+| Lexer warna | Port regex byte demi byte, termasuk keanehannya, dibuktikan dengan paritas | Pohon tree-sitter per statement, ditambah lexer cadangan untuk celah ERROR. Tidak ada paritas; perubahan tampilan didaftar sebagai V-12 |
+| Tabel Unicode ICU, eksportir fixture Swift, L4/L5 paritas | Wajib | Dihapus seluruhnya |
+| Batas statement | `scan.rs` | `scan.rs` (tidak berubah) |
+| Unit analisis | Blok checkpoint 64 baris | Satu statement `scan.rs` = satu pohon |
+| Penerapan warna | Atribut storage di rentang kotor | Atribut sementara layout manager, storage nyaris seragam |
+| Lipatan | Port `SQLFolding` | Dari node pohon: statement, CTE, subquery, badan `$tag$` |
+| Diagnostik | `unclosed` dari `scan.rs` | Sama, ditambah data ERROR/MISSING yang tidak ditampilkan secara default |
+| Dependensi baru | Tidak ada | `tree-sitter` 0.26.13, `tree-sitter-language` 0.1.7, grammar yang di-vendor, `streaming-iterator` (transitif) |
+
+### 0.2 Tempat blueprint ini tidak mengikuti daftar pemilik apa adanya
+
+1. **Batas statement dan run mark tetap dari `scan.rs`, bukan dari pohon.** Pohon mengisi isi statement (kelas token, lipatan, alias), tidak menentukan di mana statement berakhir. Buktinya:
+   - `ANALYZE wide_500k;` di `deploy/dev/seed-postgres.sql:72` diparse menjadi satu node ERROR yang **menelan `;`**. Pohon menghitung 8 statement di seed itu, `scan()` menghitung 9. `ANALYZE TABLE wide_500k;` di `seed-mysql.sql:79` sama.
+   - Grammar membungkus `BEGIN; …; COMMIT` menjadi satu node `transaction`, jadi anak teratas pohon bukan statement.
+   - Di korpus bench (`lines-10k`, `chars-2m`, `bench-10k`, `dump-2m`), pemisah `scan()` dan `;` teratas pohon sama persis (0 selisih di 10.000, 2.457, 11.891, dan 1 pemisah). Jadi pemilihan ini tidak mengorbankan apa pun di teks yang parse bersih, dan menutup kasus yang tidak parse.
+   - Run, Safe Mode, dan `script` (W12-T3) memecah dengan `scan.rs`. Band yang memakai sumber lain akan kembali ke bug yang ditutup W4-T2b (`select "a;b"` tampil satu statement, Run mengirim setengahnya).
+2. **ERROR dan MISSING dari pohon tidak digambar sebagai garis bawah secara default (W10-T6).** Dari korpus uji dialek buatan sendiri (§1.2), statement **valid** yang pohonnya memuat ERROR atau MISSING: PostgreSQL 3 dari 21 (14%), MySQL 9 dari 19 (47%), Trino 8 dari 17 (47%). Contohnya `SHOW CATALOGS`, `USE tpch.sf1`, `DESCRIBE t`, `FETCH FIRST 5 ROWS ONLY`, `TABLESAMPLE BERNOULLI (10)`, `GROUPING SETS`, `LIMIT 10, 20`, dan `UPDATE … ORDER BY … LIMIT`. Garis bawah di bawah SQL yang benar lebih merugikan daripada tidak ada garis bawah. Datanya tetap dihitung dan diekspor (§4.8); yang ditampilkan W10-T6 adalah masalah leksikal dari `scan.rs` dan posisi galat dari server.
+3. **Formatter (W12-T1) mengambil token dari mesin `scan.rs` dan lexer kode `qh-sql`, bukan dari pohon** (§8.4). Formatter yang menolak bekerja di setiap statement ber-ERROR akan menolak separuh SQL MySQL dan Trino yang valid, dan formatter yang tetap bekerja di atas pohon ber-ERROR berisiko memindahkan spasi di tempat yang pohonnya salah baca.
+
+Lipatan per node sintaks, alias untuk autocomplete, dan kelas warna diambil dari pohon sesuai keputusan pemilik.
+
+## 1. Bukti
+
+### 1.1 Lingkungan dan cara mengulang
+
+- Crate buangan: `target/run/ts-bench/` (grammar crates.io 0.3.11), `ts-bench-fixed/` (0.3.11 + perbaikan scanner upstream PR #361), `ts-bench-abi15/` (grammar 0.3.11 dibangkitkan ulang dengan ABI 15 memakai `tree-sitter-cli` 0.26.13 yang dipasang lokal di `target/run/tools/`), `ts-bench-main/` (snapshot `gh-pages` upstream `39fdb00640`, yaitu build dari `main@97614d05`). Semuanya `[workspace]` sendiri, profil rilis sama dengan workspace (`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "unwind"`).
+- Korpus: `deploy/dev/make_sql_corpus.py` (`lines-10k.sql` 411.038 B, `chars-2m.sql` 2.000.000 B, keduanya penuh `:name`, komentar, dan `$tag$`), salinan persis dokumen `BenchMode.sqlDocument` (`bench-10k.sql` 957.780 B, `bench-2m.sql` 2.000.010 B), dan `dump-2m.sql` (satu `INSERT` 1.999.878 B dalam satu baris). Awalan `sub-` berarti `:name` diganti `_name` dengan panjang sama (§4.3).
+- Perintah: `target/release/bench parse1|type1|chunked|flip|patho|agree|probe|incr|leak|mirror`, dan `spike/spike bench|verify [light] [nocheck]`. Keluaran yang dipakai di dokumen ini tersimpan di `target/run/ts-bench/results.txt`, `probe-out*.txt`.
+- Beban: pengukuran §1.3 diambil pada load average 3–5 (sepuluh core), kecuali yang ditandai.
+
+### 1.2 Grammar, lisensi, dan cakupan dialek
+
+| Kandidat | Lisensi (diperiksa dari repo) | Status | Putusan |
+|---|---|---|---|
+| **DerekStride/tree-sitter-sql**, crate `tree-sitter-sequel` | MIT, `LICENSE` upstream "Copyright (c) 2021 Derek Stride"; `license = "MIT"` di crate | Aktif (push 19 Sep 2026, 247 bintang). Rilis terakhir 0.3.11 tanggal 1 Okt 2025; `main` 64 commit lebih maju dan tidak meng-commit `parser.c` | **Dipakai, versi 0.3.11, di-vendor** |
+| m-novikov/tree-sitter-sql | MIT | Push terakhir 6 Mar 2024 | Ditolak: tidak dipelihara |
+| gmr/tree-sitter-postgres | BSD-3-Clause | Aktif, versi beta | Ditolak: hanya PostgreSQL |
+| takegue/tree-sitter-sql-bigquery | MIT | Mei 2024 | Ditolak: BigQuery |
+| tree-sitter (runtime) | MIT (repo dan crate) | 0.27.0 butuh Rust 1.90, `tree-sitter-language` 0.1.8 juga | **0.26.13 dan 0.1.7 dipatok**, karena `rust-version = "1.85"` di workspace |
+| SwiftTreeSitter (tree-sitter/swift-tree-sitter) | BSD-3-Clause | Aktif | Tidak dipakai (§2, D-3) |
+
+**Isi grammar 0.3.11 yang relevan** (`grammar.js` di crate):
+
+- Dollar-quote lewat scanner eksternal (`src/scanner.c`), termasuk tag bernama. Badan `CREATE FUNCTION … AS $body$ … $body$` diparse sebagai SQL; tag menjadi node `dollar_quote`.
+- Backtick hanya untuk identifier sederhana: `` seq("`", $._identifier, "`") ``. `` `order details` `` menjadi ERROR (diperbaiki di `main`, belum dirilis).
+- `"…"` berupa regex `/"[^"]*"/` tanpa escape `""`, dan bisa menjadi `identifier` atau `literal` tergantung konteks.
+- Parameter hanya `?` dan `$1` (`parameter: /\?|(\$[0-9]+)/`). **`:name` tidak dikenal**: setiap `:` menjadi ERROR satu karakter.
+- Identifier: ASCII ditambah U+00C0–U+017F. `имя` menjadi ERROR.
+- String `'…'` dengan `''`; `E'…'` dengan `\'`. Escape backslash MySQL di string biasa tidak dikenal (`'it\'s'` menjadi ERROR), sama dengan `scan.rs` hari ini.
+- Kata kunci: 340 simbol `keyword_*`. Dari 131 kata kunci `SQLSyntax.keywords`, yang tidak ada di grammar: `apply`, `at`, `catalog`, `charset`, `describe`, `fetch`, `grant`, `identity`, `regexp`, `revoke`, `rlike`, `straight_join`, `try_cast`, `unnest`.
+- Kueri `queries/highlights.scm` bawaan ditulis untuk nvim-treesitter: `#match?` dengan pola Lua (`%d`) yang tidak dikenal mesin regex Rust, capture `@spell`, dan semua nama tabel ditandai `@type`. Tidak bisa dipakai apa adanya (§2, D-6).
+
+**Uji dialek** (`target/run/ts-bench/probes.sql`, SQL valid satu statement per baris, ditulis sendiri):
+
+| Kelompok | Bersih | Ber-ERROR/MISSING | Contoh yang gagal |
+|---|---|---|---|
+| PostgreSQL | 18 | 3 | `ON CONFLICT (a) DO UPDATE`, `DO $$ … RAISE …$$`, `имя` |
+| MySQL | 10 | 9 | `` `order details` ``, `'it\'s'`, `LIMIT 10, 20`, `@x := …`, `REGEXP`, `UPDATE … ORDER BY … LIMIT`, `WITH ROLLUP`, `STRAIGHT_JOIN`, `DESCRIBE` |
+| Trino | 9 | 8 | `WITH ORDINALITY`, `TABLESAMPLE`, `OFFSET … FETCH FIRST`, `SHOW CATALOGS`, `SHOW SCHEMAS FROM`, `USE`, `GROUPING SETS`, `EXPLAIN (TYPE …)` |
+| Parameter QueryHive | 0 | 2 | setiap `:name` |
+
+Yang lulus termasuk `$$a;b$$`, fungsi `$body$`, `a::text`, `E'…'`, `$1`, `->>`/`#>`/`@>`, `WITH RECURSIVE`, `FILTER … OVER (… ROWS BETWEEN …)`, `ARRAY[…]` dan slice, `DISTINCT ON`, `LATERAL`, lambda Trino `x -> x * 2`, nama tiga bagian `tpch.sf1.lineitem`, `TRY_CAST`, literal bertipe `date '…'`, dan `VALUES` sebagai tabel.
+
+**`main` upstream tidak layak dipakai sekarang.** Snapshot `39fdb00640` (build dari `main@97614d05`) menghasilkan `parser.c` 41,6 MB (0.3.11: 17,4 MB) dan pustaka statis grammar 11,09 MB (0.3.11: 2,47 MB), dengan hanya dua uji tambahan yang lulus (backtick berspasi dan `REGEXP`).
+
+### 1.3 Parse, reparse, dan memori
+
+**Parse penuh satu pohon per dokumen** (median n = 5):
+
+| Dokumen | Byte | ERROR | Parse | Parse dengan view `:name` | Heap pohon |
+|---|---|---|---|---|---|
+| `lines-10k` | 411.038 | 2.327 | 133–152 ms | 29 ms (0 ERROR) | 14,9 MB |
+| `bench-10k` | 957.780 | 0 | 78–90 ms | — | 51,6 MB |
+| `chars-2m` | 2.000.000 | 11.414 | 648–768 ms | 133 ms (0 ERROR) | 72,8 MB |
+| `bench-2m` | 2.000.010 | 0 | 162–216 ms | — | 106,6 MB |
+| `dump-2m` | 1.999.878 | 0 | 126–153 ms | — | 101,9 MB |
+
+Memori pohon 36–54 byte per byte sumber. Semua ERROR di korpus berasal dari `:name` (dicek per templat); pemulihan galat membuat parse 5–6 kali lebih lambat.
+
+**Ketikan satu karakter, satu pohon per dokumen** (200 ketikan di awal baris tengah; p50/p99 ms; load ≈ 5):
+
+| Dokumen | Reparse | `changed_ranges` |
+|---|---|---|
+| `sub-lines-10k` | 0,85 / 0,92 | 0,73 / 0,76 |
+| `bench-10k` | 2,49 / 3,05 | 2,35 / 3,04 |
+| `sub-chars-2m` | 4,71 / 5,63 | 4,01 / 4,60 |
+| `bench-2m` | 5,25 / 7,52 | 5,01 / 6,69 |
+| `dump-2m` (mengetik di dalam string) | 7,57 / 12,50 | 5,61 / 8,04 |
+
+Biaya ini naik bersama jumlah anak node akar (`program: repeat(seq(statement, ';'))`, 2,5–20,6 ribu statement di korpus ini) atau panjang daftar di dalam satu node (`dump-2m`), bukan bersama ukuran edit.
+
+**Satu pohon per statement `scan.rs`** (load ≈ 3,7):
+
+| Dokumen | Statement (terbesar) | Parse semua | Parse jendela ±24 KB | Ketikan: edit + reparse p50 / p99 |
+|---|---|---|---|---|
+| `sub-lines-10k` | 2.458 (1.277 B) | 45 ms | 3,7 ms (308 statement) | 0,021 / 0,026 ms |
+| `bench-10k` | 10.001 (96 B) | 79 ms | 3,9 ms | 0,018 / 0,024 ms |
+| `sub-chars-2m` | 11.892 (1.277 B) | 108 ms | 2,6 ms | 0,028 / 0,033 ms |
+| `bench-2m` | 20.636 (98 B) | 163 ms | 3,9 ms | 0,026 / 0,032 ms |
+| `chars-2m` (tanpa view) | 11.892 | 641 ms | 16,2 ms | 0,030 / 0,087 ms |
+| `dump-2m` | 2 (1.999.877 B) | 134 ms | 128 ms | 6,8 / 17,3 ms |
+
+Angka ketikan sudah termasuk menggeser offset semua statement sesudahnya. Heap total sama dengan pohon tunggal (14,4 / 52,4 / 70,5 / 108,1 MB). Kasus `dump-2m` (satu statement 2 MB) tidak tertolong pohon per statement, dan karena itulah ada batas statement besar (§4.4).
+
+**Sisi main.** Cermin teks Rust (sisip ke `String` 2 MB, geser 48.629 awal baris dan 11.891 awal statement): p50 0,018 ms, p99 0,020 ms; di bawah load 11: p99 0,22 ms. Biaya satu panggilan UniFFI ke objek **[belum diukur]**; diukur W4-T2 di bench FFI.
+
+### 1.4 Edit yang mengubah makna teks sesudahnya
+
+Satu sisipan di awal baris tengah (`flip`, model per statement; "rescan" di sini adalah `scan()` seluruh dokumen, batas atas dari resinkronisasi §4.2):
+
+| Dokumen | Sisipan | Rescan | Statement | Yang berubah | Reparse yang berubah ∩ jendela |
+|---|---|---|---|---|---|
+| `sub-lines-10k` | `'` | 4,4 ms | 2.458 → 2.446 | 2 (2.026 B) | 1,8 ms |
+| `sub-lines-10k` | `$$` | 1,4 ms | 2.458 → 1.585 | 356 (205 KB) | 4,3 ms |
+| `sub-chars-2m` | `"` | 5,0 ms | 11.892 → 5.966 | 1 (1,0 MB) | 0,17 ms |
+| `sub-chars-2m` | `$$` | 4,0 ms | 11.892 → 7.625 | 1.660 (1,0 MB) | 1,9 ms |
+| `bench-2m` | `'` | 4,5 ms | 20.636 → 10.431 | 1 (1,0 MB) | 0,24 ms |
+| `bench-2m` | `;` | 6,8 ms | 20.636 → 20.637 | 2 (99 B) | 0,02 ms |
+
+Statement 1 MB yang muncul saat kutip belum ditutup diwarnai dengan lexer saja (§4.4), sesuai dengan cara engine akan membaca teks itu.
+
+Sebagai pembanding, pada pohon tunggal sisipan `$$` di `sub-chars-2m` butuh reparse 153 ms dan menghasilkan 7.610 ERROR, dan pembatalannya 67 ms.
+
+### 1.5 Stabilitas inkremental dan lexer cadangan
+
+Uji diferensial: 2.000 edit acak (sisip dan hapus `'`, `"`, `$`, `$body$`, `/*`, `*/`, `--`, LF, `;`, huruf, `é`, 😀) di potongan 12.000 karakter yang memuat badan fungsi `$body$`. Setelah setiap edit, pohon inkremental dibandingkan dengan parse dari nol.
+
+| Grammar | S-expression berbeda | Semuanya pohon ber-ERROR? | Daftar token warna berbeda, tanpa lexer celah | Dengan lexer celah (§4.5) |
+|---|---|---|---|---|
+| 0.3.11, edit dibias ke badan `$tag$` | 282 | ya | 282 | **0** |
+| 0.3.11, edit merata | 329 | ya | 329 | **0** |
+| 0.3.11 dibangkitkan ulang dengan ABI 15 | 282 / 329 | ya | — | — |
+| `main@97614d05` | 22 / 4 | ya | 22 / 4 | tidak diuji |
+
+Artinya:
+
+- Pohon inkremental 0.3.11 berbeda dari parse baru di 14–16% edit, **hanya di pohon ber-ERROR**, dan penyebabnya ada di isi grammar, bukan versi ABI.
+- Perbedaannya hampir selalu soal token mana yang dilewati pemulihan galat. Contoh: `FROM` muncul sebagai `keyword_from` di dalam ERROR pada pohon inkremental, dan menjadi celah tanpa anak di pohon baru. Node ERROR punya byte yang tidak dimiliki anak mana pun (`SELEC 1;` adalah satu ERROR tanpa anak kecuali `;`).
+- Dengan celah ERROR diwarnai oleh lexer leksikal, warna menjadi fungsi dari teks saja: **0 perbedaan dari 4.000 edit**. Diagnostik dan lipatan tetap bergantung pada pohon, jadi statement ber-ERROR diparse ulang dari nol saat idle (§4.4).
+- **Batas bukti ini (koreksi AR-TS).** `cmd_incr` di `target/run/ts-bench/src/main.rs` memakai **satu pohon untuk potongan 12.000 karakter**, bukan pohon per statement, **tanpa** view `:name`, dan sesudah setiap selisih pohon inkremental **diganti pohon baru** (`tree = fresh`). Jadi yang terbukti adalah "0 dari 611 pohon yang menyimpang satu langkah", bukan bahwa penyimpangan yang menumpuk selama banyak edit tidak pernah mengubah warna. Klaim itu juga tidak dijamin secara struktur: anak ERROR di pohon inkremental diwarnai pohon, sedangkan byte yang sama di pohon baru bisa menjadi celah yang diwarnai lexer. Karena itu: (1) G2 (§9) menjalankan model yang sungguhan (pohon per statement, view, lexer celah) **tanpa** resinkronisasi, sehingga penyimpangan boleh menumpuk; (2) konvergensi §4.4 menghitung ulang token dan menambahkan selisihnya ke `dirty`, sehingga warna akhirnya selalu sama dengan parse baru walaupun klaim per edit gagal; (3) bila G2 menemukan selisih warna sebelum konvergensi, W3-T2 mengganti aturan ERROR menjadi "seluruh rentang ERROR dilex, anaknya diabaikan", lalu mengulang G2.
+
+**Kebocoran scanner.** 100.000 edit di dalam badan `$body$`, lalu pohon dan parser dibuang: heap naik 7,35 MB dengan scanner 0.3.11, dan 0,20 MB dengan perbaikan PR #361 (0,17 MB pada 20.000 edit, jadi tidak tumbuh). Penyebabnya `tree_sitter_sql_external_scanner_deserialize` menimpa `start_tag` tanpa `free` (`src/scanner.c:180-187` di crate), sementara `serialize` (`:161-178`) membebaskannya di tempat yang salah.
+
+### 1.6 Atribut sementara: spike AppKit
+
+Spike `target/run/ts-bench/spike/TempAttrSpike.swift`: tumpukan TextKit 1 yang sama dengan `SQLEditor` (`NSLayoutManager` sendiri, `allowsNonContiguousLayout`, `isRichText = false`), dokumen 195k karakter berpola `type-coloured-195k`, 200 ketikan `"select id, name from t where x = 1 and y in (2) "`, lalu layout rentang terlihat dan gambar ulang baris caret lewat `cacheDisplay`. Rilis, load ≈ 3. p50/p99 ms.
+
+| Mode | `insertText` tengah | Layout terlihat tengah | Gambar baris caret | `insertText` di akhir | Run storage |
+|---|---|---|---|---|---|
+| Seragam (tanpa warna) | 0,90 / 1,26 | 0,00 | 0,26 / 0,34 | 0,28 / 0,32 | 1 |
+| Warna di storage (hari ini) | 3,72 / 4,09 | 3,53 / 3,93 | 4,19 / 4,64 | 1,84 / 2,17 | 65.908 |
+| **Warna sementara, italic komentar di storage** | **0,53 / 0,80** | **0,04 / 0,06** | 5,28 / 5,67 | **0,40 / 0,65** | 3.623 |
+| Warna sementara, tanpa italic | 0,49 / 0,74 | 0,00 | 5,37 / 5,80 | 0,31 / 0,55 | 1 |
+
+Pemeriksaan perilaku (`spike verify`, `spike verify light`):
+
+- **Piksel identik.** Warna storage dan warna sementara menghasilkan 0 dari 2.800.000 piksel berbeda, di gelap dan terang, dengan `NSColor` dinamis. `cacheDisplay` menggambar atribut sementara (storage dibanding tanpa warna: 327.096 piksel berbeda di gelap, 297.556 di terang), jadi G-VIS tetap menangkapnya.
+- **`.font` sebagai atribut sementara diabaikan**: 0 piksel berubah. Italic komentar harus tetap di storage, atau dihapus.
+- **Karakter yang diketik tidak mewarisi warna sementara**: di dalam kata kunci, sesudahnya, di dalam komentar, dan di posisi 0, semuanya tanpa warna sementara. Di `NSTextView` dengan `isRichText = false`, karakter baru juga mendapat `typingAttributes` apa adanya, bukan atribut storage tetangga: di dalam komentar ia tegak, bukan italic. Ini menjawab `[perlu verifikasi]` blueprint lama.
+- **Undo tidak memulihkan atribut sementara**: `select` dihapus lalu di-undo, dan warna sementaranya hilang. Undo selalu masuk jalur edit, jadi rentangnya dicat ulang (§7.5).
+
+**Sisa biaya: gambar ulang baris yang diedit.** Sesudah edit, menggambar satu baris berwarna di jalur `cacheDisplay` makan 4–5 ms baik warna di storage maupun sementara, sedangkan baris seragam 0,26 ms. Menggambar ulang baris yang sama tanpa edit di antaranya hanya 0,25 ms, kemungkinan karena isi layer diambil dari cache tanpa `drawRect`. Profil `sample`: `NSColor` → `CGColor` dibuat per run (`create_color`, `evaluate_headroom`), state display list CoreGraphics per run, dan `NSTextCheckingController considerTextCheckingForRange:` (sekitar seperempat waktu gambar). Mematikan deteksi tautan, deteksi data, penyelesaian teks, dan prediksi inline menurunkan gambar dari 5,49 ke 4,20 ms. `NSColor` statis dan `NSColor(cgColor:)` tidak menurunkannya secara berarti. **Apakah jalur di layar semahal ini [belum diukur]**: W4-T2 mengukurnya dengan signpost di app, dan itu gate NFR-P5 (§14).
+
+### 1.7 Ukuran biner dan lisensi
+
+- **Delta biner** (rilis, stripped, LTO fat, binari dengan satu parse, satu edit, dan satu query):
+  - di atas baseline yang sudah menautkan `regex` (app sudah menautkannya lewat `mysql_common`): **+2,63 MB** untuk 0.3.11; +11,31 MB untuk snapshot `main`;
+  - di atas baseline polos: +3,75 MB.
+  - Binari app hari ini 23,67 MB (`app/dist/QueryHive.app/Contents/MacOS/QueryHive`), jadi 0.3.11 menambah sekitar 11%.
+- **Waktu build**: `parser.c` 17,4 MB dikompilasi sekali (build dingin crate buangan 15,7 dtk total), lalu di-cache.
+- **`cargo deny check licenses`** dengan `deny.toml` repo: `licenses ok`. Crate baru: `tree-sitter` 0.26.13 (MIT), `tree-sitter-language` 0.1.7 (MIT), `tree-sitter-sequel` 0.3.11 (MIT), `streaming-iterator` 0.1.9 (MIT OR Apache-2.0), dan `cc` 1.2.67 (build, MIT OR Apache-2.0; versi kedua karena crate grammar mematok `~1.2.1`, dan hilang bila grammar di-vendor dengan `build.rs` sendiri). `regex`, `serde_json`, `shlex`, dan `find-msvc-tools` sudah ada di `Cargo.lock`.
+- **Di luar jangkauan `cargo deny`**: runtime C tree-sitter membawa header UTF ICU di bawah lisensi Unicode (`lib/src/unicode/LICENSE` di crate `tree-sitter`), dan `parser.c`/`scanner.c` yang di-vendor membawa MIT Derek Stride. Keduanya dicatat di `PROVENANCE.md` crate grammar. Repo belum punya berkas pemberitahuan pihak ketiga untuk app; itu celah yang sudah ada sebelum 4B (§15).
+
+## 2. Keputusan desain
 
 | # | Keputusan | Alasan |
 |---|---|---|
-| D-1 | **Lexer warna meniru regex byte demi byte, termasuk keanehannya** (§3.5). | NFR-V menuntut atribut editor identik per rentang. Memperbaiki keanehan (misalnya `a+-- c` yang bukan komentar) berarti mengubah piksel, dan itu harus menjadi perubahan V tersendiri dengan rekam ulang baseline, bukan efek samping 4B. |
-| D-2 | **Dua mesin status di satu modul.** Mesin warna (semantik regex) dan mesin statement (`scan.rs`, semantik engine). | Keduanya memang berbeda hari ini: regex tidak mengenal `$tag$`, dan memperlakukan kutip tak tertutup sebagai kode. Statement harus mengikuti engine (`performance-plan.md` §8: "Batas statement dari `scan.rs`"). Menyatukan keduanya akan melanggar D-1 atau salah memecah statement. |
-| D-3 | **Cermin teks di Rust dalam UTF-8** (`Arc<String>`), dengan indeks baris LF dan indeks potongan (UTF-16, byte) setiap ≤ 1 KB. | Lexer bekerja atas byte. Swift mengirim edit dalam UTF-16. Indeks potongan menjaga pemetaan tetap O(1 KB) walaupun ada satu baris 2 MB (dump `INSERT` bergaya MySQL). |
-| D-4 | **Lexer "selesaikan dulu, baru emit".** Token multi-baris (komentar blok, string, identifier berkutip) dicari penutupnya sebelum diemit. Tidak ada state tentatif yang disimpan. | Aturan EOF regex bergantung pada ada tidaknya penutup di sisa dokumen (§3.3). State tentatif yang kemudian dibatalkan adalah sumber bug inkremental yang paling licin. |
-| D-5 | **Konvergensi hanya di checkpoint ber-mode Normal.** | Di checkpoint Normal, hasil lex sesudahnya hanya bergantung pada teks sesudahnya dan satu bit `prev_word`. Di dalam token, ujung token bisa berubah walaupun pembukanya sama. |
-| D-6 | **Statement dan lipatan dihitung penuh per revisi, off-main, setelah debounce.** Tidak inkremental. | Satu lintasan `scan.rs` atas 2 MB hanya beberapa milidetik di latar. Kode inkremental untuk ini tidak sebanding dengan hematnya. |
-| D-7 | **Dua kunci, dan main thread tidak pernah memegang kunci lexer.** | `replace` di main harus O(edit). Lex ulang besar (kutip yang membalik pasangan) boleh lama, tetapi hanya di latar. |
-| D-8 | **QoS berasal dari antrean Swift, bukan dari pool Rust.** Panggilan UniFFI sinkron mewarisi QoS thread pemanggil. | Tidak perlu runtime `qh-rt`. `USER_INITIATED` untuk jendela terlihat dan `UTILITY` untuk sisanya terpenuhi oleh dua `DispatchQueue` serial. |
-| D-9 | **Penjaga IME ada di sisi penerapan, bukan di sisi pengiriman.** Edit selalu dikirim, termasuk saat `hasMarkedText`, tetapi atribut tidak pernah diterapkan selama ada marked text. | **Menyimpang dari teks `performance-plan.md` §8** ("tidak mengirim edit selama `hasMarkedText`"). Alasannya ada di §7.5. **Diterima AR.** Alternatif rencana membuat cermin tertinggal selama komposisi, sehingga deteksi drift (§7.5) menembak palsu setiap kali ada scroll di tengah komposisi, dan butuh kode penggabung edit. Deviasi ini dicatat di ADR-0033. |
-| D-10 | **Tabel Unicode diekspor dari ICU dan Foundation lewat Swift, lalu dibekukan** di `unicode_tables.rs`. | `\b` dan `\d` di ICU bergantung pada properti Unicode yang tidak diekspos `std` Rust dengan persis (§3.4). Setelah regex dihapus, tabel itu menjadi definisi. **Diterima AR**, dengan syarat asal-usul tercatat dan eksportir tabel tetap hidup (§3.4, koreksi AR). |
-| D-11 | **Indeks baris Swift dari 4A dipertahankan untuk ruler.** Indeks Rust dipakai Rust sendiri dan diekspos untuk pemeriksaan drift. | Ruler butuh jawaban sinkron di main. Mengganti sumbernya ke FFI akan menyentuh `LineNumberRulerTests` di luar daftar berkas W4-T2. Dua indeks yang dibandingkan di tes adalah detektor drift yang murah. |
-| D-12 | **Tanpa tree-sitter, tanpa crate baru.** Uji acak memakai SplitMix64 buatan sendiri. `proptest` tidak dipakai. | `performance-plan.md` §8 dan brief. `cargo deny` tidak perlu disentuh. |
-| D-13 | **W4-T2 menjadi dua commit** (§13). Commit A menambah FFI dan tes paritas tanpa mengubah perilaku, commit B mengganti jalur dan menghapus regex. | Gate "paritas lulus **sebelum** regex dihapus" menjadi bukti di riwayat git, bukan sekadar klaim di laporan. **Diterima AR**, sah menurut `development-plan.md` §0 butir 3 (sub-fase dengan gate sendiri). Syaratnya: A meninggalkan pohon hijau (G-RUST, G-FFI, G-SWIFT, G-VIS), `EditorAnalysis` belum disambungkan ke `SQLEditor` di A, dan kedua commit masuk dalam satu tugas tanpa tugas lain di antaranya, kecuali W4-T2b (§15.1). |
-| D-14 | **Hasil `analysis` adalah `uniffi::Record` dengan larik `u32` datar, bukan paket byte buatan tangan** (koreksi AR, §6.2). | Lifting UniFFI terjadi di thread pemanggil, yaitu antrean latar, sehingga biaya main thread sama saja. Binding diregenerasi bersama Rust (invariant #1), jadi magic, versi format, dan field cadangan tidak menjaga apa pun. `statements` dan `folds` sudah berupa record. Dengan begini ada satu gaya encoding, tanpa parser biner di Swift. |
+| D-1 | **Grammar `tree-sitter-sequel` 0.3.11, di-vendor ke `crates/qh-sql-grammar`**, dengan `parser.c` apa adanya dari crate (checksum `9d198ad3…ec7d17`) dan `scanner.c` yang diberi patch PR #361 upstream. | MIT diverifikasi dari upstream. Perbaikan scanner menghentikan bocor 74 B per edit (§1.5). Rilis crates.io belum membawanya, dan `main` tiga kali lebih besar untuk dua uji tambahan (§1.2). `parser.c` 17,4 MB menjadi sekitar 818 KB terkompresi di git. Crate terpisah mengurung C dan satu-satunya `unsafe` (deklarasi `extern "C"` dan `LanguageFn::from_raw`) di satu tempat kecil yang diperiksa SEC. |
+| D-2 | **Runtime `tree-sitter = "=0.26.13"` dan `tree-sitter-language = "=0.1.7"`**, dipatok di `[workspace.dependencies]`. | 0.27.0 dan 0.1.8 butuh Rust 1.90; workspace menyatakan `rust-version = "1.85"`. ABI 15 didukung runtime 0.26. |
+| D-3 | **Di Rust, bukan Swift (SwiftTreeSitter).** | Konsumen pohon ada di Rust: pemecah statement (`scan.rs`), formatter W12-T1, dan alias W11-T6. Satu parse melayani semuanya. Tes diferensial dan properti di Rust tidak butuh AppKit. SwiftTreeSitter berarti paket SwiftPM baru (NFR-L: "tidak ada yang direncanakan"), grammar C dibangun dua kali, dan parse kedua untuk formatter. Harga Rust: satu cermin teks (§1.3, ≤ 0,02 ms per ketikan) dan hasil yang menyeberang FFI (kecil, karena hanya selisih). |
+| D-4 | **Crate baru `crates/qh-editor`, bukan modul `qh-sql/src/editor/`.** | `qh-sql` dipakai ketiga driver dan `qh-import`. Mereka tidak boleh ikut mengompilasi 17 MB C atau menautkan tree-sitter. Kontrak `qh-sql` ("murni, tanpa global", `forbid(unsafe_code)`) tetap berlaku. Feature flag di crate yang dipakai lima crate lain rawan penyatuan fitur. `qh-editor` juga `forbid(unsafe_code)`. |
+| D-5 | **Satu pohon per statement `scan.rs`.** | Reparse 0,02–0,09 ms per ketikan dan parse jendela 3–4 ms, berapa pun ukuran dokumen (§1.3). Statement sama dengan engine dan Safe Mode. ERROR terkurung di satu statement. Cache pohon bisa dibatasi (D-9). |
+| D-6 | **Klasifikasi lewat jalan pohon (`TreeCursor`) dan tabel jenis node, bukan `highlights.scm`.** | Kueri upstream khusus nvim (§1.2). Celah ERROR tetap butuh kode sendiri. Konteks induk (`invocation > object_reference > identifier`) terbaca langsung tanpa mesin predikat. |
+| D-7 | **Celah ERROR dan statement besar diwarnai lexer leksikal** (`qh_sql::lex`, di atas mesin `scan.rs`). | Warna tidak bergantung pada riwayat edit (§1.5). SQL yang belum selesai diketik tetap berwarna. Kutip yang belum ditutup mewarnai sisa statement sebagai string, seperti yang engine baca. |
+| D-8 | **View parse `:name`**: sebelum diparse, `:` yang didahului byte di luar `[A-Za-z0-9_:]` (atau awal statement) dan diikuti `[A-Za-z_]` diganti `_`, dengan panjang sama. **Kelas Parameter tidak diambil dari pohon**, tetapi dari lapis leksikal yang meniru aturan `SQLScanner` (koreksi AR-TS, §4.3). | Parse 5–6 kali lebih cepat di SQL berparameter dan tidak ada ERROR palsu (§1.3). Aturannya lokal (tiga byte), jadi edit hanya perlu diperlebar satu byte di kiri dan kanan. Di dalam string, komentar, atau dollar-quote, penggantian tidak mengubah jenis token. Tanpa fork grammar. Warna parameter sama dengan yang akan diikat Run. |
+| D-9 | **Statement > 256 KiB tidak diberi pohon dan tokennya tidak di-cache** (koreksi AR-TS, §4.4), dan cache pohon dibatasi kira-kira 640 KiB sumber per dokumen (≈ 32 MB pohon), LRU. | `dump-2m`: reparse 7–17 ms per ketikan pada satu statement 2 MB (di bawah load 11: p99 62 ms, `results.txt`), sedangkan lexer cukup untuk dump. Pohon 36–54 B per byte berarti 70–108 MB untuk 2M bila semua pohon disimpan. Token, lipatan, dan masalah per statement biasa tetap di-cache setelah pohonnya dibuang, dan parse ulang satu statement rata-rata 8–18 µs. Kedua angka boleh disetel W3-T2. |
+| D-10 | **Warna lewat atribut sementara `NSLayoutManager` (`.foregroundColor`).** Storage hanya atribut dasar (warna dasar, font tegak 12,5 pt, paragraph style) ditambah font italic di rentang komentar. | `insertText` 3,7 → 0,5 ms dan layout terlihat 3,5 → 0,04 ms di 195k, piksel identik (§1.6). Run storage 65.908 → 3.623. |
+| D-11 | **Himpunan kotor dan selisih token per statement** menggantikan `changed_ranges`. | Rentang edit selalu kotor (karakter baru tanpa warna sementara). Token lama dan baru dibandingkan dengan pemangkasan prefiks dan sufiks, seperti blueprint lama §5.6. Rentang yang dicat ulang saat mengetik: p50 1 unit, p99 54–84 unit (§1.3). `changed_ranges` berbiaya O(anak akar), 0,7–5,6 ms. |
+| D-12 | **Diagnostik: leksikal ditampilkan, ERROR/MISSING dihitung tetapi tidak ditampilkan secara default.** | §0.2 butir 2. |
+| D-13 | **Formatter W12-T1: token dari `scan.rs` + `qh_sql::lex`.** | §0.2 butir 3, §8.4. |
+| D-14 | **Alias W11-T6 dari pohon statement, dengan cadangan leksikal di statement ber-ERROR.** | Pohon memberi `relation` beserta `alias`, `object_reference`, dan nama `cte`. |
+| D-15 | **Lipatan dari node**: statement (dari `scan.rs`), `cte`, `subquery`, dan badan `$tag$`, hanya yang lebih dari satu baris. | Permintaan pemilik. Ini perubahan penanda gutter yang didaftar di V-12. |
+| D-16 | **Penjaga IME di sisi penerapan** (blueprint lama D-9, diterima AR). | Tidak berubah. |
+| D-17 | **Dua kunci; main tidak pernah memegang kunci analisis. QoS dari antrean Swift.** | Tidak berubah (blueprint lama D-7, D-8). |
+| D-18 | **Hasil berupa `uniffi::Record` dengan larik `u32` datar.** | Tidak berubah (blueprint lama D-14). |
+| D-19 | **W4-T2 tetap dua commit dengan W4-T2b di antaranya.** A: FFI, `EditorAnalysis`, dan tes, tanpa perubahan perilaku. B: jalur baru, regex dihapus, baseline V-12 direkam ulang. | W4-T2b butuh `sql_statement_ranges` dari A. Gate "paritas sebelum regex dihapus" diganti fixture capture emas dan tes diferensial (§9). |
+| D-20 | **API punya parameter dialek, W4-T2 mengirim `.generic`.** `sql_statement_ranges` juga menerima dialek (koreksi AR-TS). | Satu-satunya aturan dialek di 4B adalah `"…"` (string di MySQL, identifier di tempat lain), dan `SQLEditor` belum tahu driver tab. Sambungan per tab ikut W10-T6, yang memang butuh dialek untuk posisi galat server. Pemecah Run (`sql_statement_ranges`, W4-T2b) mendapat parameternya sekarang, karena W3-T0 (§15) membuat pemecahan MySQL di engine sadar-dialek; tanpa parameter itu Run di tab MySQL akan memecah berbeda dari engine, dan menambahkannya belakangan berarti memecah permukaan FFI lagi. |
+| D-21 | **`qh-sql` tidak tahu daftar kata kunci editor** (koreksi AR-TS). `qh_sql::lex` mengeluarkan `Word` tanpa kelas; himpunan kata kunci (grammar ∪ `EXTRA_KEYWORDS`) tinggal di `qh-editor`. | Arah dependensi: `qh-sql` adalah crate engine yang dipakai driver dan tidak boleh bergantung pada daftar yang diturunkan dari grammar tree-sitter. Formatter W12-T1 (di `qh-sql`, P-10) memakai daftar kata klausa miliknya sendiri. |
 
-## 2. Asumsi atas 4A (W2-T3)
+## 3. Grammar: vendoring dan pemeliharaan
 
-4B dibangun di atas keadaan sesudah 4A. Yang diasumsikan, sesuai `performance-plan.md` §8 butir 4A:
+**Isi `crates/qh-sql-grammar/`:**
 
-1. TextKit 1 eksplisit dan `allowsNonContiguousLayout = true`. Temporary attribute find bar tetap ada di `NSLayoutManager`.
-2. Lipatan lewat delegate layout manager, dengan tinggi terlipat yang sama, 0,1 pt (`SQLFoldStyler.collapsedLineHeight`, `SQLEditor.swift:918`). **Tidak ada atribut lipatan di text storage.**
-3. Tidak ada lagi `setAttributes` atas seluruh dokumen. 4A menerapkan atribut hanya di rentang kotor dan terlihat, dengan statement yang diedit sebagai rentang kotornya.
-4. Model sync di-debounce 150 ms. `updateNSView` membandingkan revisi, bukan string.
-5. Indeks baris ruler inkremental, diperbarui dari `textStorage(_:didProcessEditing:range:changeInLength:)`.
-6. `statementRanges`, region lipatan, dan run mark dihitung off-main setelah debounce.
+- `Cargo.toml`: `license = "MIT"`, `links = "tree-sitter-sql"`, dependensi `tree-sitter-language` dan build-dependency `cc` dari workspace (1.4.7, sehingga tidak ada `cc` kedua).
+- `build.rs`: `cc::Build::new().std("c11").include("vendor")`, dengan berkas `vendor/parser.c` dan `vendor/scanner.c`. `MACOSX_DEPLOYMENT_TARGET` dipaksa oleh `.cargo/config.toml` (invariant #4), jadi objek C mengikuti 14.0 seperti SQLite yang di-bundle.
+- `src/lib.rs`: `pub const LANGUAGE: LanguageFn`. `#![deny(unsafe_code)]`, dengan `#[allow(unsafe_code)]` hanya di blok `extern "C"` dan `from_raw`.
+- `vendor/parser.c`, `vendor/tree_sitter/{parser.h,alloc.h,array.h}`: salinan byte demi byte dari crate 0.3.11.
+- `vendor/scanner.c`: salinan crate ditambah patch PR #361 (hapus `free` di `serialize`; `free` sebelum menimpa di `deserialize`; periksa `malloc`). Diff-nya disimpan sebagai `vendor/scanner.patch`.
+- `grammar.js` dan `node-types.json`: sumber untuk membangkitkan ulang dan untuk tes nama node.
+- `LICENSE` (MIT, Derek Stride) dan `PROVENANCE.md`: versi crate, checksum `.crate`, URL dan commit PR #361, versi runtime yang diuji, lisensi ICU di runtime, dan prosedur pembaruan.
+- `tests/scanner_leak.rs`: `tree_sitter::set_allocator` dengan penghitung alokasi hidup. Sesudah 10.000 edit di badan `$body$` dan semua objek dibuang, hitungannya kembali ke awal. Ini satu-satunya berkas tes yang memakai `unsafe`.
 
-**Bila salah satu tidak benar saat W4-T2 mulai:**
+**Di `Cargo.toml` root (koreksi AR-TS):**
 
-- (2) gagal: fungsi apply 4B (§7.4) harus menerapkan ulang atribut lipatan di rentang yang sama sesudah warna. Kalau tidak, ketikan pertama membuka lipatan secara visual.
-- (3) gagal: himpunan kunci atribut yang disentuh 4B harus sama dengan milik 4A, supaya lapis atribut `VisualParityTests` tetap identik.
-- (5) gagal: ruler memakai indeks Rust (`line_count`, `line_of`), dan D-11 gugur.
+- `cc = "1.4"` di `[workspace.dependencies]` (hari ini `cc` hanya transitif, 1.4.7 di `Cargo.lock`). Runtime `tree-sitter` 0.26.13 meminta `cc ^1.2.48`, jadi satu versi `cc` melayani keduanya.
+- `[profile.dev.package.qh-sql-grammar]` dan `[profile.dev.package.tree-sitter]` dengan `opt-level = 2`. `cc` membaca `OPT_LEVEL` per paket; tanpa ini `parser.c` dikompilasi `-O0` di build debug, dan anggaran G2 "< 30 dtk di debug" diukur terhadap parser yang beberapa kali lebih lambat dari yang dikirim.
+- MSRV: `tree-sitter` 0.26.13 dan `tree-sitter-language` 0.1.7 menyatakan `rust-version = "1.77"`, jadi cocok dengan 1.85; 0.1.8 menyatakan 1.90 (diperiksa di registry lokal). **`rust-version = "1.85"` tidak diverifikasi siapa pun**: tidak ada `rust-toolchain.toml`, CI memasang `stable`, dan mesin ini memakai rustc 1.98.1. Resolver `"2"` tidak sadar MSRV, jadi patok `=` adalah satu-satunya penahan. Menaikkan MSRV untuk tree-sitter 0.27 adalah keputusan ADR tersendiri, bukan bagian 4B.
 
-W4-T2 membaca kode 4A yang sudah mendarat sebelum menulis satu baris pun, lalu mencatat asumsi mana yang berlaku di laporannya.
+**Pembaruan grammar** adalah tugas tersendiri dengan gate: jalankan ulang uji dialek §1.2, diferensial §1.5, bench §1.3, dan ukuran biner §1.7. Pembaruan ke `main` upstream hanya bila ukuran bisa ditekan, misalnya dengan membangkitkan ulang dari `grammar.js` dengan CLI yang dipatok. Fork grammar (misalnya untuk `:name` atau sintaks Trino) **tidak** direncanakan. View §4.3 dan lexer celah §4.5 menutup kebutuhan warna tanpa fork.
 
-## 3. Aturan token yang di-port
+## 4. Arsitektur `qh-editor`
 
-### 3.1 Pola, urutan, dan cara memindai
+Semua tipe di bagian ini murni: tanpa thread dan tanpa global selain tabel `const`. Konkurensi dirakit di `qh-ffi` (§6, §7).
 
-Pola di `SQLSyntax.swift:30-32` (`NSRegularExpression`, jadi ICU, dengan opsi kosong):
+### 4.1 `TextBuffer`
 
-```
-(--[^\n]*|/\*[\s\S]*?\*/)|('(?:[^']|'')*')|("(?:[^"]|"")*"|`[^`]*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_$]*)|([-+*/%=<>!|,;().\[\]]+)
-```
+Sama dengan blueprint lama §5.1, dengan tiga penyederhanaan:
 
-Semantik pemindaian yang direproduksi:
+- Cermin UTF-8 (`Arc<String>`, CoW), indeks baris LF (`starts_utf16`, `starts_byte`), indeks potongan UTF-16 ↔ byte setiap ≤ 1 KiB, revisi, dan log (`Edit`, `Touch`, `Applied`).
+- `last_closer` dan `closers_inserted` dihapus. Pembalikan kutip ditangani resinkronisasi statement (§4.2), bukan oleh lexer.
+- `replace` di main: validasi batas char, `replace_range`, geser indeks, dorong `LogEntry::Edit`. Anggaran < 0,5 ms di 2 MB; terukur ≤ 0,02 ms p99 tanpa beban (§1.3).
+- **Biaya CoW di main (koreksi AR-TS).** Angka di atas diukur tanpa snapshot hidup. Selama `paint` di latar memegang `Arc<String>`, `replace` di main harus menyalin seluruh 2 MB (`Arc::make_mut`), dan itu terjadi di sebagian besar ketikan cepat. Bench W3-T2 mencatat `replace` p50/p99 dengan snapshot hidup di 2M. Bila p99 > 0,5 ms, W3-T2 mengganti cermin dengan buffer berpotongan (misalnya potongan 64 KiB dengan `Arc` per potongan) tanpa mengubah API, dan mencatatnya di laporan.
 
-1. **Kiri ke kanan, tanpa tumpang tindih.** Di posisi p, keenam alternatif dicoba berurutan. Yang **pertama** berhasil menang, bukan yang terpanjang. Percobaan berikutnya mulai di akhir match itu.
-2. **Tidak ada yang cocok di p:** p maju satu code point, dan karakter itu tidak mendapat token. Di Rust itu satu `char`, yaitu 1 unit UTF-16, atau 2 untuk karakter di luar BMP.
-3. **Kelas.** Alternatif 1 menjadi Comment, satu-satunya token yang membawa font italic (`SQLSyntax.swift:54-57`). Alternatif 2 String. Alternatif 3 QuotedIdentifier, untuk kedua jenis kutip. Alternatif 4 Number. Alternatif 5 kata, diklasifikasi lagi di §3.2. Alternatif 6 Punctuation.
+### 4.2 Statement dari mesin `scan.rs`
 
-| Alt | Pola | Aturan port |
+- **Refaktor `scan.rs` (dari blueprint lama §4.1, tetap dengan gate SEC).** Loop `scan()` diekstrak menjadi `pub fn walk(bytes, &mut impl Visitor) -> EndState`. Visitor menerima `separator(pos)`, `opaque(kind, start, end)` untuk kutip `'`, `"`, backtick, komentar, dan `$tag$`, serta `word(start, end)`. `scan()` tetap mengumpulkan hasil yang identik, dikunci oleh tes diferensial `scan_refactor.rs` dengan salinan fungsi lama.
+- **Batas Safe Mode (koreksi AR-TS).** `scan()` adalah masukan tunggal `classify`, `statements_with_lines`, `decisions`, `check_confirmed`, `wrap.rs`, dan deteksi multi-statement driver PostgreSQL (`qh-driver-postgres/src/lib.rs:910`). W3-T2 **tidak boleh** mengubah perilaku engine sedikit pun. Syarat refaktornya:
+  - salinan beku fungsi lama hanya ada di `tests/scan_refactor.rs`, tidak di `src/`;
+  - yang dibandingkan adalah **seluruh** `Scan` (`separators`, `ends_with_terminator`, `leading_keyword`, `keywords`), ditambah `statement_count`, `statements_with_lines`, dan `decisions` untuk keempat `SafeMode`, bukan hanya pemisah;
+  - korpus: seed `deploy/dev/*.sql`, `tools/golden/live_cases.py`, korpus bench, dan fixture `qh-sql` yang ada; acak: SplitMix64 berbenih dengan alfabet `'`, `''`, `"`, `""`, backtick, `--`, `/*`, `*/`, `$`, `$$`, `$tag$`, `$1`, `;`, LF, CR, `\`, `#`, `_`, huruf, angka, `é`, 😀; 10.000 kasus di debug dan ≥ 1.000.000 dengan `QH_SCAN_SOAK=1` di rilis, dijalankan sekali oleh W3-T2 dan dicatat;
+  - tes unit `scan.rs` yang ada tidak diubah satu baris pun;
+  - `walk` tanpa `unsafe` dan tanpa indeks yang bisa panic (setiap `bytes[i]` di belakang pemeriksaan batas, seperti hari ini);
+  - `scan()` di `chars-2m` dan `bench-2m` tidak lebih lambat dari 10% (angka sebelum dan sesudah di laporan);
+  - satu-satunya perubahan API `qh-sql` selain `walk` dan `lex` adalah `first_significant` menjadi `pub` (dibutuhkan `qh-editor` untuk aturan `statements_with_lines`).
+  Perbaikan escape MySQL dan komentar `#` **bukan** bagian W3-T2; itu W3-T0 (§15), dan W3-T2 langkah 2 dimulai sesudah W3-T0 mendarat, supaya salinan beku di `scan_refactor.rs` membekukan pemindai yang sudah benar.
+- **Daftar statement** `Vec<Stmt>` terurut. Statement ke-i adalah `[pemisah_(i-1) + 1, pemisah_i + 1)`: `;` ikut di dalam statement, supaya pohonnya melihat terminator. Potongan terakhir sampai EOF. Setiap `Stmt` menyimpan awal byte dan awal UTF-16 (digeser per edit, O(jumlah statement)), pohon opsional, token, lipatan, masalah, dan `giant: bool`.
+- **Rentang untuk UI** (band, run mark, rotor, `sql_statement_ranges`) adalah `[pemisah_(i-1) + 1, pemisah_i)`, tanpa `;`, dengan aturan `statements_with_lines`: potongan dipertahankan hanya bila `first_significant` ada. Bentuknya sama dengan blueprint lama §4.1, termasuk tabel perbedaan terhadap `sqlStatements` Swift hari ini (`"a;b"`, `$tag$`, potongan komentar saja, CRLF, NBSP).
+- **Resinkronisasi sesudah edit.** Jalankan `walk` dari awal statement yang memuat awal edit. Berhenti di pemisah pertama yang (1) terletak sesudah ujung edit dan (2) sama dengan batas lama yang sudah digeser. Statement lama dari titik itu dipakai ulang. Alasannya sama dengan konvergensi blueprint lama §5.5: pemisah hanya muncul di state Normal, dan teks sesudahnya tidak berubah. Kutip yang membalik pasangan bisa membuat jalan ini sampai EOF, dengan batas atas `scan()` penuh 2–10 ms di 2M, di latar.
+- Statement yang teksnya berubah tetapi batasnya tetap diberi `tree.edit` dengan `InputEdit` relatif terhadap awal statement. Statement baru hasil pecah atau gabung diparse dari nol saat dibutuhkan.
+
+### 4.3 View parse `:name`
+
+`ParseView::bytes(stmt_text) -> Cow<[u8]>`: salin hanya bila ada `:` yang diganti. Aturannya:
+
+- byte `:` di i, byte i+1 ∈ `[A-Za-z_]`, dan byte i−1 tidak ada atau ∉ `[A-Za-z0-9_:]` (koreksi AR-TS). Tanpa syarat "di dalam kode", karena penggantian di dalam string atau komentar tidak mengubah jenis token. Syarat byte i−1 mencegah view merusak slice yang parse bersih hari ini: dengan aturan lama `arr[lo:hi]` menjadi identifier `lo_hi` dan `arr[1:n]` menjadi `1_n`.
+- Edit diperlebar satu byte di kiri dan kanan saat membentuk `InputEdit` (view byte i bergantung pada byte i−1, i, i+1, jadi ini tetap cukup).
+- **Kelas `Parameter` datang dari lapis leksikal, bukan dari pohon (koreksi AR-TS).** Sesudah klasifikasi pohon dan celah, `classify` menimpa kelas di setiap `:name` yang lolos aturan `SQLScanner.swift:58-64,112-117`: di region kode `walk`, kedalaman `[`…`]` nol (dihitung dari awal statement), dan byte sebelumnya bukan `:`. Blueprint versi sebelumnya memberi kelas ke `identifier` yang byte aslinya `:`, dan itu keliru di dua arah: `arr[1:n]` akan diwarnai parameter padahal `SQLScanner` sengaja menganggapnya slice (`:58`), dan `x:a` tidak diwarnai padahal Run akan mengikatnya. Dengan lapis ini, warna parameter sama dengan yang diikat Run, dan tetap fungsi dari teks statement saja. Korpus `edge-params` mengunci `a::text`, `:=`, `arr[lo:hi]`, `arr[1:n]`, `arr[:n]`, `x:a`, `(:a)`, `':a'`, `-- :a`, `$$ :a $$`, dan `:a` di awal statement.
+
+Dialek: tidak ada view kedua. Escape backslash dan komentar `#` MySQL mengikuti `walk`: sesudah W3-T0, dokumen berdialek `MySql` memakai mode MySQL `walk`, dan grammar tetap salah baca `'it\'s'` (ERROR, diwarnai lexer celah) (§14, §15).
+
+### 4.4 Pohon per statement
+
+- Satu `tree_sitter::Parser` per dokumen, di dalam `Analyzer`. Parse lewat `parse_with_options` dengan callback progres yang berhenti bila revisi terbaru (atomik yang ditulis `replace`) sudah melewati revisi yang sedang dianalisis.
+- **Statement besar**: > 256 KiB → `giant = true`. Tidak ada pohon; token dari `qh_sql::lex`; tidak ada lipatan di dalamnya dan tidak ada masalah sintaks.
+- **Token statement besar tidak di-cache (koreksi AR-TS).** `dump-2m` punya sekitar 400.000 token dalam satu statement; melex, menyimpan, dan membandingkan semuanya per ketikan berarti O(2 MB) kerja dan ~5 MB alokasi setiap giliran. Untuk statement `giant`, `paint` menjalankan `walk` dari awal statement sampai ujung jendela (terukur `scan()` 2,8 ms untuk 2 MB) dan hanya mengeluarkan token di dalam jendela. `dirty` untuk statement `giant` adalah rentang edit yang diperlebar ke batas token, ditambah sisa statement di dalam jendela bila `EndState` `walk` di ujung edit berubah (kutip atau komentar membalik). W3-T2 mencatat `paint` p50/p99 untuk ketikan di `dump-2m`; bila p99 > 8 ms, tambahkan checkpoint state `walk` setiap 64 KiB di dalam statement besar.
+- **Cache**: pohon statement yang terlihat dan yang baru diedit dipertahankan. Sisanya dibuang dengan LRU bila jumlah byte sumber statement berpohon melewati ~640 KiB. Token, lipatan, dan masalah tetap disimpan. Memori di luar pohon (token sekitar 12 B, ditambah `Stmt` dan larik per statement) dicatat W3-T2 sesudah `paint` penuh `chars-2m` dan `bench-2m` (20.636 statement), dengan sasaran total analisis ≤ 48 MB untuk dokumen 2M.
+- **Konvergensi**: statement yang pohon inkrementalnya `has_error()` diparse ulang dari nol 500 ms sesudah edit terakhirnya, di antrean idle. Token statement itu dihitung ulang dan selisihnya masuk `dirty` (koreksi AR-TS, §1.5), jadi warna akhir selalu sama dengan parse baru; lipatan, masalah, dan alias juga bisa berubah.
+- **Warna sementara sebelum parse selesai.** Pewarnaan pertama sinkron (§7.6) dan prefiks jendela (butir berikut) boleh menghasilkan warna yang bukan warna akhir. Itu hanya sah bila parse lengkapnya dijadwalkan di idle dan hasilnya lewat jalur selisih yang sama. G2 membandingkan warna sesudah antrean idle dikuras (§9).
+- **Jendela untuk statement yang sangat panjang dan baru**: bila statement yang harus diparse lebih besar dari jendela, jalur terlihat boleh memparse awalannya sampai ujung jendela saja, dan pohon lengkapnya diparse di idle.
+
+### 4.5 Klasifikasi dan lexer cadangan
+
+Jalan pohon menurun hanya ke node yang beririsan dengan rentang yang diminta. Node atomik (tidak dimasuki): `literal`, `identifier`, `comment`, `marginalia`, `parameter`, `op_other`, `op_unary_other`, `dollar_quote`, dan semua `keyword_*`. Tabel kelas ada di §5.1.
+
+**Celah ERROR**: untuk setiap node ERROR, byte di antara anak-anaknya, sebelum anak pertama, dan sesudah anak terakhir diberikan ke `qh_sql::lex`. Lexer ini (modul baru di `qh-sql`, di atas `walk`) mengeluarkan:
+
+- region opaque dari `walk` dengan batas **dipotong ke celah**: komentar, string, identifier berkutip, dan dollar-quote. Pembuka tanpa penutup menjadi token sampai ujung celah;
+- di region kode: angka, `Word` tanpa kelas, `:name`, dan lari tanda baca.
+
+`qh-editor` memberi kelas ke `Word`: kata kunci bila ada di himpunan kata kunci grammar ∪ 131 kata `SQLSyntax.keywords`; Literal untuk `null`/`true`/`false`; selain itu tanpa kelas (koreksi AR-TS, D-21). Lexer yang sama dipakai untuk statement besar, formatter W12-T1, dan cadangan alias W11-T6. Himpunan kata kunci diambil dari `Language::node_kind_for_id` (awalan `keyword_`) sekali saat start, digabung dengan daftar tetap `qh_editor::keywords::EXTRA_KEYWORDS`.
+
+### 4.6 Himpunan kotor, selisih, dan hasil cat
+
+`dirty: RangeSet<u32>` dalam UTF-16, dengan koordinat revisi analisis. Semantiknya sama dengan blueprint lama §5.6:
+
+- `Edit`: geser, lalu **selalu** tambahkan `[s, s + new_len)`;
+- statement yang diparse ulang: token lama (digeser) dan baru dibandingkan dengan pemangkasan prefiks dan sufiks, dan sisanya ditambahkan;
+- statement yang batasnya berubah: seluruh rentangnya ditambahkan;
+- `Touch` menambah, dan `Applied { revision, ranges }` mengurangi hanya bila revisinya cocok di titik log itu.
+
+**Hasil `paint`** untuk `dirty ∩ jendela`, dibatasi anggaran:
+
+- `ranges`: rentang yang harus dicat ulang Swift, di-snap ke batas token;
+- `runs`: token berkelas di dalam rentang itu. Yang tidak disebut berarti tanpa warna sementara;
+- `fonts`: rentang yang font storage-nya harus ditulis, dengan penanda italic. Isinya hanya rentang edit (font storage-nya tidak diketahui Rust, karena undo bisa memulihkan italic lama) dan tempat status komentar berubah. Saat mengetik biasa, `fonts` kosong atau berisi satu rentang satu karakter.
+
+### 4.7 Lipatan
+
+Dari pohon statement, hanya yang mencakup lebih dari satu baris:
+
+- `Statement`: statement non-kosong (header = baris pertama yang signifikan, ringkasan = kata kunci pertama dalam huruf besar atau `"statement"`);
+- `Cte`: badan berkurung node `cte` (ringkasan `"CTE"`);
+- `Subquery`: node `subquery` (ringkasan `"subquery"`);
+- `Body`: isi di antara dua node `dollar_quote` (ringkasan `"body"`).
+
+Statement `giant` atau yang pohonnya dibuang dan belum diparse ulang memakai lipatan terakhir yang di-cache, digeser. Deduplikasi dan urutan `(header, lastLine)` sama dengan `SQLFolding` hari ini.
+
+### 4.8 Masalah (data untuk W10-T6)
+
+| Jenis | Sumber | Ditampilkan W10-T6 |
 |---|---|---|
-| 1a | `--[^\n]*` | Dari `--` sampai sebelum LF (0x0A) atau EOF. CR ikut di dalam token. Selalu berhasil. |
-| 1b | `/\*[\s\S]*?\*/` | Tertutup di `*/` pertama yang **mulai** di ≥ pembuka + 2, jadi `/*/` belum tertutup. Tidak bersarang. Tanpa penutup: §3.3. |
-| 2 | `'(?:[^']\|'')*'` | Pasangan `''` adalah escape. Tertutup di `'` pertama yang tidak diikuti `'`. Tanpa penutup: §3.3. |
-| 3a | `"(?:[^"]\|"")*"` | Sama dengan alternatif 2, untuk `"`. |
-| 3b | `` `[^`]*` `` | **Tanpa** escape ganda. ``` `a``b` ``` menjadi dua token, `` `a` `` dan `` `b` `` (terverifikasi). |
-| 4 | `\b\d+(?:\.\d+)?\b` | `\d` berarti Unicode Nd, bukan hanya ASCII, jadi `٣` adalah angka (terverifikasi). Backtracking: coba dengan pecahan lebih dulu. Bila `\b` di akhir gagal, coba tanpa pecahan. Bila masih gagal, alternatif ini gagal di p. `\b` dijelaskan di §3.4. |
-| 5 | `[A-Za-z_][A-Za-z0-9_$]*` | ASCII saja. Tidak ada `\b` di depannya, jadi `1abc` menghasilkan `abc` sebagai kata. |
-| 6 | `[-+*/%=<>!\|,;().\[\]]+` | Lari rakus atas karakter `- + * / % = < > ! \| , ; ( ) . [ ]`. Lari ini **tidak** berhenti di `--` atau `/*` (§3.5). |
+| `UnclosedQuote`, `UnclosedComment`, `UnclosedDollar`, `UnclosedIdentifier` | state akhir `walk` per statement (pembuka yang benar-benar diketik) | ya |
+| `UnbalancedParen` | hitungan kurung di region kode `walk` per statement | ya |
+| `SyntaxError` (ERROR), `MissingToken` (MISSING) | pohon statement, sesudah konvergensi §4.4 | **tidak** secara default (D-12) |
 
-Titik dua (`:`), `@`, `#`, `?`, `^`, `&`, `~`, `{`, `}`, `$` yang berdiri sendiri, spasi, tab, CR, LF, dan semua huruf non-ASCII tidak cocok alternatif mana pun. Karakter-karakter itu dilewati dan tetap berwarna dasar.
+### 4.9 Plafon
 
-### 3.2 Klasifikasi kata
+`CEILING_UTF16 = 2_000_000`, inklusif, seperti blueprint lama §5.7. Di atas plafon tidak ada warna (Swift menghapus warna sementara bertahap), tidak ada pohon dan lipatan, tetapi statement tetap dihitung. `bench-2m.sql` berukuran 2.000.010 unit, jadi fixture bench `type-2m` harus dipangkas ≤ 2.000.000 sebelum NFR-P5 diukur.
 
-- **Keyword.** `lowercased` ASCII dari kata ada di daftar 131 kata (`SQLSyntax.swift:12-27`). Sumber kebenarannya pindah ke `crates/qh-sql/src/editor/mod.rs` (`KEYWORDS`, terurut) di W3-T2. Swift membacanya lewat `editorKeywords()` sejak W4-T2 commit B. W3-T2 menguji kesamaan kedua daftar terhadap `keywords.txt` hasil ekspor.
-- **Literal.** `null`, `true`, `false` adalah keyword yang diwarnai sebagai Literal (`:113-115`).
-- **Function.** Hanya untuk kata yang **bukan** keyword. Syaratnya: sesudah akhir kata ada nol atau lebih U+0020, lalu `(` (`isCalled`, `:105-109`). Tab, LF, dan komentar memutus rantai itu, jadi `foo\t(` bukan fungsi (terverifikasi). Karena keyword dicek lebih dulu, `replace(`, `left(`, dan `values (` tetap Keyword. Lookahead ini tidak pernah melewati LF.
-- **Lainnya** tidak mendapat token. Di Rust ia menjadi kelas internal `Word`, yang dipakai W11-T6 dan formatter tetapi tidak pernah dikirim ke Swift.
+## 5. Kelas, warna, dan perubahan tampilan (V-12)
 
-### 3.3 Aturan EOF (terverifikasi dengan pola asli)
+### 5.1 Pemetaan node → kelas → warna
 
-Pembuka yang tidak punya penutup **tidak** menjadi token sampai EOF. Hasilnya bergantung pada jenis pembuka, dan semuanya akibat backtracking ICU:
+Warna adalah pasangan `SQLSyntax` yang sudah ada (`Views/SQLSyntax.swift:202-210`), dan tidak ada warna baru. Kode kelas adalah enum tertutup di dua sisi batas (invariant #3), dengan `default` yang memicu fault di Swift.
 
-| Pembuka | Tanpa penutup | Input → token hari ini |
-|---|---|---|
-| `'`, tanpa pasangan `''` sesudahnya | `'` dilewati tanpa token. Lex lanjut di karakter berikutnya **sebagai kode**. | `x 'abc` → `x`, `abc` |
-| `'`, dengan ≥ 1 pasangan `''` sebelum EOF | String ditutup di kutip **pertama** dari pasangan `''` **terakhir**. Kutip kedua pasangan itu gagal sebagai pembuka, lalu dilewati. | `select 'it''s` → `select`, `'it'`, `s` · `'''` → `''` |
-| `"` | Sama dengan `'` | `"ab""c` → `"ab"`, `c` |
-| `` ` `` | Dilewati. Lex lanjut di karakter berikutnya. | — |
-| `/*` | Alternatif 1 gagal, dan alternatif 6 menang di posisi yang sama. `/*` beserta tanda baca yang menempel menjadi Punctuation, lalu sisanya dilex sebagai kode. | `x /* open` → `x`, `/*` (punct), `open` |
-| `--` | Selalu tertutup, di LF atau EOF | — |
+| Node grammar 0.3.11 | Kelas (kode) | Token warna (gelap / terang) | Hari ini (regex) |
+|---|---|---|---|
+| `comment` (`--`), `marginalia` (`/* */`) | Comment (1), italic di storage | `comment` 5A6072 / 5F6672 | sama, kecuali `;--`, `)--`, `+--`, `)/*` yang hari ini menjadi tanda baca |
+| `literal` diawali `'`, `E'`, `N'`, `U&'`, `B'`, `X'`, `$` | String (2) | `string` 3EE6A8 / 0A7A52 | `'…'` sama; `$tag$…$tag$` hari ini dilex sebagai kode; `E` di `E'…'` hari ini tanpa warna |
+| `dollar_quote` (tag badan fungsi) | String (2) | `string` | hari ini `tag$` kata biasa |
+| Badan fungsi `$body$ … $body$` | kelas SQL biasa | — | hari ini kode juga, tetapi dengan keanehan regex |
+| `literal` literal bertipe (`date '…'`, anak `identifier` + string) | identifier → Keyword (5), sisanya String (2) | `keyword`, `string` | `date` tanpa warna |
+| `literal` diawali angka, `.`, atau tanda | Number (4) | `number` FFB547 / 9A5B00 | sama, kecuali `$1`, `1abc`, `1.5a` |
+| `literal` diawali `"` | QuotedIdentifier (3); String (2) untuk dialek MySQL | `quotedIdentifier` E8C468 / 7A5C00 | selalu `quotedIdentifier` |
+| `keyword_null`, `keyword_true`, `keyword_false` | Literal (6) | `literal` FF7A8A / BE2F45 | sama |
+| `keyword_*` lain, termasuk tipe (`int`, `varchar`, `text`, `timestamp`, `jsonb`, …) | Keyword (5) | `keyword` 8B7BFF / 5B3FD6 | hanya 131 kata; tipe tanpa warna, atau `function` bila diikuti `(` |
+| `identifier` sebagai `name` dari `object_reference` di dalam `invocation` | Function (7) | `function` 4FD8FF / 0B6E8F | kata bukan kata kunci yang diikuti spasi lalu `(` |
+| `identifier` diawali `"` atau backtick | QuotedIdentifier (3) | `quotedIdentifier` | sama |
+| `parameter` (`?`, `$1`) dan `:name` dari lapis leksikal §4.3 | Parameter (9) | **`literal`** | `?` dan `:` tanpa warna; `1` di `$1` menjadi angka |
+| Token anonim operator dan tanda baca (`( ) , ; . [ ] = < > <= >= != <> + - * / % ^ :: \|\| :=`), `op_other`, `op_unary_other` (`->`, `->>`, `#>`, `@>`, …) | Punctuation (8) | `punctuation` 8A90A6 / 565C6B | lari `[-+*/%=<>!\|,;().\[\]]+`; `:`, `@`, `#` tanpa warna |
+| `identifier` lain (kolom, tabel, alias, skema) | tanpa kelas | `base` | sama, kecuali kata di daftar 131 |
+| Celah ERROR, statement besar | dari `qh_sql::lex` (§4.5) | sesuai kelas | — |
 
-**Bentuk mesinnya.** Saat bertemu `'` atau `"`, lexer menelusuri kutip sejenis. Pasangan `qq` diteruskan, dan posisi pasangan terakhir dicatat. `q` yang tidak diikuti `q` menutup token. Bila penelusuran habis di EOF, aturan tabel di atas yang berlaku. Karena sesudah pembuka yang gagal tidak ada lagi kutip sejenis (setiap kutip sesudahnya pasti sudah menjadi bagian pasangan), paling banyak ada **satu** pembuka gagal per jenis kutip di seluruh dokumen. Untuk `/*` bisa lebih dari satu: semua `/*` sesudah `*/` terakhir gagal.
+Parameter memakai warna `literal` karena parameter dibaca sebagai nilai, seperti `null`, dan karena kandidat warna baru dari kosakata `Tone` gagal di kanvas Nord: `Tone.magenta` FF4FA3 4,10:1, `Tone.blue` 4F8DFF 3,92:1. Kelasnya tetap terpisah di FFI supaya UX bisa memberinya warna sendiri tanpa perubahan Rust.
 
-**Konsekuensi non-lokal.** Satu `'` yang diketik di baris 10 bisa berpasangan dengan `'` di baris 40.000, dan itu membalik pasangan semua string sesudahnya. Itulah perilaku hari ini, dan 4B mereproduksinya (§5.4).
+### 5.2 Kontras (dihitung WCAG 2.x dari nilai heksadesimal)
 
-### 3.4 Batas kata ICU (`\b`) dan kelas Unicode
+| Token | Midnight | Graphite | Nord | Ink | Daylight | Cloud | Paper |
+|---|---|---|---|---|---|---|---|
+| base | 16,19 | 15,18 | 10,40 | 16,78 | 15,25 | 15,15 | 15,55 |
+| keyword | 5,91 | 5,54 | **3,79** | 6,12 | 6,21 | 6,17 | 6,33 |
+| function | 11,67 | 10,94 | 7,49 | 12,09 | 5,33 | 5,30 | 5,44 |
+| string | 12,12 | 11,37 | 7,78 | 12,56 | 4,96 | 4,92 | 5,05 |
+| number | 11,07 | 10,38 | 7,11 | 11,47 | 5,02 | 4,98 | 5,12 |
+| quotedIdentifier | 11,60 | 10,88 | 7,45 | 12,02 | 5,78 | 5,74 | 5,90 |
+| literal (juga Parameter) | 7,78 | 7,30 | 5,00 | 8,06 | 5,27 | 5,24 | 5,38 |
+| comment | 3,10 | 2,91 | 1,99 | 3,22 | 5,35 | 5,31 | 5,45 |
+| punctuation | 6,13 | 5,75 | **3,94** | 6,35 | 6,19 | 6,14 | 6,31 |
 
-`\b` di ICU, mode default (bukan `UREGEX_UWORD`), di posisi p:
+Aturan palet (`app/DESIGN.md` §Appearance: setiap nilai terang ≥ 4,5:1 di Daylight, setiap nilai gelap ≥ 4,5:1 di Midnight, `comment` gelap sengaja di bawahnya) terpenuhi, dan 4B tidak menambah warna. **Temuan yang sudah ada sebelum 4B:** NFR-A1 menuntut ≥ 4,5:1 di ketujuh kanvas, sedangkan `keyword` (3,79) dan `punctuation` (3,94) gagal di Nord. Memperbaikinya berarti nilai gelap per kanvas atau menaikkan kecerahan untuk semua kanvas gelap. **Diputuskan orkestrator (30 Sep 2026): diperbaiki di dalam V-12**, karena baseline editor direkam ulang di commit yang sama dan NFR-A1 berlaku untuk ketujuh kanvas. Nilai barunya dipilih W4-T2 commit B dengan gate UX, dengan syarat: `keyword` dan `punctuation` ≥ 4,5:1 di keempat kanvas gelap, nilai terang tidak berubah, dan hue tetap dikenali sebagai ungu dan abu-abu. Bila palet hanya membedakan gelap dan terang (bukan per kanvas), nilai gelap yang dinaikkan berlaku untuk keempat kanvas gelap. `SyntaxPaletteTests` (baru, §9) mengunci ≥ 4,5:1 untuk semua token di ketujuh kanvas, kecuali `comment` gelap.
 
-1. Bila p = EOF, karakter sesudahnya dianggap bukan kata.
-2. Bila karakter **di** p adalah `Grapheme_Extend` atau `Cf`, p **bukan** batas.
-3. Karakter sebelumnya dicari dengan mundur melewati karakter `Grapheme_Extend` dan `Cf`. Yang pertama bukan keduanya dipakai. Awal teks dihitung bukan kata.
-4. Batas = (sesudah ∈ W) XOR (sebelum ∈ W), dengan W = `[\p{Alphabetic}\p{M}\p{Nd}\p{Pc}‌‍]`.
+### 5.3 V-12: perubahan tampilan yang didaftarkan
 
-Ini ditulis dari ingatan atas `RegexMatcher::isChunkWordBoundary` di ICU, lalu diperiksa dengan pola `\b\d+\b` di mesin ini:
+Baris baru untuk PRD §6.5 (diisi orkestrator): **V-12 — Warna sintaks dan lipatan editor dari tree-sitter; warna sebagai atribut sementara — W4-T2 commit B.** Isinya:
 
-| Input (code point) | Hasil |
-|---|---|
-| `a` U+0301 `1` | tidak ada angka. Tanda kombinasi dilewati mundur, lalu `a` adalah kata. |
-| `x` U+200D `1` | tidak ada angka. ZWJ adalah `Cf`. |
-| `٣` | angka `{0,1}` |
-| `$1` | angka `{1,1}`. `$` bukan W. |
-| `1` U+0301 | tidak ada angka. Karakter sesudahnya `Grapheme_Extend`. |
+1. Kata kunci mengikuti grammar dan konteks: tipe data menjadi ungu; kata yang dipakai sebagai nama kolom menjadi warna dasar bila grammar melex-nya sebagai identifier; kata di luar grammar (`describe`, `grant`, `fetch`, …) tetap ungu di celah ERROR lewat daftar cadangan.
+2. Deteksi fungsi mengikuti `invocation`: `INSERT INTO t (a)` tidak lagi mewarnai `t` sebagai fungsi, dan `varchar(20)` menjadi kata kunci.
+3. Dollar-quote biasa menjadi string. Badan fungsi diwarnai sebagai SQL, dan tagnya sebagai string.
+4. Komentar sesudah tanda baca (`1;-- c`, `count(*)--c`, `)/* x */`) menjadi komentar.
+5. Parameter `:name`, `?`, dan `$1` memakai warna literal.
+6. `::`, `->>`, `#>`, `@>`, dan `:=` menjadi abu-abu tanda baca.
+7. Kutip atau komentar yang belum ditutup mewarnai sisa statement (menurut `scan.rs`) sebagai string atau komentar. Hari ini karakter pembukanya dilewati dan sisanya diwarnai sebagai kode.
+8. Penanda lipatan bertambah: CTE, subquery, dan badan `$tag$` yang lebih dari satu baris.
+9. Lapis atribut G-VIS: warna pindah dari run storage ke run `temporary: true`. Run storage tinggal dasar dan italic komentar.
+10. `keyword` dan `punctuation` gelap dinaikkan sampai ≥ 4,5:1 di Nord (§5.2, keputusan orkestrator).
+11. Warna parameter (butir 5) mengikuti aturan `SQLScanner` persis: `:n` di dalam `[`…`]` (slice) tidak berwarna parameter, sedangkan `x:a` berwarna parameter karena Run mengikatnya (§4.3).
 
-Mundur di langkah 3 tidak pernah melewati LF, karena LF bukan `Grapheme_Extend` dan bukan `Cf`. Jadi semua lookbehind dan lookahead lexer warna lokal di dalam baris. Hanya mode token multi-baris yang membawa state melintasi LF.
+Scene editor yang direkam ulang: `editor-syntax`, `-folded`, `-plain`, `-find`, `-invisibles`, `-wrap-on`, `-wrap-off`, dan `-long-middle`, masing-masing gelap dan terang (16 pasang PNG dan JSON). Pasangan lama dan baru ditinjau berdampingan oleh pemilik di laporan akhir (P-01).
 
-**Tabel yang diekspor** (D-10). `LexerFixtureExport.swift` menulis `crates/qh-sql/src/editor/unicode_tables.rs`: daftar rentang code point yang terurut dan tidak beririsan, beserta kepala "generated, do not edit". Isinya:
-
-- `ICU_WORD`: dari `\w` ICU, yang di ICU memakai himpunan yang sama dengan `\b`;
-- `ICU_DIGIT`: dari `\d`;
-- `ICU_TRANSPARENT`: dari `[\p{Grapheme_Extend}\p{Cf}]`;
-- `FND_LETTER` dan `FND_ALNUM`: `CharacterSet.letters` dan `.alphanumerics`, **BMP saja**, untuk port `SQLFolding` di §4.2.
-
-Pengambilan untuk kelas ICU: satu string berisi semua scalar yang dipisah `\n`, lalu satu `matches(in:)` per kelas. `\n` bukan anggota kelas mana pun, jadi setiap match adalah satu scalar. Tiga lintasan atas sekitar 4,5 juta unit ini selesai dalam hitungan detik.
-
-`CharacterSet.whitespacesAndNewlines` setara dengan `char::is_whitespace` (properti `White_Space`). Kesetaraan ini **diuji**, tidak ditabelkan. Jalur ASCII tidak pernah menyentuh tabel.
-
-**Pemeliharaan tabel (koreksi AR).**
-
-- Kepala berkas mencatat asal-usulnya: versi macOS dan build, versi ICU dan Unicode yang dilaporkan sistem, tanggal, dan perintah regenerasi. Tanpa catatan itu, tabel beku tidak bisa diaudit.
-- Ekspor tabel dipisah ke `app/Tests/QueryHiveTests/UnicodeTableExport.swift` (di-skip kecuali `QH_EXPORT_UNICODE=1`). Ekspor ini hanya bergantung pada `NSRegularExpression` dan `CharacterSet`, bukan pada `SQLSyntax`, sehingga **tidak** ikut dihapus di commit B (§10). Dengan begitu tabel bisa dibandingkan dengan macOS berikutnya kapan saja.
-- Selisih yang ditemukan di macOS baru **tidak** otomatis diterapkan. Mengubah tabel berarti mengubah warna, jadi itu perubahan V tersendiri (PRD §6.5). `editor_unicode.rs` menguji bahwa tabel terurut, tidak beririsan, dan bahwa `ICU_DIGIT ⊂ ICU_WORD`.
-
-### 3.5 Keanehan yang sengaja dipertahankan (semuanya terverifikasi)
-
-| Input | Token hari ini | Catatan |
-|---|---|---|
-| `a+-- c` | `a`, `+--` punct, `c` | `--` tertelan lari tanda baca. Bukan komentar. |
-| `count(*)--c` | `count`, `(*)--` punct, `c` | Komentar tepat sesudah `)` tidak dikenali. |
-| `1;-- c` | `1`, `;--` punct, `c` | Sama. Kasus yang umum di dunia nyata. |
-| `)/* x */` | `)/*` punct, `x`, `*/` punct | `/*` tertelan. |
-| `$tag$ select $tag$` | `tag$`, `select`, `tag$` | Badan dollar-quote dilex sebagai kode. |
-| `1abc from` | `abc`, `from` | `\b` gagal di `1`, lalu `abc` menjadi kata. |
-| `1.5a` | `1` number, `.` punct, `a` | Backtracking pecahan. |
-| `:name`, `a::text` | `:` dilewati, `name` kata | Lexer `:name` milik `SQLScanner` tidak tersentuh. |
-| `E'it\'s'` | escape backslash tidak dikenal | Sama dengan `SQLScanner` dan `scan.rs`. |
-
-Memperbaiki satu pun dari ini adalah perubahan V baru (PRD §6.5). Itu di luar 4B.
-
-### 3.6 Satuan posisi
-
-- Semua posisi yang menyeberang FFI adalah offset UTF-16 absolut dalam `u32`. Rentang ditulis setengah terbuka, `[start, start + len)`.
-- Karakter non-BMP selalu dilangkahi utuh. Tidak ada token yang mulai atau berakhir di tengah pasangan surrogate.
-- **Surrogate yatim.** NSString bisa memuat surrogate yatim. Saat di-bridge ke Swift `String` untuk dikirim ke UniFFI, ia menjadi U+FFFD. Panjangnya tetap 1 unit UTF-16, sehingga offset tetap sejajar. Keduanya tidak cocok alternatif mana pun dan bukan anggota W, `Grapheme_Extend`, atau `Cf`, jadi hasil lex identik. Satu kasus korpus mengunci ini.
-
-## 4. Statement, lipatan, dan baris
-
-### 4.1 Statement: dari `scan.rs`
-
-- **Pemisah.** Posisi `;` dari mesin `scan()` (`crates/qh-sql/src/scan.rs:62-187`). Mesin ini mengenal kutip `'`, `"`, backtick (semuanya dengan escape ganda), `--`, `/* */` tanpa sarang, dan `$tag$` (`read_dollar_tag`, `:195-209`). Pembuka yang tidak tertutup berlaku sampai EOF.
-- **Rentang statement i.** `[pemisah_(i-1) + 1, pemisah_i)` dalam UTF-16, atau sampai akhir teks untuk potongan terakhir. Ini bentuk yang sama dengan `sqlStatements` hari ini (`Models/QueryTab.swift:1056-1098`), sehingga band dan run mark tidak bergeser untuk teks biasa.
-- **Potongan dipertahankan** hanya bila `first_significant(potongan)` bukan `None` (`scan.rs:270-299`). Ini aturan `statements_with_lines` (`classify.rs:566-608`).
-- **Refaktor `scan.rs` (W3-T2).** Loop di `scan()` diekstrak menjadi satu fungsi jalan internal yang memanggil callback pemisah dan kata. `scan()` tetap mengumpulkan keduanya dengan keluaran yang identik, dikunci oleh tesnya sendiri. Editor hanya memakai pemisah dan state akhir, sehingga tidak mengalokasikan satu `String` per kata.
-- **Syarat refaktor (koreksi AR).** `scan()` adalah dasar Safe Mode (`classify.rs` membaca `keywords` dan `separators`), jadi refaktor ini menyentuh batas keamanan:
-  - `scan.rs` belum ada di daftar berkas W3-T2 di `development-plan.md`. Orkestrator menambahkannya sebelum W3-T2 mulai.
-  - Tes diferensial baru: `scan()` sebelum dan sesudah refaktor menghasilkan `Scan` yang identik atas seluruh korpus editor dan alfabet acak §9. Salinan fungsi lama disimpan di modul tes untuk keperluan ini saja.
-  - Gate W3-T2 ditambah SEC, khusus untuk diff `scan.rs`.
-  - Alasan refaktor yang mengikat adalah state akhir (`unclosed`, §8.2) dan region opaque untuk W12-T1, bukan alokasi. Outline dihitung di latar sesudah debounce, sehingga alokasi per kata tidak menyentuh NFR-P5.
-
-**Perbedaan terhadap perilaku hari ini.** Semuanya membuat editor sepakat dengan engine:
-
-| Kasus | `sqlStatements` Swift hari ini | Sesudah 4B (`scan.rs`) |
-|---|---|---|
-| `;` di dalam `"a;b"` atau `` `a;b` `` | memecah | tidak memecah |
-| `;` di dalam `$tag$ … $tag$` | memecah (diakui di komentar `:1050-1051`) | tidak memecah |
-| potongan yang hanya komentar (`SELECT 1; -- akhir`) | statement sendiri, dengan band dan run mark | bukan statement |
-| teks CRLF yang memuat `--` | komentar baris tidak pernah berakhir, karena loop `Character` menganggap `"\r\n"` satu karakter (terverifikasi: 0 LF terlihat pada `"-- c\r\nSELECT 1; SELECT 2"`). Tidak ada pemecahan sesudah komentar pertama. | berakhir di LF |
-| potongan yang hanya NBSP, U+2028, atau VT | dibuang (trim Unicode) | dianggap signifikan (`is_ascii_whitespace`) |
-
-Scene `editor-syntax` dan `editor-long-middle` tidak memuat satu pun kasus ini. Scene pertama hanya satu statement; scene kedua memakai `;` biasa. Jadi tidak ada piksel yang diharapkan berubah. **Run Current Statement** masih memakai `sqlStatement(in:atUTF16Offset:)` versi Swift sampai tindak lanjut di §15.1. Selama itu, band atau run mark dan Run bisa berselisih untuk kasus di tabel ini.
-
-### 4.2 Lipatan: port `SQLFolding` apa adanya
-
-Port 1:1 dari `regions` (`SQLFolding.swift:89-134`), `cteRegions`, `cteOpenParens`, `matchingParen` (`:153-225`), dan mini-lexer `nextToken` dan `skipTrivia` (`:300-376`). Statement yang dipakai adalah daftar dari §4.1.
-
-- **Trim header dan akhir** memakai `whitespacesAndNewlines`, per unit UTF-16 (`isSpace`, `:265-268`). Di Rust: `char::is_whitespace`.
-- **Kata.** Dimulai oleh `letters` atau `_`, dilanjutkan `alphanumerics`, `_`, atau `$` (`:378-388`). Pengecekannya per unit UTF-16, jadi karakter non-BMP tidak pernah menjadi bagian kata. Rust memakai `FND_LETTER` dan `FND_ALNUM` untuk karakter BMP, dan `false` untuk non-BMP.
-- **Kata dijadikan huruf besar** dengan pemetaan Unicode penuh (`uppercased()` Swift dan `str::to_uppercase` Rust). Kata itu dipakai untuk membandingkan `WITH`, `AS`, `NOT`, `MATERIALIZED`, dan untuk ringkasan (summary). Ringkasan jatuh ke `"statement"` bila token pertama bukan kata, dan bernilai `"CTE"` untuk region CTE.
-- **Aturan EOF mini-lexer ini berbeda dengan lexer warna, dan tetap berbeda.** Kutip atau komentar yang tidak tertutup berlaku sampai akhir teks statement. `matchingParen` melompati literal dengan cara yang sama.
-- **Dedup dan urutan.** Header ganda dibuang: yang pertama menang, statement lebih dulu dari CTE. Urutan akhir `(header, lastLine)`.
-- **Plafon** 2.000.000, inklusif (§5.7).
-
-Semantik ini hanya bisa berbeda dari Swift lewat statement-nya (tabel §4.1). Fixture lipatan untuk teks di tabel itu masuk daftar pengecualian yang dijelaskan (§9).
-
-### 4.3 Baris
-
-- Hanya LF (0x0A) yang memutus baris. `line_starts` = `[0] + [i + 1 untuk setiap LF di i]`. Dokumen kosong punya 1 baris. Ini sama dengan `SQLFolding.lineStarts` (`:55-63`).
-- CR yang berdiri sendiri bukan pemutus baris di indeks, walaupun AppKit menggambarnya sebagai paragraf baru. Selisih ini sudah ada hari ini dan tidak diubah (§14).
-
-## 5. Desain inkremental
-
-Semua tipe di bagian ini hidup di `crates/qh-sql/src/editor/`. Semuanya murni: tanpa kunci, tanpa thread, dan tanpa global selain tabel `const`, sesuai kontrak `qh-sql/src/lib.rs:16`. Konkurensi dirakit di `qh-ffi` (§7.1).
-
-### 5.1 `TextBuffer`
+## 6. API UniFFI (`crates/qh-ffi/src/editor.rs`)
 
 ```rust
-pub struct TextBuffer {
-    text: Arc<String>,               // CoW: Arc::make_mut saat ada snapshot yang masih dipegang
-    revision: u64,                   // 1 saat new(); +1 per replace
-    lines: Arc<LineIndex>,           // starts_utf16: Vec<u32>, starts_byte: Vec<u32>
-    chunks: Arc<ChunkIndex>,         // titik (utf16, byte) setiap ≤ 1024 byte, di batas char
-    last_closer: [Closer; 4],        // ' " ` dan */: Absent | At(byte) | Unknown (langkah 6)
-    log: Vec<LogEntry>,              // dikuras oleh Highlighter, berurutan
-}
-pub enum LogEntry {
-    Edit(Edit),                               // setiap replace
-    Touch { revision: u64, start: u32, len: u32 },    // mark_dirty
-    Applied { revision: u64, ranges: Vec<(u32, u32)> }, // mark_applied
-}
-pub struct Edit {
-    pub revision: u64,                         // revisi sesudah edit
-    pub start_utf16: u32, pub old_len_utf16: u32, pub new_len_utf16: u32,
-    pub start_byte: u32,  pub old_len_byte: u32,  pub new_len_byte: u32,
-    pub closers_inserted: u8,                  // bit per jenis: ' " ` */
-    pub joins_block_close: bool,               // penghapusan yang merapatkan * dan /
-}
-```
+#[derive(uniffi::Enum)] pub enum EditorDialect { Generic, Postgres, MySql, Trino }
 
-**`replace(start, len, text)`, langkah demi langkah:**
-
-1. Validasi. `start + len` ≤ panjang dokumen. Kedua ujung harus jatuh di batas char. Kalau tidak: `SplitsCharacter`.
-2. Petakan UTF-16 ke byte lewat `chunks`: pencarian biner, lalu pindai ≤ 1024 byte.
-3. `String::replace_range`. Biayanya memmove sampai 2 MB, sekitar 0,1 ms.
-4. Perbarui `lines`. Awal baris di dalam rentang lama dibuang, awal baris dari teks baru disisipkan, dan sisanya digeser (Δbyte, Δutf16). O(jumlah baris) penjumlahan.
-5. Perbarui `chunks` dengan cara yang sama. Tambahkan titik di dalam teks baru sehingga tidak ada celah > 1024 byte.
-6. Perbarui `last_closer`. Kemunculan di teks baru menang bila lebih akhir. Bila kemunculan terakhir yang lama berada di rentang yang dihapus, entri itu ditandai **tidak diketahui**, dan tidak dicari di sini. Pencarian mundur bisa O(n) di main (koreksi AR). Highlighter menghitung ulang entri yang tidak diketahui dari snapshot di latar, dengan satu `rfind` per jenis, sebelum melex.
-7. `revision += 1`, dorong `LogEntry::Edit`, kembalikan revisi.
-
-**Anggaran.** Pada 2 MB, `replace` di main < 0,5 ms, termasuk satu salinan CoW 2 MB bila analisis latar sedang memegang snapshot. `log` dibatasi 1.024 entri. Bila meluap, `log` dikosongkan dan Highlighter diberi tanda `needs_full_relex`.
-
-### 5.2 Blok checkpoint
-
-```rust
-struct Block {
-    start_byte: u32, start_utf16: u32,   // absolut, digeser per edit (O(jumlah blok))
-    entry: Entry,
-    tokens: Vec<Tok>,                    // token yang MULAI di blok ini, tanpa Word
-}
-enum Entry {
-    Normal { prev_word: bool },          // bit W dari karakter non-transparan sebelumnya (§3.4)
-    Inside { open_byte: u32, open_utf16: u32 }, // di dalam token multi-baris yang mulai di open
-}
-struct Tok { start: u32 /* UTF-16, relatif ke blok */, len: u32, class: Class /* u8 */ }
-```
-
-- **Batas blok baru** dipasang sesudah ≥ 64 baris atau ≥ 4.096 byte sejak awal blok, di posisi **layak** pertama. Posisi layak adalah:
-  - awal baris, dengan `Entry` apa pun;
-  - di tengah baris, bila ia **awal percobaan** (bukan di dalam token), mode Normal, dan karakter di posisi itu bukan U+0020. Aturan terakhir ini mencegah lookahead `isCalled` dari kata sebelumnya menyeberangi batas blok.
-- **Token milik blok tempat ia mulai.** Token yang melintasi batas blok membuat blok-blok berikutnya ber-`Entry::Inside`.
-- **Memori pada 2 MB.** Sekitar 800 blok. Token tanpa `Word` kira-kira 300–500 ribu × 12 byte, jadi 4–6 MB, ditambah teks 2 MB.
-
-### 5.3 Lexer "selesaikan dulu, baru emit"
-
-```rust
-pub struct Lexer<'a> { /* text, pos_byte, pos_utf16, prev_word, closers: &[Option<u32>; 4] */ }
-impl<'a> Lexer<'a> {
-    pub fn new(text: &'a str, at_byte: u32, at_utf16: u32, prev_word: bool,
-               closers: &'a [Option<u32>; 4]) -> Self;
-    pub fn next_token(&mut self) -> Option<Token>;   // termasuk Class::Word
-}
-pub fn lex_all(text: &str) -> Vec<Token>;           // oracle: dari nol, tanpa blok
-```
-
-- Di pembuka `'`, `"`, backtick, atau `/*`, lexer mencari penutup lebih dulu. Pencarian dibatasi `last_closer`: bila `last_closer[k]` tidak ada atau < posisi pembuka, pembuka gagal seketika, tanpa memindai sampai EOF. Kemudian token diemit utuh, atau aturan EOF §3.3 diterapkan. Tidak ada state tentatif.
-- `lex_all` adalah oracle untuk tes diferensial dan dipakai juga untuk `new()` atas dokumen kecil.
-
-### 5.4 Titik mulai lex ulang
-
-Untuk setiap `Edit` yang dikuras dari log, dengan s = `start_utf16` dalam koordinat baru:
-
-1. **Blok awal** = blok terakhir yang mulai **sebelum** s (tegas, <), atau blok 0.
-2. Selama `entry` blok itu `Inside { open }`, mundur ke blok yang memuat `open`. Prosesnya berhenti karena `open` selalu turun.
-3. **Pembuka gagal.** Highlighter mencatat `failed_first[k]`: posisi pembuka gagal pertama untuk setiap jenis k. Bila edit menyisipkan penutup jenis k (`closers_inserted`, atau `joins_block_close` untuk `*/`) dan `failed_first[k]` < s, blok awal = min(blok awal, blok yang memuat `failed_first[k]`). Tanpa aturan ini, `'` yang diketik di baris 900 tidak akan berpasangan dengan `'` gagal di baris 5.
-4. Beberapa edit dalam satu kurasan diproses berurutan. Rentang lex ulang digabung.
-
-### 5.5 Konvergensi
-
-- Lex ulang berjalan dari blok awal. Sesudah melewati ujung edit (s + `new_len`), setiap batas blok lama b (sudah digeser Δ) yang didarati lexer tepat sebagai awal percobaan diperiksa. Bila di sana mode baru `Normal { prev_word }` sama dengan `entry` lama `Normal { prev_word }`, lex ulang **berhenti**:
-  - blok lama dari b dan seterusnya dipakai ulang;
-  - `start_byte` dan `start_utf16` digeser Δ;
-  - posisi `open` yang lebih besar dari ujung edit ikut digeser.
-- **Kenapa aman.** Di checkpoint Normal, token sesudah b hanya bergantung pada teks sesudah b, yang tidak berubah, dan pada `prev_word`. Token sebelum b tidak bergantung pada teks sesudah b:
-  - lookahead `isCalled` tidak bisa menyeberangi b, karena b bukan U+0020 atau b adalah awal baris;
-  - `\b` di akhir angka hanya melihat karakter di b;
-  - lari tanda baca berhenti karena karakter di b bukan tanda baca.
-- **Batas `Inside` tidak pernah dipakai untuk konvergensi** (D-5).
-- **Malas (lazy): ditunda (koreksi AR).** Lex ulang selalu berjalan sampai konvergen atau EOF di panggilan yang menguras log. Lex ulang O(n) hanya terjadi saat kutip membalik pasangan, dan hanya di latar, sehingga tidak menyentuh anggaran main NFR-P5; akibatnya paling-paling warna terlambat satu frame, risiko yang sudah diterima rencana. `frontier` dan bit `LEX_PENDING` baru ditambahkan bila bench W3-T2 menunjukkan `lex_all` atas 2 MB > 16 ms di mesin bench. Rancangannya bila dibutuhkan: panggilan jendela terlihat berhenti di checkpoint Normal pertama sesudah ujung jendela; token sesudahnya adalah token lama yang digeser dan tetap kotor; panggilan `UTILITY` melanjutkan dengan anggaran sekitar 256 KB per panggilan.
-
-### 5.6 Himpunan kotor
-
-`dirty: RangeSet<u32>` (vektor rentang UTF-16 yang terurut dan tidak beririsan) dalam koordinat revisi Highlighter. Isinya diperbarui saat log dikuras, berurutan:
-
-- **`Edit`:** geser, lalu **selalu** tambahkan [s, s + `new_len`). Karakter yang baru masuk membawa atribut apa pun yang diberikan storage, entah typing attributes, atribut yang dipulihkan undo, atau hasil tempel. Jadi rentang edit wajib dicat ulang walaupun tokennya tidak berubah.
-- **Lex ulang:** tambahkan rentang beda token. Prefiks dan sufiks token (start, len, class) yang sama antara daftar lama yang digeser dan daftar baru dibuang. Yang tersisa ditambahkan. Mengetik satu huruf di tengah biasanya mengotori satu atau dua token, bukan seluruh blok.
-- **`Touch`:** tambahkan.
-- **`Applied { revision, ranges }`:** kurangi, hanya bila `revision` sama dengan revisi Highlighter di titik log itu. Bila tidak, abaikan; rentangnya akan dikirim lagi.
-- **Saat hasil disusun** (§6.2), rentang di-snap ke batas token sehingga tidak ada token yang terpotong.
-
-### 5.7 Plafon
-
-- `CEILING_UTF16 = 2_000_000`, inklusif: dokumen dengan ≤ 2.000.000 unit diwarnai. Diekspos lewat `editor_ceiling_utf16()` untuk Swift dan tes.
-- **Di atas plafon:**
-  - Highlighter tidak aktif. Saat melintasi plafon ke atas, seluruh dokumen ditandai kotor sekali tanpa token, dan hasil `analysis` membawa `inactive = true`. Swift mengembalikan semuanya ke warna dasar dalam potongan idle. Ini sama dengan hasil hari ini di atas 200 ribu (`SQLSyntax.swift:44`).
-  - Lipatan kosong.
-  - Statement **tetap** dihitung. Hari ini `statementBounds` juga tidak punya plafon (`SQLEditor.swift:673`).
-- **Kembali ke bawah plafon:** lex penuh.
-- **Fixture bench.** Fixture `type-2m` harus ≤ 2.000.000 unit UTF-16. Kalau lebih, pewarnaan mati dan angka NFR-P5 tidak berarti. W4-T2 memeriksanya sebelum mengukur.
-
-## 6. API UniFFI `EditorDocument`
-
-### 6.1 Permukaan (`crates/qh-ffi/src/editor.rs`)
-
-```rust
 #[derive(uniffi::Object)]
 pub struct EditorDocument {
-    text: Mutex<TextBuffer>,                       // main: replace, baris, log
-    highlight: Mutex<Highlighter>,                 // hanya thread latar
-    outline: Mutex<Option<(u64, Arc<Outline>)>>,   // cache statement+lipatan per revisi
+    text: Mutex<TextBuffer>,       // main: replace, mark_*, len; latar: snapshot + kuras log. Kunci daun.
+    analysis: Mutex<Analyzer>,     // hanya thread latar
+    latest: AtomicU64,             // revisi terbaru, dibaca callback progres parse (§4.4)
 }
 
 #[uniffi::export]
 impl EditorDocument {
     #[uniffi::constructor]
-    pub fn new(text: String) -> Result<Arc<Self>, EditorError>;
+    pub fn new(text: String, dialect: EditorDialect) -> Result<Arc<Self>, EditorError>;
     pub fn revision(&self) -> Result<u64, EditorError>;
     pub fn len_utf16(&self) -> Result<u32, EditorError>;
-    /// Main thread. O(edit) + geser indeks. Tidak pernah melex.
+    /// Main thread. O(edit) + geser indeks. Tidak pernah memparse.
     pub fn replace(&self, start_utf16: u32, len_utf16: u32, text: String) -> Result<u64, EditorError>;
-    /// Thread latar. Rekaman §6.2 untuk dirty ∩ [window_start, window_start+window_len),
-    /// dibatasi budget_utf16 (lunak: satu token yang lebih panjang tetap dikirim utuh).
-    pub fn analysis(&self, revision: u64, window_start: u32, window_len: u32,
-                    budget_utf16: u32) -> Result<EditorAnalysis, EditorError>;
-    /// Main thread. `ranges` = pasangan datar (start, len) dari hasil `analysis` yang sudah diterapkan.
+    /// Thread latar. Resinkronisasi statement, reparse, dan selisih untuk dirty ∩ jendela, dibatasi anggaran.
+    pub fn paint(&self, revision: u64, window_start: u32, window_len: u32,
+                 budget_utf16: u32) -> Result<EditorPaint, EditorError>;
+    /// Main thread. `ranges` = pasangan (start, len) dari `EditorPaint.ranges` yang sudah diterapkan.
     pub fn mark_applied(&self, revision: u64, ranges: Vec<u32>) -> Result<(), EditorError>;
-    /// Main thread. Untuk ganti font kode (seluruh dokumen) dan pemulihan.
+    /// Main thread. Ganti font kode dan pemulihan.
     pub fn mark_dirty(&self, start_utf16: u32, len_utf16: u32) -> Result<(), EditorError>;
-    pub fn statements(&self, revision: u64) -> Result<EditorStatements, EditorError>;
-    pub fn folds(&self, revision: u64) -> Result<EditorFolds, EditorError>;
-    pub fn line_count(&self) -> Result<u32, EditorError>;
-    // line_of dan line_starts diekspor HANYA bila asumsi 4A no. 5 gagal (§2). Bila tidak,
-    // tidak ada pemanggil di Swift, dan keduanya tetap internal (koreksi AR, YAGNI).
-    pub fn line_of(&self, offset_utf16: u32) -> Result<u32, EditorError>;
-    pub fn line_starts(&self, first_line: u32, max_count: u32) -> Result<Vec<u32>, EditorError>;
+    /// Thread latar, sesudah debounce. Statement, lipatan, dan masalah.
+    pub fn outline(&self, revision: u64) -> Result<EditorOutline, EditorError>;
+    pub fn line_count(&self) -> Result<u32, EditorError>;   // deteksi drift
 }
-
-#[uniffi::export] pub fn editor_keywords() -> Result<Vec<String>, EditorError>;
 #[uniffi::export] pub fn editor_ceiling_utf16() -> Result<u32, EditorError>;
-/// Tanpa state: rentang statement §4.1 untuk teks apa pun. Dipakai wrapper
-/// `SQLFolding.statementRanges(in:)` sekarang, dan `sqlStatements(in:)` pada tindak lanjut §15.1.
-#[uniffi::export] pub fn sql_statement_ranges(sql: String) -> Result<Vec<u32>, EditorError>;
-```
+/// Tanpa state: rentang statement §4.2 untuk teks apa pun (W4-T2b). `dialect` diabaikan sampai
+/// W3-T0 memberi `walk` mode MySQL; sesudah itu wajib sama dengan dialek yang dipakai engine (D-20).
+#[uniffi::export] pub fn sql_statement_ranges(sql: String, dialect: EditorDialect) -> Result<Vec<u32>, EditorError>;
 
-**Semantik yang mengikat:**
-
-- **Revisi.** `revision` bermula 1 dan naik satu per `replace`. `mark_*` tidak mengubahnya.
-- **`Stale`.** `analysis`, `statements`, dan `folds` mengembalikan `Stale` bila argumen `revision` < revisi teks saat panggilan masuk. Hasilnya selalu membawa revisi tempat ia dihitung. Revisi itu bisa lebih baru dari argumen bila edit masuk di antaranya; Swift yang memutuskan (§7.4).
-- **`analysis` menguras log sebelum melex.** Ia:
-  1. mengunci `highlight`, lalu `text` sebentar untuk snapshot `Arc` dan pengurasan log;
-  2. melepas kunci `text` dan melex ulang sampai ujung jendela resolved (§5.5);
-  3. menyusun `EditorAnalysis`, lalu melepas kunci.
-- **Bukan perintah engine.** `EditorDocument` adalah objek UniFFI, bukan `EngineCommand`. Invariant #11 (empat daftar) **tidak** tersentuh. Invariant #1 berlaku: `app/Generated/` diregenerasi dan di-commit bersama perubahan Rust-nya.
-- **Urutan kunci (koreksi AR).** `text` adalah kunci daun: selama memegangnya, tidak ada kunci lain yang diambil. Urutan yang sah hanya `highlight → text` dan `outline → text`. Main hanya mengambil `text`.
-
-### 6.2 Rekaman `analysis` (koreksi AR, D-14)
-
-Draf awal memakai paket byte little-endian (magic `QHEA`, versi, flags, padding) yang di-parse tangan di Swift. AR menggantinya dengan rekaman UniFFI. Isi dan invariannya tetap; hanya encoding-nya yang berubah.
-
-```rust
-#[derive(uniffi::Record)] pub struct EditorAnalysis {
-    pub revision: u64,          // revisi tempat hasil dihitung
-    pub doc_len_utf16: u32,     // panjang dokumen pada revisi itu
-    pub window_start: u32,      // gema argumen setelah di-clamp
-    pub window_len: u32,
-    pub inactive: bool,         // di atas plafon: tanpa token, rentang dicat warna dasar
-    pub more_in_window: bool,   // masih ada rentang kotor di jendela, di luar anggaran
-    pub dirty_elsewhere: bool,  // ada rentang kotor di luar jendela
-    pub ranges: Vec<u32>,       // pasangan datar (start, len), len ≥ 1
-    pub tokens: Vec<u32>,       // tripel datar (start, len, class), len ≥ 1
+#[derive(uniffi::Record)] pub struct EditorPaint {
+    pub revision: u64, pub doc_len_utf16: u32, pub window_start: u32, pub window_len: u32,
+    pub inactive: bool,          // di atas plafon: tanpa runs, rentang dikembalikan ke dasar
+    pub more_in_window: bool, pub dirty_elsewhere: bool,
+    pub ranges: Vec<u32>,        // pasangan (start, len), terurut, tidak beririsan
+    pub runs: Vec<u32>,          // tripel (start, len, class 1…9), masing-masing utuh di dalam satu rentang
+    pub fonts: Vec<u32>,         // tripel (start, len, italic 0|1), di dalam rentang
 }
-```
-
-**Invarian yang dijamin Rust dan dikunci L3:**
-
-- `ranges`: terurut naik, tidak beririsan, di dalam [0, `doc_len_utf16`]. Inilah rentang yang dicat ulang Swift, lalu digemakan ke `mark_applied`.
-- `tokens`: terurut menurut `start`, tidak beririsan, dan **setiap token berada utuh di dalam tepat satu rentang**.
-- Panjang `ranges` genap dan panjang `tokens` kelipatan tiga.
-
-**Kelas.** `1` Comment, `2` String, `3` QuotedIdentifier, `4` Number, `5` Keyword, `6` Literal, `7` Function, `8` Punctuation. Kodenya didefinisikan sekali di `Class` (`#[repr(u8)]`, `editor/mod.rs`). Swift memetakannya di satu `switch` dengan cabang `default` yang memicu fault. Ini enum tertutup di dua sisi batas (invariant #3), dan dicatat di ADR-0033. `Word` tidak pernah dikirim.
-
-**Contoh yang dikunci tes W3-T2.** `EditorDocument::new("select 1")`, lalu `analysis(1, 0, 8, u32::MAX)`, menghasilkan `revision = 1`, `doc_len_utf16 = 8`, `window = (0, 8)`, ketiga flag `false`, `ranges = [0, 8]`, dan `tokens = [0, 6, 5, 7, 1, 4]`.
-
-**Pemeriksaan di Swift** (`EditorAnalysisResult.validate`, fungsi murni, dijalankan di antrean latar):
-
-- panjang larik, keterurutan, batas terhadap `doc_len_utf16`, token di dalam rentang, dan kelas 1–8;
-- hasil yang tidak sah dibuang dengan `os_log(.fault)`, lalu dokumen dibuat ulang (§7.6). Tidak ada fallback diam. Pemeriksaan ini tetap perlu, karena `addAttributes` di luar batas melempar `NSRangeException`.
-
-**Biaya dan jalan mundur.** Lifting `[UInt32]` terjadi di antrean latar. W4-T2 mengukurnya di bench FFI in-process (`b810592`) untuk jendela 131.072 unit. Bila p99 lifting > 2 ms, `tokens` dan `ranges` boleh diganti satu `Vec<u8>` berisi `u32` little-endian datar, tanpa magic, versi, atau padding, dan tanpa gate AR baru. Field lain tetap di rekaman.
-
-### 6.3 Rekaman
-
-```rust
-#[derive(uniffi::Record)] pub struct EditorStatements {
+#[derive(uniffi::Record)] pub struct EditorOutline {
     pub revision: u64,
-    pub ranges: Vec<u32>,                  // pasangan datar (start, end) UTF-16, §4.1
-    pub unclosed: Option<EditorUnclosed>,  // state akhir scan.rs; titik kait FR-ED-06 (§8.2)
+    pub statements: Vec<u32>,    // pasangan (start, end), aturan statements_with_lines
+    pub folds: Vec<EditorFold>,
+    pub issues: Vec<EditorIssue>,
 }
-#[derive(uniffi::Record)] pub struct EditorUnclosed { pub kind: EditorOpaqueKind, pub at_utf16: u32 }
-#[derive(uniffi::Enum)]   pub enum EditorOpaqueKind { SingleQuote, DoubleQuote, Backtick, BlockComment, DollarQuote }
-#[derive(uniffi::Record)] pub struct EditorFolds { pub revision: u64, pub folds: Vec<EditorFold> }
-#[derive(uniffi::Record)] pub struct EditorFold {
-    pub kind: EditorFoldKind, pub header_line: u32, pub last_line: u32,
-    pub header: u32, pub body_start: u32, pub body_end: u32, pub summary: String,
-}
-#[derive(uniffi::Enum)]   pub enum EditorFoldKind { Statement, Cte }
+#[derive(uniffi::Record)] pub struct EditorFold { pub kind: EditorFoldKind, pub header_line: u32, pub last_line: u32,
+    pub header: u32, pub body_start: u32, pub body_end: u32, pub summary: String }
+#[derive(uniffi::Enum)] pub enum EditorFoldKind { Statement, Cte, Subquery, Body }
+#[derive(uniffi::Record)] pub struct EditorIssue { pub kind: EditorIssueKind, pub start: u32, pub len: u32 }
+#[derive(uniffi::Enum)] pub enum EditorIssueKind { UnclosedQuote, UnclosedIdentifier, UnclosedComment,
+    UnclosedDollar, UnbalancedParen, SyntaxError, MissingToken }
 ```
 
-`statements` dan `folds` dihitung dalam **satu** lintasan (lipatan butuh statement), dari snapshot teks tanpa kunci lexer. Hasilnya di-cache per revisi di `outline`.
+**Semantik yang mengikat** (sisanya sama dengan blueprint lama §6.1–§6.4):
 
-### 6.4 Galat, dan aturan untuk gate SEC
-
-```rust
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum EditorError {
-    #[error("revision {asked} is not current ({current})")]              Stale { asked: u64, current: u64 },
-    #[error("{start}+{len} is outside a document of {doc_len} UTF-16 units")] OutOfBounds { start: u32, len: u32, doc_len: u32 },
-    #[error("offset {offset} splits a character")]                        SplitsCharacter { offset: u32 },
-    #[error("a document of {len_utf16} UTF-16 units cannot be addressed")] TooLarge { len_utf16: u64 },
-    #[error("{reason}")]                                                  Malformed { reason: String },
-}
-```
-
-- **Semua ekspor mengembalikan `Result`**, termasuk getter dan fungsi bebas, sehingga pemanggil Swift wajib `try`.
-- Tidak ada `unwrap`/`expect` pada jalur yang bergantung pada input. Mutex yang poisoned dipetakan ke `Malformed`.
-- `TooLarge` hanya untuk panjang > `u32::MAX - 1`.
-- `mark_applied` dengan jumlah elemen ganjil atau rentang di luar batas: `Malformed` atau `OutOfBounds`.
-- Panic tetap ditangkap UniFFI (`panic = "unwind"`, `performance-plan.md` temuan 12). Di Swift ia diperlakukan sama dengan `Malformed`.
-- Tidak ada buffer mentah yang menyeberang. Swift hanya mengirim `String` dan `Vec<u32>` ke Rust, dan hanya menerima rekaman UniFFI (D-14).
+- `revision` mulai 1 dan naik satu per `replace`. `Stale` bila argumen revisi lebih kecil dari revisi saat panggilan masuk. Hasil selalu membawa revisi tempat ia dihitung.
+- Urutan kunci: `analysis → text` saja. `text` adalah kunci daun. Main hanya mengambil `text`.
+- **Invarian hasil** (dikunci tes Rust dan divalidasi Swift di latar): larik genap atau kelipatan tiga; terurut; di dalam `[0, doc_len_utf16]`; setiap run dan font utuh di dalam satu rentang; kelas 1…9.
+- Galat: `EditorError { Stale, OutOfBounds, SplitsCharacter, TooLarge, Malformed }`. Semua ekspor mengembalikan `Result`. Tidak ada `unwrap` pada jalur input, dan mutex poisoned menjadi `Malformed`.
+- **Contoh yang dikunci tes W3-T2.** `new("select :a -- c", Generic)`, lalu `paint(1, 0, 14, u32::MAX)` → `revision = 1`, `doc_len_utf16 = 14`, ketiga flag `false`, `ranges = [0, 14]`, `runs = [0,6,5, 7,2,9, 10,4,1]`, dan `fonts = [0,10,0, 10,4,1]`. Pada dokumen baru seluruh teks dianggap rentang edit, jadi `fonts` mencakup semuanya. Sesudah `mark_applied(1, [0, 14])` dan `replace(14, 0, "x")` (revisi 2, teks `select :a -- cx`), `paint(2, 0, 15, u32::MAX)` hanya mengembalikan token komentar yang memanjang: `ranges = [10, 5]`, `runs = [10, 5, 1]`, `fonts = [14, 1, 1]`.
+- `EditorDocument` bukan perintah engine, jadi invariant #11 tidak tersentuh. Invariant #1 berlaku (`app/Generated/` diregenerasi bersama Rust).
 
 ## 7. Threading dan penerapan di Swift
 
-### 7.1 Kunci
+### 7.1 Antrean
 
-| Kunci | Dipegang oleh | Lama |
+Sama dengan blueprint lama §7.1–§7.2:
+
+- `qh.editor.visible` (`.userInitiated`, serial, dikoalesi): `paint` untuk jendela ±2 layar, anggaran 131.072;
+- `qh.editor.idle` (`.utility`, serial): `paint` sisa (16.384 per giliran), `outline` sesudah debounce, dan parse ulang konvergensi.
+
+### 7.2 Alur satu ketikan
+
+```
+main   textStorage(_:didProcessEditing:) (.editedCharacters)
+         ├─ indeks ruler 4A, lalu doc.replace(start, oldLen, newText)     ≤ 0,02 ms (2M, §1.3)
+         ├─ geser band, run mark, header lipatan (O(k))
+         └─ catat rentang edit terakhir
+main   textDidChange
+         ├─ warisi warna tetangga untuk rentang edit (§7.5)                O(1)
+         └─ requestVisible()
+visible pkt = doc.paint(rev, jendela, 131_072)                              reparse 0,02–0,09 ms; sisanya [belum diukur]
+         └─ validate(pkt) → main.async { apply(pkt) }
+main   apply bila pkt.revision == revision && !hasMarkedText && docLen == storage.length
+         ├─ lm.removeTemporaryAttribute(.foregroundColor, r) untuk setiap rentang
+         ├─ lm.addTemporaryAttribute(.foregroundColor, SQLSyntax.colour(class), r) untuk setiap run
+         ├─ bila fonts tidak kosong: storage.beginEditing; addAttribute(.font, italic|tegak); endEditing
+         └─ doc.markApplied(rev, ranges); jadwalkan idle bila more_in_window || dirty_elsewhere
+idle   (debounce) doc.outline(rev) → main.async { band, run mark, lipatan, rotor, masalah }
+```
+
+Hook `didProcessEditing` mengabaikan edit yang hanya mengubah atribut. Atribut sementara tidak lewat storage, jadi tidak memicu hook itu sama sekali.
+
+### 7.3 Aturan penerapan
+
+- **Storage** hanya diubah di tiga tempat: saat dokumen dibuat (`setAttributes(base)` seluruh dokumen, seperti `paintWhole` hari ini), saat font kode atau lebar tab berganti (tulis ulang seluruh dokumen, lalu `mark_dirty(0, len)`), dan di `fonts`. Tidak pernah saat mengetik, kecuali satu rentang edit.
+- **Warna** hanya lewat `addTemporaryAttribute` dan `removeTemporaryAttribute` dengan kunci `.foregroundColor`. `setTemporaryAttributes` dilarang, karena ia mengganti semua kunci, termasuk sorotan find.
+- **Jangan menyentuh yang sudah benar (koreksi AR-TS).** Setiap `add`/`remove` meng-invalidate tampilan rentangnya, dan menggambar ulang satu baris berwarna berharga 4–5 ms (§1.6). `apply` membandingkan dulu dengan `temporaryAttribute(.foregroundColor, atCharacterIndex:longestEffectiveRange:in:)` dan melewati run yang warnanya sudah sama. Karena pewarisan tetangga (§7.5) biasanya sudah benar untuk ketikan di dalam kata, string, atau komentar, sebagian besar giliran `apply` tidak menggambar ulang apa pun. G7 menghitung invalidasi pada ketikan di tengah identifier dan mengharapkan nol.
+- **`typingAttributes`** = dasar (12,5 pt tegak), dipasang sekali saat dokumen dibuat dan saat font berganti. Spike menunjukkan editor `isRichText = false` tidak menyalin atribut tetangga, jadi font karakter baru selalu 12,5 pt tegak dan tinggi baris tidak melompat. Italic untuk karakter yang diketik di dalam komentar datang bersama `apply`. Font monospace tegak dan italic sama lebarnya, jadi tidak ada geometri yang bergeser.
+- **Warna dinamis.** Objek `NSColor(name:dynamicProvider:)` yang sama dipakai sebagai nilai atribut sementara. Pergantian appearance tidak butuh cat ulang (terverifikasi: piksel identik di gelap dan terang).
+- **Pemeriksaan teks dimatikan.** Selain yang sudah dimatikan di `SQLEditor.swift:99-105`, tambahkan `isAutomaticLinkDetectionEnabled`, `isAutomaticDataDetectionEnabled`, `isAutomaticTextCompletionEnabled` bernilai `false`, dan `inlinePredictionType = .no`. Di spike ini menghemat 1,3 ms per gambar ulang baris. Tidak ada perubahan piksel.
+
+### 7.4 Pemilik kunci atribut sementara
+
+Satu kunci, satu pemilik. Tidak ada fitur yang menghapus kunci milik fitur lain.
+
+| Kunci sementara | Pemilik | Catatan |
 |---|---|---|
-| `text` | main (`replace`, `line_*`, `mark_*`, `len_utf16`); latar (snapshot dan pengurasan log) | mikrodetik |
-| `highlight` | **hanya** antrean latar | biasanya < 1 ms. Lex ulang O(n) saat kutip membalik pasangan bisa belasan milidetik pada 2 MB, dan hanya di latar (§5.5) |
-| `outline` | antrean latar | mikrodetik (cache) |
+| `.foregroundColor` | 4B (warna sintaks) | |
+| `.backgroundColor` | find bar (`SQLEditor.swift:1237`, `:1247`, sudah ada) | Sorotan find tergambar di bawah glyph yang berwarna sintaks. Keduanya terlihat, tanpa urutan menang-kalah karena kuncinya berbeda. |
+| `.underlineStyle`, `.underlineColor` | W10-T6 (garis bawah diagnostik) | Kunci yang tidak memengaruhi layout, jadi diizinkan sebagai atribut sementara |
+| — | W10-T7 (pasangan kurung) | Digambar di `SQLTextView.drawBackground(in:)` seperti band sorotan, bukan atribut sementara, supaya tidak berebut `.backgroundColor` dengan find |
 
-**Main thread tidak pernah menyentuh `highlight`.** `mark_applied` dan `mark_dirty` hanya menulis ke log di bawah kunci `text`. Inversi prioritas (panggilan terlihat yang menunggu potongan idle) dibatasi oleh anggaran pengemasan `UTILITY` (16.384 unit). Lex ulang besar hampir selalu dibayar oleh panggilan terlihat sesudah ketikan, karena panggilan itulah yang pertama menguras log. Harga terburuknya warna yang terlambat, bukan main yang tertahan.
+G-VIS (`VisualParityTests.attributeRuns`, baris 958-1009) sudah merekam run sementara per rentang. Sesudah 4B, satu run sementara bisa membawa `NSColor` dan `NSBackgroundColor` sekaligus di dalam kecocokan find. Deskripsinya deterministik.
 
-### 7.2 Antrean (D-8)
+### 7.5 IME, undo, surrogate, pewarisan
 
-- `DispatchQueue(label: "qh.editor.visible", qos: .userInitiated)`, serial: permintaan jendela terlihat, **dikoalesi** (paling banyak satu yang antre dan satu yang berjalan; yang antre membaca revisi terbaru saat mulai).
-- `DispatchQueue(label: "qh.editor.idle", qos: .utility)`, serial: potongan idle, kelanjutan `frontier`, dan outline (statement dan lipatan) sesudah debounce 4A (150 ms bila 4A tidak menetapkan angka lain).
+- **IME**: seperti blueprint lama §7.5 (D-16 di sini). Edit dikirim selama `hasMarkedText`, `apply` dan penjadwal idle menunggu, dan akhir komposisi dideteksi dari transisi di `insertText`, `setMarkedText`, dan `unmarkText`. **[perlu verifikasi] (koreksi AR-TS)**: klaim "kuncinya berbeda" belum diuji. `markedTextAttributes` bisa memuat `.foregroundColor`, dan cara AppKit membersihkan atribut teks bertanda sesudah komposisi tidak didokumentasikan. Penahannya: rentang komposisi adalah rentang edit, jadi selalu kotor dan dicat ulang sesudah transisi. G7 menambah kasus: sesudah komposisi di-commit (dan sesudah dibatalkan), warna di rentang itu dan di kedua tetangganya sama dengan `paint` dokumen baru, dan sorotan find tetap ada.
+- **Aksesibilitas.** Warna di storage hari ini ikut ke `AXAttributedString`; warna sementara tidak. VoiceOver tidak membacakan warna secara default, jadi ini bukan kemunduran fungsional, tetapi gate AX W4-T2 memeriksanya dan mencatatnya di ADR-0033.
+- **Undo**: undo memutar edit storage lewat hook yang sama. Atribut sementara tidak ikut undo (terverifikasi), sedangkan italic storage ikut. Rentang edit selalu kotor dan selalu membawa `fonts`, jadi keduanya dicat ulang benar. Penerapan warna tidak pernah masuk tumpukan undo.
+- **Surrogate dan CRLF**: seperti blueprint lama (pelebaran di Swift, `SplitsCharacter`, indeks baris hanya LF).
+- **Pewarisan warna tetangga** (menggantikan pewarisan `typingAttributes` di blueprint lama §7.4). Di `textDidChange`, sesudah layout manager memproses edit, rentang sisipan diberi warna sementara karakter sebelumnya bila (a) warna itu `string` atau `comment`, atau (b) karakter sebelumnya bukan spasi dan teks sisipan tidak memuat spasi. Selain itu rentang dibiarkan dasar. Aturan ini mencegah kedipan saat mengetik di dalam string, komentar, atau di tengah kata, tanpa mewarnai kata baru sesudah kata kunci. Kesalahan paling lama bertahan satu giliran analisis.
 
-### 7.3 Alur satu ketikan
+### 7.6 Membuka, scroll, font
 
-```
-main   didProcessEditing(.editedCharacters, range, delta)
-         ├─ lebarkan ke batas surrogate (§7.5)
-         ├─ rev = doc.replace(start, oldLen, newText)          ≤ 0,5 ms pada 2 MB
-         ├─ geser cache statement, run mark, header lipatan (O(k), per edit)
-         └─ requestVisible()                                    → visible queue
-visible  pkt = doc.analysis(rev, jendela ±2 layar, 131_072)    biasanya < 1 ms
-         ├─ validate(pkt)                                       di latar (§6.2)
-         └─ main.async { apply(pkt) }
-main   apply: bila pkt.revision == revision && !hasMarkedText && docLen == storage.length
-         ├─ cat rentang: dasar, lalu token
-         ├─ doc.markApplied(pkt.revision, pkt.ranges)
-         └─ bila more_in_window || dirty_elsewhere → jadwalkan potongan idle
-idle   pkt = doc.analysis(rev, 0, len, 16_384)                  → main.async { apply }
-idle   (debounce) doc.statements(rev), doc.folds(rev)           → main.async { band, run mark, lipatan, rotor }
-```
+- Membuka dokumen (`makeNSView`, teks dari luar): `EditorDocument` baru. Dokumen ≤ 256 KiB: jendela terlihat dianalisis dan diterapkan sinkron sebelum frame pertama (parse statement terlihat 3–4 ms, §1.3). Lebih besar: asinkron dengan jendela lebih dulu, sehingga paling lama satu frame tanpa warna. `drainForTesting()` membuat G-VIS deterministik.
+- Scroll: `boundsDidChange` → `requestVisible()`, paling banyak sekali per frame.
+- Font kode dan lebar tab: tulis ulang storage seluruh dokumen, lalu `mark_dirty(0, len)`.
 
-- **Jendela ±2 layar.** Rentang karakter terlihat diambil dari `glyphRange(forBoundingRectWithoutAdditionalLayout:in:)` supaya tidak memaksa layout. Rentang itu lalu diperluas 2 × (jumlah baris terlihat) ke atas dan ke bawah lewat indeks baris.
-- **Satu delegate storage (koreksi AR).** `NSTextStorage` hanya punya satu delegate. Indeks baris ruler 4A dan hook 4B sama-sama membaca `didProcessEditing`, jadi keduanya dipanggil dari satu metode di `Coordinator`, dengan urutan tetap: indeks ruler, lalu `EditorAnalysis`. Deteksi drift (§7.5) membandingkan keduanya sesudah itu.
-- **Pemicu permintaan jendela terlihat:** edit; scroll (`boundsDidChange` pada clip view, paling banyak sekali per frame); resize atau ganti wrap; berakhirnya marked text; ganti font kode.
-- **Ganti font kode** memanggil `mark_dirty(0, len)`. Warna tidak perlu diapa-apakan karena `NSColor` dinamis mengikuti appearance sendiri (`SQLSyntax.swift:138-143`).
+### 7.7 Jalan mundur
 
-### 7.4 Aturan penerapan
-
-```swift
-storage.beginEditing()
-for r in pkt.ranges { storage.addAttributes(base, range: r) }   // [.foregroundColor: SQLSyntax.base, .font: upright]
-for t in pkt.tokens { storage.addAttributes(attrs[t.class], range: t.range) } // Comment: warna + italic
-storage.endEditing()
-```
-
-- **Hanya dua kunci atribut yang disentuh:** `.foregroundColor` dan `.font`. Objek warnanya tetap `static let` di `SQLSyntax` (palet tidak berubah), dan fontnya pasangan (tegak, italic) 12,5 pt dari `SQLSyntax.font(italic:)`. Font dasar 12,5 pt menimpa `textView.font` 13 pt, sama dengan hari ini (`SQLSyntax.swift:162` dan `SQLEditor.swift:44`).
-- **Hook `didProcessEditing` mengabaikan edit atribut saja.** Hanya `editedMask.contains(.editedCharacters)` yang dikirim ke Rust.
-- **Anggaran main per giliran runloop:** jendela terlihat ≤ 131.072 unit, potongan idle ≤ 16.384 unit (sekitar 2 ms `addAttributes`). Potongan berikutnya dijadwalkan sesudah yang sebelumnya diterapkan, sehingga event input tetap diproses di antaranya.
-- **Typing attributes.** Hari ini `apply` memaksa `typingAttributes = base` di setiap lintasan (`SQLSyntax.swift:100`), dan itu aman karena pewarnaannya sinkron. Dengan pewarnaan asinkron, karakter yang diketik mewarisi atribut karakter sebelumnya (perilaku bawaan AppKit), sehingga mengetik di dalam komentar atau string tidak berkedip. `base` hanya dipasang saat dokumen kosong dan saat font berganti. Selama paling lama satu frame, karakter baru bisa memakai warna tetangganya (§14).
-- **Pewarisan itu belum terbukti untuk editor ini (koreksi AR) `[perlu verifikasi]`.** `SQLEditor` memakai `isRichText = false` (`SQLEditor.swift:41`) dan `textView.font` 13 pt (`:44`). Bila `typingAttributes` tidak mengikuti karakter sebelumnya, karakter baru mendapat 13 pt sampai `apply` datang, dan tinggi baris bisa melompat selama satu frame. Itu perubahan geometri, bukan sekadar warna. `EditorAnalysisTests` wajib menguji bahwa karakter yang baru diketik, **sebelum** `apply` berjalan, ber-`.font` 12,5 pt, baik sesudah keyword, di dalam komentar, maupun di posisi 0. Bila tes gagal, jalan keluarnya: sesudah setiap edit karakter, `typingAttributes` diisi atribut `.foregroundColor` dan `.font` di `caret − 1` (atau `base` di posisi 0). Biayanya O(1) di main.
-
-### 7.5 IME, undo, surrogate, find bar
-
-- **IME (D-9).**
-  - `replace` dikirim untuk setiap edit karakter, **termasuk** selama `hasMarkedText()`. `replace` tidak melex, jadi pengiriman ini murah, dan cermin teks serta indeks baris tetap tepat selama komposisi.
-  - **Penjaga:** `apply` tidak pernah berjalan selama `hasMarkedText()`, dan permintaan jendela terlihat ditunda. `SQLTextView` meng-override `unmarkText()` dan `insertText(_:replacementRange:)` untuk memanggil `onMarkedTextEnded`, yang memicu permintaan jendela terlihat.
-  - **Deteksi akhir komposisi (koreksi AR).** `onMarkedTextEnded` dipicu oleh **transisi** `hasMarkedText()` dari `true` ke `false`, bukan oleh setiap panggilan. Ketiga override (`insertText(_:replacementRange:)`, `setMarkedText(_:selectedRange:replacementRange:)`, `unmarkText()`) mencatat nilainya sebelum `super` dan membandingkannya sesudahnya. `setMarkedText` wajib ikut, karena membatalkan komposisi (Esc) bisa berakhir lewat `setMarkedText` dengan string kosong. `insertText` biasa tanpa marked text tidak memicu apa pun di luar jalur edit yang sudah ada.
-  - **Penjadwal idle berhenti** selama marked text. Kalau tidak, hasil yang terus dibuang saat `apply` membuat penjadwal berputar. Rentang yang tidak diterapkan tetap kotor karena `mark_applied` tidak dipanggil, sehingga semuanya terkirim lagi sesudah komposisi.
-  - *Alternatif yang setia pada teks rencana* (**ditolak AR**, dipertahankan sebagai catatan): selama `hasMarkedText`, edit ditahan dan digabung menjadi satu `(start, oldLen, newLen)` dengan aturan gabung `start' = min`, `oldLen' = (akhir_sebelum − start') − (pn − po)`, `newLen' = (akhir_sebelum − start') + (nl − ol)`, lalu dikirim sekali saat komposisi selesai. Harga alternatif ini: kode penggabung, dan cermin yang tertinggal selama komposisi.
-- **Undo.** Undo memutar ulang edit storage. Edit itu masuk lewat hook yang sama sebagai `replace` biasa. Undo bisa memulihkan atribut lama bersama teksnya, dan itu tertangani karena rentang edit selalu kotor (§5.6). Penerapan atribut tidak lewat `shouldChangeText`, jadi tidak pernah masuk tumpukan undo.
-- **Surrogate.** Sebelum `replace`, Swift melebarkan rentang edit berdasarkan teks **baru**:
-  - bila unit di `start − 1` adalah high surrogate, `start −= 1`;
-  - bila unit di akhir rentang baru adalah low surrogate, akhir lama dan akhir baru masing-masing `+= 1`.
-
-  Teks di luar rentang edit tidak berubah, jadi pelebaran ini selalu mencakup karakter lama secara utuh. Bila Rust tetap menjawab `SplitsCharacter` atau `OutOfBounds`, dokumen dibuat ulang dari `storage.string` dan `os_log(.fault)` mencatatnya.
-- **Deteksi drift.** Sesudah setiap `replace`, `len_utf16()` dibandingkan dengan `storage.length` (O(1)). Bila berbeda, dokumen dibuat ulang dan kejadiannya dicatat. Di DEBUG dan di tes, `line_count()` juga dibandingkan dengan indeks ruler 4A.
-- **Find bar.** Sorotan find adalah temporary attribute `.backgroundColor` di layout manager (`SQLEditor.swift:601-621`). 4B tidak menyentuhnya, dan atribut storage tidak mengubahnya. Syaratnya TextKit 1 (asumsi 4A no. 1).
-
-### 7.6 Membuka dokumen dan teks dari luar
-
-- **`makeNSView` dan setiap set teks dari luar** (`updateNSView`, muat berkas, buka tabel) membuat **`EditorDocument` baru**. Hook `didProcessEditing` melewati edit yang sedang dibuat oleh set dari luar lewat sebuah flag. Hasil latar milik dokumen lama dibuang karena identitas objeknya berbeda. API `reset` tidak diperlukan.
-- **Pewarnaan pertama sinkron,** supaya tidak ada frame tanpa warna saat membuka dan scene `VisualParityTests` tetap deterministik. **Satu aturan untuk semua ukuran (koreksi AR):** jendela terlihat ±2 layar dianalisis dan diterapkan di main sebelum frame pertama, dengan anggaran 131.072 unit yang sama dengan jalur ketikan. Sisanya dikerjakan potongan idle. Bila layout belum ada (misalnya di `makeNSView`), jendela diambil di sekitar caret. Draf awal mewarnai penuh secara sinkron sampai 262.144 unit. Dengan anggaran §7.4 (sekitar 2 ms per 16.384 unit), itu berarti hitch sekitar 30 ms setiap kali tab dibuka atau berpindah, dan tidak ada gate yang membutuhkannya. Lapis atribut G-VIS yang direvisi hanya membandingkan rentang terlihat, sedangkan L5 menguras antrean secara eksplisit (§9).
-
-  Ini satu-satunya saat main memanggil `analysis`. Aman, karena dokumen baru belum punya kerja latar sehingga kunci `highlight` pasti bebas.
-- **Pindah tab dengan dokumen 2 MB** membayar satu lex penuh di latar. Menyimpan satu dokumen per `QueryTab` bisa menghapus biaya itu, tetapi `QueryTab.swift` bukan milik W4-T2. Ini dicatat sebagai optimasi lanjutan, bukan bagian 4B.
+- **Bila atribut sementara ternyata tidak tergambar sama di suatu jalur** (misalnya cetak; `NSLayoutManager` hanya menggambar atribut sementara saat menggambar ke layar), penerapan boleh kembali ke atribut storage dengan data `EditorPaint` yang sama. Hanya rentang yang berubah yang ditulis, sehingga biayanya mendekati baris "storage" di §1.6, bukan cat ulang penuh ala 4A. Pencetakan editor bukan fitur hari ini.
+- **Bila gate gambar §14 gagal** sesudah pengungkit murah, pemicunya adalah biaya gambar run berwarna (§1.6). Eskalasi yang tersedia adalah Fase 8 (`performance-plan.md` §12, butir kedua), CodeEditTextView upstream. Fork TablePro tetap dilarang. TextKit 2 kemungkinan besar membawa biaya storage yang sama, dan tidak dikejar. Yang diperiksa ulang AR (30 Sep 2026):
+  - lisensi: `LICENSE.md` repo CodeEditApp/CodeEditTextView memang MIT, "Copyright (c) 2023 CodeEdit". **Tetapi paketnya membawa dependensi**: `Package.swift` di `main` menarik ChimeHQ/TextStory (BSD-3-Clause, "Copyright (c) 2020, Chime"), apple/swift-collections (Apache-2.0), dan plugin build `SwiftLintPlugin`. Semuanya masuk allow-list yang lazim, tetapi NFR-L menuntut tinjauan manual per paket SwiftPM, dan ini paket SwiftPM pertama app;
+  - platform `.macOS(.v13)`, cocok dengan minimum 14.0;
+  - **belum terbukti lebih murah**: CodeEditTextView juga menggambar baris lewat CoreText dengan warna per run, jadi biaya `CGColor` dan display list per run (§1.6) bisa ikut pindah. Eskalasi hanya boleh diajukan ke pemilik sesudah spike buangan di `target/run/` mengukur gambar ulang satu baris berwarna (pola `type-coloured-195k`) di CodeEditTextView dan hasilnya < 50% angka `SQLEditor`;
+  - ongkos penulisan ulang tetap seperti `performance-plan.md` §12: find, fold, ruler, run mark, completion, auto-uppercase, dan `interceptKey`.
 
 ## 8. Titik kait
 
-### 8.1 Rotor (FR-ED-09), dipasang di W4-T2
+### 8.1 Rotor (FR-ED-09), W4-T2
 
-- **Aksesibilitas yang utuh.** Editor tetap `NSTextView` dengan teks di storage. Tidak ada penggambaran teks kustom, jadi seluruh aksesibilitas teks bawaan AppKit tetap berlaku.
-- **Hook.** `SQLTextView.rotorSources: [EditorRotorSource]`. Override `accessibilityCustomRotors()` membangun satu `NSAccessibilityCustomRotor(label:itemSearchDelegate:)` per sumber. Delegate-nya mencari rentang berikutnya atau sebelumnya dari `targetRange` item sekarang, lalu mengembalikan `ItemResult(targetElement: textView)` dengan `targetRange` dan `customLabel`.
-
-  ```swift
-  protocol EditorRotorSource: AnyObject {
-      var rotorLabel: String { get }
-      func rotorItems() -> [(range: NSRange, label: String)]
-  }
-  ```
-
-- **Klien pertama (4B): rotor "Statements".** Itemnya rentang statement dari outline terakhir, dengan label baris pertama statement yang dipangkas ke 60 karakter. Klien ini membuat hook itu bisa diuji (`EditorRotorTests`) dan diperiksa AX. Bila AX lebih suka hook tanpa klien, rotor ini bisa dilepas tanpa mengubah hook.
+Seperti blueprint lama §8.1: `EditorRotorSource`, dan klien pertama rotor "Statements" dari `EditorOutline.statements`.
 
 ### 8.2 Diagnostik (FR-ED-06, W10-T6)
 
-- `EditorStatements.unclosed` sudah membawa pembuka yang tidak tertutup menurut `scan.rs`, yaitu pembuka yang benar-benar diketik pengguna: `'` pertama dari string yang tak berakhir, bukan kutip yang dilewati regex. W10-T6 cukup membacanya dan menambah `QueryIssuesRotor` sebagai `EditorRotorSource` kedua.
-- Dengan begitu W10-T6 tidak perlu masuk lane FFI hanya untuk masalah leksikal. Posisi galat dari server tetap milik W10-T6.
+- W10-T6 membaca `EditorOutline.issues` berjenis leksikal (§4.8) dan posisi galat server, menggambar garis bawah dengan kunci `.underlineStyle`/`.underlineColor` (§7.4), dan menambah rotor "Query issues" sebagai `EditorRotorSource` kedua.
+- `SyntaxError` dan `MissingToken` tidak digambar. Menampilkannya, misalnya hanya untuk dialek PostgreSQL atau di balik setelan, adalah keputusan pemilik (§15) dengan angka positif palsu dari korpus §1.2 sebagai dasarnya.
+- W10-T6 juga yang menyambungkan dialek per tab ke `EditorDocument::new` (D-20).
 
-### 8.3 Referensi tabel dan alias (W11-T6)
+### 8.3 Referensi tabel dan alias (FR-ED-05, W11-T6)
 
-- `Lexer` bersifat publik di dalam crate. Ia bisa dijalankan atas potongan teks apa pun (mode Normal, `prev_word = false`) dan mengemit `Word`.
-- W11-T6 menambah `editor/refs.rs`: resolusi `FROM`/`JOIN … [AS] alias` pada **satu statement** (rentang dari §4.1) yang dihitung sesuai permintaan. Hasilnya diekspor sebagai `EditorDocument::references(revision, offset)` di `qh-ffi/src/editor.rs`.
-- Syaratnya tidak menambah kerja per ketikan. Blok token tidak menyimpan `Word`, dan itu disengaja.
+- `crates/qh-editor/src/refs.rs` (W11-T6): pada statement di bawah caret, kumpulkan `relation` (`object_reference` dengan skema dan katalog, `alias`), nama `cte`, dan alias `term`. Bila statement ber-ERROR, gunakan cadangan leksikal: pola `FROM|JOIN nama [AS] alias` di atas `qh_sql::lex`.
+- Diekspor sebagai `EditorDocument::references(revision, offset)`. Tidak menambah kerja per ketikan; dihitung saat diminta, di antrean latar.
 
-### 8.4 Formatter (P-10, W12-T1)
+### 8.4 Formatter (FR-ED-01, P-10, W12-T1)
 
-- **P-10 menyebut formatter dibangun di atas lexer 4B.** Itu hanya separuh benar. Lexer warna membawa keanehan regex (§3.5): badan `$tag$` dilex sebagai kode, `+--` bukan komentar, dan kutip tak tertutup dilewati. Formatter yang mewarisinya akan mengubah isi string dan badan fungsi.
-- **Aturan untuk W12-T1** (diterima AR):
-  - region opaque (kutip, komentar, `$tag$`) **wajib** diambil dari mesin `scan.rs`, fungsi jalan yang diekstrak di §4.1. Ini sama dengan pemisah statement engine, jadi formatter tidak bisa memecah atau mengubah isi yang engine anggap teks;
-  - formatter menolak bekerja bila `unclosed` terisi;
-  - tokenisasi di region kode **tidak** diikat di sini (koreksi AR). `Lexer` boleh dipakai ulang, tetapi keanehannya (`1abc`, lari tanda baca, `:` yang dilewati) harus dinilai terhadap verifikasi W12-T1 ("deretan token non-spasi identik", `:name`). Keputusan itu milik rancangan W12-T1 dan AR-nya.
-- **Catatan untuk PRD P-10.** Barisnya perlu berbunyi "di atas mesin `scan.rs` (region opaque) dan modul editor 4B", bukan "di atas lexer 4B". Yang mengubah PRD adalah orkestrator, bukan W4-T2.
+- Token: region opaque dari `walk` (kutip, komentar, `$tag$`) diambil byte demi byte, dan region kode dari `qh_sql::lex` (kata, angka, tanda baca, `:name`). Keduanya engine-konsisten dan tidak pernah ERROR.
+- Tata letak: kata kunci klausa dan kedalaman kurung dari aliran token yang sama. Pohon tidak dipakai di W12-T1. Bila kelak dipakai untuk kerapian, hanya di statement tanpa ERROR, dan itu keputusan rancangan W12-T1 dan AR-nya.
+- Formatter memeriksa sendiri hasilnya sebelum mengembalikannya: deretan karakter non-spasi di luar region opaque dan seluruh isi region opaque harus identik. Bila tidak, ia menolak. Ia juga menolak bila `walk` berakhir di luar state Normal (kutip terbuka).
+- Catatan untuk PRD P-10: "di atas mesin `scan.rs` (`walk`) dan lexer kode `qh-sql`", bukan "di atas lexer 4B" atau "di atas pohon".
 
-## 9. Strategi uji paritas
+### 8.5 Pasangan kurung (FR-ED-08, W10-T7)
 
-Lapis demi lapis, dari yang paling murah:
+`EditorDocument::bracket_pair(revision, offset)` (W10-T7) boleh memakai pohon statement (anak `(`/`)` dari node yang sama) dengan cadangan hitungan kurung dari `walk`. Penggambaran lewat `drawBackground` (§7.4). Karena ini menambah ekspor FFI, W10-T7 masuk rantai lane FFI (`crates/qh-ffi/src/editor.rs`, `app/Generated/`) dan memegang `crates/qh-editor/src/brackets.rs` (koreksi AR-TS).
+
+## 9. Strategi uji
+
+Paritas terhadap regex hilang bersama regex. Penggantinya:
 
 | Lapis | Di mana | Isi | Kapan |
 |---|---|---|---|
-| L0 | `LexerFixtureExport.swift` (W3-T2) | Dengan `QH_EXPORT_FIXTURES=1`, menulis `keywords.txt`, tabel Unicode (§3.4), dan `corpus/*.spans`, `*.outline`, `scripts/*.edits` ke `crates/qh-sql/tests/fixtures/editor/`. Tanpa variabel itu, tes di-skip. | W3-T2, sekali; diulang di W4-T2 commit A dan hasilnya harus identik (`git diff` kosong) |
-| L1 | `tests/editor_parity.rs` | `lex_all` == `.spans` untuk setiap berkas korpus | W3-T2 dan seterusnya |
-| L2 | `tests/editor_parity.rs` | Setiap skrip edit diputar ulang lewat `TextBuffer` + `Highlighter`. Hash FNV-1a 64 dari daftar span penuh dibandingkan per langkah. | W3-T2 dan seterusnya |
-| L3 | `tests/editor_incremental.rs` | Uji diferensial berbenih (SplitMix64): setelah setiap edit, span inkremental == `lex_all`; `dirty` ⊇ token yang berubah; invarian blok (entry sama dengan lex dari nol); indeks baris, indeks potongan, dan `last_closer` == hitung naif. | W3-T2 dan seterusnya |
-| L4 | `EditorLexerParityTests.swift` (W4-T2 A) | **Lewat FFI, melawan regex yang masih hidup.** Korpus + 500 skrip × 40 edit (`QH_PARITY_SEEDS` untuk soak) + beberapa dokumen 1 MB. Span penuh FFI == span regex di setiap langkah. | **Harus lulus sebelum commit B** |
-| L5 | `EditorLexerParityTests.swift` (W4-T2 A) | **Paritas atribut.** Dua `SQLTextView` headless (TextKit 1): satu dicat jalur lama, satu jalur baru, dengan edit yang sama. `enumerateAttributes` atas `.foregroundColor` dan `.font` dibandingkan per rentang, di appearance gelap dan terang, dengan cara yang sama seperti `VisualParityTests.attributeRuns`. | Harus lulus sebelum commit B |
-| L6 | G-VIS | Delapan scene editor × dua appearance, termasuk lapis atribut | W4-T2 A dan B |
+| G1 fixture capture emas | `crates/qh-editor/tests/golden.rs`, `tests/fixtures/corpus/*.sql` → `*.classes` | Untuk setiap berkas korpus: baris `start len class` (UTF-16) hasil `paint` penuh, ditambah `*.outline` (statement, lipatan, masalah). `QH_BLESS=1` menulis ulang; diff-nya ditinjau di review sebagai perubahan tampilan. | W3-T2, selamanya |
+| G2 diferensial inkremental | `tests/incremental.rs` | SplitMix64 berbenih, **tanpa resinkronisasi** ke pohon baru, jadi penyimpangan menumpuk (koreksi AR-TS, §1.5). Setiap edit acak: daftar statement == `scan()` seluruh teks; `dirty` ⊇ token yang berubah; indeks baris dan potongan == hitung naif; token inkremental sebelum konvergensi == `paint` dokumen baru (selisihnya dihitung dan dilaporkan; sasaran 0, dan bila tidak 0 berlaku §1.5 butir (3)). Sesudah antrean idle dikuras (termasuk konvergensi): token == `paint` dokumen baru, **wajib** sama. Seperempat edit dibias ke ±1 byte dari pemisah statement (mengetik dan menghapus `;`, kutip di batas). Default < 30 dtk di debug; `QH_EDITOR_SOAK=1` untuk soak. Alfabet dari blueprint lama §9 ditambah `$body$`, `::`, `:name`, `[`, `]`, dan `'it\'s'`. | W3-T2, selamanya |
+| G3 konvergensi | `tests/incremental.rs` | Sesudah parse ulang konvergensi, lipatan dan masalah == dokumen baru | W3-T2 |
+| G4 refaktor `scan.rs` | `crates/qh-sql/tests/scan_refactor.rs` | Seluruh `Scan`, `statement_count`, `statements_with_lines`, dan `decisions` untuk keempat `SafeMode`: lama == baru di korpus dan alfabet acak, dengan syarat lengkap di §4.2 "Batas Safe Mode" (koreksi AR-TS) | W3-T2, selamanya |
+| G5 lexer | `crates/qh-sql/tests/lex.rs` | Region opaque == `walk`; pemotongan ke celah; kata kunci cadangan | W3-T2 |
+| G6 kebocoran scanner | `crates/qh-sql-grammar/tests/scanner_leak.rs` | Hitungan alokasi hidup kembali ke awal (§3) | W3-T2, selamanya |
+| G7 FFI dan penerapan | `app/Tests/QueryHiveTests/EditorAnalysisTests.swift` | Validasi hasil (setiap aturan tolak), revisi basi dibuang, penjaga IME (termasuk `setMarkedText` kosong), undo dan redo, surrogate, CRLF, drift, `drainForTesting`, pewarisan tetangga, `setTemporaryAttributes` tidak pernah dipanggil (sorotan find tetap ada sesudah `apply`), dan font 12,5 pt pada karakter baru | W4-T2 A |
+| G8 palet | `SyntaxPaletteTests.swift` (baru) | Kontras §5.2 ≥ 4,5 untuk semua token di ketujuh kanvas, kecuali `comment` gelap (keputusan orkestrator, §5.2) | W4-T2 B |
+| G9 visual | G-VIS | 16 baseline editor direkam ulang sebagai V-12; lapis atribut memuat run sementara | W4-T2 B |
+| G10 angka | `--bench type-10k`, `type-2m` (dipangkas ≤ 2.000.000), `type-coloured-195k` | NFR-P5 untuk interval `keystroke` **dan** interval `apply` yang baru; gate gambar §14 | W4-T2 B |
 
-**Oracle L4 dan L5 (koreksi AR).**
-
-- "Regex yang masih hidup" dan "jalur lama" berarti `SQLSyntax.attributes(for:)` atas **seluruh dokumen** sesudah setiap edit, dicat di atas `base` untuk seluruh storage. Itu semantik commit P, tempat baseline direkam. Yang **bukan** oracle adalah painter inkremental 4A: 4A mengecat ulang per statement yang diedit, sehingga hasilnya bisa bergantung pada riwayat edit (kutip yang berpasangan melintasi statement tidak dicat ulang di statement lain). Bila keduanya berbeda, yang salah adalah 4A, dan temuan itu dilaporkan, bukan ditiru.
-- L5 membandingkan **seluruh dokumen**, sesudah antrean dikuras secara deterministik lewat kait tes (`EditorAnalysis.drainForTesting()`: jalankan analisis dan `apply` sampai `more_in_window` dan `dirty_elsewhere` sama-sama `false`). Tidak ada `sleep`.
-- Lapis atribut G-VIS sedang direvisi agar hanya membandingkan run di rentang terlihat dikurangi badan yang dilipat. L5 **tidak** mewarisi pembatasan itu. L5 adalah bukti paritas atas seluruh dokumen, sedangkan G-VIS adalah bukti piksel dan tata letak.
-| L7 | sesudah B | L1–L3 tetap di Rust. Di Swift, L4 berubah menjadi smoke FFI atas korpus melawan `.spans` yang dibekukan. | selamanya |
-
-**Format fixture.** Teks biasa, tanpa serde:
-
-- `.spans`: baris `start len class`, dalam UTF-16.
-- `.outline`: baris `S start end`, `F kind headerLine lastLine header bodyStart bodyEnd summary`, dan `U kind at`.
-- `.edits`: baris pertama `T <teks awal>`, lalu per langkah `E start len <teks>` dan `H <fnv64 hex>`.
-- Teks di-escape per byte UTF-8 sebagai `%XX` untuk semua yang bukan ASCII cetak.
-- Hash FNV-1a 64 dihitung atas baris `start,len,class\n`. Implementasinya sepuluh baris di tiap bahasa.
-
-**Korpus nyata:**
-
-- `deploy/dev/seed-postgres.sql`, `seed-mysql.sql`, dan `qh-mysql-old-seed-prefixed.sql` (sekitar 10 KB);
-- SQL kasus di `tools/golden/live_cases.py`;
-- SQL scene di `Support/Snapshot.swift` dan dokumen di `VisualParityTests`;
-- string SQL dari tes editor yang ada.
-
-**Korpus buatan tangan** (satu berkas per tema): `edge-eof`, `edge-punct`, `edge-numbers`, `edge-unicode`, `edge-crlf`, `edge-dollar`, `edge-functions`, `edge-surrogate`. Isinya semua baris di tabel §3.3–§3.5. Tidak ada SQL yang disalin dari TablePro.
-
-**Alfabet generator acak.** Keyword dengan huruf acak, identifier, `_`, `$`, digit, `.`, `'`, `''`, `"`, `""`, backtick, `--`, `/*`, `*/`, `( ) ; ,`, operator, spasi, tab, `\n`, `\r\n`, `\r`, `é`, `ß`, `中`, 😀, U+0301, U+200D, U+200C, U+FEFF, `٣`, `²`, `Ⅻ`, U+00A0, U+2028, U+0085, `＿`, `‿`, `$1`, `:name`, dan `::`.
-
-**Edit acak.** Sisip, hapus, dan ganti di posisi acak yang tidak membelah surrogate. Sesekali tempel 1–4 KB dan hapus lintas baris. Operasi terarah menyisipkan atau menghapus satu `'`, `"`, backtick, `/*`, atau `*/`.
-
-**Anggaran waktu tes.** Default L3 selesai < 30 detik di `cargo test` debug. `QH_EDITOR_SOAK=1` memperbesar jumlah dan ukuran. Daftar pengecualian statement dan lipatan (tabel §4.1) ditulis di `fixtures/editor/DIVERGENT.md`, lengkap dengan keluaran Rust yang diharapkan, supaya perbedaan yang disengaja tidak terbaca sebagai regresi.
+**Korpus** (tanpa SQL dari TablePro): seed `deploy/dev/*.sql`; SQL dari `tools/golden/live_cases.py`; scene `Support/Snapshot.swift`; `probes.sql` §1.2 (dipindah dari scratch ke `tests/fixtures/corpus/dialect-*.sql`); dan tema tulisan tangan `edge-unclosed`, `edge-params`, `edge-dollar`, `edge-crlf`, `edge-surrogate`, `edge-unicode`, `edge-giant` (statement 300 KiB).
 
 ## 10. Yang dihapus, dan kapan
 
 | Kapan | Yang dihapus | Di mana |
 |---|---|---|
-| W3-T2 | tidak ada | — |
-| W4-T2 commit A | tidak ada; hanya tambahan | — |
-| W4-T2 commit B | regex, `ceiling`, `attributes(for:baseFont:commentFont:)`, `apply(to:)`, `isCalled`, `isLiteral`, dan literal daftar keyword (`keywords` menjadi `Set(try editorKeywords())`). Palet dan `font(italic:)` tetap. | `Views/SQLSyntax.swift` |
-| W4-T2 commit B | `foldingSizeLimit`, isi `regions`, isi `statementRanges`, `cteRegions`, `cteOpenParens`, `matchingParen`, dan semua helper lexing (`:262-388`). Yang tetap: `FoldRegion`, `lineStarts`, `line(containing:)`, dan `shift` bila 4A masih memakainya. `regions(in:)` dan `statementRanges(in:)` menjadi pembungkus tipis atas FFI, karena `VisualParityTests` dan tes lipatan memanggilnya. | `Support/SQLFolding.swift` |
-| W4-T2 commit B | jalur `colour()` atas seluruh dokumen, perhitungan `statementBounds` di Swift, dan sisa `SQLFoldStyler` bila 4A belum menghapusnya | `Views/SQLEditor.swift` |
-| W4-T2 commit B | eksportir fixture span dan outline (oracle-nya sudah hilang, dan fixture dibekukan), serta separuh L4 yang melawan regex. **Eksportir tabel Unicode tetap** (§3.4, koreksi AR). | `LexerFixtureExport.swift`, `EditorLexerParityTests.swift` |
-| W4-T2b, sesudah W4-T1 dan sebelum W4 ditutup (§15.1) | isi `sqlStatements(in:)` diganti pembungkus `sqlStatementRanges` | `Models/QueryTab.swift:1056-1098` |
-| **tidak pernah** | lexer `:name` dan opaque (dipakai `QueryParameters.swift:51,136` dan `KeywordCase.swift:39`) | `Models/SQLScanner.swift`, `Models/QueryParameters.swift` |
+| W3-T2, W4-T2 A | tidak ada | — |
+| W4-T2 B | `pattern`, `ceiling`, `attributes(for:baseFont:commentFont:)`, `apply(to:lexing:painting:)`, `storage(_:matches:in:)`, `isCalled`, `isLiteral`. Tetap ada: palet, `font(italic:)`, `keywords` (dipakai uppercase otomatis, `SQLEditor.swift:581`), ditambah `colour(for:)`. | `Views/SQLSyntax.swift` |
+| W4-T2 B | `dirty`, `paintLimit`, `editedStatement`, `addDirty`, `paintDirty`, `widenedForQuotes`, `compute`, jalur `analyse` ke `SQLFolding` | `Views/SQLEditor.swift` |
+| W4-T2 B | isi `regions`, `statementRanges`, `cteRegions`, `cteOpenParens`, `matchingParen`, helper lexing, `foldingSizeLimit`. `regions(in:)` dan `statementRanges(in:)` menjadi pembungkus FFI. | `Support/SQLFolding.swift` |
+| W4-T2b | isi `sqlStatements(in:)` → pembungkus `sql_statement_ranges` | `Models/QueryTab.swift:1061` |
+| tidak pernah | `SQLScanner` (`:name` dan opaque untuk parameter dan `KeywordCase`) | `Models/SQLScanner.swift` |
 
-Perkiraan: Swift berkurang sekitar 450 baris, dan bertambah sekitar 350 (`EditorAnalysis.swift`). Rust bertambah sekitar 1.800–2.200 baris termasuk tes, ditambah tabel yang dihasilkan.
+Yang tidak pernah dibuat, dibanding blueprint lama: `unicode_tables.rs`, `UnicodeTableExport.swift`, `LexerFixtureExport.swift`, `EditorLexerParityTests.swift`, dan `editor/lex.rs` versi port regex.
 
-## 11. W3-T2: berkas per berkas (inti Rust dan fixture)
+## 11. W3-T2: berkas per berkas
 
-Pelaksana GP-o. Gate RR, TD, CR, ditambah SEC khusus untuk diff `scan.rs` (koreksi AR). Verifikasi G-RUST, lalu G-SWIFT (eksportir di-skip secara default). W3-T2 juga mencatat waktu `lex_all` atas 2 MB (keputusan `frontier`, §5.5).
+Pelaksana GP-o (opus). Ukuran **L** (sebelumnya M). Gate: RR, TD, CR, **SEC** (diff `scan.rs` dan seluruh `qh-sql-grammar`: C yang di-vendor, patch scanner, dan `unsafe`). Verifikasi: G-RUST, **G-DENY**, dan G-SWIFT (tidak ada berkas Swift yang berubah, jadi hanya bukti tidak mundur).
 
-| Berkas | Tujuan | Antarmuka kunci | Bergantung pada |
-|---|---|---|---|
-| `crates/qh-sql/src/editor/mod.rs` (baru) | Doc modul, re-ekspor, konstanta | `KEYWORDS: &[&str]` (131, terurut), `CEILING_UTF16`, `keywords()`, `Class`, `Token` | — |
-| `crates/qh-sql/src/editor/lex.rs` (baru) | Lexer paritas regex (§3, §5.3) | `Lexer::new`, `next_token`, `lex_all` | `unicode_tables.rs` |
-| `crates/qh-sql/src/editor/unicode_tables.rs` (baru, dihasilkan) | Lima tabel rentang (§3.4) | `ICU_WORD`, `ICU_DIGIT`, `ICU_TRANSPARENT`, `FND_LETTER`, `FND_ALNUM`, `fn contains(table, c)` | — |
-| `crates/qh-sql/src/editor/text.rs` (baru) | Cermin teks, indeks baris, indeks potongan, `last_closer`, log (§5.1) | `TextBuffer::{new, replace, snapshot, drain_log, line_count, line_of, line_starts}`, `Edit`, `LogEntry`, `Snapshot` | — |
-| `crates/qh-sql/src/editor/highlight.rs` (baru) | Blok, lex ulang, konvergensi, `dirty`, hasil `analysis` (§5.2–§5.7, §6.2) | `Highlighter::{new, sync(&Snapshot, Vec<LogEntry>), analysis(window, budget) -> Analysis}` (struct murni; `qh-ffi` memetakannya ke `EditorAnalysis`) | `lex.rs`, `text.rs` |
-| `crates/qh-sql/src/editor/outline.rs` (baru) | Statement, `unclosed`, lipatan (§4) | `outline(&Snapshot) -> Outline { statements, unclosed, folds }`, `statement_ranges(&str)` | `scan.rs`, `unicode_tables.rs` |
-| `crates/qh-sql/src/scan.rs` | Ekstrak loop menjadi fungsi jalan internal. Keluaran `scan()` identik. | `pub(crate) fn walk(bytes, on_separator, on_word) -> EndState` | — |
-| `crates/qh-sql/src/lib.rs` | `pub mod editor;`, dan doc crate menyebut modul ini | — | — |
-| `crates/qh-sql/tests/editor_parity.rs` (baru) | L1, L2 | — | fixture |
-| `crates/qh-sql/tests/editor_incremental.rs` (baru) | L3, termasuk contoh `select 1` (§6.2) | SplitMix64 lokal | — |
-| `crates/qh-sql/tests/editor_outline.rs` (baru) | Statement dan lipatan terhadap `.outline` plus `DIVERGENT.md`; baris | — | fixture |
-| `crates/qh-sql/tests/editor_unicode.rs` (baru) | Tabel terurut dan tidak beririsan; `is_whitespace` == `whitespacesAndNewlines` yang diekspor | — | fixture |
-| `crates/qh-sql/tests/fixtures/editor/**` (baru) | Keluaran eksportir dan korpus buatan tangan, total ≤ 5 MB | — | — |
-| `app/Tests/QueryHiveTests/UnicodeTableExport.swift` (baru) | Ekspor `unicode_tables.rs` beserta kepala asal-usul (§3.4). Tetap hidup sesudah commit B. | skip bila `QH_EXPORT_UNICODE` ≠ `1` | `NSRegularExpression`, `CharacterSet` |
-| `crates/qh-sql/tests/scan_refactor.rs` (baru) | Diferensial `scan()` lama vs baru (§4.1, koreksi AR) | salinan fungsi lama, hanya di tes | korpus §9 |
-| `app/Tests/QueryHiveTests/LexerFixtureExport.swift` (baru) | L0. Memetakan atribut ke kelas lewat identitas objek warna `SQLSyntax.*` (`@testable`). Untuk teks > 200 ribu memakai salinan pola yang **diverifikasi** sama dengan `SQLSyntax.attributes(for:)` pada semua input ≤ 200 ribu. | skip bila `QH_EXPORT_FIXTURES` ≠ `1` | `SQLSyntax`, `SQLFolding` (dibaca, tidak diubah) |
+**Dua commit di dalam W3-T2 (koreksi AR-TS)**, supaya tinjauan SEC atas batas Safe Mode tidak tenggelam di diff ukuran L: commit 1 `qh-sql` (`walk`, `lex`, G4, G5) dan `qh-sql-grammar` (G6), dengan SEC; commit 2 `qh-editor` dan sisanya. Commit 1 dimulai sesudah W3-T0 mendarat (§15). `crates/qh-sql-grammar` boleh dikerjakan lebih dulu.
 
-Tidak ada perubahan pada `Cargo.toml` dan `Cargo.lock`.
+| Berkas | Tujuan | Antarmuka kunci |
+|---|---|---|
+| `Cargo.toml` | anggota `crates/qh-sql-grammar`, `crates/qh-editor`; `tree-sitter = "=0.26.13"`, `tree-sitter-language = "=0.1.7"`, `cc = "1.4"` di `[workspace.dependencies]`; `[profile.dev.package.*]` untuk grammar dan runtime (§3) | — |
+| `Cargo.lock` | crate baru | — |
+| `crates/qh-sql-grammar/**` (baru) | §3 | `LANGUAGE: LanguageFn` |
+| `crates/qh-sql/src/scan.rs` | `walk` + `Visitor` + `EndState`; `scan()` identik | `pub fn walk`, `pub trait Visitor`, `pub enum OpaqueKind` |
+| `crates/qh-sql/src/lex.rs` (baru) | lexer kode di atas `walk` (§4.5); kata tanpa kelas (D-21) | `pub fn lex(bytes, range, &mut impl FnMut(Token))`, `Token { start, end, kind }` |
+| `crates/qh-sql/src/lib.rs` | ekspor `walk`, `lex`, `first_significant` | — |
+| `crates/qh-sql/tests/{scan_refactor.rs,lex.rs}` (baru) | G4, G5 | — |
+| `crates/qh-editor/Cargo.toml` (baru) | `qh-sql`, `qh-sql-grammar`, `tree-sitter`, `thiserror`; `forbid(unsafe_code)` | — |
+| `crates/qh-editor/src/lib.rs` | doc crate, ekspor, konstanta (`CEILING_UTF16`, `GIANT_STATEMENT_BYTES`, `TREE_CACHE_BYTES`), `Class`, `Dialect` | — |
+| `crates/qh-editor/src/text.rs` | `TextBuffer` (§4.1) | `new`, `replace`, `snapshot`, `drain_log`, `line_count`, `line_of` |
+| `crates/qh-editor/src/statements.rs` | daftar statement dan resinkronisasi (§4.2) | `Statements::{new, apply_edit, ranges_for_ui}` |
+| `crates/qh-editor/src/view.rs` | view `:name` (§4.3) | `parse_bytes(&str) -> Cow<[u8]>`, `widen(edit)` |
+| `crates/qh-editor/src/syntax.rs` | parser, pohon per statement, cache LRU, konvergensi (§4.4) | `Syntax::{ensure, edit, evict, converge}` |
+| `crates/qh-editor/src/classify.rs` | tabel §5.1, jalan pohon, celah ERROR (§4.5), lapis Parameter (§4.3) | `classify(stmt, tree, dialect) -> Vec<Tok>` |
+| `crates/qh-editor/src/keywords.rs` | himpunan kata kunci grammar ∪ `EXTRA_KEYWORDS` (D-21) | `is_keyword(&[u8]) -> bool` |
+| `crates/qh-editor/src/paint.rs` | himpunan kotor, selisih, `Paint` (§4.6) | `Analyzer::{sync, paint, outline}` (struct murni; `qh-ffi` memetakannya ke rekaman) |
+| `crates/qh-editor/src/folds.rs` | §4.7 | — |
+| `crates/qh-editor/src/issues.rs` | §4.8 | — |
+| `crates/qh-editor/tests/{golden.rs,incremental.rs,statements.rs,folds.rs}` (baru) | G1–G3 | — |
+| `crates/qh-editor/tests/fixtures/**` (baru) | korpus dan hasil emas, total ≤ 5 MB | — |
+| `crates/qh-editor/benches/` atau `examples/editor_bench.rs` (baru) | mengulang tabel §1.3 dan §1.4 terhadap implementasi sungguhan; angka masuk laporan | — |
 
-## 12. W4-T2: berkas per berkas (FFI dan integrasi Swift)
+W3-T2 juga mencatat: parse penuh, parse jendela, dan ketikan p50/p99 pada keempat korpus; memori dengan cache terbatas; waktu build dingin `qh-sql-grammar`; dan, dari koreksi AR-TS, `replace` p99 dengan snapshot hidup (§4.1), `paint` p99 untuk ketikan di `dump-2m` (§4.4), memori analisis di luar pohon (§4.4), serta `scan()` sebelum dan sesudah refaktor (§4.2).
 
-Pelaksana GP-s. Gate SR, RR, SEC, AX, AR, CR. Verifikasi:
+## 12. W4-T2 dan W4-T2b: berkas per berkas
 
-- G-RUST, G-FFI, G-SWIFT, L4, L5, G-VIS;
-- `--bench type-10k` ≤ 4 ms dan `type-2m` ≤ 8 ms, p99 di main;
-- bench tambahan `type-2m` dengan auto-uppercase menyala, dicatat saja (§14).
+Pelaksana GP-s. Gate SR, RR, SEC (FFI, validasi hasil), AX (rotor), UX (V-12, §5), AR, CR.
 
-| Berkas | Commit | Tujuan | Antarmuka kunci |
-|---|---|---|---|
-| `crates/qh-ffi/src/editor.rs` (baru) | A | Objek UniFFI, galat, rekaman, fungsi bebas (§6) | §6.1–§6.4 |
-| `crates/qh-ffi/src/lib.rs` | A | satu baris `pub mod editor;` (scaffolding sudah ada di `:111`) | — |
-| `app/Generated/*` | A | diregenerasi `./app/build-ffi.sh` (invariant #1) | — |
-| `app/Sources/QueryHive/Support/EditorAnalysis.swift` (baru) | A | Pemilik `EditorDocument` per editor. Revisi, dua antrean, koalesi, `EditorAnalysisResult.validate`, `apply`, penjaga marked text, penjadwal idle, fetch outline, pelebaran surrogate, deteksi drift, `StatementsRotorSource`. | `init(text:)`, `textStorageDidEdit(range:delta:)`, `requestVisible()`, `fontsChanged()`, `markedTextEnded()`, `onOutline`, `lineCount` (drift) |
-| `app/Tests/QueryHiveTests/EditorLexerParityTests.swift` (baru) | A (dipangkas di B) | L4 dan L5 | — |
-| `app/Tests/QueryHiveTests/EditorAnalysisTests.swift` (baru) | A | Validasi hasil (setiap aturan tolak), buang revisi basi, penjaga marked text (termasuk transisi lewat `setMarkedText` kosong dan penjadwal idle yang berhenti), font 12,5 pt pada karakter baru sebelum `apply` (§7.4), pelebaran surrogate, CRLF, undo dan redo memulihkan atribut, drift memicu pembuatan ulang, `drainForTesting` | — |
-| `app/Sources/QueryHive/Views/SQLEditor.swift` | B | Hook `didProcessEditing` memanggil `EditorAnalysis`. Pengamat scroll. Band, run mark, dan lipatan dari outline Rust. `SQLTextView`: rotor, override `unmarkText`/`insertText`, typing attributes (§7.4). Jalur warna lama dihapus. | — |
-| `app/Sources/QueryHive/Views/SQLSyntax.swift` | B | §10. Tambah `attributes(forClass:)` dan pasangan font. | `static let keywords` via FFI |
-| `app/Sources/QueryHive/Support/SQLFolding.swift` | B | §10. Pembungkus `regions(in:)` dan `statementRanges(in:)` atas FFI. | — |
-| `app/Tests/QueryHiveTests/EditorFindAndFoldingTests.swift` | B | `foldingSizeLimit` menjadi `editorCeilingUtf16()`. Tes lain tetap hijau tanpa diubah. | — |
-| `app/Tests/QueryHiveTests/EditorRotorTests.swift` (baru) | B | Rotor "Statements" ada; pencarian maju dan mundur memberi rentang statement | — |
-| `app/Tests/QueryHiveTests/LexerFixtureExport.swift` | B | dihapus | — |
+**Commit A** (`feat(editor): tree-sitter analysis behind the FFI, not wired to the editor yet`), tanpa perubahan perilaku:
 
-**Tidak disentuh:**
+| Berkas | Tujuan |
+|---|---|
+| `crates/qh-ffi/Cargo.toml` | `qh-editor` |
+| `crates/qh-ffi/src/editor.rs` (baru) | §6 |
+| `crates/qh-ffi/src/lib.rs` | `pub mod editor;` |
+| `app/Generated/*` | `./app/build-ffi.sh` (invariant #1) |
+| `app/Sources/QueryHive/Support/EditorAnalysis.swift` (baru) | pemilik `EditorDocument`; antrean; koalesi; `EditorPaintResult.validate`; `apply` lewat atribut sementara; `fonts`; penjaga IME; penjadwal idle; `outline`; pelebaran surrogate; drift; pewarisan tetangga; `StatementsRotorSource`; `drainForTesting` |
+| `app/Tests/QueryHiveTests/EditorAnalysisTests.swift` (baru) | G7, pada `SQLTextView` headless yang belum disambungkan ke `SQLEditor` |
+| `THIRD-PARTY-NOTICES.md` (baru, koreksi AR-TS) | Bagian pertama berkas pemberitahuan: runtime tree-sitter (MIT), header UTF ICU di runtime (lisensi Unicode), dan grammar DerekStride (MIT). Commit A adalah commit pertama yang menautkan kode ini ke `libqh_ffi.a` dan app. Pemberitahuan untuk seluruh crate lain dan pemasangannya ke bundle adalah tugas W14 (§15). |
 
-- `Models/SQLScanner.swift`, `Models/QueryParameters.swift`, `Models/KeywordCase.swift` (§15.2), `Views/Workspace.swift`, `app/Package.swift`;
-- `crates/qh-ffi/src/uniffi_api.rs` dan keempat daftar invariant #11;
-- `Models/QueryTab.swift` (milik W4-T1 di gelombang yang sama; isinya diubah di W4-T2b, §15.1).
+Verifikasi A: G-RUST, G-DENY, G-FFI, G-SWIFT, G-VIS (tidak berubah).
 
-**Selisih dengan daftar berkas `development-plan.md` (koreksi AR, untuk orkestrator).** Daftar W4-T2 di sana menyebut `Models/SQLScanner.swift` (bagian statement dihapus), padahal berkas itu tidak disentuh (§15.2). Daftar itu juga belum memuat berkas tes di tabel ini. Daftar W3-T2 belum memuat `scan.rs`, `UnicodeTableExport.swift`, dan `scan_refactor.rs`, dan masih menulis `editor.rs` alih-alih direktori `editor/` (§15.5). Rencana perlu disamakan sebelum tugasnya mulai, supaya aturan kepemilikan berkas §7 tidak dilanggar.
+**W4-T2b** (tidak berubah dari blueprint lama §15.1 dan `development-plan.md`): `Models/QueryTab.swift` (isi `sqlStatements(in:)` saja) dan `StatementSplitTests.swift`. Gate SR, DB, CR; G-SWIFT dan G-VIS tanpa perubahan piksel. Masih wajib, karena band dan run mark tetap dari `scan.rs` (§0.2). `sqlStatements(in:)` meneruskan dialek koneksi tab bila diketahui, selain itu `.generic` (D-20); `StatementSplitTests` memuat satu kasus MySQL dari W3-T0.
+
+**Commit B** (`perf(editor): tree-sitter colours and folds, applied as temporary attributes, reach 2M characters`):
+
+| Berkas | Tujuan |
+|---|---|
+| `app/Sources/QueryHive/Views/SQLEditor.swift` | hook ke `EditorAnalysis`, pengamat scroll, band/run mark/lipatan dari `outline`, rotor, flag pemeriksaan teks (§7.3), penghapusan §10 |
+| `app/Sources/QueryHive/Views/SQLSyntax.swift` | §10; `colour(for class:)` |
+| `app/Sources/QueryHive/Support/SQLFolding.swift` | §10 |
+| `app/Tests/QueryHiveTests/EditorFindAndFoldingTests.swift` | batas lipatan dari `editorCeilingUtf16()`; lipatan CTE/subquery baru |
+| `app/Tests/QueryHiveTests/EditorIncrementalTests.swift` | tes painter 4A (`testTypingInsideAStatementRepaintsItAndNothingElse`, `testAStatementWithADoubleQuotedSemicolon…`, `testAnEditAfterTheSemicolon…`, `testALoneQuoteInALargeDocumentDoesNotFreezeTyping`) ditulis ulang untuk jalur baru |
+| `app/Tests/QueryHiveTests/Bench/EditorBenchTests.swift` | bench memakai jalur baru |
+| `app/Sources/QueryHive/Support/PerfSignposts.swift`, `Support/BenchMode.swift` | interval `apply` (§14) dan pencatatannya di `--bench type-*` (koreksi AR-TS) |
+| `app/Tests/QueryHiveTests/EditorRotorTests.swift` (baru) | rotor "Statements" |
+| `app/Tests/QueryHiveTests/SyntaxPaletteTests.swift` (baru) | G8 |
+| `app/Tests/QueryHiveTests/__Baselines__/editor-*.{png,json}` | rekam ulang V-12 (16 pasang) |
+| `app/DESIGN.md` §"Colouring the query" | isi baru: tree-sitter per statement, atribut sementara, plafon 2M, pemilik kunci sementara. Kalimat "One scan, six ordered alternatives" dan "stops past 200,000 characters" menjadi salah di commit ini. |
+
+Verifikasi B: G-RUST, G-FFI, G-SWIFT, G-VIS (hanya scene editor yang berubah, sebagai V-12), `--bench type-10k` ≤ 4 ms dan `type-2m` ≤ 8 ms p99 main untuk interval `keystroke` **dan** `apply`, `type-coloured-195k` dicatat, dan bench auto-uppercase di `type-2m` dicatat.
+
+**Tidak disentuh:** `Models/SQLScanner.swift`, `Models/QueryParameters.swift`, `Models/KeywordCase.swift`, `Views/Workspace.swift`, `app/Package.swift` (tidak ada framework sistem baru; tree-sitter hanya butuh libc), `crates/qh-ffi/src/uniffi_api.rs`, dan keempat daftar invariant #11.
 
 ## 13. Urutan kerja
 
-**W3-T2**
+**W3-T0 lebih dulu** (§15): perbaikan Safe Mode MySQL di `scan.rs`/`classify.rs`, gate SEC. Langkah 1 W3-T2 boleh berjalan bersamaan; langkah 2 tidak.
 
-1. Eksportir, korpus buatan tangan, lalu jalankan `QH_EXPORT_FIXTURES=1`. Fixture dan `unicode_tables.rs` di-commit lebih dulu, karena keduanya adalah kebenaran.
-2. Refaktor `scan.rs`. Tes lamanya harus tetap hijau tanpa diubah.
-3. `lex.rs` dan `lex_all`, sampai L1 hijau.
-4. `text.rs` dan tes naifnya.
-5. `highlight.rs`: blok, lex ulang, konvergensi, `dirty`, hasil `analysis`. Sampai L2 dan L3 hijau, termasuk contoh `select 1`.
-6. `outline.rs`, sampai `editor_outline.rs` hijau dengan `DIVERGENT.md`.
+**W3-T2:**
 
-**W4-T2 commit A** (tanpa perubahan perilaku; subjek usulan `feat(editor): rust analysis behind a parity test`):
+1. `qh-sql-grammar`, lalu G6. Jalankan `cargo deny check licenses`.
+2. `walk`, lalu G4 hijau dengan tes lama `scan.rs` tanpa perubahan. Commit 1 (SEC) ditutup di sini sesudah langkah 3.
+3. `lex`, lalu G5.
+4. `text.rs` dan `statements.rs`, dengan tes statement == `scan()`.
+5. `view.rs`, `syntax.rs`, `classify.rs`. Tulis korpus, lalu `QH_BLESS=1` pertama dan tinjau hasil emasnya baris demi baris untuk tabel §5.1.
+6. `paint.rs`, sampai G2 hijau (termasuk contoh §6).
+7. `folds.rs`, `issues.rs`, G3.
+8. Bench §11, dan setel `GIANT_STATEMENT_BYTES` serta `TREE_CACHE_BYTES` dari angkanya.
 
-1. `qh-ffi/src/editor.rs`, lalu `build-ffi.sh`.
-2. Jalankan ulang eksportir: fixture harus identik.
-3. `EditorAnalysis.swift`, sementara editor masih mengecat dengan regex.
-4. L4, L5, dan `EditorAnalysisTests` hijau, lalu G-FFI, G-SWIFT, G-VIS. Hasil L4 dan L5 masuk laporan sebagai bukti gate.
+**W4-T2 A → W4-T1 mendarat → W4-T2b → W4-T2 B**, sama dengan urutan yang sudah ada di `development-plan.md` §5 W4.
 
-**W4-T2b** (§15.1), dianjurkan di titik ini bila W4-T1 sudah mendarat.
-
-**W4-T2 commit B** (subjek dari rencana: `perf(editor): analysis moves to Rust, colouring and folding reach 2M characters`):
-
-1. Sambungkan `SQLEditor` ke `EditorAnalysis`.
-2. Hapus sesuai §10.
-3. Rotor.
-4. L4 menjadi smoke terhadap fixture.
-5. G-VIS, lalu bench `type-10k` dan `type-2m`.
-
-**W4-D.** ADR-0033 mencatat D-1 sampai D-14, keanehan yang dibekukan (§3.5), tabel Unicode yang dibekukan, pergantian semantik statement (§4.1), dan penjaga IME.
+**W4-D.** ADR-0033 ditulis ulang: "Analisis editor dengan tree-sitter per statement di Rust". Isinya D-1 sampai D-20, grammar yang di-vendor dan patch-nya, kebijakan diagnostik, pemilik kunci atribut sementara, dan V-12.
 
 ## 14. Risiko
 
 | Risiko | Dampak | Penahan |
 |---|---|---|
-| Aturan `\b` ICU di §3.4 ditulis dari ingatan | Warna angka berbeda di sebelah tanda kombinasi dan format | Lima kasus sudah diverifikasi. Tabel diekspor dari ICU sendiri. Korpus `edge-unicode` dan alfabet acak di L4. Fixture yang menang, bukan dokumen ini. |
-| Surrogate | Cermin bergeser, dan posisi token meleset | Pelebaran di Swift (§7.5), `SplitsCharacter`, pembuatan ulang dengan log, kasus `edge-surrogate`, dan emoji di alfabet acak |
-| CRLF | Baris, statement, dan komentar berbeda | Indeks hanya LF, sama dengan hari ini. CR ikut di token komentar (`[^\n]`). Statement sesudah `--` di berkas CRLF kini terpecah benar; ini perubahan yang disengaja (§4.1). CR tunggal tetap tidak dihitung sebagai baris walaupun AppKit menggambarnya sebagai baris. |
-| Undo | Atribut basi kembali bersama teks | Rentang edit selalu kotor (§5.6). Ada tes. |
-| IME | Komposisi terganggu oleh perubahan atribut | Tidak ada `apply` selama marked text, penjadwal idle berhenti, dan akhir komposisi dideteksi dari transisi di tiga override, termasuk pembatalan lewat `setMarkedText` kosong (§7.5). Diuji di `EditorAnalysisTests` dengan `setMarkedText` terprogram. Pemeriksaan manual dengan IME Jepang dan Tionghoa masuk laporan. |
-| Temporary attribute find bar | Sorotan hilang | Tidak disentuh (§7.5). Scene `editor-find` di G-VIS. |
-| Warna tertinggal satu frame | Kedip saat mengetik | Typing attributes diwarisi dari tetangga (§7.4). Pewarnaan pertama sinkron (§7.6). Risiko ini sudah diterima di `performance-plan.md` §8. |
-| Karakter baru ber-font 13 pt sebelum `apply` (koreksi AR) | Tinggi baris melompat satu frame | Tes di `EditorAnalysisTests`, dan jalan keluar O(1) di §7.4 |
-| Oracle paritas tertukar dengan painter 4A (koreksi AR) | L4 dan L5 lulus atau gagal terhadap perilaku yang salah | Oracle adalah `SQLSyntax.attributes(for:)` atas seluruh dokumen (§9) |
-| Fragmentasi run atribut | Lapis atribut G-VIS gagal walaupun pikselnya sama | L5 membandingkan run dengan cara yang sama dengan `VisualParityTests` sebelum commit B |
-| Kutip membalik pasangan di dokumen 2 MB | Lex ulang O(n) | Hanya di latar. Pencarian dibatasi `last_closer`. Jendela terlihat lebih dulu. Anggaran `UTILITY` per panggilan. |
-| Perebutan kunci dan inversi prioritas | Hitch di main | Main tidak pernah memegang `highlight` (§7.1). Kunci `text` hanya dipegang mikrodetik. |
-| Tabel Unicode terikat versi ICU macOS saat ekspor | Beda kecil dengan macOS berikutnya | Sesudah regex dihapus, Rust adalah definisinya. Hal ini dicatat di ADR-0033. |
-| `KeywordCase` memindai seluruh dokumen per delimiter (`KeywordCase.swift:39`: `SQLScanner.scan` + `Array(sql.utf16)`) | Ketikan 2 MB lambat bila auto-uppercase menyala | Default-nya mati (`EditorPreferences.swift:55`). Diukur dan dicatat di W4-T2. Perbaikannya, `is_code` dari mesin `scan.rs` per statement, adalah tugas terpisah. |
-| Fixture bench > 2.000.000 unit | NFR-P5 diukur dengan pewarnaan mati | Diperiksa di W4-T2 sebelum mengukur (§5.7) |
-| Rencana menyebut hapus "bagian statement di `SQLScanner.swift`" | Implementer menghapus lexer `:name` | §15.2 |
+| **Gambar ulang baris berwarna 4–5 ms** (§1.6, jalur `cacheDisplay`) | NFR-P5 (4 ms p99 di 10k) meleset walaupun pembetulan atribut hilang | **Gate gambar (koreksi AR-TS).** Interval `keystroke` yang ada sudah berakhir di observer sesudah commit Core Animation pada giliran yang menampilkan perubahan (`PerfSignposts.swift:130-141`), jadi gambar baris pada giliran edit sudah terukur. Yang belum terukur adalah giliran `apply`, yang menggambar ulang baris itu sekali lagi dengan warna baru. W4-T2 B menambah interval `apply` (mulai di `apply`, berakhir di observer yang sama), `--bench type-*` menunggu `apply` sebelum ketikan berikutnya dan mencatat p50/p99 keduanya, dan ambang NFR-P5 berlaku untuk masing-masing giliran. Urutan pengungkit: flag pemeriksaan teks (−1,3 ms terukur), `apply` yang melewati run yang sudah benar (§7.3), `CGColor` yang di-cache per appearance (belum terbukti). Bila sesudah itu salah satu p99 masih di atas ambang, angkanya dicatat sebagai kegagalan gate NFR-P5, tugas fungsional tetap jalan (P-21), dan eskalasi mengikuti syarat §7.7 (spike CodeEditTextView lebih dulu, keputusan pemilik). |
+| Cakupan grammar untuk MySQL dan Trino | Struktur (lipatan, alias) hilang di statement ber-ERROR | Lexer celah menjaga warna; lipatan statement tetap ada; alias memakai cadangan leksikal. Diagnostik sintaks tidak ditampilkan. |
+| Pohon inkremental ≠ pohon baru di statement ber-ERROR (14–16% edit acak) | Lipatan atau alias bergantung pada riwayat | Parse ulang konvergensi 500 ms sesudah edit (§4.4), dan warna terbukti tidak terpengaruh (§1.5) |
+| Memori pohon 36–54 B per byte | 70–108 MB untuk 2M bila tanpa batas | Cache LRU sekitar 640 KiB sumber per dokumen (D-9), dan tes memori di W3-T2 |
+| C di dalam proses (parser dan scanner) | Crash atau baca di luar batas pada input aneh | Runtime dan grammar dipakai luas; G2 menjalankan puluhan ribu edit acak termasuk byte non-ASCII; SEC memeriksa `scanner.c` (190 baris) dan patch-nya; `panic = "unwind"` tidak menangkap crash C, jadi ini risiko yang diterima dan dicatat di ADR-0033 |
+| Kutip terbuka di dokumen besar | Statement 1 MB sampai kutip ditutup | Statement besar diwarnai lexer (§4.4); `walk` dari statement yang diedit, batas atas 2–10 ms di latar |
+| Escape backslash MySQL (`'it\'s'`) dan komentar `#` | Warna dan batas statement salah, **di editor dan di engine**; di engine ini **celah Safe Mode** (koreksi AR-TS, §15) | W3-T0 sebelum W3-T2 langkah 2; editor mewarisi mode MySQL `walk` lewat D-20. |
+| Pemilik kunci atribut sementara ganda | Satu fitur menghapus sorotan fitur lain | Tabel §7.4; tes G7 memastikan sorotan find bertahan sesudah `apply` |
+| Karakter baru tanpa warna selama satu giliran | Kedip | Pewarisan tetangga (§7.5). Dicatat di `performance-plan.md` §14 butir 12 (kalimatnya berubah dari "typing attributes" ke "warna tetangga, dengan aturan §7.5"). |
+| Grammar upstream bergerak | Perbaikan tidak masuk | Vendoring dengan provenance; pembaruan adalah tugas dengan gate (§3) |
+| MSRV | `cargo update` menarik tree-sitter 0.27 | Versi dipatok `=` di workspace |
+| Ukuran biner +2,63 MB, build dingin +15 dtk | App 11% lebih besar | Dicatat; tidak ada target ukuran di PRD |
 
-## 15. Koreksi terhadap rencana dan pertanyaan terbuka
+## 15. Untuk orkestrator, dan pertanyaan terbuka
 
-1. **Duplikat statement ada di `QueryTab.swift`, bukan di `SQLScanner.swift`.** `sqlStatements(in:)` (`Models/QueryTab.swift:1056-1098`) dipakai `SQLFolding`, `ServerSort.swift:37`, `GridSearch.swift:59`, `AppModel.swift:1917`, dan `sqlStatement(in:atUTF16Offset:)`. Berkas itu milik W4-T1 di gelombang yang sama.
+**Perubahan dokumen yang bukan milik blueprint ini:**
 
-   **W4-T2b diterima AR, wajib, dan cakupannya sebagai berikut (koreksi AR):**
+- **PRD:** baris O-14 di §11.1; V-12 di §6.5 (§5.3); NFR-L: `tree-sitter`, `tree-sitter-language`, grammar yang di-vendor; P-10 (§8.4); FR-ED-06: galat sintaks dari pohon tidak ditampilkan secara default (§0.2).
+- **`performance-plan.md`:** §8 4B ditulis ulang ringkas sesuai blueprint ini (modul `qh-editor`, satu pohon per statement, atribut sementara, "paritas lexer 100%" diganti G1–G3 dan V-12); §13 baris tree-sitter menjadi "Ya (O-14)"; §14 butir 8 dan 12; §15 judul ADR-0033; §17 dependensi baru dan baris "Ditolak" diperbarui.
+- **`development-plan.md`:** W3-T2 (berkas §11, ukuran L, SEC untuk `qh-sql-grammar`, G-DENY); W4-T2 (berkas §12, UX di gate, V-12); W11-T6 (`crates/qh-editor/src/refs.rs` menggantikan `crates/qh-sql/src/editor/`); W12-T1 (token dari `walk` dan `lex`); W10-T6 (masalah leksikal dan sambungan dialek); W10-T7 (pasangan kurung lewat `drawBackground`); tabel ADR (`0033` berganti judul); rantai kepemilikan `Cargo.toml` dan `Cargo.lock` untuk W3-T2.
+- ~~Backlog~~ **Tugas baru (koreksi AR-TS), bukan backlog:**
+  - **W3-T0. Celah Safe Mode MySQL (SEC, sebelum W3-T2 langkah 2).** Diturunkan dari membaca kode, belum dijalankan: `scan.rs` tidak mengenal escape backslash dan komentar `#` MySQL, `mysql_async` 0.36.2 selalu menyalakan `CLIENT_MULTI_STATEMENTS` (`opts/mod.rs:1096`), dan jalur teks driver MySQL tidak punya `prepare` yang menolak multi-statement seperti PostgreSQL (`qh-driver-postgres/src/lib.rs:19`). Akibatnya `SELECT '\''; DELETE FROM t; -- '` dibaca `scan()` sebagai satu `SELECT` (`\` lalu `''` dianggap kutip ganda), `classify` memberi `ReadOnly`, dan server MySQL menjalankan `DELETE`. Bentuk kedua: `SELECT 1 # '` + LF + `; DELETE FROM t; -- '`. MCP memaksa `SafeMode::ReadOnly` (`crates/qh-ffi/src/mcp.rs:1291-1299`) dan driver MySQL tidak punya sesi read-only di server (`read_only: false`), jadi ini melanggar NFR-S6 untuk koneksi MySQL. Arah perbaikan yang dianjurkan (diputuskan SEC): mode MySQL di pemindai (`\` meng-escape di `'…'` dan `"…"`, `#` komentar baris, isi `/*! … */` dibaca sebagai kode), dan Safe Mode di koneksi MySQL menolak bila **salah satu** pembacaan (standar atau MySQL) tidak `ReadOnly` atau jumlah statement-nya berbeda. Tes dulu: kedua contoh di atas di `crates/qh-sql` dan di `crates/qh-ffi/tests/safe_mode.rs`, plus G-LIVE MySQL. Gate SEC, DB, CR. Pemilik berkas: `crates/qh-sql/src/{scan.rs,classify.rs}` sebelum W3-T2.
+  - **Pemberitahuan pihak ketiga.** Bagian tree-sitter/ICU/grammar ikut W4-T2 commit A (§12). Berkas lengkap untuk semua crate dan pemasangannya ke bundle (`app/build.sh`) masuk W14 sebagai kriteria rilis, karena celah ini sudah ada sebelum 4B dan tidak ada distribusi sebelum rilis.
 
-   - **Kenapa wajib, bukan tindak lanjut bebas.** Komentar `SQLFolding.swift:138-140` menjanjikan bahwa lipatan dan Run "tidak bisa berselisih". Commit B mematahkan janji itu untuk kasus di tabel §4.1. Contohnya `select "a;b"`: band dan run mark menunjukkan satu statement, tetapi Run mengirim `select "a`. Itu persis "menjalankan setengah statement" yang ditolak komentar `QueryTab.swift:1049-1051`. `AppModel.swift:1914-1918` juga mengklaim memecah "the way the engine splits them", dan klaim itu baru benar sesudah W4-T2b.
-   - **Urutan.** W4-T2b hanya butuh `sql_statement_ranges` dari commit A. Urutan yang dianjurkan: W4-T2 A → W4-T1 mendarat → W4-T2b → W4-T2 B. Dengan urutan ini band, lipatan, dan Run pindah semantik bersamaan (`SQLFolding.statementRanges` sudah memanggil `sqlStatements`), dan jendela selisih tidak pernah ada. Bila W4-T1 belum selesai saat B siap, B boleh mendarat lebih dulu, tetapi **W4 tidak ditutup sebelum W4-T2b mendarat**. Batas "sebelum W12-T3" di draf awal terlalu longgar.
-   - **Berkas.** `Models/QueryTab.swift`: hanya isi dan komentar doc `sqlStatements(in:)`. Signature `[(range: Range<String.Index>, text: String)]` tetap, dan `sqlStatement(in:atUTF16Offset:)` tidak diubah, sehingga keempat pemanggil tidak tersentuh. Tes baru `app/Tests/QueryHiveTests/StatementSplitTests.swift`. Rantai kepemilikan `QueryTab.swift` di `development-plan.md` §7 ditambah W4-T2b di antara W4-T1 dan W5-T1.
-   - **Semantik.** Rentang 1:1 dengan `sql_statement_ranges`, dipetakan dari UTF-16 ke `String.Index`. `text` = potongan yang di-trim dengan `.whitespacesAndNewlines`, yang setara dengan `White_Space` dan `str::trim` (§3.4). Tidak ada penyaringan tambahan di Swift, supaya lipatan, band, dan Run memakai rentang yang sama persis.
-   - **Tes.** Setiap baris tabel §4.1, termasuk CRLF dan dollar-quote. Invarian `SQLFolding.statementRanges(in:) == sqlStatements(in:).map(range)` atas korpus editor, sehingga janji di `SQLFolding.swift:138-140` menjadi tes, bukan komentar. Ditambah `ServerSortTests`, `QuickSearchTests`, `RunConfirmationTests`, dan `HighlightBandTests` yang tetap hijau.
-   - **Pelaksana dan gate.** GP-s · sonnet, ukuran S. Gate SR, DB (semantik pemecahan per dialek: `$tag$`, backtick, CRLF), dan CR. Verifikasi G-SWIFT dan G-VIS editor, yang tidak boleh berubah. Subjek commit usulan: `fix(editor): statements split the way the engine splits them`.
-   - **Perubahan perilaku** di tabel §4.1 (Run, guard satu statement di sort dan search server, daftar statement di konfirmasi tulis) didaftarkan orkestrator di `performance-plan.md` §14.
-2. **`SQLScanner.swift` tidak punya bagian statement.** Isinya region opaque dan parameter `:name`, dan berkas itu tetap utuh (§10). `KeywordCase` tetap memakainya. Mengganti `isCode` dengan token warna akan menjadi regresi, karena selama string belum ditutup regex menganggap sisanya kode, sehingga kata di dalam string yang sedang diketik ikut diubah ke huruf besar.
-3. **Penjaga IME** di sisi penerapan (D-9). **Diputuskan AR: diterima**, dengan deteksi transisi dan penjadwal idle yang berhenti (§7.5). Kalimat `performance-plan.md` §8 ("tidak mengirim edit selama `hasMarkedText`") dicatat sebagai diganti oleh ADR-0033. Yang mengubah teks rencana adalah orkestrator.
-4. **Dua commit di W4-T2** (D-13). **Diputuskan AR: dua commit**, dengan syarat di D-13. Satu commit tidak lagi dianjurkan, karena urutan W4-T2b di butir 1 membutuhkan titik A yang hijau di riwayat.
-5. **Nama modul** `crates/qh-sql/src/editor/` (direktori), bukan `editor.rs`. W11-T6 dan W12-T1 yang menyebut `editor.rs` merujuk ke modul ini.
-6. **P-10** perlu catatan: formatter memakai `scan.rs` untuk region opaque (§8.4). **Diterima AR**, dengan tokenisasi region kode diserahkan ke rancangan W12-T1.
-7. **Untuk pemilik, tidak memblokir.** Apakah keanehan §3.5 (`;--`, `)--`, badan `$tag$`) kelak diperbaiki sebagai perubahan V dengan rekam ulang baseline? Bila ya, lexer warna bisa disatukan dengan `scan.rs`, dan D-2 gugur.
+**Keputusan orkestrator atas pertanyaan terbuka (30 Sep 2026), diterima AR:**
 
-## Verdict architect-reviewer
+1. **Vendoring 17,4 MB C** (sekitar 818 KB di git) dengan perbaikan bocor PR #361, di `crates/qh-sql-grammar`. **Diputuskan: vendoring.**
+2. **Garis bawah sintaks dari pohon:** **mati secara default.** W10-T6 menampilkan posisi galat server dan diagnostik leksikal (kutip, komentar, identifier, dan dollar-quote yang belum ditutup, kurung tidak seimbang).
+3. **Warna parameter:** **`literal`.** Kelas 9 tetap terpisah di FFI.
+4. **Kontras Nord:** **diperbaiki di V-12** (§5.2), karena baseline editor direkam ulang di commit yang sama (NFR-A1).
+
+## Riwayat: blueprint lexer regex (digantikan)
+
+Blueprint sebelumnya (port regex `SQLSyntax` ke `qh-sql`, dengan paritas byte demi byte) digantikan oleh keputusan pemilik O-14 pada 30 Sep 2026. Teks lengkapnya ada di `git show dc4186f:docs/architecture/blueprints/fase-4b-editor-analysis.md`. Verdict AR-nya disimpan di bawah apa adanya. Nomor bagian di dalamnya merujuk ke versi itu, bukan ke dokumen ini. Keputusan yang dibawa ke blueprint ini: D-9 (penjaga IME di sisi penerapan) menjadi D-16, D-13 (dua commit) menjadi D-19, D-14 (rekaman UniFFI) menjadi D-18, urutan kunci dan satu delegate storage, refaktor `scan.rs` dengan gate SEC, W4-T2b, dan koreksi P-10. Yang gugur: D-1, D-2, D-4, D-5, D-10, D-12, tabel Unicode, eksportir fixture Swift, dan uji paritas L4/L5.
+
+### Verdict architect-reviewer atas blueprint regex
 
 **Verdict: disetujui dengan koreksi.** Semua koreksi sudah diterapkan di dokumen ini dan ditandai "(koreksi AR)". W3-T2 boleh mulai sesudah orkestrator menyamakan daftar berkas di `development-plan.md` (lihat bagian terakhir di bawah). Dampak arsitektur: **sedang**. Batas barunya bersih: inti murni di `qh-sql`, konkurensi di `qh-ffi`, dan penerapan di Swift. Satu-satunya sentuhan ke batas keamanan adalah refaktor `scan.rs`, dan sekarang refaktor itu punya gate sendiri.
 
@@ -813,3 +783,108 @@ Pelaksana GP-s. Gate SR, RR, SEC, AX, AR, CR. Verifikasi:
 - ADR-0033 (W4-D): D-1 sampai D-14, keanehan yang dibekukan, asal-usul tabel Unicode, dan enum kelas sebagai kasus invariant #3.
 
 **Implikasi jangka panjang.** Sesudah W4-T2b, `scan.rs` menjadi satu-satunya jawaban untuk "di mana statement berakhir" di engine, editor, Run, sort dan search server, konfirmasi tulis, dan formatter. Jalur ini mempermudah W10-T6, W11-T6, W12-T1, dan W12-T3. Utang yang sengaja diambil adalah lexer warna kedua yang membawa keanehan regex. Utang itu hanya bisa dilunasi lewat perubahan V dengan rekam ulang baseline (§15.7), dan keputusan itu ada di tangan pemilik.
+
+## Verdict architect-reviewer (tree-sitter)
+
+**Verdict: disetujui dengan koreksi.** Semua koreksi sudah diterapkan di dokumen ini dan ditandai "(koreksi AR-TS)". Dampak arsitektur: **tinggi**. Ada crate C baru di dalam proses app, satu dependensi runtime baru, cara menerapkan warna yang baru, dan sentuhan ke batas Safe Mode. Bentuk dasarnya sehat: grammar dikurung di `qh-sql-grammar`, analisis murni di `qh-editor`, konkurensi di `qh-ffi`, dan penerapan di Swift. Batas statement tetap satu jawaban (`scan.rs`) untuk engine, Run, dan editor. W3-T2 boleh mulai dengan langkah 1 (grammar). Langkah 2 (refaktor `scan.rs`) menunggu W3-T0, tugas SEC baru yang lahir dari pemeriksaan ini (§15).
+
+**Yang diperiksa.** Blueprint ini secara utuh; `target/run/ts-bench/results.txt`, `probe-out.txt`, `probe-out-gap.txt`, dan sumber bench `src/main.rs` (`cmd_incr`); `crates/qh-sql/src/scan.rs`, `classify.rs` (`classify`, `decisions`, `statements_with_lines`), `wrap.rs`, `lib.rs`; `Cargo.toml` root dan manifes kelima konsumen `qh-sql`; `crates/qh-ffi/Cargo.toml` dan `src/mcp.rs:1291-1299`; driver MySQL (jalur teks, `read_only: false`) dan `mysql_async` 0.36.2 `opts/mod.rs:1096`; driver PostgreSQL (`prepare` menolak multi-statement); manifes `tree-sitter` 0.26.13, `tree-sitter-language` 0.1.7 dan 0.1.8, `tree-sitter-sequel` 0.3.11 di registry lokal; `rustc` lokal 1.98.1, tidak ada `rust-toolchain.toml`, CI memasang `stable`; `SQLScanner.swift:58-64,112-117`; `SQLEditor.swift:99-105` (flag pemeriksaan teks), `:1228-1248` (sorotan find), `:1615` (lipatan lewat glyph null); `VisualParityTests.attributeRuns` (`:952-1009`); `PerfSignposts.swift:125-147` dan `BenchMode.swift`; PRD NFR-P5, NFR-A1, NFR-L, NFR-S6, V-1…V-11, FR-ED-06, P-10; `performance-plan.md` §8 dan §12; `development-plan.md` W3-T2, W4-T2, W4-T2b, W10-T6, W10-T7, W11-T6, W12-T1, §4, §7. Lisensi CodeEditTextView, `Package.swift`-nya, dan lisensi TextStory diambil dari GitHub hari ini. Tidak ada yang dibangun ulang.
+
+### Kepatuhan pola
+
+| Pola | Status |
+|---|---|
+| Driver dan `qh-import` tidak mengompilasi C grammar | patuh: `qh-editor` terpisah, hanya `qh-ffi` yang bergantung padanya (D-4) |
+| Arah dependensi `qh-editor → qh-sql`, tidak sebaliknya | patuh sesudah koreksi D-21 (daftar kata kunci editor keluar dari `qh-sql`) |
+| `qh-sql` murni, tanpa `unsafe` | patuh; `unsafe` hanya di `qh-sql-grammar` (FFI ke C) dan satu tes |
+| Satu pemecah statement untuk engine, Run, dan editor | patuh, dan diperkuat: `sql_statement_ranges` menerima dialek (D-20) |
+| Refaktor batas Safe Mode tanpa perubahan perilaku | patuh sesudah G4 diperluas ke seluruh `Scan` dan `decisions` (§4.2) |
+| Main thread O(edit) | patuh dengan satu syarat terukur: CoW 2 MB saat snapshot hidup (§4.1) |
+| Satu pemilik per kunci atribut sementara | patuh (§7.4); find memakai `removeTemporaryAttribute(.backgroundColor)`, tidak menyentuh `.foregroundColor` |
+| Invariant #1, #3, #11 | patuh; kelas 1…9 enum tertutup kedua, dicatat di ADR-0033 |
+| MSRV | patuh secara deklarasi (0.26.13 dan 0.1.7 menyatakan 1.77); 1.85 tidak diverifikasi CI |
+
+### Jawaban atas titik yang diminta
+
+**(a) Refaktor `scan.rs` dan Safe Mode.** Rencana awal (salinan lama + tes diferensial + SEC) arahnya benar, tetapi terlalu sempit: yang dikunci hanya "`scan()` lama == baru", padahal `classify` bergantung pada `keywords` dan `leading_keyword`, bukan hanya pemisah. Sekarang G4 membandingkan seluruh `Scan`, `statement_count`, `statements_with_lines`, dan `decisions` untuk keempat mode, dengan alfabet tertulis, soak satu juta kasus, pembanding kecepatan, dan larangan mengubah tes lama. W3-T2 tidak mengubah perilaku engine; satu-satunya perubahan API adalah `walk`, `lex`, dan `first_significant` menjadi `pub`. **Temuan yang lebih penting ada di luar 4B:** `scan.rs` hari ini sudah salah baca MySQL, dan untuk MCP itu celah keamanan (W3-T0, §15). Temuan ini diturunkan dari kode dan belum dijalankan. SEC harus menulis kedua contohnya sebagai tes yang gagal dulu.
+
+**(b) Pohon per statement.** Resinkronisasi §4.2 benar untuk `;` dan kutip yang diketik atau dihapus. Pemisah hanya ada di state Normal, statement ke-i memuat `;`-nya sendiri, dan titik henti "pemisah sesudah ujung edit yang sama dengan batas lama yang digeser" menjamin teks dan state sesudahnya identik. Edit tepat di awal statement aman karena state sesudah `;` selalu Normal. G2 sekarang membias seperempat edit ke sekitar pemisah dan membandingkan daftar statement dengan `scan()` di setiap langkah. Untuk memori: pohon dibatasi LRU, dan sekarang memori di luar pohon juga dicatat dengan sasaran ≤ 48 MB di 2M. Batas 256 KiB masuk akal (statement terbesar di korpus biasa 1.277 B), tetapi statement besar semula tetap menyimpan dan membandingkan ~400.000 token per ketikan. Sekarang tokennya tidak di-cache, dan lex hanya berjalan sampai ujung jendela (§4.4).
+
+**(c) Warna dan riwayat edit.** Klaim "0 dari 4.000" lebih lemah dari yang tertulis. Bench memakai satu pohon untuk seluruh potongan, tanpa view `:name`, dan pohon di-reset setiap kali menyimpang, jadi penyimpangan yang menumpuk tidak pernah diuji. Klaim itu juga tidak dijamin secara struktur, karena anak ERROR diwarnai pohon sedangkan celah diwarnai lexer. Penahannya sekarang ada tiga (§1.5): G2 tanpa reset, konvergensi yang mengecat ulang selisih token sehingga warna akhir selalu fungsi dari teks, dan aturan cadangan "lex seluruh ERROR" bila G2 menemukan selisih. View `:name` sendiri murni fungsi teks (tiga byte), tetapi aturannya merusak slice (`arr[lo:hi]` → `lo_hi`), dan cara memberi kelas Parameter tidak cocok dengan `SQLScanner` (`:58` mengecualikan isi `[…]`). Keduanya dikoreksi (D-8, §4.3).
+
+**(d) Atribut sementara.** Karakter yang diketik dan undo sudah terverifikasi di spike, dan rentang edit selalu kotor, jadi keduanya dicat ulang. Find memakai kunci lain dan membersihkan hanya `.backgroundColor`. G-VIS memang membaca `temporaryAttributes` per rentang (`VisualParityTests.swift:986-996`) dan menggabungkan tetangga yang sama, jadi baseline V-12 deterministik. Italic komentar di storage benar, karena `.font` sementara tidak digambar. Yang kurang ada dua. Pertama, IME: "kuncinya berbeda" belum pernah diuji dan `markedTextAttributes` bisa memuat `.foregroundColor`, jadi klaim itu ditandai `[perlu verifikasi]` dengan tes G7. Kedua, `apply` yang menulis ulang warna yang sudah benar tetap meng-invalidate dan menggambar ulang baris seharga 4–5 ms; sekarang `apply` melewati run yang tidak berubah (§7.3).
+
+**(e) Crate, MSRV, build.** Pemisahan `qh-editor`/`qh-sql-grammar` benar dan perlu: kelima konsumen `qh-sql` tidak menyentuh C. Bin `queryhive-engine` dan `queryhive-mcp` ikut menautkan `qh-editor` lewat `qh-ffi`, tetapi LTO fat dan penautan arsip membuang kode yang tidak dirujuk, jadi yang bertambah hanya waktu build. Patok `=0.26.13`/`=0.1.7` benar karena 0.1.8 menyatakan 1.90. Tambahan: `cc` masuk `[workspace.dependencies]`, dan `opt-level = 2` untuk grammar dan runtime di profil dev, supaya G2 di debug tidak memakai parser `-O0`.
+
+**(f) Gambar ulang 4–5 ms.** Semula gate ini tidak terdefinisi. Interval `keystroke` yang ada ternyata sudah mencakup gambar pada giliran edit (berakhir sesudah commit Core Animation), tetapi giliran `apply`, yang menggambar ulang baris dengan warna baru, tidak terukur sama sekali. Sekarang ada interval `apply`, bench menunggu `apply`, dan ambang NFR-P5 berlaku untuk tiap giliran. Urutan pengungkit dan jalan eskalasinya juga tertulis (§14). Jalan mundur ke CodeEditTextView: lisensi MIT terverifikasi, tetapi paketnya menarik TextStory (BSD-3-Clause), swift-collections (Apache-2.0), dan plugin SwiftLint, sehingga butuh tinjauan NFR-L. Paket itu juga belum terbukti lebih murah karena ia pun menggambar lewat CoreText dengan warna per run. Eskalasi sekarang mensyaratkan spike terukur dan keputusan pemilik (§7.7).
+
+**(g) Backlog.** Escape backslash MySQL **bukan backlog**. Bersama komentar `#`, ia membuat Safe Mode MySQL bisa dilewati (`SELECT '\''; DELETE FROM t; -- '`), dan MCP bersandar penuh pada Safe Mode untuk MySQL (NFR-S6). Karena itu ia menjadi **W3-T0**, sebelum W3-T2 langkah 2, supaya salinan beku G4 membekukan pemindai yang sudah diperbaiki dan `walk` lahir dengan mode MySQL. Berkas pemberitahuan pihak ketiga dipecah dua: bagian tree-sitter/ICU/grammar ikut W4-T2 commit A (commit pertama yang menautkan kode itu ke app), dan berkas lengkap beserta pemasangannya ke bundle menjadi kriteria rilis W14.
+
+**(h) Pembagian tugas.** W3-T2 ukuran L diterima, dipecah menjadi dua commit: `qh-sql` + grammar dengan SEC, lalu `qh-editor`. W4-T2 A/B dengan W4-T2b di antaranya tetap. Commit A menambah `THIRD-PARTY-NOTICES.md`, commit B menambah `PerfSignposts.swift` dan `BenchMode.swift`, dan W4-T2b meneruskan dialek. W10-T6 hanya Swift: diagnostik leksikal dan posisi server, garis bawah lewat `.underlineStyle` sementara, sambungan dialek per tab ke `EditorDocument::new`, dan garis bawah sintaks mati. W10-T7 menambah `bracket_pair`, jadi masuk rantai lane FFI dan memegang `qh-editor/src/brackets.rs`. W11-T6 pindah ke `crates/qh-editor/src/refs.rs`. W12-T1 tetap di `qh-sql` di atas `walk` + `lex`, dengan daftar kata klausa sendiri, tanpa pohon.
+
+### Keputusan
+
+- Empat keputusan orkestrator dicatat dan diterima tanpa pembatalan: grammar di-vendor dengan PR #361 di `crates/qh-sql-grammar`; garis bawah sintaks dari pohon mati secara default; parameter memakai `literal`; kontras Nord diperbaiki di V-12. Keputusan keempat didukung bukti: G8 kini mengunci ketujuh kanvas.
+- D-21 baru: `qh-sql` tidak tahu daftar kata kunci editor.
+- W3-T0 baru, dengan gate SEC, mendahului refaktor `scan.rs`.
+- `sql_statement_ranges` menerima dialek sekarang, bukan belakangan.
+
+### Koreksi yang diterapkan
+
+1. §1.5: batas bukti diferensial (satu pohon, tanpa view, reset per selisih), dan tiga penahan yang menggantikannya.
+2. D-8, §4.3: syarat byte i−1 ∉ `[A-Za-z0-9_:]` di view, dan kelas Parameter dari lapis leksikal yang meniru `SQLScanner`, lengkap dengan korpus `edge-params`.
+3. D-9, §4.4: token statement besar tidak di-cache dan hanya dilex sampai ujung jendela; sasaran memori di luar pohon; konvergensi mengecat ulang selisih; aturan warna sementara sebelum parse selesai.
+4. D-20, §6, §12: `sql_statement_ranges(sql, dialect)`, dan W4-T2b meneruskan dialek tab.
+5. D-21, §4.5, §11: `qh_sql::lex` mengeluarkan `Word` tanpa kelas, dan `keywords.rs` di `qh-editor`.
+6. §3, §11: `cc` di workspace, `opt-level` dev untuk C, dan catatan MSRV yang tidak diverifikasi.
+7. §4.1: biaya CoW di main diukur, dengan jalan keluar buffer berpotongan.
+8. §4.2, G4: syarat refaktor batas Safe Mode (seluruh `Scan` dan `decisions`, soak, kecepatan, tes lama utuh, `first_significant` `pub`), dan W3-T2 langkah 2 sesudah W3-T0.
+9. §7.3: `apply` melewati run yang sudah benar. §7.5: IME `[perlu verifikasi]` dengan tes, dan catatan AX.
+10. §7.7, §14: gate gambar dengan interval `apply`, urutan pengungkit, serta syarat spike dan keputusan pemilik sebelum CodeEditTextView, termasuk dependensi transitifnya.
+11. §5.2, §5.3, G8: perbaikan Nord di V-12 (butir 10), warna parameter sama dengan `SQLScanner` (butir 11), dan G8 untuk ketujuh kanvas.
+12. §8.5: W10-T7 masuk lane FFI.
+13. §9 G2: tanpa reset, bias ke pemisah, dua tingkat perbandingan (sebelum dan sesudah konvergensi).
+14. §11, §13: W3-T2 dua commit, SEC di commit 1, dan urutan W3-T0.
+15. §12: `THIRD-PARTY-NOTICES.md` di commit A; `PerfSignposts.swift` dan `BenchMode.swift` di commit B; verifikasi B untuk dua interval.
+16. §14, §15: risiko MySQL naik menjadi celah Safe Mode, W3-T0 dirumuskan, pemberitahuan pihak ketiga dibagi ke W4-T2 A dan W14, dan pertanyaan pemilik dijawab.
+
+### Untuk orkestrator (dokumen yang bukan milik AR)
+
+**PRD `prd-performance-and-parity.md`:**
+- §11.1: baris O-14 (30 Sep 2026: tree-sitter untuk analisis editor; perubahan tampilan boleh, dengan tampilan yang disetel ulang).
+- §11.2: empat keputusan orkestrator (vendoring grammar, garis bawah sintaks mati, parameter `literal`, Nord di V-12) dan D-21.
+- §11.2 P-10: "di `qh-sql` di atas mesin `scan.rs` (`walk`, region opaque) dan lexer kode `qh_sql::lex`; pohon tree-sitter tidak dipakai".
+- §6.5: baris V-12 (butir 1–11 di §5.3, W4-T2 commit B), dan kalimat "Atribut editor harus identik per rentang" diberi pengecualian V-12.
+- §6.3 NFR-L: `tree-sitter` =0.26.13, `tree-sitter-language` =0.1.7, `streaming-iterator`, dan grammar C yang di-vendor (MIT, di luar jangkauan `cargo deny`, dicatat di `PROVENANCE.md` dan `THIRD-PARTY-NOTICES.md`). Paket SwiftPM tetap "tidak ada yang direncanakan"; CodeEditTextView hanya lewat Fase 8.
+- §5 FR-ED-06: galat sintaks dari pohon tidak ditampilkan secara default (positif palsu 14–47% di SQL valid).
+- §6.1 NFR-P5: ambang berlaku untuk giliran ketikan dan giliran `apply` masing-masing.
+- §6.4 NFR-S1/NFR-S6: tes `safe_mode.rs` untuk `\'` dan `#` di MySQL (W3-T0).
+- §9 kriteria rilis: `THIRD-PARTY-NOTICES.md` lengkap dan terpasang di bundle (W14).
+- §13 Risiko: C di dalam proses (grammar dan runtime), diterima dan dicatat di ADR-0033.
+
+**`performance-plan.md`:**
+- §8 4B ditulis ulang ringkas: `crates/qh-editor` + `crates/qh-sql-grammar`, satu pohon per statement `scan.rs`, atribut sementara, plafon 2M; gate "paritas lexer 100%" diganti G1–G4 dan V-12; interval `apply`; kalimat risiko find diganti rujukan ke tabel pemilik kunci (§7.4 blueprint).
+- §12 butir kedua: CodeEditTextView hanya sesudah spike gambar-baris-berwarna < 50% dan keputusan pemilik; dependensi transitif TextStory (BSD-3-Clause), swift-collections (Apache-2.0), dan SwiftLintPlugin.
+- §13: baris tree-sitter menjadi "Ya (O-14)".
+- §14 butir 8 dan 12: warna tetangga dengan aturan §7.5; warna parameter sama dengan `SQLScanner`.
+- §15: ADR-0033 "Analisis editor dengan tree-sitter per statement di Rust".
+- §17: dependensi baru; baris "Ditolak" (tree-sitter tidak lagi ditolak; SwiftTreeSitter dan `main` upstream ditolak, dengan alasan §1.2 dan D-3).
+- §18: risiko Safe Mode MySQL (W3-T0).
+
+**`development-plan.md`:**
+- §4 baris `fase-4b-editor-analysis.md`: isi baru (tree-sitter per statement, atribut sementara, `walk`/`lex`, pemilik kunci sementara, W3-T0). Tabel ADR: 0033 berganti judul.
+- §5 W3: tugas baru **W3-T0** (Safe Mode MySQL: `crates/qh-sql/src/{scan.rs,classify.rs}`, tesnya, `crates/qh-ffi/tests/safe_mode.rs`; GP-o; gate SEC, DB, CR; G-RUST, G-LIVE MySQL; ukuran S–M; sebelum W3-T2 langkah 2).
+- §5 W3-T2: ukuran L; berkas §11; dua commit (commit 1 dengan SEC); G-DENY; bergantung pada W3-T0; `LexerFixtureExport.swift` dan `UnicodeTableExport.swift` dihapus dari daftar; alasan GP-o diganti (batas Safe Mode, C, dan konvergensi, bukan semantik regex).
+- §5 W4-T2: berkas §12 (A: `THIRD-PARTY-NOTICES.md`; B: `PerfSignposts.swift`, `BenchMode.swift`, `SyntaxPaletteTests.swift`, `EditorRotorTests.swift`); gate ditambah UX dan AX; "tes paritas" diganti G7; verifikasi B dengan dua interval.
+- §5 W4-T2b: `sql_statement_ranges(sql, dialect)`.
+- §5 W4-D: isi ADR-0033 (D-1…D-21, grammar dan patch, kebijakan diagnostik, pemilik kunci sementara, V-12, risiko C, MSRV).
+- §5 W10-T6: `Support/EditorAnalysis.swift`; sambungan dialek per tab; garis bawah lewat kunci sementara `.underlineStyle`/`.underlineColor`; galat sintaks pohon mati.
+- §5 W10-T7: tambah `crates/qh-editor/src/brackets.rs`, `crates/qh-ffi/src/editor.rs`, `app/Generated/`; penggambaran di `drawBackground`; G-FFI.
+- §5 W11-T6: `crates/qh-editor/src/refs.rs` menggantikan `crates/qh-sql/src/editor/`.
+- §5 W12-T1: token dari `walk` + `qh_sql::lex`, daftar kata klausa sendiri, tanpa pohon.
+- §5 W14: pemberitahuan pihak ketiga lengkap dan terpasang di bundle.
+- §6: W3-T0 memakai opus.
+- §7 rantai kepemilikan: `crates/qh-sql/src/scan.rs` dan `classify.rs` W3-T0 → W3-T2; `Cargo.toml`/`Cargo.lock` W3-T1 dan W3-T2 berurutan, tidak paralel; lane FFI … W6-T1 → **W10-T7** → W11-T1 …; `Support/EditorAnalysis.swift` W4-T2 → W10-T6 → W10-T7; `Support/PerfSignposts.swift` dan `BenchMode.swift` ditambah W4-T2.
+- §10 butir 4: "batas Safe Mode (`scan.rs`), C di dalam proses, pemetaan UTF-16, dan biaya gambar baris berwarna", menggantikan "paritas lexer".
+
+**Implikasi jangka panjang.** Keputusan yang paling menentukan, batas statement tetap di `scan.rs`, adalah yang membuat pilihan tree-sitter aman. Pohon boleh salah membaca MySQL dan Trino tanpa pernah menentukan apa yang dikirim ke server, dan grammar bisa diganti tanpa menyentuh engine. Utang yang sengaja diambil ada tiga: 17 MB C yang di-vendor dan harus diperbarui lewat gate §3; cakupan grammar yang lemah untuk MySQL dan Trino, yang ditutup lexer untuk warna tetapi tidak untuk struktur; dan biaya gambar baris berwarna yang belum punya jawaban selain eskalasi mahal. Temuan terbesar pemeriksaan ini bukan milik 4B: pemindai yang menjadi satu-satunya jawaban "di mana statement berakhir" belum mengenal MySQL, dan karena `walk` akan dipakai bersama engine dan editor, perbaikan W3-T0 langsung berlaku untuk keduanya.

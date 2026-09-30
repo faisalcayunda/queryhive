@@ -1,6 +1,6 @@
 # Rencana pengembangan: performa, desain, dan fitur untuk eksekusi orkestrator
 
-- **Status:** rencana eksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..93c864b`, 30 Sep 2026); berikutnya W3. Rincian di `PROGRESS.md` §"Run perf-parity".
+- **Status:** rencana eksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan, lalu W3. Rincian di `PROGRESS.md` §"Run perf-parity".
 - **Pasangan:** `docs/architecture/prd-performance-and-parity.md` (PRD: FR, NFR, dan log keputusan O-* dan P-*). Isi teknis setiap fase performa ada di `docs/architecture/performance-plan.md`. Dokumen ini tidak mengulanginya dan hanya menyebut tugas, berkas, gate, dan urutan.
 - **Penomoran fase** mengikuti `performance-plan.md` versi final:
   - 0 pengukuran;
@@ -76,7 +76,7 @@ Aturan yang selalu ditulis di brief:
 ### 0.5 Baseline visual
 
 - **Perekaman awal.** Baseline direkam di W1-T3 dari commit P dengan `QH_RECORD_BASELINES=1`.
-- **Rekam ulang** hanya untuk scene yang terdaftar sebagai perubahan V-1…V-11 di PRD §6.5, dan hanya oleh tugas pemilik perubahan itu. Syaratnya:
+- **Rekam ulang** hanya untuk scene yang terdaftar sebagai perubahan V-1…V-12 di PRD §6.5, dan hanya oleh tugas pemilik perubahan itu. Syaratnya:
   - dilakukan dalam commit sendiri, dengan subjek `test(visual): re-record <scene> for <V-n>`;
   - ui-ux-designer dan a11y-architect memberi verdict approved.
 - **Scene di luar daftar** yang berubah dianggap gagal gate, bukan alasan untuk merekam ulang.
@@ -96,17 +96,18 @@ Orkestrator menyimpan ledger di scratchpad sesi (bukan di repo). Isinya:
 | Nama | Perintah | Kapan dijalankan |
 |---|---|---|
 | G-RUST | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` | setiap tugas Rust |
-| G-DENY | `cargo deny check licenses` | dependensi berubah, dan setiap gate gelombang |
+| G-DENY | `cargo deny check licenses`. Sejak W13-T8a ditambah `cargo deny --manifest-path helpers/analytics/Cargo.toml check licenses --config deny.toml`. | dependensi berubah, dan setiap gate gelombang |
 | G-FFI | `./app/build-ffi.sh`, lalu `app/Generated/` ikut di-commit, lalu `cd app && swift test --filter RustEngineTests` | permukaan UniFFI atau daftar perintah berubah |
 | G-SWIFT | `cd app && swift build && swift test` | setiap tugas Swift |
 | G-VIS | `cd app && swift test --filter VisualParityTests` | setiap tugas yang menyentuh view |
 | G-GOLDEN | `cargo build --bin queryhive-engine && /usr/bin/python3 tools/golden/live_cases.py` | container hidup. Setiap selisih harus terklasifikasi di `docs/golden-deltas.md`, dan selisih baru dianggap regresi. |
 | G-LIVE | tes live di crate yang disentuh, dengan penjaga `QH_TEST_*` yang ada di crate itu: `QH_TEST_POSTGRES=1 cargo test -p qh-ffi --test real_server`, `QH_TEST_TRINO=1 cargo test -p qh-driver-trino`, `deploy/dev/qh-sshd-run.sh && QH_TEST_SSH=1 cargo test -p qh-tunnel`, `QH_TEST_KEYCHAIN=1 cargo test -p qh-credentials` | tugas yang menyentuh driver, tunnel, atau Keychain |
 | G-APP | `./app/build.sh && app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot "$SCRATCH/smoke.png" --scene done` | gate gelombang, dan tugas yang menyentuh `app/build.sh`, `Package.swift`, atau resource |
-| G-BENCH(a) | `python3 deploy/dev/bench_app.py --axis <a> --label <fase>-<yyyymmdd> --repeat <n>`, lalu `python3 deploy/dev/bench_fetch.py --report-only` | tugas bench (eksklusif) |
+| G-BENCH(a) | `python3 deploy/dev/bench_app.py --axis <a> --label <fase>-<yyyymmdd> --repeat <n>`, lalu `python3 deploy/dev/bench_fetch.py --report-only`. Untuk sumbu 3, rekaman mencatat `spilled_bytes` di samping memori (R-29), supaya hasil yang tumpah atau tidak tidak dibaca sebagai regresi. | tugas bench (eksklusif) |
 | G-BENCHQ | subset cepat `--bench ttfr-pg,scroll-1m,type-10k` dengan n = 5, dibanding rekaman gelombang sebelumnya | gate W9–W13 (NFR-P9) |
 | G-LEAK | `MallocStackLogging=1 leaks --atExit -- app/.build/debug/QueryHive --bench tabs-100`, lalu `store_stats().stores == 0` dan `spilled_bytes == 0` di akhir `tabs-100` (berkas spill di-unlink saat dibuat, jadi pemeriksaan direktori spill hampa) | Fase 6, dan final |
-| **G-HEAVY** | G-RUST + G-DENY + G-FFI + G-SWIFT + G-VIS + G-GOLDEN + G-APP | penutupan setiap gelombang |
+| G-ANALYTICS | `cargo test --manifest-path helpers/analytics/Cargo.toml && cargo build --release --manifest-path helpers/analytics/Cargo.toml && cargo deny --manifest-path helpers/analytics/Cargo.toml check licenses --config deny.toml`, ditambah `cargo tree --manifest-path helpers/analytics/Cargo.toml -e normal` yang tidak boleh memuat `reqwest`, `hyper`, `h2`, atau `rustls`. Ukuran helper stripped dan terkompresi dicatat. | W13-T8a, W13-T8b, gate W13, dan W14 |
+| **G-HEAVY** | G-RUST + G-DENY + G-FFI + G-SWIFT + G-VIS + G-GOLDEN + G-APP. Untuk W13 dan W14 saja, ditambah G-ANALYTICS. | penutupan setiap gelombang |
 
 ## 2. Lingkungan (W0-T2)
 
@@ -146,8 +147,8 @@ Fakta yang sudah diverifikasi orkestrator:
 | W0 | Git, lingkungan, gate awal dan golden live | — | 3 | gate berat hijau di commit P, container sehat |
 | W1 | **Fase 0**: pengukuran, harness, baseline visual | W0 | 10 | setiap sumbu punya angka QueryHive atau alasan tertulis; baseline ter-commit; profil 0.1 tercatat |
 | W2 | **Fase 1** dan **Fase 4A**, plus blueprint Fase 2, 4B, dan 6 | W1 | 9 | gate standar Fase 1 dan 4A (fungsional); angka dicatat |
-| W3 | **Fase 2** dan **Fase 4B-core**, plus blueprint Fase 5 | W2 | 6 | tes kebocoran state, golden tidak berubah, verdict architect-reviewer |
-| W4 | **Fase 3** (Batch 7), **Fase 4B-integrasi**, **Fase 6-core** | W3 | 8 | paritas lexer 100%, tes perilaku Batch 7, tes enkripsi spill |
+| W3 | **W3-T0** (Safe Mode MySQL), **Fase 2**, dan **Fase 4B-core**, plus blueprint Fase 5 | W2 | 7 | tes kebocoran state, golden tidak berubah, tes Safe Mode MySQL, G4 (refaktor `scan.rs`), verdict architect-reviewer |
+| W4 | **Fase 3** (Batch 7), **Fase 4B-integrasi**, **Fase 6-core** | W3 | 8 | G7 dan G8 (penerapan dan palet editor), V-12, tes perilaku Batch 7, tes enkripsi spill |
 | W5 | **Fase 5** (grid), dan **Fase 6-engine** di Rust | W4 | 5 | paritas visual grid, daftar paritas fitur, tes AX |
 | W6 | **Fase 6-Swift** (integrasi data plane) | W5 | 5 | tes diferensial, G-LEAK, paritas terhadap baseline Fase 5 |
 | W7 | **Fase 7** (plafon ingest, opsi bersyarat) | W6 | 7 | golden dan `type_zoo` live identik |
@@ -156,10 +157,10 @@ Fakta yang sudah diverifikasi orkestrator:
 | W10 | Desain grid dan editor di atas komponen baru | W9 | 10 | G-HEAVY, G-BENCHQ |
 | W11 | Metadata, SSH, JWT dan CA, MCP, autocomplete | W10 | 9 | G-HEAVY, G-LIVE (SSH, TLS) |
 | W12 | Formatter, berkas `.sql`, script runner, impor, notifikasi | W11 | 9 | G-HEAVY |
-| W13 | Paginasi, rencana query, aktivitas server, audit, lokalisasi | W12 | 10 | G-HEAVY |
-| W14 | Final: gate penuh, benchmark, paritas, dokumen, merge, laporan | W13 | 6 | kriteria rilis PRD §9 |
+| W13 | Paginasi, rencana query, aktivitas server, audit, helper analitik (mesin), lokalisasi | W12 | 13 | G-HEAVY, G-ANALYTICS |
+| W14 | Final: gate penuh, benchmark, paritas, dokumen, panduan agen, merge, laporan | W13 | 7 | kriteria rilis PRD §9 |
 
-**Total: sekitar 112 tugas**, sekitar 59 di antaranya implementasi. Rinciannya di §10.
+**Total: sekitar 117 tugas**, sekitar 63 di antaranya implementasi. Rinciannya di §10.
 
 ## 4. Jalur arsitektur dan ADR
 
@@ -168,8 +169,8 @@ Fakta yang sudah diverifikasi orkestrator:
 | Blueprint | Ditulis di | Untuk | Isi wajib |
 |---|---|---|---|
 | `fase-2-engine-host.md` | W2-A1 | W3-T1 | Bentuk UniFFI `EngineHost`. Pool 2+1 (O-7). Semantik reset. Operasi panjang di luar pool (P-05). Tunnel per kunci. Handle SQLite. Warm-up. Hemat RTT. Tes reset. |
-| `fase-4b-editor-analysis.md` | W2-A2 | W3-T2, W4-T2 | API `EditorDocument`. Checkpoint lexer. Aturan EOF. Pemetaan UTF-16. Penjaga IME. Hook rotor (FR-ED-09). Daftar yang dihapus. |
-| `fase-6-data-plane.md` | W2-A3, disegarkan di W6-A1 | W4-T3, W5-T2, W6-T1 | Codec per chunk. Spill terenkripsi (NFR-S3). `ResultHandle` dan generation. `set_view`. `StoreRows`. "Off" Batch 7 dengan dua store per tab. |
+| `fase-4b-editor-analysis.md` | W2-A2, direvisi 30 Sep 2026 (O-14) | W3-T0, W3-T2, W4-T2 | Tree-sitter per statement di `qh-editor` dan `qh-sql-grammar` (vendor). `walk` dan `lex` di `qh-sql`. Atribut sementara dan pemilik kunci sementara. API `EditorDocument`. Penjaga IME. Hook rotor (FR-ED-09). V-12. W3-T0 (Safe Mode MySQL). Daftar yang dihapus. |
+| `fase-6-data-plane.md` | W2-A3, direvisi 30 Sep 2026 (O-15, O-18), disegarkan di W6-A1 | W4-T3, W5-T2, W6-T1, W7-T1, W13-T8a–c | Store Arrow per chunk (`qh-columnar`). Spill terenkripsi (NFR-S3). `ResultHandle` dan `StoreId`. `set_view`. `StoreRows`. "Off" Batch 7 dengan dua store per tab. Helper analitik (§14). |
 | `fase-5-grid.md` | W3-A1 | W5-T1 | Seam `ResultRows`. Tabel dan row view. Header. Cache. Model kursor sel dan elemen AX (P-24). Daftar paritas. |
 | `w9-shell-and-a11y.md` | W9-A1 | W9 | Rencana pemecahan `AppModel`. Peta menu dan pintasan kedua skema, tanpa konflik. Outline. Shell. Pemetaan 11 pt. Spesifikasi dari ui-ux-designer dan a11y-architect. |
 | `w10-grid-editor-design.md` | W10-A1 | W10 | Kunci kursor. Peek. Tata bahasa staged. Tombol tinjau. Record. Diagnostik. Rotor. |
@@ -183,11 +184,11 @@ Fakta yang sudah diverifikasi orkestrator:
 |---|---|---|
 | 0031 bagian 1, addendum 0010 | Runtime per proses dan cancel sampai server | W2-D |
 | 0031 lengkap, addendum 0016 | `EngineHost`, pool 2+1, reset, operasi panjang di luar pool | W3-D |
-| 0033 | Analisis editor di Rust, tanpa tree-sitter | W4-D |
-| 0037 | Spill terenkripsi dengan kunci efemeral per proses | W4-D |
+| 0033 | Analisis editor dengan tree-sitter per statement di Rust. Isi: D-1 sampai D-21, grammar yang di-vendor dan patch-nya, kebijakan diagnostik, pemilik kunci atribut sementara, V-12, risiko C di dalam proses, dan MSRV. | W4-D |
+| 0037 | Spill terenkripsi (IPC Arrow + AES-256-GCM) dengan kunci efemeral. Satu kunci per proses yang menulis spill, dan kunci tidak pernah menyeberang proses (blueprint Fase 6 §23). | W4-D |
 | 0032 | Grid dengan sel yang digambar (mengamandemen 0003) | W5-D |
-| 0030, amandemen 0004 dan 0008 | Data plane app. Menggantikan 0013. | W6-D |
-| 0034 | View in-memory di Rust, kolasi, divergensi | W6-D |
+| 0030, amandemen 0004, menggantikan 0008 dan 0013 | Data plane app: store Arrow per chunk (`qh-columnar`), `window()` terender, Explain di store (blueprint Fase 6 §23). | W6-D |
+| 0034 | View in-memory di Rust, kolasi, divergensi. DataFusion untuk SQL di helper opsional, bukan untuk view grid. | W6-D |
 | 0035, 0036, amandemen 0028 | Bersyarat, hanya bila diadopsi | W7-T6 |
 | 0038 | Perintah baca baru dan keluaran yang digerbangi setelan (P-06) | W11-D |
 | 0039 | SSH di app, TOFU dengan fingerprint dipatok | W11-D |
@@ -196,17 +197,19 @@ Fakta yang sudah diverifikasi orkestrator:
 | 0042 | Script runner dan result set berganda | W12-D |
 | 0043 | Aktivitas server dan guard cancel | W13-D |
 | 0044 | Paginasi dan cap tunggal | W13-D |
+| 0045 | DataFusion sebagai komponen analitik terpisah yang diunduh saat pertama dipakai (O-15, O-18) | W13-D |
+| Adendum 0007, 0010, 0014 | App tetap tanpa sandbox dan helper dikurung `sandbox-exec` (0007). Runtime tokio helper ber-QoS (0010). Helper tanpa entitlement (0014). | W13-D |
 
 **Pembersihan di akhir setiap gelombang (`Wx-C`).**
 
 - `refactor-cleaner` (sonnet) membuang kode mati, dibatasi ke berkas yang disentuh gelombang itu.
 - `code-simplifier` (sonnet) menyederhanakan area yang sama tanpa mengubah perilaku.
-- Gate: `code-reviewer` (opus) dan G-HEAVY.
+- Gate: G-HEAVY, dan satu reviewer sonnet (risiko rendah, O-17).
 - Commit `refactor(<area>): …`, atau tidak ada commit bila tidak ada perubahan.
 
 ## 5. Tugas per gelombang
 
-**Singkatan reviewer (semuanya opus):**
+**Singkatan reviewer (opus, kecuali tugas berisiko rendah yang memakai satu reviewer sonnet, O-17):**
 
 | Singkatan | Agen |
 |---|---|
@@ -367,7 +370,23 @@ T1, T2, dan T3 berjalan paralel di worktree. A1–A3 berjalan paralel karena han
 
 **Gate W2:** gate standar Fase 1 dan 4A. Angka yang meleset diperiksa PO satu putaran (P-21).
 
-### W3: Fase 2 dan Fase 4B-core
+### W3: Safe Mode MySQL, Fase 2, dan Fase 4B-core
+
+Urutan: W3-T0 dan W3-T1 berjalan paralel (berkas terpisah). W3-T2 langkah 1 (`qh-sql-grammar`) boleh bersamaan dengan W3-T0. Langkah 2 W3-T2 menunggu W3-T0 mendarat, dan W3-T2 menunggu W3-T1 untuk `Cargo.toml` dan `Cargo.lock` (§7).
+
+**W3-T0. Celah Safe Mode MySQL.** Ukuran S–M. Risiko tinggi. Implementer **GP-o**, karena `scan()` menentukan apa yang dikirim ke server dan MCP bersandar penuh padanya untuk MySQL. **Sedang dikerjakan (30 Sep 2026).** Lahir dari verdict AR 4B, dan mendahului W3-T2 langkah 2.
+- Cakupan: NFR-S1, NFR-S6.
+- Masalah (diturunkan dari kode, belum dijalankan): `scan.rs` tidak mengenal escape backslash dan komentar `#` MySQL, `mysql_async` 0.36.2 selalu menyalakan `CLIENT_MULTI_STATEMENTS`, dan jalur teks driver MySQL tidak punya `prepare` yang menolak multi-statement seperti PostgreSQL.
+  - `SELECT '\''; DELETE FROM t; -- '` dibaca `scan()` sebagai satu `SELECT` (`\` lalu `''` dianggap kutip ganda), `classify` memberi `ReadOnly`, dan server menjalankan `DELETE`.
+  - Bentuk kedua: `SELECT 1 # '` + LF + `; DELETE FROM t; -- '`, yaitu komentar `#`.
+  - Komentar eksekusi `/*! … */` berisi kode yang dijalankan MySQL.
+  - MCP memaksa `SafeMode::ReadOnly` dan driver MySQL tidak punya sesi read-only di server, jadi ini melanggar NFR-S6.
+- Arah perbaikan (diputuskan SEC): mode MySQL di pemindai (`\` meng-escape di `'…'` dan `"…"`, `#` komentar baris, isi `/*! … */` dibaca sebagai kode), dan Safe Mode di koneksi MySQL menolak bila **salah satu** pembacaan (standar atau MySQL) tidak `ReadOnly` atau jumlah statement-nya berbeda.
+- Urutan kerja: tes gagal lebih dulu, yaitu kedua contoh di atas (SEC menulis atau meninjaunya) di `crates/qh-sql` dan di `crates/qh-ffi/tests/safe_mode.rs`. Baru sesudah itu perbaikannya.
+- Berkas: `crates/qh-sql/src/{scan.rs,classify.rs}`, tes `crates/qh-sql/tests/`, `crates/qh-ffi/tests/safe_mode.rs`.
+- Gate: SEC, DB, CR.
+- Verifikasi: G-RUST, G-LIVE MySQL (`QH_TEST_MYSQL=1`, di crate yang punya tes itu).
+- Commit: `fix(sql): MySQL backslash escapes and # comments can no longer hide a write from Safe Mode`.
 
 **W3-T1. Fase 2: `EngineHost`, pool, dan TTFR.** Ukuran L. Implementer **GP-o**, karena kebenaran reset, konkurensi pool, dan tunnel bersama adalah bug yang diam.
 - Cakupan: FR-PERF-03, NFR-P1 (S1, S3, S4), NFR-P8.
@@ -392,16 +411,21 @@ T1, T2, dan T3 berjalan paralel di worktree. A1–A3 berjalan paralel karena han
   - 1 `perf(engine): an engine host with a session pool that resets every run`;
   - 2 `perf(engine): capped previews keep their session, warm-up on select, one round trip fewer`.
 
-**W3-T2. Fase 4B-core.** Ukuran M. Implementer **GP-o**, karena semantik regex dan aturan EOF harus direproduksi persis, di atas pemetaan UTF-8 ke UTF-16.
-- Cakupan: FR-PERF-04.
-- Berkas:
-  - `crates/qh-sql/src/editor/` (direktori baru), `crates/qh-sql/src/lib.rs`, `crates/qh-sql/tests/editor_*.rs`, `crates/qh-sql/tests/fixtures/`;
-  - `crates/qh-sql/src/scan.rs` (refaktor: satu fungsi jalan internal dengan callback, keluaran `scan()` identik) dan `crates/qh-sql/tests/scan_refactor.rs` (tes diferensial `scan()` sebelum dan sesudah);
-  - `app/Tests/QueryHiveTests/LexerFixtureExport.swift` (baru; mengekspor span `SQLSyntax` saat `QH_EXPORT_FIXTURES=1`), `app/Tests/QueryHiveTests/UnicodeTableExport.swift` (baru; tabel Unicode, hidup terus sesudah commit B W4-T2).
-- Uji acak berbenih tanpa dependensi baru. `proptest` hanya bila `cargo deny` lulus.
-- Gate: RR, TD, CR, dan **SEC** khusus untuk diff `scan.rs` (`scan()` adalah dasar Safe Mode).
-- Verifikasi: G-RUST (paritas terhadap fixture Swift, `scan_refactor.rs`), G-SWIFT.
-- Commit: `feat(sql): an incremental editor lexer with statement and fold analysis in qh-sql`.
+**W3-T2. Fase 4B-core: `qh-sql-grammar`, `walk`/`lex`, dan `qh-editor`.** Ukuran L (sebelumnya M). Implementer GP-s (O-17). Risikonya ada di batas Safe Mode (`scan.rs`), C di dalam proses, dan konvergensi warna, bukan di semantik regex, dan gate tinggi menjaganya.
+- Cakupan: FR-PERF-04, O-14.
+- Bergantung pada W3-T0. Langkah 1 (`qh-sql-grammar`) boleh berjalan bersamaan dengan W3-T0. Langkah 2 (refaktor `scan.rs`) menunggu W3-T0 mendarat, supaya salinan beku G4 membekukan pemindai yang sudah diperbaiki dan `walk` lahir dengan mode MySQL. `Cargo.toml` dan `Cargo.lock` berurutan dengan W3-T1, tidak paralel (§7).
+- Berkas (blueprint `fase-4b-editor-analysis.md` §11):
+  - `Cargo.toml`, `Cargo.lock`: anggota `crates/qh-sql-grammar` dan `crates/qh-editor`; `tree-sitter = "=0.26.13"`, `tree-sitter-language = "=0.1.7"`, dan `cc = "1.4"` di `[workspace.dependencies]`; `[profile.dev.package.*]` dengan `opt-level = 2` untuk grammar dan runtime;
+  - `crates/qh-sql-grammar/**` (baru): C yang di-vendor, patch scanner PR #361, `PROVENANCE.md`, dan tes kebocoran scanner;
+  - `crates/qh-sql/src/scan.rs` (`walk`, `Visitor`, `EndState`; `scan()` identik), `crates/qh-sql/src/lex.rs` (baru), `crates/qh-sql/src/lib.rs`, dan tes `crates/qh-sql/tests/{scan_refactor.rs,lex.rs}` (baru);
+  - `crates/qh-editor/**` (baru): `text`, `statements`, `view`, `syntax`, `classify`, `keywords`, `paint`, `folds`, `issues`, tes `tests/{golden,incremental,statements,folds}.rs`, `tests/fixtures/**`, dan `examples/editor_bench.rs`.
+  - Tidak ada berkas Swift. `LexerFixtureExport.swift` dan `UnicodeTableExport.swift` tidak dibuat, karena paritas terhadap regex tidak lagi dituntut.
+- Uji acak berbenih (SplitMix64) tanpa dependensi baru.
+- Gate: RR, TD, CR, dan **SEC** di commit 1 (diff `scan.rs` dan seluruh `qh-sql-grammar`: C yang di-vendor, patch scanner, dan `unsafe`). **G-DENY**.
+- Verifikasi: G-RUST (G1 sampai G6), G-DENY, dan G-SWIFT (tidak ada berkas Swift yang berubah, jadi hanya bukti tidak mundur). Angka bench §11 blueprint dicatat di laporan.
+- Commit: dua.
+  - 1 `refactor(sql): a walk engine and a code lexer over scan.rs, and a vendored tree-sitter grammar`. Berisi `qh-sql` (`walk`, `lex`, G4, G5) dan `qh-sql-grammar` (G6), dengan SEC.
+  - 2 `feat(editor): a qh-editor crate with one tree-sitter tree per statement`. Berisi `qh-editor` dan sisanya.
 
 **W3-A1.** Blueprint Fase 5. code-architect · opus, dengan spesifikasi kursor dan AX dari UX dan AX. Pemeriksa AR.
 
@@ -432,46 +456,49 @@ Urutan T2: commit A → W4-T1 → W4-T2b → commit B. Tidak ada tugas lain di a
 - Verifikasi: G-SWIFT, G-VIS (rekam ulang V-1 saja), G-GOLDEN.
 - Commit: `feat(grid): sort and search go to the server first, with one source for the header's sort state`.
 
-**W4-T2. Fase 4B-integrasi.** Ukuran M. Dua commit (D-13, verdict AR `fase-4b-editor-analysis.md`): A menambah FFI dan tes paritas tanpa mengubah perilaku, dan `EditorAnalysis` belum tersambung ke editor; B mengganti jalur dan menghapus regex.
-- Cakupan: FR-PERF-04, FR-ED-09, NFR-P5.
+**W4-T2. Fase 4B-integrasi.** Ukuran M. Dua commit (D-19, blueprint `fase-4b-editor-analysis.md` §12): A menambah FFI dan tes tanpa mengubah perilaku, dan `EditorAnalysis` belum tersambung ke editor; B mengganti jalur dan menghapus regex.
+- Cakupan: FR-PERF-04, FR-ED-09, NFR-P5, V-12.
 - Berkas:
-  - A: `crates/qh-ffi/src/editor.rs` (baru), `crates/qh-ffi/src/lib.rs` (satu baris `mod`), `app/Generated/`, `Support/EditorAnalysis.swift` (baru), tes baru `EditorLexerParityTests.swift` (L4 dan L5) dan `EditorAnalysisTests.swift`;
-  - B: `Views/SQLEditor.swift`, `Views/SQLSyntax.swift`, `Support/SQLFolding.swift`, tes `EditorFindAndFoldingTests.swift` (ubah kecil), `EditorRotorTests.swift` (baru), `LexerFixtureExport.swift` (dihapus; `UnicodeTableExport.swift` tetap), dan `EditorLexerParityTests.swift` (dipangkas);
+  - A: `crates/qh-ffi/Cargo.toml` (`qh-editor`), `crates/qh-ffi/src/editor.rs` (baru), `crates/qh-ffi/src/lib.rs` (satu baris `mod`), `app/Generated/`, `Support/EditorAnalysis.swift` (baru), tes baru `EditorAnalysisTests.swift` (G7, pada `SQLTextView` headless), dan `THIRD-PARTY-NOTICES.md` (baru: bagian runtime tree-sitter, header UTF ICU, dan grammar DerekStride, karena commit A adalah yang pertama menautkan kode itu ke app; berkas lengkap untuk semua crate dan pemasangannya ke bundel adalah kriteria rilis W14);
+  - B: `Views/SQLEditor.swift`, `Views/SQLSyntax.swift`, `Support/SQLFolding.swift`, `Support/PerfSignposts.swift` (interval `apply`), `Support/BenchMode.swift` (`type-*` menunggu `apply`), tes `EditorFindAndFoldingTests.swift`, `EditorIncrementalTests.swift`, `Bench/EditorBenchTests.swift`, `EditorRotorTests.swift` (baru), `SyntaxPaletteTests.swift` (baru, G8), `__Baselines__/editor-*` (rekam ulang V-12, 16 pasang), dan `app/DESIGN.md` §"Colouring the query";
   - `Models/SQLScanner.swift` **tidak disentuh** (tidak punya bagian statement).
-- Pelaksana: GP-s. Gate: SR, RR, SEC (buffer FFI, semua ekspor throwing), AX (hook rotor), AR, CR.
+- Pelaksana: GP-s. Gate: SR, RR, SEC (buffer FFI, validasi hasil, semua ekspor throwing), AX (hook rotor), UX (V-12 dan perbaikan kontras Nord), AR, CR.
 - Verifikasi:
-  - G-RUST, G-FFI, G-SWIFT;
-  - tes Swift yang membandingkan span lewat FFI dan span regex atas korpus (L4, L5). Tes ini harus lulus **sebelum** regex dihapus, jadi hasilnya masuk laporan commit A;
-  - G-VIS (editor);
-  - `--bench type-10k` ≤ 4 ms dan `type-2m` ≤ 8 ms.
+  - A: G-RUST, G-DENY, G-FFI, G-SWIFT (termasuk G7), G-VIS (tidak berubah). G7 harus hijau di commit A, sebelum jalur regex dihapus;
+  - B: G-RUST, G-FFI, G-SWIFT, G-VIS (hanya scene editor yang berubah, sebagai V-12);
+  - `--bench type-10k` ≤ 4 ms dan `type-2m` ≤ 8 ms p99 main untuk interval `keystroke` **dan** interval `apply`. `type-coloured-195k` dan bench auto-uppercase di `type-2m` dicatat.
 - Commit: dua, masing-masing dengan gate:
-  - A `feat(editor): rust analysis behind a parity test`;
-  - B `perf(editor): analysis moves to Rust, colouring and folding reach 2M characters`.
+  - A `feat(editor): tree-sitter analysis behind the FFI, not wired to the editor yet`;
+  - B `perf(editor): tree-sitter colours and folds, applied as temporary attributes, reach 2M characters`.
 
 **W4-T2b. Satu pemecah statement untuk editor dan Run.** Ukuran S. Wajib (verdict AR `fase-4b-editor-analysis.md` §15.1): tanpa tugas ini, sesudah commit B band dan run mark memakai `scan.rs` sementara Run masih memakai pemindai Swift, sehingga `select "a;b"` tampil satu statement tetapi Run mengirim `select "a`.
 - Berkas: `Models/QueryTab.swift` (hanya isi dan komentar doc `sqlStatements(in:)`, dengan signature tetap dan `sqlStatement(in:atUTF16Offset:)` tidak diubah), `app/Tests/QueryHiveTests/StatementSplitTests.swift` (baru).
-- Isi: badan `sqlStatements(in:)` diganti pemecahan berbasis `scan.rs` lewat FFI commit A. Tes invarian `statementRanges == sqlStatements`.
+- Isi: badan `sqlStatements(in:)` diganti pemecahan berbasis `scan.rs` lewat FFI commit A, `sql_statement_ranges(sql, dialect)` (D-20). Ia meneruskan dialek koneksi tab bila diketahui, selain itu `.generic`. Tes invarian `statementRanges == sqlStatements`, dan `StatementSplitTests` memuat satu kasus MySQL dari W3-T0.
 - Urutan: sesudah commit A dan W4-T1, sebelum commit B W4-T2.
 - Pelaksana: GP-s. Gate: SR, DB, CR.
 - Verifikasi: G-SWIFT, G-VIS (tidak ada piksel berubah).
 - Commit: `refactor(editor): one statement splitter for the editor and Run`.
 
-**W4-T3. Fase 6-core: codec, view, dan spill terenkripsi.** Ukuran L.
-- Cakupan: FR-PERF-05, NFR-S3.
-- Berkas:
-  - `crates/qh-result-store/src/{codec.rs,store.rs,view.rs (baru),spill.rs (baru),registry.rs (baru),collate.rs (baru),render.rs (baru),lib.rs}`, `crates/qh-result-store/Cargo.toml` (`ring`, `rayon`, `unicode-segmentation`), tes `crates/qh-result-store/tests/{spill.rs,window.rs,view.rs}`;
+**W4-T3. Fase 6-core: store Arrow, view, dan spill terenkripsi.** Ukuran L.
+- Cakupan: FR-PERF-05, NFR-S3, O-15.
+- Berkas (blueprint `fase-6-data-plane.md` §21.1):
+  - `crates/qh-columnar/**` (baru): `encoding`, `builder` (`ChunkBuilder`), `read`, `tagged` (codec bertag dipindah dari `codec.rs`), tes `roundtrip.rs`;
+  - `crates/qh-result-store/src/{chunk.rs,logical.rs,store.rs,view.rs,spill.rs,registry.rs,collate.rs,render.rs,lib.rs}`, `crates/qh-result-store/Cargo.toml` (`qh-columnar`, `qh-rt`, `arrow-*`, `ring`, `rayon`, `unicode-segmentation`, dan lainnya), tes `crates/qh-result-store/tests/{spill.rs,window.rs,view.rs,logical.rs}`;
+  - `crates/qh-result-store/src/codec.rs` **dihapus**;
+  - `crates/qh-core/src/render.rs` (`write_text` dan hex tanpa `format!` per byte; keluaran tidak berubah);
   - `crates/qh-rt/src/lib.rs` (pool rayon ber-QoS), `crates/qh-rt/Cargo.toml`;
   - `Cargo.toml`, `Cargo.lock`.
-- Pelaksana: GP-s. Gate: RR, SEC (nonce, AAD, umur kunci, `0600`, sapuan), TD, SF (disk penuh), CR.
+- Pelaksana: GP-s. Gate: RR, SEC (nonce, AAD, umur kunci, `0600`, sapuan), TD, SF (disk penuh, rekaman rusak), AR (verdict baru), CR.
 - Verifikasi:
-  - G-RUST, G-DENY;
+  - G-RUST, G-DENY, **G-GOLDEN** (keluaran `render.rs` tidak berubah);
   - tes spill: teks biasa tidak ada di berkas, kunci salah gagal, manipulasi gagal, mode berkas `0600`, sapuan yatim;
-  - tes view dan window.
+  - tes view, window, round trip, dan skema logis (`tests/logical.rs`);
+  - `cargo test -p qh-result-store -- --ignored bench_*` untuk angka lokal (dicatat, bukan gate). Target lokal: jendela 128 × 30 bertipe p99 ≤ 250 µs di sisi Rust.
 - **Perbaikan wajib** (R-15, verdict AR `fase-6-data-plane.md`):
-  - `Unknown` bentuk 2 (`raw`) lolos round-trip codec: hari ini `codec.rs` men-decode-nya menjadi `text` lossy dengan `raw: None`, sehingga teks sel berubah senyap dari hex;
+  - `Unknown` bentuk 2 (`raw`) lolos round-trip (B-5): hari ini `codec.rs` men-decode-nya menjadi `text` lossy dengan `raw: None`, sehingga teks sel berubah senyap dari hex. Perbaikannya di `qh-columnar/tagged.rs`;
   - sapuan spill (direktori `0700`, tanpa mengikuti symlink) yang hari ini tidak ada;
   - penimpaan berkas spill: `create(true).truncate(true)` dengan penghitung per store membuat dua store dalam satu proses menimpa berkas yang sama, jadi berkas dibuat `create_new` (`0600`) lalu di-unlink sebelum byte pertama ditulis.
-- Commit: `feat(store): a typed columnar codec, a rayon view, and spill encrypted with a per-process key`.
+- Commit: `feat(store): Arrow chunks with a lossless Value mapping, a rayon view, and spill encrypted with a per-process key`.
 
 **W4-T4. Fixture diferensial sort, filter, dan search.** Ukuran S.
 - Berkas: `app/Tests/QueryHiveTests/SortFixtureExport.swift` (baru), `crates/qh-result-store/tests/{differential.rs,fixtures/}`.
@@ -481,7 +508,7 @@ Urutan T2: commit A → W4-T1 → W4-T2b → commit B. Tidak ada tugas lain di a
 
 **W4-T5.** Sesi bench: sumbu 5, sort sekunder, dan verdict PO.
 
-**W4-D.** ADR 0033 dan 0037.
+**W4-D.** ADR 0033 (isi di §4) dan 0037.
 
 **W4-C.** Pembersihan.
 
@@ -504,7 +531,7 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
   - 5a `refactor(grid): every reader of rows goes through a ResultRows seam`;
   - 5b `perf(grid): an NSTableView that draws its cells, and the SwiftUI grid is gone`.
 
-**W5-T2. Fase 6-engine.** Ukuran L. Implementer **GP-o**, karena menyangkut umur handle, generation, dan panic lintas FFI.
+**W5-T2. Fase 6-engine.** Ukuran L. Implementer GP-s (O-17). Umur handle, `StoreId`, dan panic lintas FFI dijaga gate RR, SEC, TD, SF, dan AR.
 - Cakupan: FR-PERF-05.
 - Berkas: `crates/qh-ffi/src/{host.rs,store_api.rs (baru),commands.rs (`RESULT_SINK=store`),events.rs,uniffi_api.rs,lib.rs}`, `crates/qh-ffi/Cargo.toml`, `crates/qh-ffi/examples/bench_ffi.rs` (kasus `window`), `crates/qh-ffi/tests/store_sink.rs` (baru), `Cargo.lock` (hanya tepi `qh-ffi → qh-result-store`), `app/Generated/`, `app/Tests/QueryHiveTests/ResultHandleSmokeTests.swift` (baru).
 - Gate: RR, SEC, TD, SF, AR, CR.
@@ -556,7 +583,7 @@ Urutan:
 
 | ID | Isi | Berkas | Pelaksana | Gate | Verifikasi | Commit |
 |---|---|---|---|---|---|---|
-| W7-T1 | 7.1 builder tanpa alokasi | `crates/qh-core` (`ColumnarBuilder`), `crates/qh-driver` (`Cursor::next_into`), tiga driver, ingest `qh-result-store` | GP-s | RR, CR, PO | G-RUST, G-GOLDEN (`type_zoo` live identik), G-BENCH(2) A/B | `perf(drivers): rows go straight into the store's columns` |
+| W7-T1 | 7.1 builder tanpa alokasi: driver menulis array Arrow langsung lewat `qh_columnar::ChunkBuilder` | `crates/qh-driver/src/lib.rs` dan `Cargo.toml` (`Cursor::next_chunk`), `crates/qh-driver-postgres/src/{normalize.rs,lib.rs}`, `crates/qh-driver-mysql/src/lib.rs` (dan modul decode-nya), `crates/qh-driver-trino/src/{lib.rs,decode.rs}`, `crates/qh-columnar/src/builder.rs` (append yang dibutuhkan parser driver), `crates/qh-ffi/src/commands.rs` (`StoreTarget`), `crates/qh-driver-{postgres,mysql,trino}/tests/chunk_parity.rs` (baru). `crates/qh-core` (`ColumnarBuilder`) tidak dibangun. | GP-s | RR, CR, PO | G-RUST, G-GOLDEN (`type_zoo` live identik), G-LIVE, G-BENCH(2) A/B | `perf(drivers): rows go straight into the store's columns` |
 | W7-T2 | 7.2 PostgreSQL `COPY … TO STDOUT` | `crates/qh-driver-postgres`, pemeriksaan satu SELECT di `crates/qh-sql`, jalur ekspor, `memchr` langsung | GP-s | RR, DB, CR | sama; dipakai bila ≥ 1,3× | `perf(postgres): COPY TO STDOUT for exports and large previews` |
 | W7-T3 | 7.3 hasil biner (**bersyarat**: profil menunjukkan output teks server dominan) | driver PostgreSQL | GP-s | RR, DB | golden `type_zoo` live | `perf(postgres): binary results where every column has a decoder` |
 | W7-T4 | 7.4 spooling Trino dan JSON SIMD (**bersyarat**: parse JSON > 50% profil setelah 7.1) | `crates/qh-driver-trino` | GP-s | RR, CR | G-LIVE Trino, G-BENCH(2) | `perf(trino): …` |
@@ -605,7 +632,7 @@ T3 boleh masih berjalan di batch 3 dan 4, selama jumlah implementer tetap ≤ 3.
 | W9-T5 | Banner galat inline dan lembar konfirmasi | FR-RUN-06, 07; V-4 | `Views/ResultGrid.swift` (badan galat), `Views/RunConfirmationSheet.swift`, `Models/RunConfirmation.swift` | GP-s | SR, UX, AX | G-SWIFT (`RunConfirmationTests`: Esc membatalkan, tanpa Return default), G-VIS | S | `feat(app): errors you can select and copy, and a write confirmation that Return cannot approve by accident` |
 | W9-T6 | Open Quickly | FR-UI-09; V-6 | `Views/OpenQuickly.swift`, `Models/QuickSearch.swift` | GP-s | SR, AX | G-SWIFT (`QuickSearchTests`) | S | `feat(app): Open Quickly keeps the highlight in view and filters by scope` |
 | W9-T7 | Settings: judul pane, `HelpHint` yang terjangkau, ukuran font editor dan grid | FR-UI-10, FR-ED-07 (setelan), FR-UI-06 (font grid); V-6 | `Views/SettingsView.swift`, `Support/Theme.swift` (`HelpHint`), `Support/EditorPreferences.swift`, `Support/DataPreferences.swift` | GP-s | SR, UX, AX | G-SWIFT (`EditorPreferencesTests`, `DataPreferencesTests`), G-VIS | M | `feat(settings): panes title the window, help is reachable by keyboard, and fonts have a size` |
-| W9-T8 | Shell native. Implementer **GP-o**, karena struktur jendela berubah dan harness snapshot harus tetap menangkapnya. | FR-UI-08; V-7 | `Views/RootView.swift`, `Views/Workspace.swift` (toolbar), `App.swift` (jendela, ukuran minimum), `Views/ContextCascade.swift`, `Support/Snapshot.swift` | GP-o | SR, UX, AX, AR, CR | G-SWIFT, G-VIS (V-7; scene lain tetap), semua scene `--snapshot` merender, ukuran minimum diukur dan dicatat | L | `feat(app): a native split view and toolbar around the same surfaces` |
+| W9-T8 | Shell native. Implementer GP-s (O-17); struktur jendela berubah dan harness snapshot harus tetap menangkapnya, dijaga gate AR dan CR. | FR-UI-08; V-7 | `Views/RootView.swift`, `Views/Workspace.swift` (toolbar), `App.swift` (jendela, ukuran minimum), `Views/ContextCascade.swift`, `Support/Snapshot.swift` | GP-s | SR, UX, AX, AR, CR | G-SWIFT, G-VIS (V-7; scene lain tetap), semua scene `--snapshot` merender, ukuran minimum diukur dan dicatat | L | `feat(app): a native split view and toolbar around the same surfaces` |
 | W9-T9 | Lantai 11 pt, serial dan terakhir | FR-UI-06; V-8 | semua view yang punya pemanggilan `.ui`/`.code` di bawah 11 | GP-s | UX, AX, SR | G-VIS (V-8), tes kontras | M | `fix(a11y): nothing a person must read is smaller than 11pt` |
 
 - **W9-D.** Bagian shell, pintasan, dan Appearance di `app/DESIGN.md`, plus `PROGRESS.md`.
@@ -631,8 +658,8 @@ Maksimal 3 lane berjalan bersamaan.
 | W10-T3 | Insert/delete baris, tombol tinjau ⌘S (responder chain, P-16), undo | FR-GRID-10, 11; V-9 | `Views/ResultGrid.swift` (footer), `Views/ResultGridTable.swift` (menu), `Models/{CellEdits,WritePlan}.swift`, `Models/AppModel+Edit.swift`, `App.swift` (Save) | GP-s | SR, DB, UX, AX | G-SWIFT (`WritePlanTests`, `CellEditUndoTests`), G-LIVE PostgreSQL untuk `apply_changes` | M | `feat(grid): add and delete rows, review them with ⌘S, and undo with ⌘Z` |
 | W10-T4 | Salin sebagai INSERT, drag keluar sebagai CSV | FR-GRID-12, 15 | `Models/CellSelection.swift` (`GridClipboard`), `Models/InsertStatements.swift`, `Views/ResultGridTable.swift` (sumber drag) | GP-s | DB, SR | G-SWIFT (`InsertStatementsTests`, uji pasteboard) | M | `feat(grid): copy a selection as INSERT statements, or drag it out as a CSV file` |
 | W10-T5 | Mode Record | FR-GRID-13; V-11 | `Views/RecordPanel.swift` (baru), `Views/CellValueViewer.swift` (sakelar mode) | GP-s | SR, UX, AX | G-SWIFT, scene baru | M | `feat(grid): a record view that reads a whole row as fields` |
-| W10-T6 | Diagnostik editor, rotor, dan readout. Posisi galat hanya dikirim bila app memasang setelan (P-06). | FR-ED-06; V-10 | `crates/qh-core/src/error.rs`, pemetaan galat di tiga driver, `crates/qh-ffi/src/events.rs`, `Views/SQLEditor.swift`, `Support/EditorDiagnostics.swift` (baru) | GP-s | RR, SR, AX, UX, CR | G-RUST, G-SWIFT, G-GOLDEN (tidak berubah) | M | `feat(editor): server errors and unclosed quotes are underlined, listed in a rotor, and read out` |
-| W10-T7 | Ukuran font editor (⌘+/⌘−/⌘0), pasangan kurung, gutter recess | FR-ED-07, 08, 10; V-10 | `Views/SQLEditor.swift`, `Support/EditorPreferences.swift` | GP-s | SR, UX, AX | G-VIS, G-BENCHQ (ketikan) | M | `feat(editor): a font size you can change, matching brackets, and a gutter that recesses on light canvases` |
+| W10-T6 | Diagnostik editor, rotor, dan readout: masalah leksikal dari `scan.rs` dan posisi galat dari server. Garis bawah lewat atribut sementara `.underlineStyle`/`.underlineColor`. Dialek koneksi tab diteruskan ke `EditorDocument::new`. Galat sintaks dari pohon tree-sitter mati secara default (P-28). Posisi galat server hanya dikirim bila app memasang setelan (P-06). | FR-ED-06; V-10 | `crates/qh-core/src/error.rs`, pemetaan galat di tiga driver, `crates/qh-ffi/src/events.rs`, `Support/EditorAnalysis.swift`, `Views/SQLEditor.swift`, `Support/EditorDiagnostics.swift` (baru) | GP-s | RR, SR, AX, UX, CR | G-RUST, G-SWIFT, G-GOLDEN (tidak berubah) | M | `feat(editor): server errors and unclosed quotes are underlined, listed in a rotor, and read out` |
+| W10-T7 | Ukuran font editor (⌘+/⌘−/⌘0), pasangan kurung (`bracket_pair` di Rust, digambar di `drawBackground`), gutter recess | FR-ED-07, 08, 10; V-10 | `crates/qh-editor/src/brackets.rs` (baru), `crates/qh-ffi/src/editor.rs`, `app/Generated/`, `Support/EditorAnalysis.swift`, `Views/SQLEditor.swift`, `Support/EditorPreferences.swift` | GP-s | RR, SR, UX, AX | G-RUST, G-FFI, G-VIS, G-BENCHQ (ketikan) | M | `feat(editor): a font size you can change, matching brackets, and a gutter that recesses on light canvases` |
 
 **W10-D** dan **W10-C**, lalu gate W10: G-HEAVY dan G-BENCHQ.
 
@@ -649,11 +676,11 @@ Maksimal 3 lane berjalan bersamaan.
 | ID | Isi | Cakupan | Berkas | Pelaksana | Gate | Verifikasi | Ukuran | Commit |
 |---|---|---|---|---|---|---|---|---|
 | W11-T1 | Perintah `columns`, `ddl`, `execution_log`, dan jenis objek di `tables` (lewat setelan) | FR-TREE-01…03, FR-SAFE-02 (engine) | `crates/qh-ffi/src/metadata.rs` (baru), empat daftar invariant #11 (`lib.rs`, `uniffi_api.rs`, `Support/RustEngine.swift`), `commands.rs`, `crates/qh-driver/src/lib.rs`, tiga driver, `app/Generated/`, `tests/golden.rs`, `tests/safe_mode.rs` | GP-s | RR, DB, SF, CR | G-RUST, G-FFI, G-SWIFT, G-GOLDEN (kasus lama tidak berubah; kasus `_live` baru direkam dengan `--record`) | L | `feat(engine): read-only columns, DDL and object kinds, plus a reader for the execution log` |
-| W11-T2 | SSH (alias `~/.ssh/config`, TOFU dengan fingerprint dipatok, known_hosts app), JWT Trino, CA untuk PostgreSQL dan Trino. Implementer **GP-o**, karena ini keputusan kepercayaan. | FR-CON-01…03, 07, 08 (engine) | `crates/qh-tunnel/src/{ssh_config.rs (baru),known_hosts.rs,lib.rs}`, `crates/qh-ffi/src/{tunnel.rs,config.rs,events.rs}`, `crates/qh-driver/src/lib.rs` (`ConnectionConfig`, `Debug` tersensor), `crates/qh-driver-trino/src/lib.rs`, `crates/qh-driver-postgres/src/{tls.rs,lib.rs}` | GP-o | SEC, RR, SF, AR, CR | G-RUST, G-LIVE (SSH terhadap `qh-sshd-dev`: host asing, terima dengan fingerprint benar dan salah, kunci berubah), tes TLS dengan CA uji | L | `feat(engine): SSH trust on first use pinned to a fingerprint, ~/.ssh/config aliases, Trino JWT and a per-connection CA` |
+| W11-T2 | SSH (alias `~/.ssh/config`, TOFU dengan fingerprint dipatok, known_hosts app), JWT Trino, CA untuk PostgreSQL dan Trino. Implementer GP-s (O-17); ini keputusan kepercayaan, dijaga gate SEC, RR, SF, AR, dan CR. | FR-CON-01…03, 07, 08 (engine) | `crates/qh-tunnel/src/{ssh_config.rs (baru),known_hosts.rs,lib.rs}`, `crates/qh-ffi/src/{tunnel.rs,config.rs,events.rs}`, `crates/qh-driver/src/lib.rs` (`ConnectionConfig`, `Debug` tersensor), `crates/qh-driver-trino/src/lib.rs`, `crates/qh-driver-postgres/src/{tls.rs,lib.rs}` | GP-s | SEC, RR, SF, AR, CR | G-RUST, G-LIVE (SSH terhadap `qh-sshd-dev`: host asing, terima dengan fingerprint benar dan salah, kunci berubah), tes TLS dengan CA uji | L | `feat(engine): SSH trust on first use pinned to a fingerprint, ~/.ssh/config aliases, Trino JWT and a per-connection CA` |
 | W11-T3 | Form koneksi di app, item Keychain, prompt host key, validasi bernama, ⌘↩, Navicat SSH, pemetaan MCP | FR-CON-01…05, 07…09; V-11 | `Views/ConnectionsViews.swift`, `Views/HostKeySheet.swift` (baru), `Models/Connections.swift`, `Support/NavicatImport.swift`, `Models/AppModel+Connections.swift`, `crates/qh-ffi/src/mcp.rs` (pemetaan), `crates/qh-ffi/tests/mcp.rs` | GP-s | SEC, SR, RR, UX, AX | G-SWIFT, G-RUST, G-LIVE (Keychain), CLI end-to-end lewat tunnel: `SSH_HOST=127.0.0.1 SSH_PORT=52222 … queryhive-engine test` | L | `feat(connections): an SSH section with Keychain secrets and a host-key prompt, JWT and CA fields` |
 | W11-T4 | Label jenis objek, anak kolom, dan tab DDL read-only | FR-TREE-01…03; V-11 | `Views/SchemaOutline.swift`, `Models/SchemaTree.swift`, `Models/AppModel+Tree.swift`, `Models/QueryTab.swift` (jenis tab DDL) | GP-s | SR, UX, AX | G-SWIFT, scene baru | M | `feat(tree): views are labelled, tables show their columns, and DDL opens read-only` |
 | W11-T5 | Tool MCP `describe_table` dan `table_ddl` | FR-MCP-01 | `crates/qh-ffi/src/mcp.rs`, `docs/mcp-stability.md`, `crates/qh-ffi/tests/{mcp.rs,mcp_stdio.rs}` | GP-s | SEC, RR | G-RUST (allowlist kosong menolak; `read_only` tetap) | S | `feat(mcp): describe_table and table_ddl, inside the same scope and allowlist` |
-| W11-T6 | Autocomplete dari katalog dengan resolusi alias (tanpa cache kedua) | FR-ED-05 | `crates/qh-sql/src/editor/` (API referensi tabel dan alias), `crates/qh-ffi/src/editor.rs`, `app/Generated/`, `Models/SQLSuggestions.swift`, `Models/AppModel+Completion.swift` | GP-s | RR, SR, CR | G-RUST, G-FFI, G-SWIFT (`SuggestionScopeTests`), G-BENCHQ (ketikan) | M | `feat(editor): column suggestions from the catalog, with aliases resolved` |
+| W11-T6 | Autocomplete dari katalog dengan resolusi alias (tanpa cache kedua) | FR-ED-05 | `crates/qh-editor/src/refs.rs` (API referensi tabel dan alias; menggantikan `crates/qh-sql/src/editor/`), `crates/qh-ffi/src/editor.rs`, `app/Generated/`, `Models/SQLSuggestions.swift`, `Models/AppModel+Completion.swift` | GP-s | RR, SR, CR | G-RUST, G-FFI, G-SWIFT (`SuggestionScopeTests`), G-BENCHQ (ketikan) | M | `feat(editor): column suggestions from the catalog, with aliases resolved` |
 
 **W11-D** (ADR 0038, 0039, 0040) dan **W11-C**, lalu gate W11.
 
@@ -669,7 +696,7 @@ Maksimal 3 lane berjalan bersamaan.
 
 | ID | Isi | Cakupan | Berkas | Pelaksana | Gate | Verifikasi | Ukuran | Commit |
 |---|---|---|---|---|---|---|---|---|
-| W12-T1 | Formatter | FR-ED-01 | `crates/qh-sql/src/format.rs` (baru), `crates/qh-sql/src/lib.rs`, ekspor fungsi di `crates/qh-ffi/src/editor.rs`, `app/Generated/` | GP-s | RR, DB, CR | G-RUST (deretan token non-spasi identik, idempoten, dollar-quote, `:name`, per dialek), G-FFI | M | `feat(sql): a formatter that moves whitespace and nothing else` |
+| W12-T1 | Formatter. Token dari `walk` + `qh_sql::lex` dengan daftar kata klausa sendiri, tanpa pohon tree-sitter (P-10, D-21). | FR-ED-01 | `crates/qh-sql/src/format.rs` (baru), `crates/qh-sql/src/lib.rs`, ekspor fungsi di `crates/qh-ffi/src/editor.rs`, `app/Generated/` | GP-s | RR, DB, CR | G-RUST (deretan token non-spasi identik, idempoten, dollar-quote, `:name`, per dialek), G-FFI | M | `feat(sql): a formatter that moves whitespace and nothing else` |
 | W12-T2 | Format, toggle comment, Save dan Save As, tab terikat berkas, deteksi perubahan dari luar, drop `.sql`, restore | FR-ED-01…04, PR-16 | `Models/QueryTab.swift`, `Models/Session.swift`, `Models/AppModel+Files.swift` (baru), `App.swift`, `Views/SQLEditor.swift`, `Views/Workspace.swift` | GP-s | SR, UX, AX | G-SWIFT (`SessionTests`: restore tanpa menjalankan) | M | `feat(editor): format, toggle comment, and .sql tabs that save back to their file` |
 | W12-T3 | Perintah engine `script` | FR-RUN-01 | `crates/qh-ffi/src/script.rs` (baru), empat daftar invariant #11, `app/Generated/`, `Support/EngineWire.swift`, `tests/golden.rs` (cursor palsu), `tests/safe_mode.rs` | GP-s | RR, DB, SF, SEC, CR | G-RUST, G-FFI, G-SWIFT, G-LIVE PostgreSQL (stop, continue, cancel di dalam statement) | L | `feat(engine): a script command that runs statements one by one with a stop or continue policy` |
 | W12-T4 | UI Run Script, result set per statement, pin, satu entri history | FR-RUN-01…03; V-11 | `Models/QueryTab.swift` (result set berisi handle store), `Views/ResultGrid.swift` (strip tab hasil), `Models/AppModel+Run.swift`, `Views/Panels.swift` | GP-s | SR, UX, AX, SF, AR | G-SWIFT, scene baru, memori tetap di dalam anggaran global | L | `feat(app): Run Script shows each statement's outcome and keeps a result per statement` |
@@ -683,8 +710,10 @@ Maksimal 3 lane berjalan bersamaan.
 **Urutan batch:**
 1. T1, T2, dan T6.
 2. T3 (setelah T1 dan T2) dan T4 (lane FFI, setelah T2, karena keduanya menyentuh berkas driver).
-3. T5.
-4. T7 sendirian.
+3. T5 dan T8a (setelah T4, di lajur Rust sendiri).
+4. T8b (lane FFI, setelah T4 dan T8a).
+5. T8c (setelah T8b).
+6. T7 sendirian, sesudah T8c, supaya string panel Analitik lewat katalog.
 
 **W13-A1.** Blueprint `w13-plan-activity.md` (code-architect · opus). Termasuk verifikasi dukungan `EXPLAIN ANALYZE (FORMAT JSON)` di Trino 483 dalam container. Bila tidak didukung, ANALYZE untuk Trino tetap berupa teks.
 
@@ -696,9 +725,12 @@ Maksimal 3 lane berjalan bersamaan.
 | W13-T4 | Perintah `sessions` dan `session_cancel` dengan guard sendiri (P-12) | FR-SAFE-03 (engine) | `crates/qh-ffi/src/activity.rs` (baru), empat daftar invariant #11, `app/Generated/`, SQL aktivitas di driver, `tests/safe_mode.rs` | GP-s | DB, SEC, RR, SF | G-RUST, G-FFI, G-SWIFT, G-LIVE (cancel pada `pg_sleep` di sesi lain) | M | `feat(engine): list server sessions and cancel one, under Safe Mode` |
 | W13-T5 | Tampilan aktivitas server | FR-SAFE-03; V-11 | `Views/ServerActivity.swift` (baru), `Models/AppModel+Activity.swift` (baru), `Views/SchemaOutline.swift` (menu) | GP-s | SR, UX, AX | G-SWIFT, scene baru | M | `feat(app): a server activity view with cancel` |
 | W13-T6 | Penampil execution log | FR-SAFE-02; V-11 | `Views/ExecutionLogView.swift` (baru), `Views/Panels.swift` (tab Audit), `Models/AppModel+Audit.swift` (baru) | GP-s | SR, UX, AX, SEC | G-SWIFT | S | `feat(safety): read the execution log and whether its chain holds` |
-| W13-T7 | Fondasi lokalisasi (P-20), serial dan terakhir | FR-UI-11 | `app/Package.swift` (`defaultLocalization`), `app/Resources/` (katalog, baru), `app/build.sh` (menyalin atau mengompilasi string ke `Contents/Resources`), `Support/L10n.swift` (baru), string di berkas yang disentuh W9–W13 | GP-s | SR, UX, AX | G-SWIFT, G-VIS tidak berubah, G-APP (bundel memuat string dari katalog) | M | `feat(app): a string catalog, and the strings in the new surfaces go through it` |
+| W13-T8a | Helper analitik `queryhive-analytics`: DataFusion di workspace dan proses terpisah (O-15, O-18). Implementer **GP-o**, karena kripto spill helper, pool anggaran, dan protokol. | FR-ANL-01…04; NFR-S3, S5 | `crates/qh-analytics-proto/**` (baru, anggota workspace utama); `helpers/analytics/**` (baru: `Cargo.toml` dengan `[workspace]` sendiri dan `rust-version = "1.94"`, `Cargo.lock`, `src/{main,server,session,pool,spill,remote_table,files,udf,output}.rs`, `tests/`); `crates/qh-columnar/src/from_arrow.rs` dan tesnya (fitur `from-arrow`); `crates/qh-result-store/src/spill.rs` (`SpillCipher` dan `SpillFile` dibuka `pub`, tag domain `QHD1`); `crates/qh-rt/src/lib.rs` (runtime tokio ber-QoS); `Cargo.toml` (anggota proto, `exclude = ["helpers/analytics"]`), `Cargo.lock` | GP-o | SEC (wajib: §14.7, §14.8, §14.9), RR, SF, AR | G-RUST (workspace utama, tanpa DataFusion), G-DENY (dua workspace), G-ANALYTICS. Ukuran helper stripped dan terkompresi dicatat terhadap blueprint §2.2. | L | `feat(analytics): a separate DataFusion helper that runs SQL over results inside a leased budget and encrypted spill` |
+| W13-T8b | Klien helper di app: spawn di dalam kurungan `sandbox-exec`, sewa anggaran, unduh dan verifikasi, rilis. Implementer **GP-o**, karena umur proses, sewa, dan verifikasi unduhan. | FR-ANL-01, 05; NFR-S5, S7 | `crates/qh-ffi/src/analytics/{mod,client,serve,lease}.rs` dan `profile.sb` (baru), `crates/qh-ffi/src/{analytics_api.rs (baru),host.rs,lib.rs,uniffi_api.rs}`, `crates/qh-ffi/Cargo.toml`, `crates/qh-ffi/tests/analytics_api.rs` (baru), `crates/qh-ffi/examples/bench_ffi.rs` (`sql-*`), `crates/qh-result-store/src/{registry.rs,logical.rs}` (sewa, chunk logis), `Support/AnalyticsComponent.swift` (baru), `App.swift` (`SIGPIPE` diabaikan), `Support/RustEngine.swift`, `Tests/.../{AnalyticsComponentTests,AnalyticsSmokeTests}.swift` (baru), `app/build.sh`, `app/build-dmg.sh`, `app/release.sh`, `app/Generated/` | GP-o | SEC (wajib: §14.2, §14.4, §14.9), RR, SF, SR, AR, CR | G-RUST, G-FFI, G-SWIFT, G-APP, G-ANALYTICS, `./app/release.sh --dry-run`. Throughput pipa (target ≥ 1 GB/s) dan `sql-*` dicatat. | L | `feat(app): fetch, verify and confine the analytics helper, and hand it results chunk by chunk` |
+| W13-T8c | Panel Analitik di Settings: status, unduh, pasang dari berkas, hapus. Sebelum W13-T7. | FR-ANL-05; V-11 | `Views/SettingsView.swift`, `Models/AppModel+Analytics.swift` (baru), `Tests/.../AnalyticsSettingsTests.swift` (baru), scene snapshot baru | GP-s | SR, UX, AX | G-SWIFT, G-VIS (scene baru) | M | `feat(app): an Analytics pane that installs, repairs and removes the optional helper` |
+| W13-T7 | Fondasi lokalisasi (P-20), serial dan terakhir, sesudah W13-T8c | FR-UI-11 | `app/Package.swift` (`defaultLocalization`), `app/Resources/` (katalog, baru), `app/build.sh` (menyalin atau mengompilasi string ke `Contents/Resources`), `Support/L10n.swift` (baru), string di berkas yang disentuh W9–W13 | GP-s | SR, UX, AX | G-SWIFT, G-VIS tidak berubah, G-APP (bundel memuat string dari katalog) | M | `feat(app): a string catalog, and the strings in the new surfaces go through it` |
 
-**W13-D** (ADR 0043, 0044) dan **W13-C**, lalu gate W13.
+**W13-D** (ADR 0043, 0044, 0045, adendum 0007, 0010, 0014) dan **W13-C**, lalu gate W13: G-HEAVY, G-ANALYTICS, dan ambang NFR-P3 untuk SQL yang ditetapkan dari angka `bench_ffi sql-*`.
 
 ### W14: final
 
@@ -708,8 +740,8 @@ Lihat §9.
 
 | Peran | Agen | Model | Dipakai di |
 |---|---|---|---|
-| Implementasi Rust, Swift, dan Python | general-purpose | sonnet. **opus** untuk W3-T1, W3-T2, W5-T1, W5-T2, W6-T1, W9-T8, dan W11-T2 (alasannya di masing-masing tugas) | semua `Tx` implementasi |
-| Tes lebih dulu | tdd-guide | sonnet | W2-T1, W3-T1 |
+| Implementasi Rust, Swift, dan Python | general-purpose | sonnet secara default. **opus** hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b (O-17; alasannya di masing-masing tugas) | semua `Tx` implementasi |
+| Tes lebih dulu | tdd-guide | sonnet | W2-T1, W3-T0, W3-T1 |
 | Rangkaian tes dan fixture | test-engineer | sonnet | W0-T3, W1-T3, W1-T5, W4-T4, W14-T3 |
 | Harness dan sesi bench | performance-engineer | sonnet. **opus** untuk W1-T8 (interpretasi profil) | W1, `Wx` bench |
 | Verdict angka, keputusan Fase 7 dan 8 | performance-optimizer | opus | semua gate bench, W8-T2 |
@@ -722,17 +754,31 @@ Lihat §9.
 | Review umum per fase | code-reviewer | opus | setiap fase performa, pembersihan, W14-T4 |
 | UI | ui-ux-designer | opus | spesifikasi W9–W13, gate UI, rekam ulang V |
 | Aksesibilitas | a11y-architect | opus | spesifikasi W9–W10, gate UI |
-| Keamanan | security-reviewer | opus | FFI, spill, SSH, Keychain, JWT, CA, MCP, guard aktivitas, Safe Mode |
+| Keamanan | security-reviewer | opus | FFI, spill, SSH, Keychain, JWT, CA, MCP, guard aktivitas, Safe Mode (W3-T0, `scan.rs` di W3-T2), helper analitik (W13-T8a dan W13-T8b wajib: unduhan, kurungan, spill helper) |
 | SQL | database-reviewer | opus | reset pool, COPY, metadata, `script`, EXPLAIN, aktivitas, INSERT, formatter, SQL pembungkus Batch 7 |
-| Jalur galat | silent-failure-hunter | opus | cancel, pool, spill, `script`, impor |
+| Jalur galat | silent-failure-hunter | opus | cancel, pool, spill, `script`, impor, helper analitik |
 | Desain tipe | type-design-analyzer | opus | `EngineHost`, `ResultRows`, `EditorDocument`, `ResultHandle` |
 | Galat build | swift-build-resolver, rust-build-resolver | sonnet | §8 |
 | Bug keras dan gate merah | debugger | opus | §8 |
 | ADR | adr-generator | sonnet | `Wx-D` |
-| Dokumen | doc-updater | sonnet | `Wx-D`, W14-T5 |
+| Dokumen | doc-updater | sonnet | `Wx-D`, W14-T5, W14-T7 (skill `writing-for-agents`) |
 | Kode mati | refactor-cleaner | sonnet | `Wx-C` |
 | Penyederhanaan | code-simplifier | sonnet | `Wx-C` |
 | Pencarian untuk menyusun brief | Explore | haiku | orkestrator, sebelum setiap tugas |
+
+### Kebijakan review berjenjang menurut risiko (O-17)
+
+Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko tinggi. Tingkatnya menentukan siapa yang benar-benar dipanggil dan berapa putaran.
+
+| Tingkat | Yang termasuk | Reviewer | Putaran maksimal |
+|---|---|---|---|
+| Tinggi | Tugas berimplementer opus, dan yang menyentuh Safe Mode, kripto dan spill, kepercayaan (SSH, JWT, CA), umur proses atau handle, pool sesi, atau batas FFI | opus, hanya spesialis yang relevan dari kolom Gate (bukan seluruh daftar) | 3 |
+| Sedang | Tugas implementasi lain | satu reviewer, yang paling relevan dari kolom Gate | 2 |
+| Rendah | Dokumen, ADR, tooling, hanya tes, hanya pemindahan kode, dan pembersihan (`Wx-C`) | satu reviewer sonnet, atau cukup gate | 1 |
+
+- Hanya temuan yang **memblokir** memicu satu putaran. Saran dan nit dicatat di laporan tugas, bukan putaran.
+- Implementer sonnet secara default. Opus hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b.
+- Verdict tetap "approved" dengan daftar berkas (§8). Yang berubah adalah jumlah reviewer dan putarannya, bukan bukti verifikasinya.
 
 ## 7. Paralelisme dan kepemilikan berkas
 
@@ -740,12 +786,22 @@ Lihat §9.
 
 | Berkas atau kelompok | Pemilik, berurutan |
 |---|---|
-| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W2-T1 (bila berubah) → W3-T1 → W4-T2 → W5-T2 → W6-T1 → W11-T1 → W11-T6 → W12-T1 → W12-T3 → W13-T4 |
-| `crates/qh-ffi/src/commands.rs` | W2-T1 → W3-T1 → W5-T2 → W11-T1 → W13-T2 |
+| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W2-T1 (bila berubah) → W3-T1 → W4-T2 → W5-T2 → W6-T1 → W10-T7 → W11-T1 → W11-T6 → W12-T1 → W12-T3 → W13-T4 → W13-T8b |
+| `crates/qh-ffi/src/editor.rs` | W4-T2 → W10-T7 → W11-T6 → W12-T1 |
+| `crates/qh-ffi/Cargo.toml` | W4-T2 → W5-T2 → W13-T8b |
+| `crates/qh-ffi/src/commands.rs` | W2-T1 → W3-T1 → W5-T2 → W7-T1 → W11-T1 → W13-T2 |
 | `crates/qh-ffi/src/lib.rs` (baris `mod` dianggap boleh digabung tangan) | ikut lane FFI |
 | Tiga driver | W3-T1 → W7-T1 → W7-T2 dan W7-T4 (PostgreSQL dan Trino, berkas terpisah) → W7-T3 → W10-T6 → W11-T1 → W11-T2 → W13-T2 → W13-T4 |
 | `crates/qh-ffi/src/mcp.rs` | W11-T3 → W11-T5 |
-| `Cargo.toml`, `Cargo.lock` | W4-T3 → W5-T2 (hanya `Cargo.lock`, tepi `qh-ffi → qh-result-store`) → W7-T2 → W7-T5 |
+| `Cargo.toml`, `Cargo.lock` | W3-T1 → W3-T2 (berurutan, tidak paralel) → W4-T3 → W5-T2 (hanya `Cargo.lock`, tepi `qh-ffi → qh-result-store`) → W7-T2 → W7-T5 → W13-T8a |
+| `crates/qh-sql/src/{scan.rs,classify.rs}` | W3-T0 → W3-T2 → W7-T2 (pemeriksaan satu SELECT, bila menyentuh) → W13-T2 (`classify.rs`) |
+| `crates/qh-sql/src/lib.rs` | W3-T2 → W12-T1 |
+| `crates/qh-editor/**` | W3-T2 → W10-T7 (`src/brackets.rs`) → W11-T6 (`src/refs.rs`) |
+| `crates/qh-rt/src/lib.rs` | W2-T1 → W4-T3 → W13-T8a |
+| `crates/qh-columnar/**` | W4-T3 → W7-T1 → W13-T8a |
+| `crates/qh-result-store/src/spill.rs` | W4-T3 → W13-T8a |
+| `crates/qh-result-store/src/{registry.rs,logical.rs}` | W4-T3 → W13-T8b |
+| `helpers/analytics/**`, `crates/qh-analytics-proto/**` | W13-T8a (baru) |
 | `crates/qh-ffi/examples/bench_ffi.rs` | W1-T2 → W3-T1 → W5-T2 |
 | `tests/golden/`, `crates/qh-ffi/tests/golden.rs` | W2-T1 → W11-T1 → W12-T3 |
 | `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0. Sesudahnya, satu pemilik per extension. |
@@ -754,11 +810,18 @@ Lihat §9.
 | `Views/ResultGridTable.swift`, `GridRowView`, `GridHeaderView` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
 | `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W10-T6 → W10-T7 → W12-T2 |
 | `Views/Workspace.swift` | W2-T3 → W9-T1 → W9-T4 → W9-T8 → W12-T2 |
-| `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 |
+| `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 → W13-T8b |
+| `Views/SettingsView.swift` | W2-T2 → W6-T1 → W9-T7 → W13-T8c → W13-T7 |
+| `app/build.sh` | W13-T8b → W13-T7 → W14-T5 |
+| `app/release.sh`, `app/build-dmg.sh` | W13-T8b |
+| `THIRD-PARTY-NOTICES.md` | W4-T2 (commit A) → W14-T5 |
+| `AGENTS.md`, `CLAUDE.md` | W14-T7 (baru) |
 | `Support/Theme.swift` | W9-T1 → W9-T7 → W10-T2 |
 | `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W9-T4 → W11-T3 |
 | `Support/Snapshot.swift` | W1-T3 → W5-T1 → W6-T1 → W9-T8 |
-| `Support/BenchMode.swift` | W1-T4 → W6-T1 |
+| `Support/EditorAnalysis.swift` | W4-T2 → W10-T6 → W10-T7 |
+| `Support/PerfSignposts.swift` | W1-T4 → W4-T2 |
+| `Support/BenchMode.swift` | W1-T4 → W4-T2 → W6-T1 |
 | `__Baselines__/` | hanya lewat langkah merge orkestrator (§0.5) |
 
 **Freeze** (`performance-plan.md` §0). Selama Fase 4 dan 5 tidak ada fitur yang menyentuh `SQLEditor.swift` atau `ResultGrid.swift`. Urutan gelombang di atas sudah memenuhinya: fitur baru dimulai di W9.
@@ -769,7 +832,7 @@ Lihat §9.
 
 **Gate tugas.**
 
-- Verifikasi tugas lulus, dan setiap reviewer yang disebut memberi verdict **approved** dengan daftar berkasnya (aturan "done means verified").
+- Verifikasi tugas lulus, dan setiap reviewer yang dijadwalkan menurut tingkat risikonya (§6, O-17) memberi verdict **approved** dengan daftar berkasnya (aturan "done means verified").
 - `./app/build.sh` dijalankan di gate gelombang, kecuali tugas itu menyentuh `app/build.sh`, `Package.swift`, atau resource.
 
 **Gate gelombang.**
@@ -791,7 +854,7 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 
 1. **Galat build:** swift-build-resolver atau rust-build-resolver, maksimal 3 putaran.
 2. **Tes atau gate merah:** debugger (opus) mendiagnosis, maksimal 2 putaran. Implementer memperbaiki sekali berdasarkan diagnosis itu.
-3. **Reviewer meminta perubahan:** implementer memperbaiki lalu review ulang, maksimal 2 putaran. Bila masih buntu, `architect` memutuskan sekali.
+3. **Reviewer meminta perubahan (O-17):** hanya temuan yang memblokir memicu putaran; saran dan nit dicatat saja. Implementer memperbaiki lalu review ulang, dengan batas menurut tingkat risiko: tinggi maksimal 3 putaran, sedang maksimal 2, rendah 1. Bila masih buntu, `architect` memutuskan sekali.
 4. **Bila semua putaran habis:**
    - buang perubahan tugas itu (worktree dihapus, atau `git restore` pada berkas milik tugas itu saja);
    - tandai **TERBLOKIR** di ledger dengan bukti, lalu lewati tugas yang bergantung padanya;
@@ -807,12 +870,13 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 
 | ID | Isi | Pelaksana | Verifikasi |
 |---|---|---|---|
-| W14-T1 | G-HEAVY penuh, termasuk G-GOLDEN dengan Trino dan semua G-LIVE. `./app/build.sh` dan semua scene `--snapshot`. | test-engineer · sonnet | semua hijau, hitungan tes dicatat |
+| W14-T1 | G-HEAVY penuh, termasuk G-GOLDEN dengan Trino, semua G-LIVE, dan G-ANALYTICS. `./app/build.sh` dan semua scene `--snapshot`. | test-engineer · sonnet | semua hijau, hitungan tes dicatat |
 | W14-T2 | Sesi bench final untuk semua sumbu (eksklusif), TablePro best-effort, laporan diregenerasi | performance-engineer · sonnet; PO | `docs/benchmarks.md` hasil generator |
 | W14-T3 | Laporan paritas visual: baseline P, lalu setelah Fase 5 dan 6, lalu final. Pasangan berdampingan untuk setiap V ditulis ke `app/.build/parity-report/` (tidak di-commit), dengan indeks. | test-engineer · sonnet; UX | semua scene non-V lulus |
 | W14-T4 | Pass perbaikan akhir dan review per area atas diff branch (engine, store, grid, editor, shell, koneksi), plus review keamanan atas semua diff yang relevan | refactor-cleaner, code-simplifier · sonnet; CR, SEC · opus | approved per area |
-| W14-T5 | Dokumen: `PROGRESS.md`, `app/DESIGN.md` (Scope, grid, editor, shell, CLI, Stop, formatter, skrip), `docs/invariants.md` (hanya insiden nyata), status di `performance-plan.md`, `remaining-work-plan.md`, `tablepro-adoption-plan.md`, `tablepro-feature-map.md`, dan `tablepro-design-audit.md` | doc-updater · sonnet | CR |
-| W14-T6 | Merge: G-HEAVY di branch, `git switch main && git merge --no-ff work/perf-parity -m "merge: performance, design and parity work"`, G-HEAVY sekali lagi di `main` | orkestrator | hijau |
+| W14-T5 | Dokumen: `PROGRESS.md`, `app/DESIGN.md` (Scope, grid, editor, shell, CLI, Stop, formatter, skrip), `docs/invariants.md` (hanya insiden nyata), status di `performance-plan.md`, `remaining-work-plan.md`, `tablepro-adoption-plan.md`, `tablepro-feature-map.md`, dan `tablepro-design-audit.md`. Ditambah `THIRD-PARTY-NOTICES.md` lengkap (semua crate dan grammar yang dikirim, termasuk helper) dan pemasangannya ke bundel lewat `app/build.sh` (kriteria rilis PRD §9). | doc-updater · sonnet | satu reviewer sonnet (O-17); `THIRD-PARTY-NOTICES.md` ada di `Contents/Resources` setelah `./app/build.sh` |
+| W14-T6 | Merge: G-HEAVY (dengan G-ANALYTICS) di branch, `git switch main && git merge --no-ff work/perf-parity -m "merge: performance, design and parity work"`, G-HEAVY sekali lagi di `main` | orkestrator | hijau |
+| W14-T7 | Panduan agen repo (O-16): `AGENTS.md` sebagai sumber dan `CLAUDE.md` yang menunjuk ke sana, supaya AI mana pun yang bekerja di codebase ini menjaga kualitasnya. Isinya gate (§1), invariant, anggaran performa, gate paritas, batas lisensi (TablePro AGPL-3.0, QueryHive MIT), dan pelajaran yang didapat selama run. Ditulis dengan skill `writing-for-agents`. Nomor terakhir, tetapi dijalankan sebelum W14-T6 dan ditinjau sebelum merge, supaya ikut masuk `main`. | doc-updater · sonnet (skill `writing-for-agents`) | satu reviewer sonnet (O-17); setiap path dan perintah yang disebut ada dan dijalankan, dan `CLAUDE.md` hanya menunjuk ke `AGENTS.md` |
 
 **Isi laporan akhir untuk pemilik:**
 
@@ -821,9 +885,9 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
    - tugas yang terblokir (dengan bukti);
    - tugas kontingen Fase 8 yang dijalankan atau tidak.
 2. **Angka per sumbu:** target, QueryHive, TablePro (atau `tidak diukur (izin OS)` dan `tidak diukur (butuh sudo)`), verdict, dan rujukan ke `docs/benchmarks.md`.
-3. **Paritas visual:** daftar scene yang lulus, dan pasangan berdampingan untuk V-1…V-11 yang perlu ditinjau. Setiap rekam ulang punya commit sendiri, jadi bisa di-revert.
+3. **Paritas visual:** daftar scene yang lulus, dan pasangan berdampingan untuk V-1…V-12 yang perlu ditinjau. Setiap rekam ulang punya commit sendiri, jadi bisa di-revert.
 4. **Status UC-01…UC-18** dan bukti otomatisnya.
-5. **Keputusan perencana P-01…P-26** yang bisa dibatalkan.
+5. **Keputusan perencana P-01…P-31** yang bisa dibatalkan, dan keputusan blueprint yang diserahkan ke pemilik (blueprint Fase 6 §26: D-8, D-16 dan O-18, D-19, D-21, anggaran 256 MiB untuk `wide_500k`).
 6. **Tindakan pemilik:**
    - beri izin Screen Recording dan Accessibility, setel koneksi TablePro, lalu jalankan `qhbench` (perintahnya dicantumkan);
    - `sudo purge` untuk start dingin;
@@ -842,13 +906,14 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 
 ## 10. Ukuran dan titik rawan
 
-**Jumlah tugas.** Sekitar 112: 59 implementasi, 10 blueprint, 14 ADR/dokumen, 13 pembersihan, 10 bench, dan 6 final. Bila Fase 8 terpicu, ada tambahan 0–4 tugas kontingen berukuran L. Tugas berukuran L ada 14:
+**Jumlah tugas.** Sekitar 117: 63 implementasi, 10 blueprint, 14 ADR/dokumen, 13 pembersihan, 10 bench, dan 7 final. Bila Fase 8 terpicu, ada tambahan 0–4 tugas kontingen berukuran L. Tugas berukuran L ada 17:
 
-- W3-T1, W4-T3, W5-T1, W5-T2, W6-T1;
+- W3-T1, W3-T2, W4-T3, W5-T1, W5-T2, W6-T1;
 - W9-T3, W9-T8;
 - W10-T1;
 - W11-T1, W11-T2, W11-T3;
 - W12-T3, W12-T4;
+- W13-T8a, W13-T8b;
 - W1-T10, dihitung L karena lama berjalan.
 
 **Paling mungkin meledak, berurutan:**
@@ -856,18 +921,25 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 1. **W5-T1, grid.** Daftar paritasnya paling luas, dan fokus, IME, serta AX bertemu di sini. Karena itu dipecah menjadi dua commit (5a seam, 5b tabel).
 2. **W6-T1, integrasi data plane.** Penghapusan besar di Swift dan umur handle per tab. Tes diferensial harus lulus sebelum kode Swift dihapus.
 3. **W3-T1, `EngineHost`.** Kebocoran state yang diam, pool bersama tunnel, dan reconnect.
-4. **W3-T2 dan W4-T2, editor 4B.** Paritas lexer dan pemetaan UTF-16.
+4. **W3-T0, W3-T2, dan W4-T2, editor 4B.** Batas Safe Mode (`scan.rs`), C di dalam proses, pemetaan UTF-16, dan biaya gambar baris berwarna.
 5. **W9-T8, shell native.** Mengubah struktur jendela, dan harness snapshot harus tetap bisa menangkapnya.
 6. **W12-T3 dan W12-T4, skrip dan result set.** Protokol event baru ditambah UX baru.
 7. **W11-T2 dan W11-T3, SSH.** Kepercayaan dan Keychain. Pengujian ujung ke ujung bergantung pada `qh-sshd-dev`.
 8. **W13-T7, lokalisasi.** Resource bundel SwiftPM di app yang dirakit `build.sh` belum pernah dicoba di repo ini.
 9. **W1-T9, build TablePro.** Butuh jaringan dan XcodeGen. Dilewati di run ini (disk 30 GiB).
 10. **W1-T6 dan W1-T10, harness black-box.** Terhalang izin OS. Hasilnya tercatat dan tidak menggagalkan gate.
+11. **W13-T8a, build DataFusion.** Sekitar 2,3 GB `target` rilis, dan debug dikurangi dengan `line-tables-only`. Periksa ruang disk sebelum mulai.
 
 ## 11. Yang masih terbuka
 
-1. **Tindakan pemilik setelah run, tidak memblokir:** izin OS dan koneksi TablePro untuk head-to-head, `sudo purge` untuk start dingin, smoke manual (VoiceOver, IME, notifikasi, drag and drop), dan tinjauan paritas V-1…V-11.
+1. **Tindakan pemilik setelah run, tidak memblokir:** izin OS dan koneksi TablePro untuk head-to-head, `sudo purge` untuk start dingin, smoke manual (VoiceOver, IME, notifikasi, drag and drop), dan tinjauan paritas V-1…V-12.
 2. **Dukungan `EXPLAIN ANALYZE (FORMAT JSON)` di Trino 483.** Diverifikasi di W13-A1, dan fallback-nya (teks) sudah ditetapkan. Ini bukan pertanyaan untuk pemilik.
 3. **Plafon kawat VM (gvproxy).** Menentukan apakah sumbu 2 dinilai dengan 575k atau dengan 80% plafon. Aturannya sudah ada di `performance-plan.md` §2. Yang belum ada hanya angkanya, yang baru diketahui di W1-T10.
+
+4. **Ukuran unduhan helper terkompresi** (W13-T8a), throughput pipa (W13-T8b, target ≥ 1 GB/s), dan ambang NFR-P3 untuk SQL (gate W13).
+5. **Sort natural rayon dengan `view_pool` 4 thread** (W5-T2, `bench_ffi view-*`).
+6. **Perilaku profil `sandbox-exec` di macOS 26**, dibuktikan `confinement.rs` (W13-T8a). Jalur App Sandbox menunggu sertifikat Developer ID.
+7. **Dari W2-A3, untuk W6-A1:** bentuk pintu darurat `Json`, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan mitigasi R-19 bila batas fd terukur.
+8. **W13-T8a–b tetap di lingkup program ini** (O-15). Bila tugas itu dipotong, orkestrator melaporkannya ke pemilik sebagai penyimpangan dari O-15, bukan diam-diam.
 
 Tidak ada pertanyaan produk yang tersisa. Semua keputusan yang diperlukan tercatat sebagai O-* dan P-* di PRD §11.

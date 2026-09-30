@@ -1,6 +1,6 @@
 # PRD: performa dan paritas QueryHive terhadap TablePro
 
-- **Status:** disetujui untuk dieksekusi, 29 Sep 2026. Belum ada yang dikerjakan.
+- **Status:** disetujui untuk dieksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan. Keputusan O-14 sampai O-18 dan P-27 sampai P-31 ditambahkan 30 Sep 2026 (§11).
 - **Pasangan:** `docs/architecture/development-plan.md` (siapa mengerjakan apa, dalam urutan apa, dan dengan gate apa). Dokumen ini menjawab *apa* dan *seberapa baik*.
 - **Sumber:** `docs/architecture/performance-plan.md` (Fase 0–8, sumbu, ADR 0030–0036), `docs/architecture/tablepro-feature-map.md` (peta fitur, 18 use case, must/should/later/skip), `docs/architecture/tablepro-design-audit.md` (P0/P1/P2), `docs/architecture/tablepro-adoption-plan.md` (§0 gate berat, §12, §13), `docs/architecture/remaining-work-plan.md` (Batch 7), `docs/architecture/tablepro-feature-analysis.md`, `docs/invariants.md`, `docs/benchmarks.md`, `app/DESIGN.md`. Di akar repo tidak ada `DESIGN.md`. Kontrak desainnya adalah `app/DESIGN.md`.
 - **Batas lisensi:** TablePro berlisensi AGPL-3.0, sedangkan QueryHive MIT (`LICENSE`, ADR-0002, `deny.toml`). TablePro hanya dibaca untuk mempelajari ide dan angka. Kode, aset, dan string UI-nya tidak pernah masuk ke pohon ini.
@@ -121,7 +121,7 @@ Kolom **Tugas** menunjuk ID di `development-plan.md`.
 | FR-ED-03 | Save dan Save As `.sql`. Tab terikat berkas dengan penanda kotor. Perubahan dari luar dideteksi saat tab aktif dan sebelum menyimpan, lalu app bertanya dan tidak menimpa diam-diam. Session restore membuka ulang berkas tanpa menjalankannya. | UC-06, UC-16 | must #3 | W12-T2 |
 | FR-ED-04 | Berkas `.sql` yang di-drop ke jendela terbuka sebagai tab. | UC-06 | audit HIG P1 | W12-T2 |
 | FR-ED-05 | Autocomplete kolom dari katalog dengan resolusi alias di statement aktif. Kolom yang belum dimuat diambil asinkron lewat sesi metadata dan disimpan di `TreeNode`, satu-satunya cache (`performance-plan.md` §13). Ketikan tidak pernah menunggu. | UC-03 | must #5 | W11-T6 |
-| FR-ED-06 | Diagnostik: posisi galat dari server (PostgreSQL `position`, Trino `errorLocation`, dan baris MySQL bila ada) serta masalah leksikal (kutip atau komentar yang tidak tertutup) digambar sebagai garis bawah. Ada rotor VoiceOver "Query issues" dan readout di status. | UC-03 | audit §4 P1 | W10-T6 |
+| FR-ED-06 | Diagnostik: posisi galat dari server (PostgreSQL `position`, Trino `errorLocation`, dan baris MySQL bila ada) serta masalah leksikal (kutip atau komentar yang tidak tertutup) digambar sebagai garis bawah. Ada rotor VoiceOver "Query issues" dan readout di status. Galat sintaks dari pohon tree-sitter tidak ditampilkan secara default (positif palsu 14–47% di SQL valid); datanya tetap dihitung. | UC-03 | audit §4 P1 | W10-T6 |
 | FR-ED-07 | Ukuran font editor bisa diatur di Settings, dengan ⌘+, ⌘−, dan ⌘0. | — | audit §4, §14 P1 | W9-T7, W10-T7 |
 | FR-ED-08 | Pasangan kurung dan kutip ditandai. | — | audit §4 (keputusan P-18) | W10-T7 |
 | FR-ED-09 | Aksesibilitas `NSTextView` tetap utuh, dan hook rotor terpasang sejak rewrite 4B. | — | audit §4 P0 | W4-T2 |
@@ -210,6 +210,18 @@ Kolom **Tugas** menunjuk ID di `development-plan.md`.
 | FR-PERF-06 | Plafon ingest: builder bebas alokasi dan COPY. Opsi bersyarat diadopsi bila angkanya lolos. | 7 | W7-* |
 | FR-PERF-07 | `--bench`, signpost, `bench_ffi`, microbench Swift, dan harness `qhbench`. | 0 | W1-* |
 
+### 5.11 Analitik atas hasil
+
+Mesin analitik adalah komponen opsional yang diunduh saat pertama dipakai (O-18). Semua yang dibangun W4–W7 berjalan tanpa komponen ini. UI-nya rilis berikutnya (§10); program ini hanya membangun mesin dan panel komponen di Settings.
+
+| ID | Kebutuhan | Sumber | Tugas |
+|---|---|---|---|
+| FR-ANL-01 | SQL atas hasil: query dijalankan di helper analitik terhadap store hasil yang sudah ada. Mesinnya saja; UI kemudian. | O-15, O-18 | W13-T8a, W13-T8b |
+| FR-ANL-02 | Agregasi dan pivot atas hasil. Mesin lewat SQL di FR-ANL-01; UI kemudian. | O-15 | W13-T8a, W13-T8b |
+| FR-ANL-03 | Join antar-hasil. Mesin lewat SQL di FR-ANL-01; UI kemudian. | O-15 | W13-T8a, W13-T8b |
+| FR-ANL-04 | CSV dan Parquet lokal sebagai sumber query. Mesin di helper; UI pembuka berkas kemudian. | O-15 | W13-T8a, W13-T8b |
+| FR-ANL-05 | Komponen analitik: izin unduh, verifikasi, pasang dari berkas, hapus, dan status di Settings. | O-18 | W13-T8b, W13-T8c |
+
 ## 6. Kebutuhan non-fungsional
 
 ### 6.1 Performa (NFR-P)
@@ -220,9 +232,9 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 |---|---|---|---|---|
 | NFR-P1 | TTFR sampai baris pertama tergambar | S1 hangat cap 1k/10k: p50 ≤ 25 ms, p95 ≤ 40 ms. S2 cap 500k: p95 ≤ 50 ms. S3 RTT 30 ms: hangat ≤ 1 RTT + 20 ms. | S1 ≤ 0,5×; S2 ≤ 0,1×; S3, S4 ≤ 1,0× | 2 (S1, S3, S4), 6 (S2) |
 | NFR-P2 | Baris/s ke grid | ≥ 575.000 baris/s, atau ≥ 80% plafon COPY hari yang sama bila plafonnya lebih rendah. Interim Fase 6: ≥ 380.000. | ≥ 1,5× (termasuk Trino lineitem) | 6 (interim), 7 |
-| NFR-P3 | Memori puncak | ≤ anggaran store (256 MB) + 64 MB, berapa pun jumlah barisnya | ≤ 0,5× | 6 |
+| NFR-P3 | Memori puncak | ≤ anggaran store (256 MB) + 64 MB, berapa pun jumlah barisnya. Untuk skenario SQL, diukur sebagai jumlah `phys_footprint` app dan helper; ambangnya ditetapkan di gate W13 dari angka `bench_ffi sql-*`. | ≤ 0,5× | 6 |
 | NFR-P4 | Frame saat scroll | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms (120 Hz); hasil 500 kolom tergambar ≤ 30 ms | hitch ≤ 1,0× | 5 |
-| NFR-P5 | Latensi ketikan | main thread p99 ≤ 4 ms (10k baris) dan ≤ 8 ms (2M karakter), dengan pewarnaan menyala | input-to-photon p95 ≤ 1,0× | 4 |
+| NFR-P5 | Latensi ketikan | main thread p99 ≤ 4 ms (10k baris) dan ≤ 8 ms (2M karakter), dengan pewarnaan menyala. Ambang berlaku untuk giliran ketikan dan giliran `apply` (penerapan warna) masing-masing. | input-to-photon p95 ≤ 1,0× | 4 |
 | NFR-P6 | Latensi cancel | PostgreSQL/MySQL p95 ≤ 100 ms; Trino ≤ 300 ms; UI berhenti ≤ 1 frame | ≤ 1,0× | 1 |
 | NFR-P7 | Cold start | hangat ≤ 400 ms; dingin ≤ 1 dtk | ≤ 1,0× | 2 (tidak mundur), 8 |
 | NFR-P8 | Sekunder | Perintah lokal p50 ≤ 2 ms. Level pohon hangat ≤ 1 RTT + 10 ms. Introspeksi 5.000 tabel < 1 dtk. Fallback sort 500k: numerik ≤ 100 ms, teks ≤ 300 ms, off-main. `window` p99 ≤ 0,5 ms. Nol leak dan nol spill tersisa setelah 100× buka/tutup tab. | — | 1, 2, 6 |
@@ -242,27 +254,35 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 ### 6.3 Lisensi (NFR-L)
 
 - Tidak ada kode, aset, atau string TablePro. Tidak ada vendoring dari `TablePro/Packages/TableProEditor`.
-- Setiap crate baru lulus `cargo deny check licenses` dengan allow-list ADR-0002. Yang direncanakan: `rayon`, `unicode-segmentation`, dan bersyarat `mimalloc`. `ring` dan `memchr` sudah ada di `Cargo.lock` (§12.3).
-- Paket SwiftPM ditinjau manual. Tidak ada yang direncanakan.
+- Setiap crate baru lulus `cargo deny check licenses` dengan allow-list ADR-0002. Yang direncanakan:
+  - `rayon`, `unicode-segmentation`, dan bersyarat `mimalloc`;
+  - `arrow-array`/`-schema`/`-buffer`/`-ipc` 59.3 (app);
+  - `datafusion` 55.1 fitur minimal plus `arrow-cast` (hanya helper analitik);
+  - `tree-sitter` =0.26.13, `tree-sitter-language` =0.1.7, `streaming-iterator`, dan grammar SQL berbahasa C yang di-vendor di `crates/qh-sql-grammar` (MIT, di luar jangkauan `cargo deny`, dicatat di `PROVENANCE.md` dan `THIRD-PARTY-NOTICES.md`).
+
+  `ring` dan `memchr` sudah ada di `Cargo.lock` (§12.3).
+- Workspace helper (`helpers/analytics`) juga lulus `cargo deny check licenses`. Fitur DataFusion `recursive_protection` dan `compression` mati.
+- Paket SwiftPM ditinjau manual. Tidak ada yang direncanakan. CodeEditTextView hanya lewat Fase 8.
 - Build TablePro hanya untuk pengukuran lokal, di luar repo, dan binarinya tidak pernah didistribusikan.
 
 ### 6.4 Keselamatan dan keamanan (NFR-S)
 
-- **NFR-S1.** Setiap perintah baru (`columns`, `ddl`, `execution_log`, `script`, `sessions`, `session_cancel`) dan setiap setelan baru (EXPLAIN ANALYZE) punya tes di `crates/qh-ffi/tests/safe_mode.rs`. Floor ADR-0027 tetap monoton.
+- **NFR-S1.** Setiap perintah baru (`columns`, `ddl`, `execution_log`, `script`, `sessions`, `session_cancel`) dan setiap setelan baru (EXPLAIN ANALYZE) punya tes di `crates/qh-ffi/tests/safe_mode.rs`. Floor ADR-0027 tetap monoton. Untuk MySQL, tes yang sama memuat escape backslash (`\'`) dan komentar `#` (W3-T0).
 - **NFR-S2.** Tidak ada kredensial (password, passphrase, JWT) di log, galat, event, keluaran MCP, atau kunci pool. Versi kredensial masuk sidik jari pool sebagai hash.
 - **NFR-S3 Spill.**
-  - Kripto: AEAD `ring` (AES-256-GCM) dengan kunci acak per proses yang hanya ada di memori. Nonce adalah penghitung per chunk dan tidak pernah dipakai ulang dengan kunci yang sama. AAD berisi id store, indeks chunk, dan generation.
+  - Kripto: AEAD `ring` (AES-256-GCM) dengan kunci acak per proses yang hanya ada di memori. Nonce dari penghitung per kunci yang tidak pernah berulang. Satu kunci per proses yang menulis spill, dan kunci tidak pernah menyeberang proses (helper analitik punya kuncinya sendiri). AAD berisi id store, indeks chunk, dan generation.
   - Berkas: direktori `0700` dan berkas `0600`. Berkas yatim disapu saat startup.
   - Tes: teks biasa tidak muncul di berkas; kunci salah dan manipulasi berkas gagal; disk penuh menjadi event galat.
 - **NFR-S4.** Host key SSH mengikuti FR-CON-03. Tidak ada terima diam-diam.
-- **NFR-S5.** Tidak ada data hasil yang ditulis ke disk selain lewat ekspor yang diminta pengguna, spill terenkripsi, atau file promise CSV yang di-drop pengguna. Panel peek tidak memakai berkas sementara.
-- **NFR-S6.** MCP tetap proses terpisah, fail-closed, dan dipaksa `read_only`.
+- **NFR-S5.** Tidak ada data hasil yang ditulis ke disk selain lewat ekspor yang diminta pengguna, spill terenkripsi, atau file promise CSV yang di-drop pengguna. Panel peek tidak memakai berkas sementara. Helper analitik tidak bisa menulis berkas selain spill terenkripsinya dan tidak punya jaringan; dijaga kurungan kernel.
+- **NFR-S6.** MCP tetap proses terpisah, fail-closed, dan dipaksa `read_only`. Untuk MySQL, Safe Mode membaca escape backslash dan komentar `#` (W3-T0), karena MCP bersandar penuh padanya.
+- **NFR-S7.** Komponen yang diunduh diverifikasi (EdDSA dengan kunci Sparkle, SHA-256 yang dipatok per build, tanda tangan kode) sebelum dipasang, SHA-256 diperiksa ulang sebelum setiap eksekusi, dan komponen tidak pernah dijalankan tanpa kurungan.
 
 ### 6.5 Paritas visual (NFR-V)
 
-- **Tiga lapis** (`performance-plan.md` §4.8): geometri identik secara numerik; warna identik di titik sampel; teks dalam toleransi (≤ 0,1% piksel dengan delta kanal > 16/255 per scene). Atribut editor harus identik per rentang.
+- **Tiga lapis** (`performance-plan.md` §4.8): geometri identik secara numerik; warna identik di titik sampel; teks dalam toleransi (≤ 0,1% piksel dengan delta kanal > 16/255 per scene). Atribut editor harus identik per rentang, kecuali perubahan V-12 (warna editor dari tree-sitter).
 - Baseline PNG di-commit di `app/Tests/QueryHiveTests/__Baselines__/`, direkam dari commit P.
-- Fase performa tidak boleh mengubah piksel, kecuali V-1 di bawah.
+- Fase performa tidak boleh mengubah piksel, kecuali V-1 dan V-12 di bawah.
 - **Perubahan yang disengaja** hanya yang terdaftar di bawah. Scene lain harus lulus tanpa perubahan.
 
 | Kode | Perubahan | Tugas |
@@ -278,6 +298,7 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 | V-9 | Kursor sel, kontras grid, tanda staged, funnel, tombol tinjau | W10-T1…T3 |
 | V-10 | Garis bawah diagnostik, kurung, gutter terang | W10-T6, W10-T7 |
 | V-11 | Permukaan baru tanpa baseline lama: record, pohon plan, aktivitas, audit, footer paginasi, tab hasil skrip, bagian SSH, tab DDL | W10–W13 |
+| V-12 | Warna sintaks dan lipatan editor dari tree-sitter, dengan warna sebagai atribut sementara (butir 1–11 di blueprint 4B §5.3, termasuk kontras Nord yang diperbaiki) | W4-T2 commit B |
 
 - Setiap rekam ulang punya commit sendiri. Baseline lama tetap bisa diambil dari riwayat git. Pemilik meninjau pasangan berdampingan di laporan akhir (keputusan O-10, P-01).
 
@@ -288,6 +309,7 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 - `app/Generated/` diregenerasi dan di-commit bersama perubahan Rust-nya (invariant #1).
 - Satu ADR per keputusan yang mengubah kontrak. ADR adalah catatan, bukan kontrak.
 - Deployment target macOS 14.0 di tiga tempat tidak berubah (invariant #4).
+- SQL atas hasil adalah objek UniFFI, bukan perintah NDJSON; CLI dan MCP tidak mendapatkannya.
 
 ### 6.7 Kualitas (NFR-Q)
 
@@ -332,7 +354,9 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 - Laporan benchmark diregenerasi, dan setiap sumbu punya angka QueryHive.
 - Laporan paritas visual tersedia, termasuk pasangan untuk setiap perubahan V.
 - Dokumen diperbarui: `PROGRESS.md`, `app/DESIGN.md`, `docs/benchmarks.md` (lewat generator), status di rencana-rencana terkait, dan ADR.
+- `AGENTS.md` (sumber) dan `CLAUDE.md` (menunjuk ke `AGENTS.md`) ada dan sudah ditinjau (O-16, W14-T7).
 - Tugas yang terblokir tercantum beserta buktinya. Tidak ada tugas yang diam-diam hilang.
+- `THIRD-PARTY-NOTICES.md` lengkap (semua crate dan grammar yang dikirim, termasuk helper) dan terpasang di bundel (W14).
 - Tidak ada push, PR, atau rilis. Persetujuan akhir dari pemilik.
 
 ## 10. Di luar lingkup
@@ -370,8 +394,9 @@ Hal-hal berikut didokumentasikan tetapi tidak dibangun.
   - default row sort, deteksi nilai per sel, format tanggal global.
 - **Proses:**
   - Fase 8, kecuali gate gagal;
-  - notarisasi, DMG, push, PR;
+  - notarisasi, DMG, push, PR. Notarisasi tetap di luar lingkup, dan helper analitik bekerja dengan tanda tangan ad-hoc;
   - build universal atau Intel.
+- **Analitik:** UI analitik (editor SQL atas hasil, pivot, join, pembuka CSV/Parquet) rilis berikutnya. Program ini hanya membangun mesin dan panel komponen di Settings (§5.11).
 
 ## 11. Log keputusan
 
@@ -392,6 +417,11 @@ Hal-hal berikut didokumentasikan tetapi tidak dibangun.
 | O-11 | **Baseline:** PNG di-commit. |
 | O-12 | **Batas memori dan spill:** clamp `rowLimit` 200.000 sampai Fase 6, lalu 5.000.000. Ini menggantikan angka 100.000 di `performance-plan.md` §5.4. Anggaran store 256 MB global. Spill menyala, dienkripsi dengan kunci efemeral per proses, berkas `0600`, dan disapu saat startup. |
 | O-13 | **TablePro:** dibangun lokal pada commit yang dipatok, hanya untuk pengukuran. Angkanya masuk `docs/benchmarks.md`. `qhbench` butuh izin OS, jadi head-to-head bersifat best-effort dan ditulis `tidak diukur (izin OS)` bila terhalang. |
+| O-14 | **Analisis editor (30 Sep 2026):** tree-sitter dipakai untuk analisis editor (kelas warna, lipatan, alias). Perubahan tampilan boleh, dengan tampilan yang disetel ulang (V-12). Menggantikan penolakan tree-sitter di `performance-plan.md` §13. |
+| O-15 | **Arrow dan DataFusion (30 Sep 2026):** diadopsi untuk analitik atas hasil besar: SQL atas hasil, agregasi, dan CSV/Parquet lokal. Store hasil berformat Arrow sejak W4-T3. |
+| O-16 | **Panduan agen repo (30 Sep 2026):** tugas terakhir W14-T7 menulis panduan untuk agen AI di repo ini. `AGENTS.md` menjadi sumbernya, `CLAUDE.md` menunjuk ke sana, supaya AI mana pun yang bekerja di codebase ini menjaga kualitasnya: gate, invariant, anggaran performa, gate paritas, batas lisensi, dan pelajaran yang didapat. Ditulis dengan skill `writing-for-agents` dan ditinjau sebelum merge. |
+| O-17 | **Kebijakan review berjenjang menurut risiko (30 Sep 2026):** risiko tinggi memakai reviewer opus, spesialis hanya yang relevan, maksimal 3 putaran. Risiko sedang: satu reviewer, maksimal 2 putaran. Risiko rendah (dokumen, ADR, tooling, hanya tes, hanya pemindahan, pembersihan): satu reviewer sonnet atau cukup gate, 1 putaran. Hanya temuan yang memblokir memicu putaran. Implementer sonnet secara default, opus hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b. Diterapkan di `development-plan.md` §6 dan §8. |
+| O-18 | **DataFusion sebagai komponen terpisah (30 Sep 2026):** DataFusion adalah komponen opsional yang diunduh saat pertama dipakai, bukan bagian bundel. App tetap sekitar 30 MB dan store Arrow ada di app. Semua fungsi di luar analitik berjalan tanpa komponen ini. |
 
 ### 11.2 Keputusan perencana
 
@@ -408,7 +438,7 @@ Keputusan ini diturunkan dari keputusan pemilik dan kode. Pemilik bisa membatalk
 | P-07 | **Paginasi = menaikkan satu cap** dengan menjalankan ulang. Cursor tidak ditahan terbuka. | Cursor yang diparkir menahan snapshot atau transaksi di prod. Portal cap adalah eskalasi Fase 8. |
 | P-08 | **CA per koneksi** hanya untuk PostgreSQL dan Trino, dan bila diisi kepercayaannya hanya bundel itu. MySQL tidak didukung. | Batas API `mysql_async` (§12.1) |
 | P-09 | **TOFU dipatok ke fingerprint** dengan known_hosts milik app | Mencegah TOCTOU antara prompt dan percobaan ulang. Engine menolak host asing hari ini (`crates/qh-ffi/src/tunnel.rs:33-46`). |
-| P-10 | **Formatter ditulis sendiri** di `qh-sql` di atas mesin `scan.rs` (region opaque) dan modul editor 4B, tanpa crate formatter | Satu pemindai statement untuk engine, editor, dan formatter. Formatter di atas lexer warna akan mewarisi badan `$tag$` yang dilex sebagai kode dan `+--` yang tidak dianggap komentar. Token dan `:name` terjaga. |
+| P-10 | **Formatter ditulis sendiri** di `qh-sql` di atas mesin `scan.rs` (`walk`, region opaque) dan lexer kode `qh_sql::lex`, tanpa crate formatter. Pohon tree-sitter tidak dipakai. | Satu pemindai statement untuk engine, editor, dan formatter. Formatter yang menolak bekerja di setiap statement ber-ERROR akan menolak separuh SQL MySQL dan Trino yang valid, dan di atas pohon ber-ERROR ia berisiko memindahkan spasi di tempat yang salah baca. Token dan `:name` terjaga. |
 | P-11 | **Script runner** memakai perintah baru `script`, kebijakan stop/continue, tanpa transaksi implisit, dan satu entri history per skrip | `import_data` tidak mengembalikan baris per statement |
 | P-12 | **Aktivitas server:** cancel saja, dengan guard sendiri | Statement `KILL QUERY` tak terklasifikasi dan akan ditolak di `confirm` |
 | P-13 | **Notifikasi masuk lingkup**, menggantikan keputusan Batch 2 #2 di `remaining-work-plan.md` | O-1 memasukkan P1 audit |
@@ -425,6 +455,11 @@ Keputusan ini diturunkan dari keputusan pemilik dan kode. Pemilik bisa membatalk
 | P-24 | **Blueprint Fase 5 sudah memodelkan kursor sel dan AX.** Pengikatan kuncinya di W10. | Fase performa tidak boleh menambah fitur (`performance-plan.md` §18) |
 | P-25 | **Prasyarat P dianggap terpenuhi** oleh commit `3ba01ae`, `f4873c4`, dan `546b9d7`. Orkestrator memverifikasinya di W0-T1. | Snapshot `git status` saat perencanaan hanya menunjukkan dokumen yang belum dilacak |
 | P-26 | **Filter funnel per kolom tetap in-memory** dengan banner jujur. Tidak ada WHERE builder server. | Batch 7 dan Fase 3 hanya mencakup sort dan search. Builder bukan P0 atau P1. |
+| P-27 | **Grammar tree-sitter di-vendor** di `crates/qh-sql-grammar` dengan perbaikan scanner PR #361 upstream. | Rilis crates.io bocor sekitar 74 B per edit di badan `$tag$`. Vendoring mengurung C dan satu-satunya `unsafe` di satu crate kecil (blueprint 4B, D-1). Diterima architect-reviewer. |
+| P-28 | **Garis bawah sintaks dari pohon mati secara default.** W10-T6 menampilkan posisi galat server dan diagnostik leksikal saja. | 14–47% statement valid per dialek ditandai ERROR (blueprint 4B §0.2). Datanya tetap dihitung dan diekspor. |
+| P-29 | **Warna parameter memakai warna `literal`.** Kelas Parameter tetap terpisah di FFI. | Parameter dibaca sebagai nilai. Kandidat warna baru gagal kontras di kanvas Nord. |
+| P-30 | **Kontras Nord diperbaiki di dalam V-12.** `keyword` dan `punctuation` gelap naik sampai ≥ 4,5:1 di keempat kanvas gelap. | NFR-A1 berlaku untuk ketujuh kanvas, dan baseline editor direkam ulang di commit yang sama. |
+| P-31 | **`qh-sql` tidak tahu daftar kata kunci editor** (D-21 blueprint 4B). `qh_sql::lex` mengeluarkan `Word` tanpa kelas, dan himpunan kata kunci tinggal di `qh-editor`. | Arah dependensi: crate engine yang dipakai driver tidak boleh bergantung pada daftar yang diturunkan dari grammar tree-sitter. |
 
 ## 12. Koreksi terhadap dokumen lama
 
@@ -443,7 +478,9 @@ Semua koreksi ini ditemukan saat perencanaan.
 | Risiko | Dampak | Mitigasi |
 |---|---|---|
 | Fase 5 (grid) dan Fase 6 (data plane) berukuran L, dengan permukaan paritas yang luas | Gelombang fitur grid tertunda | Blueprint lebih dulu. Seam `ResultRows` di-commit terpisah. Implementer `opus`. Jalur lama dihapus di fase yang sama begitu gate lulus. |
-| Paritas lexer 4B dan pemetaan UTF-16 | Warna berubah di layar, gate paritas gagal | Fixture dari Swift, uji acak berbenih, dan tes Swift lewat FFI **sebelum** regex dihapus |
+| Pemetaan UTF-16 dan penerapan warna 4B | Warna salah atau berkedip di layar | Uji acak berbenih (G2), tes G7 pada `SQLTextView` headless, dan perubahan tampilan didaftar sebagai V-12 |
+| C di dalam proses (runtime dan grammar tree-sitter) | Crash atau baca di luar batas pada input aneh. `panic = "unwind"` tidak menangkap crash C. | Diterima dan dicatat di ADR-0033. G2 menjalankan puluhan ribu edit acak, dan SEC memeriksa `scanner.c` beserta patch-nya. |
+| Safe Mode MySQL salah membaca escape backslash dan komentar `#` | Write lolos sebagai `SELECT` lewat `CLIENT_MULTI_STATEMENTS`, termasuk lewat MCP | W3-T0: tes gagal dulu, mode MySQL di pemindai, gate SEC, DB, dan CR |
 | State bocor lewat sesi pool | Hasil salah antar-Run | Tes reset ditulis lebih dulu (tdd-guide), ditambah pemeriksaan database-reviewer |
 | Enkripsi spill salah pakai (nonce, AAD) | Data hasil terbaca di disk | security-reviewer dan tes negatif (kunci salah, manipulasi, teks biasa) |
 | Kepercayaan SSH | MITM atau bastion palsu | Fingerprint dipatok, kunci yang berubah ditolak keras, security-reviewer, dan tes terhadap `qh-sshd-dev` |
@@ -454,3 +491,4 @@ Semua koreksi ini ditemukan saat perencanaan.
 | Shell native dan lokalisasi menyentuh banyak berkas | Regresi visual luas | Keduanya serial. Paritas per scene. Perubahan V didaftar. |
 | Biaya Trino untuk search dan sort server-first | Query gudang per ketikan atau klik | Debounce 250 ms, minimal 3 karakter, dan search yang sedang jalan di-cancel (Stop sampai server sejak Fase 1) |
 | Durasi run otonom | Run terhenti di tengah | Satu commit per tugas, ledger di scratchpad, dan `PROGRESS.md` diperbarui per gelombang supaya run bisa dilanjutkan |
+| Unduhan komponen analitik tidak tersedia (tanpa jaringan) | Analitik tidak bisa dipakai | "Pasang dari berkas…" dengan verifikasi yang sama. Semua fungsi di luar analitik tidak terpengaruh. |
