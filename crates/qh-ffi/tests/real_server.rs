@@ -929,3 +929,61 @@ async fn a_read_only_mysql_connection_runs_a_read_with_a_hash_comment() {
         );
     }
 }
+
+// --------------------------------------------------------------------------- //
+// a MySQL change plan is one transaction (W3-T1 commit F)
+// --------------------------------------------------------------------------- //
+
+/// A plan whose last statement fails must leave the table as it was. Before commit F every
+/// statement ran on its own connection, so `BEGIN` and `ROLLBACK` bracketed nothing and the
+/// first two rows stayed while the run reported a rollback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_mysql_change_plan_rolls_back_what_it_wrote() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_MYSQL=1 with deploy/dev/up.sh running");
+        return;
+    }
+    let table = "qh_w3t1_plan";
+    mysql_run(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop any leftover");
+    mysql_run(&format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY) ENGINE=InnoDB"
+    ))
+    .await
+    .expect("create scratch table");
+
+    let plan = serde_json::json!([
+        {"sql": format!("INSERT INTO {table} VALUES (1)"), "expected": 1},
+        {"sql": format!("INSERT INTO {table} VALUES (2)"), "expected": 1},
+        // The duplicate key refuses this one.
+        {"sql": format!("INSERT INTO {table} VALUES (1)"), "expected": 1},
+    ]);
+    let mut pairs: Vec<(String, String)> = MYSQL_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("CHANGES".to_owned(), plan.to_string()));
+    let mut out = Capture::new();
+    let result = run(
+        Command::ApplyChanges,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        &RealEngine::new(),
+        &CancelFlag::new(),
+    )
+    .await;
+
+    let count = mysql_count(table).await;
+    mysql_run(&format!("DROP TABLE {table}"))
+        .await
+        .expect("drop scratch table");
+    let error = result.expect_err("the third change is refused").to_string();
+    assert!(error.contains("rolled back"), "{error}");
+    assert_eq!(
+        count, 0,
+        "the plan reported a rollback and left rows behind"
+    );
+}

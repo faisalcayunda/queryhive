@@ -14,6 +14,17 @@
 //! (section 2.3) rather than a workaround — a producer that ran ahead of the
 //! consumer would fill memory with rows nobody had asked for yet.
 //!
+//! ## One session, one connection
+//!
+//! A transaction, `SET FOREIGN_KEY_CHECKS`, a user variable and `max_execution_time` all
+//! live on the connection, so a session that ran each statement on a new one would run
+//! `BEGIN`, its writes and `ROLLBACK` in three different transactions. The producer
+//! therefore hands its connection back through a [`Flight`] when the statement has been
+//! read to its end (or failed with an answer from the server), and the session runs the
+//! next statement on it. A statement that was abandoned instead — the cursor dropped
+//! mid-stream, a row limit reached, the socket failing — leaves the connection in an
+//! unknown state, so it is dropped as before and the next statement opens a fresh one.
+//!
 //! `execute` waits for the producer's first message before returning, so
 //! `columns()` is valid immediately as the trait requires. Only the column
 //! descriptions have to arrive for that, and they come before any row — so this
@@ -118,6 +129,101 @@ const BATCH_BACKLOG: usize = 4;
 /// for 100.
 const DEFAULT_PRODUCER_BATCH: usize = 1024;
 
+/// How long a session waits for the producer of its previous statement to hand the
+/// connection back before it calls the cursor still in use.
+///
+/// A producer that has read its whole result needs a few microseconds; one blocked on a
+/// full channel needs the cursor to be read, which the waiting caller cannot do, so it is
+/// refused rather than waited for.
+const HAND_BACK_WAIT: Duration = Duration::from_millis(250);
+
+/// What a statement does to the session's transaction, read from its first words.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum TxnEffect {
+    Begin,
+    End,
+    Rollback,
+    None,
+}
+
+fn txn_effect(sql: &str) -> TxnEffect {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let mut words = upper
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty());
+    match (words.next(), words.next()) {
+        (Some("BEGIN"), _) | (Some("START"), Some("TRANSACTION")) => TxnEffect::Begin,
+        (Some("ROLLBACK"), Some("TO")) => TxnEffect::None,
+        (Some("ROLLBACK"), _) => TxnEffect::Rollback,
+        (Some("COMMIT"), _) => TxnEffect::End,
+        _ => TxnEffect::None,
+    }
+}
+
+/// Where a producer hands its connection back to the session that lent it.
+struct Flight {
+    state: Mutex<FlightState>,
+    /// Woken when the producer finishes.
+    done: tokio::sync::Notify,
+    /// Weak, so holding it does not keep the channel open for a cursor that has been
+    /// read to the end. Upgrading tells whether the cursor still exists.
+    sender: mpsc::WeakSender<Message>,
+}
+
+#[derive(Default)]
+struct FlightState {
+    /// The connection, when the statement ended in a state the next one can start from.
+    conn: Option<Conn>,
+    finished: bool,
+}
+
+impl Flight {
+    fn new(sender: mpsc::WeakSender<Message>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(FlightState::default()),
+            done: tokio::sync::Notify::new(),
+            sender,
+        })
+    }
+
+    /// Called by the producer as its last act: `conn` is `None` when it was abandoned.
+    fn finish(&self, conn: Option<Conn>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.conn = conn;
+            state.finished = true;
+        }
+        self.done.notify_one();
+    }
+
+    fn take_conn(&self) -> Option<Conn> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.conn.take())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.state.lock().map_or(true, |state| state.finished)
+    }
+
+    /// Whether the producer finished within `limit`.
+    async fn wait_finished(&self, limit: Duration) -> bool {
+        let wait = async {
+            while !self.is_finished() {
+                self.done.notified().await;
+            }
+        };
+        tokio::time::timeout(limit, wait).await.is_ok()
+    }
+
+    /// Whether the cursor of this statement has been dropped.
+    fn cursor_gone(&self) -> bool {
+        self.sender
+            .upgrade()
+            .is_none_or(|sender| sender.is_closed())
+    }
+}
+
 /// MySQL.
 pub struct MysqlDriver;
 
@@ -207,11 +313,26 @@ impl Driver for MysqlDriver {
             opts,
             connection_id,
             idle: Some(conn),
+            flight: None,
+            in_transaction: false,
+            transaction_lost: false,
             // Nothing has been asked of the server yet, so the session must not send a
             // `SET SESSION max_execution_time = 0` on its first statement and override a
             // bound the server's configuration set.
             statement_timeout: None,
         }))
+    }
+}
+
+fn transaction_lost() -> EngineError {
+    EngineError::Query {
+        message: "the connection that held this session's transaction was lost, so the server \
+                  rolled the transaction back; nothing after its BEGIN was kept. Send ROLLBACK \
+                  to end it"
+            .to_owned(),
+        code: None,
+        position: None,
+        kind: FailureKind::Permanent,
     }
 }
 
@@ -250,6 +371,14 @@ struct MysqlSession {
     /// The connection kept for the next statement, so an idle session is one
     /// connection rather than a new handshake per query.
     idle: Option<Conn>,
+    /// The statement that currently holds the connection, if any.
+    flight: Option<Arc<Flight>>,
+    /// A `BEGIN` was sent and no `COMMIT` or `ROLLBACK` since.
+    in_transaction: bool,
+    /// The connection that held the open transaction is gone, so the server has already
+    /// rolled it back. Everything but `ROLLBACK` is refused until one is sent, because
+    /// running on a fresh autocommit connection would let a `COMMIT` succeed over nothing.
+    transaction_lost: bool,
     /// The `max_execution_time` this session last sent to the server, so the `SET`
     /// is sent when the bound changes rather than on every statement.
     statement_timeout: Option<Duration>,
@@ -260,18 +389,48 @@ impl MysqlSession {
         MysqlDriver.capabilities()
     }
 
-    /// The connection to use for a metadata call, opening one if the idle
-    /// connection was handed to a running statement.
-    async fn connection(&mut self) -> Result<Conn, EngineError> {
+    /// The connection for the next statement: the one the session already has, taken
+    /// back from the previous statement when that one ended cleanly, and a new one only
+    /// when there is none to take.
+    ///
+    /// A previous statement whose cursor is still alive and has not finished is an
+    /// error, not a wait and not a second connection: the caller is running two
+    /// statements at once on a session that has one connection, and a silent second
+    /// connection would put them in different transactions.
+    ///
+    /// `may_replace` says whether a new connection is acceptable when the old one is gone
+    /// in the middle of a transaction (only a `ROLLBACK` is).
+    async fn connection(&mut self, may_replace: bool) -> Result<Conn, EngineError> {
         if let Some(conn) = self.idle.take() {
             return Ok(conn);
         }
-        Conn::new(self.opts.clone())
+        if let Some(flight) = self.flight.take() {
+            if !flight.cursor_gone() && !flight.wait_finished(HAND_BACK_WAIT).await {
+                self.flight = Some(flight);
+                return Err(EngineError::Usage {
+                    message: "the previous statement of this session is still being read; \
+                              read or drop its cursor before running another"
+                        .to_owned(),
+                });
+            }
+            if let Some(conn) = flight.take_conn() {
+                return Ok(conn);
+            }
+        }
+        if self.in_transaction && !may_replace {
+            self.transaction_lost = true;
+            return Err(transaction_lost());
+        }
+        let conn = Conn::new(self.opts.clone())
             .await
             .map_err(|error| EngineError::Connect {
                 message: error.to_string(),
                 kind: classify_connect_error(&error),
-            })
+            })?;
+        // A new connection starts at the server's own settings, whatever was sent to the
+        // one it replaces.
+        self.statement_timeout = None;
+        Ok(conn)
     }
 
     /// Run one of our own statements and read every cell as text.
@@ -279,7 +438,7 @@ impl MysqlSession {
     /// Used by browse and objects, which are our statements with a known shape —
     /// unlike a user's query, they do not need the streaming path.
     async fn text_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, EngineError> {
-        let mut conn = self.connection().await?;
+        let mut conn = self.connection(false).await?;
         let outcome = async {
             let rows: Vec<mysql_async::Row> = conn
                 .query(sql)
@@ -340,7 +499,19 @@ impl MysqlSession {
             });
         }
 
-        let mut conn = self.connection().await?;
+        let effect = txn_effect(sql);
+        if self.transaction_lost && effect != TxnEffect::Rollback {
+            return Err(transaction_lost());
+        }
+        let mut conn = self.connection(effect == TxnEffect::Rollback).await?;
+        match effect {
+            TxnEffect::Begin => self.in_transaction = true,
+            TxnEffect::End | TxnEffect::Rollback => {
+                self.in_transaction = false;
+                self.transaction_lost = false;
+            }
+            TxnEffect::None => {}
+        }
 
         // The bound is a server setting, so it reaches the server before the statement
         // does. Applied when it changed: `SET` is a round trip.
@@ -377,6 +548,8 @@ impl MysqlSession {
         }
 
         let (sender, mut receiver) = mpsc::channel(BATCH_BACKLOG);
+        let flight = Flight::new(sender.downgrade());
+        self.flight = Some(Arc::clone(&flight));
         // Shared rather than sent as a message: the count belongs to the statement,
         // and the cursor may be asked for it before or after the stream is drained.
         let affected = Arc::new(Mutex::new(None));
@@ -397,6 +570,7 @@ impl MysqlSession {
             connection_id: Arc::clone(&self.connection_id),
             affected: Arc::clone(&affected),
             timeout: options.statement_timeout,
+            flight: Arc::clone(&flight),
         };
         tokio::spawn(producer.run());
 
@@ -413,13 +587,22 @@ impl MysqlSession {
         }
 
         match receiver.recv().await {
-            Some(Message::Ready { columns }) => Ok(Box::new(MysqlCursor {
-                columns,
-                receiver,
-                pending: None,
-                finished: false,
-                affected,
-            })),
+            Some(Message::Ready { columns }) => {
+                // No columns means nothing will stream: the producer is about to finish,
+                // and the next statement (a `COMMIT` after this `INSERT`) needs its
+                // connection, so wait for it here rather than make the caller drain a
+                // cursor that has nothing in it.
+                if columns.is_empty() {
+                    flight.wait_finished(HAND_BACK_WAIT).await;
+                }
+                Ok(Box::new(MysqlCursor {
+                    columns,
+                    receiver,
+                    pending: None,
+                    finished: false,
+                    affected,
+                }))
+            }
             Some(Message::Failed(error)) => Err(error),
             Some(Message::Batch(_)) | None => Err(EngineError::Internal {
                 message: "the query task ended before describing its result".to_owned(),
@@ -566,7 +749,11 @@ impl Session for MysqlSession {
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), EngineError> {
-        if let Some(conn) = self.idle.take() {
+        let conn = self
+            .idle
+            .take()
+            .or_else(|| self.flight.take().and_then(|flight| flight.take_conn()));
+        if let Some(conn) = conn {
             let _ = conn.disconnect().await;
         }
         Ok(())
@@ -644,6 +831,8 @@ struct Producer {
     affected: Arc<Mutex<Option<u64>>>,
     /// The bound the statement runs under, so a server timeout names it.
     timeout: Option<Duration>,
+    /// Where the connection goes when the statement is over.
+    flight: Arc<Flight>,
 }
 
 impl Producer {
@@ -651,16 +840,20 @@ impl Producer {
         // Captured before `produce` consumes the producer, so a failure can still be
         // reported.
         let sender = self.sender.clone();
-        if let Err(error) = self.produce().await {
+        let flight = Arc::clone(&self.flight);
+        let (outcome, conn) = self.produce().await;
+        // Before the failure is announced, so a caller that sees it finds the connection.
+        flight.finish(conn);
+        if let Err(error) = outcome {
             // A closed receiver means the cursor was dropped, which is a user
             // cancelling a scroll rather than a failure. Sending is best effort.
             let _ = sender.send(Message::Failed(error)).await;
         }
         // The id is left in place, see `MysqlSession::connection_id`.
         //
-        // Dropping the connection closes the socket; `disconnect` is the tidy
-        // path but it consumes the value, and there is nothing to report if it
-        // fails while the statement is already over.
+        // A connection the session did not take back is dropped with `flight`'s state,
+        // which closes the socket; `disconnect` is the tidy path but there is nothing to
+        // report if it fails while the statement is already over.
     }
 
     /// Read the statement and feed the cursor.
@@ -669,7 +862,12 @@ impl Producer {
     /// life while the streaming loop borrows the other fields beside it. A
     /// statement with no values keeps the text protocol it always used; one with
     /// values takes the prepared protocol, which is where `?` exists.
-    async fn produce(self) -> Result<(), EngineError> {
+    ///
+    /// Returns the connection alongside the outcome when the statement ended somewhere
+    /// the next one can start from: read to its end, or refused by the server with an
+    /// answer. Anything else (a limit reached, the cursor gone, the socket failing)
+    /// leaves the protocol mid-result or unknown, so the connection is not offered back.
+    async fn produce(self) -> (Result<(), EngineError>, Option<Conn>) {
         let Producer {
             mut conn,
             sql,
@@ -683,6 +881,7 @@ impl Producer {
             connection_id,
             affected,
             timeout,
+            flight: _,
         } = self;
         // Read before the query, because the result set takes the connection
         // mutably for as long as it lives.
@@ -700,20 +899,30 @@ impl Producer {
             timeout,
         };
 
-        if params.is_empty() {
-            let mut result = conn
-                .query_iter(&sql)
-                .await
-                .map_err(|error| map_query_error(error, &sql, timeout))?;
-            consume(&mut result, &config).await
+        let (outcome, clean) = if params.is_empty() {
+            match conn.query_iter(&sql).await {
+                Ok(mut result) => consume(&mut result, &config).await,
+                Err(error) => refused(error, &sql, timeout),
+            }
         } else {
-            let mut result = conn
-                .exec_iter(&sql, params)
-                .await
-                .map_err(|error| map_query_error(error, &sql, timeout))?;
-            consume(&mut result, &config).await
-        }
+            match conn.exec_iter(&sql, params).await {
+                Ok(mut result) => consume(&mut result, &config).await,
+                Err(error) => refused(error, &sql, timeout),
+            }
+        };
+        (outcome, clean.then_some(conn))
     }
+}
+
+/// A statement the server (or the socket) refused, and whether the connection can still be
+/// used: only an answer from the server says so.
+fn refused(
+    error: mysql_async::Error,
+    sql: &str,
+    timeout: Option<Duration>,
+) -> (Result<(), EngineError>, bool) {
+    let answered = matches!(error, mysql_async::Error::Server(_));
+    (Err(map_query_error(error, sql, timeout)), answered)
 }
 
 /// The fields the streaming loop reads, borrowed beside the result set.
@@ -735,10 +944,13 @@ struct StreamConfig<'a> {
 /// Free rather than a method because the result set holds `conn` mutably for its
 /// whole life, and the loop still needs the fields beside it; they are passed as
 /// one borrow group instead.
+///
+/// The `bool` is whether the result was read to its end (or ended in a server answer),
+/// so the connection can serve the next statement.
 async fn consume<P: mysql_async::prelude::Protocol>(
     result: &mut mysql_async::QueryResult<'_, '_, P>,
     config: &StreamConfig<'_>,
-) -> Result<(), EngineError> {
+) -> (Result<(), EngineError>, bool) {
     let (column_types, binary) = if config.announce_columns {
         // Not described up front, so ask the result set. This is also where a
         // statement with no result set becomes distinguishable from one that
@@ -767,7 +979,7 @@ async fn consume<P: mysql_async::prelude::Protocol>(
             .await
             .is_err()
         {
-            return Ok(());
+            return (Ok(()), false);
         }
         (types, binary)
     } else {
@@ -780,40 +992,51 @@ async fn consume<P: mysql_async::prelude::Protocol>(
     // OK packet the result already read, and so does an `INSERT`.
     if column_types.is_empty() {
         record_affected(config.affected, result);
-        return Ok(());
+        return (Ok(()), true);
     }
 
     let mut batch = BatchBuilder::new(column_types, binary, config.batch_rows);
     let mut emitted = 0usize;
+    // Cleared when the loop stops before the server's last packet.
+    let mut exhausted = true;
 
-    while let Some(row) = result
-        .next()
-        .await
-        .map_err(|error| map_query_error(error, config.sql, config.timeout))?
-    {
+    loop {
+        let row = match result.next().await {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(error) => return refused(error, config.sql, config.timeout),
+        };
         if let Some(limit) = config.row_limit {
             if emitted + batch.rows >= limit {
+                exhausted = false;
                 break;
             }
         }
         batch.push_row(&row);
         if batch.rows >= config.batch_rows {
-            let full = batch.take()?;
+            let full = match batch.take() {
+                Ok(full) => full,
+                Err(error) => return (Err(error), false),
+            };
             emitted += full.rows();
             if config.sender.send(Message::Batch(full)).await.is_err() {
-                return Ok(());
+                return (Ok(()), false);
             }
         }
     }
 
     if batch.rows > 0 {
-        let rest = batch.take()?;
-        let _ = config.sender.send(Message::Batch(rest)).await;
+        match batch.take() {
+            Ok(rest) => {
+                let _ = config.sender.send(Message::Batch(rest)).await;
+            }
+            Err(error) => return (Err(error), false),
+        }
     }
     // Read after the stream is exhausted: the OK packet that carries the count is
     // the one that ends it.
     record_affected(config.affected, result);
-    Ok(())
+    (Ok(()), exhausted)
 }
 
 /// One bound value in MySQL's own value shapes.

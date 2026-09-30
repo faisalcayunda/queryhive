@@ -853,3 +853,330 @@ async fn a_statement_timeout_is_a_typed_error_that_names_the_limit() {
         "the timeout took {elapsed:?}"
     );
 }
+
+// --------------------------------------------------------------------------- //
+// one session keeps one connection (W3-T1 commit F)
+// --------------------------------------------------------------------------- //
+
+/// Run one statement to the end and return its first row's first cell, if any.
+async fn scalar(session: &mut Box<dyn Session>, sql: &str, options: &ExecuteOptions) -> Value {
+    let mut cursor = session.execute(sql, options).await.expect("execute");
+    let (rows, _) = drain(&mut cursor, 8).await;
+    rows.first().map_or(Value::Null, |row| row[0].clone())
+}
+
+/// Run one statement that returns nothing, to the end.
+async fn run(session: &mut Box<dyn Session>, sql: &str) {
+    let mut cursor = session
+        .execute(sql, &ExecuteOptions::default())
+        .await
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"));
+    drain(&mut cursor, 8).await;
+}
+
+#[tokio::test]
+async fn every_statement_of_a_session_runs_on_the_same_connection() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let options = ExecuteOptions::default();
+    let first = scalar(&mut session, "SELECT CONNECTION_ID()", &options).await;
+    let second = scalar(&mut session, "SELECT CONNECTION_ID()", &options).await;
+    let third = scalar(&mut session, "SELECT CONNECTION_ID()", &options).await;
+    assert_ne!(first, Value::Null, "CONNECTION_ID() came back empty");
+    assert_eq!(first, second, "the second statement ran elsewhere");
+    assert_eq!(second, third, "the third statement ran elsewhere");
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_rollback_undoes_what_the_same_sessions_transaction_wrote() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let table = "qh_w3t1_rollback";
+    run(&mut session, &format!("DROP TABLE IF EXISTS {table}")).await;
+    run(
+        &mut session,
+        &format!("CREATE TABLE {table} (id INT PRIMARY KEY) ENGINE=InnoDB"),
+    )
+    .await;
+
+    run(&mut session, "BEGIN").await;
+    run(&mut session, &format!("INSERT INTO {table} VALUES (1)")).await;
+    run(&mut session, "ROLLBACK").await;
+
+    let count = scalar(
+        &mut session,
+        &format!("SELECT COUNT(*) FROM {table}"),
+        &ExecuteOptions::default(),
+    )
+    .await;
+    run(&mut session, &format!("DROP TABLE {table}")).await;
+    assert_eq!(count, Value::Int(0), "ROLLBACK undid nothing");
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_failed_statement_leaves_the_transaction_open_for_the_rollback() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let table = "qh_w3t1_failed";
+    run(&mut session, &format!("DROP TABLE IF EXISTS {table}")).await;
+    run(
+        &mut session,
+        &format!("CREATE TABLE {table} (id INT PRIMARY KEY) ENGINE=InnoDB"),
+    )
+    .await;
+
+    run(&mut session, "BEGIN").await;
+    run(&mut session, &format!("INSERT INTO {table} VALUES (1)")).await;
+    let duplicate = session
+        .execute(
+            &format!("INSERT INTO {table} VALUES (1)"),
+            &ExecuteOptions::default(),
+        )
+        .await;
+    assert!(duplicate.is_err(), "the duplicate key must be refused");
+    drop(duplicate);
+    run(&mut session, "ROLLBACK").await;
+
+    let count = scalar(
+        &mut session,
+        &format!("SELECT COUNT(*) FROM {table}"),
+        &ExecuteOptions::default(),
+    )
+    .await;
+    run(&mut session, &format!("DROP TABLE {table}")).await;
+    assert_eq!(
+        count,
+        Value::Int(0),
+        "the first insert survived the rollback"
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn foreign_key_checks_set_in_one_statement_hold_for_the_next() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let (parent, child) = ("qh_w3t1_parent", "qh_w3t1_child");
+    run(&mut session, &format!("DROP TABLE IF EXISTS {child}")).await;
+    run(&mut session, &format!("DROP TABLE IF EXISTS {parent}")).await;
+    run(
+        &mut session,
+        &format!("CREATE TABLE {parent} (id INT PRIMARY KEY) ENGINE=InnoDB"),
+    )
+    .await;
+    run(
+        &mut session,
+        &format!(
+            "CREATE TABLE {child} (id INT PRIMARY KEY, p INT, \
+             FOREIGN KEY (p) REFERENCES {parent}(id)) ENGINE=InnoDB"
+        ),
+    )
+    .await;
+
+    run(&mut session, "SET FOREIGN_KEY_CHECKS = 0").await;
+    // The orphan is what the import path writes when it loads children first.
+    let orphan = session
+        .execute(
+            &format!("INSERT INTO {child} VALUES (1, 99)"),
+            &ExecuteOptions::default(),
+        )
+        .await;
+    let orphan_ok = orphan.is_ok();
+    drop(orphan);
+    run(&mut session, "SET FOREIGN_KEY_CHECKS = 1").await;
+
+    run(&mut session, &format!("DROP TABLE IF EXISTS {child}")).await;
+    run(&mut session, &format!("DROP TABLE IF EXISTS {parent}")).await;
+    assert!(
+        orphan_ok,
+        "FOREIGN_KEY_CHECKS = 0 did not reach the next statement"
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_session_variable_survives_to_the_next_statement() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    run(&mut session, "SET @qh_w3t1 = 7").await;
+    let value = scalar(&mut session, "SELECT @qh_w3t1", &ExecuteOptions::default()).await;
+    assert_ne!(
+        value,
+        Value::Null,
+        "the user variable was lost with its connection"
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn the_statement_timeout_still_holds_on_the_second_statement() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let options = ExecuteOptions {
+        statement_timeout: Some(Duration::from_secs(5)),
+        ..ExecuteOptions::default()
+    };
+    // The second statement does not send the `SET` again, because the session
+    // believes the bound is already in force. It has to be right.
+    scalar(&mut session, "SELECT 1", &options).await;
+    let bound = scalar(&mut session, "SELECT @@max_execution_time", &options).await;
+    assert_eq!(
+        bound,
+        Value::Int(5000),
+        "the bound was lost with the connection"
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_session_still_answers_after_its_cursor_was_dropped_unread() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let cursor = session
+        .execute(
+            "SELECT a.id FROM wide_500k a JOIN wide_500k b ON a.id < b.id LIMIT 1000000",
+            &ExecuteOptions::default(),
+        )
+        .await
+        .expect("execute");
+    session.cancel().await.expect("cancel");
+    drop(cursor);
+    let one = scalar(&mut session, "SELECT 1", &ExecuteOptions::default()).await;
+    assert_eq!(one, Value::Int(1));
+    session.close().await.expect("close");
+}
+
+const BIG_JOIN: &str = "SELECT a.id FROM wide_500k a JOIN wide_500k b ON a.id < b.id";
+/// More rows than the producer's channel holds, and few enough to drain in a moment when
+/// the connection is dropped mid-result (the drop reads the rest, unless a KILL came first).
+const ABANDONED: &str = "SELECT id FROM wide_500k";
+
+#[tokio::test]
+async fn a_second_statement_on_a_live_cursor_is_refused_not_waited_for() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let cursor = session
+        .execute(BIG_JOIN, &ExecuteOptions::default())
+        .await
+        .expect("execute");
+
+    let asked = Instant::now();
+    let second = session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await;
+    assert!(
+        matches!(second, Err(EngineError::Usage { .. })),
+        "expected a Usage error, got {:?}",
+        second.map(|_| "a cursor")
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "it waited {:?}",
+        asked.elapsed()
+    );
+
+    // The refusal must not have cost the session its statement or its connection.
+    session.cancel().await.expect("cancel");
+    drop(cursor);
+    let one = scalar(&mut session, "SELECT 1", &ExecuteOptions::default()).await;
+    assert_eq!(one, Value::Int(1));
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_lost_transaction_refuses_commit_and_accepts_rollback() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let table = "qh_w3t1_lost";
+    run(&mut session, &format!("DROP TABLE IF EXISTS {table}")).await;
+    run(
+        &mut session,
+        &format!("CREATE TABLE {table} (id INT PRIMARY KEY) ENGINE=InnoDB"),
+    )
+    .await;
+
+    run(&mut session, "BEGIN").await;
+    run(&mut session, &format!("INSERT INTO {table} VALUES (1)")).await;
+    // Abandoned mid-stream: the connection cannot be offered back.
+    let cursor = session
+        .execute(ABANDONED, &ExecuteOptions::default())
+        .await
+        .expect("execute");
+    drop(cursor);
+
+    let commit = session.execute("COMMIT", &ExecuteOptions::default()).await;
+    match commit {
+        Err(EngineError::Query { kind, .. }) => assert_eq!(kind, FailureKind::Permanent),
+        other => panic!(
+            "COMMIT over a lost transaction must fail: {:?}",
+            other.map(|_| "ok")
+        ),
+    }
+    let select = session
+        .execute("SELECT 1", &ExecuteOptions::default())
+        .await;
+    assert!(
+        select.is_err(),
+        "the session ran a statement on a fresh connection"
+    );
+    drop(select);
+
+    run(&mut session, "ROLLBACK").await;
+    let count = scalar(
+        &mut session,
+        &format!("SELECT COUNT(*) FROM {table}"),
+        &ExecuteOptions::default(),
+    )
+    .await;
+    run(&mut session, &format!("DROP TABLE {table}")).await;
+    assert_eq!(
+        count,
+        Value::Int(0),
+        "the lost transaction's row is in the table"
+    );
+    // ROLLBACK cleared the state.
+    assert_eq!(
+        scalar(&mut session, "SELECT 1", &ExecuteOptions::default()).await,
+        Value::Int(1)
+    );
+    session.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn the_timeout_is_sent_again_when_a_dropped_statement_costs_the_connection() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let options = ExecuteOptions {
+        statement_timeout: Some(Duration::from_secs(5)),
+        ..ExecuteOptions::default()
+    };
+    scalar(&mut session, "SELECT 1", &options).await;
+    let cursor = session.execute(ABANDONED, &options).await.expect("execute");
+    drop(cursor);
+    // A new connection starts at the server's 0; the session must not think 5000 is set.
+    let bound = scalar(&mut session, "SELECT @@max_execution_time", &options).await;
+    assert_eq!(bound, Value::Int(5000));
+    session.close().await.expect("close");
+}
