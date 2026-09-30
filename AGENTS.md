@@ -38,11 +38,11 @@ Dev databases run in podman on loopback: PostgreSQL 55432, MySQL 53306, Trino 58
 
 ## Review by risk
 
-- **High** (credentials, SSH trust, spill encryption, Safe Mode classification in `crates/qh-sql`, FFI, any path that can lose user text or data, the engine host, grid and data-plane rewrites): the strongest available model reviews, plus a security or database reviewer where relevant; up to three rounds.
-- **Medium** (UI features, SQL the app generates): one reviewer, up to two rounds.
+- **High** (credentials, SSH trust, spill encryption, Safe Mode classification in `crates/qh-sql`, FFI, any path that can lose user text or data, the engine host, grid and data-plane rewrites): the strongest available model reviews, plus a security or database reviewer where relevant.
+- **Medium** (UI features, SQL the app generates): one reviewer.
 - **Low** (docs, ADRs, bench tooling, test-only, move-only refactors, cleanup): gates plus one light review.
 
-Only a blocking finding starts another round; everything else goes to the backlog and is fixed in the wave's cleanup.
+Every tier gets at most 2 review rounds. Only a blocking finding earns round 2; everything else goes to the backlog and is fixed in the wave's cleanup. After round 2, verify the remaining fixes with the gates and record them as pending review in the ledger instead of starting round 3.
 
 ## Working rules
 
