@@ -298,6 +298,13 @@ pub trait Engine: Send + Sync {
     fn driver(&self, kind: DriverKind) -> &dyn Driver;
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError>;
+
+    /// Whether the sessions this engine hands out go back to a pool when they are closed, which
+    /// then decides their fate itself (reset, refill or discard). A capped preview leaves such a
+    /// session alone; on any other engine it stops the statement on the server before closing.
+    fn keeps_sessions(&self) -> bool {
+        false
+    }
 }
 
 /// The three drivers, wired together.

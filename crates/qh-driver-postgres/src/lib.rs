@@ -11,7 +11,10 @@
 //! 2. `Client::simple_query_raw` — the statement actually runs, streaming rows
 //!    back as text, one message at a time.
 //!
-//! The cost is one extra round trip and one extra parse on the server. What it
+//! The cost is one extra round trip and one extra parse on the server (a `SET
+//! statement_timeout` that changed rides in the same flight as the describe). The statement
+//! itself is never sent before its describe has been answered, so a text the server refuses is
+//! never run. What it
 //! buys is that values and their types arrive without the binary decoding pass
 //! the extended protocol would need, and no unmodelled type can fail a query
 //! (see [`normalize`] for the full argument).
@@ -87,6 +90,7 @@ pub mod normalize;
 pub mod tls;
 
 use std::error::Error as _;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -199,6 +203,9 @@ impl PostgresDriver {
             .port(config.port)
             .user(&config.user)
             .application_name("QueryHive")
+            // A pooled session can idle behind a NAT that forgets it; a probe every minute keeps
+            // the mapping alive and lets a dead socket show up as one.
+            .keepalives_idle(Duration::from_secs(60))
             // Spelled out per mode rather than left at `tokio-postgres`'s
             // default, so which mode is on the wire is decided here.
             .ssl_mode(tls::ssl_mode(config.tls));
@@ -520,31 +527,46 @@ impl Session for PostgresSession {
     ) -> Result<Box<dyn Cursor>, EngineError> {
         // The bound is a server setting, so it has to reach the server before the
         // statement does. Applied only when it changed: `SET` is a round trip, and the
-        // value already in force is already in force.
+        // value already in force is already in force. It travels in the same flight as the
+        // describe below, so it costs nothing extra.
         self.ensure_open()?;
-        apply_statement_timeout(
-            &self.client,
-            self.statement_timeout,
-            options.statement_timeout,
+        let set = timeout_statement(self.statement_timeout, options.statement_timeout);
+        let client = &self.client;
+        // Described first so the columns arrive with their types, and **before the statement
+        // is sent**: a statement that cannot be described is refused as the server reports it,
+        // which is also how a multi-statement script is refused, and nothing has run by then.
+        // The statement is never sent together with its describe: the classifier and the
+        // server can read the same text differently, and a describe that would have refused it
+        // must come first.
+        let ((), statement) = futures_util::future::try_join(
+            async {
+                match &set {
+                    Some(statement) => client
+                        .batch_execute(statement)
+                        // The bound is in force from here, so a failure setting it is reported
+                        // as what it is: the timeout is not on, and the caller must not be
+                        // told it is.
+                        .await
+                        .map_err(|error| {
+                            map_query_error(error, statement, options.statement_timeout)
+                        }),
+                    None => Ok(()),
+                }
+            },
+            async {
+                client
+                    .prepare(sql)
+                    .await
+                    .map_err(|error| map_describe_error(error, sql, options.statement_timeout))
+            },
         )
         .await?;
-        self.statement_timeout = options.statement_timeout;
-
-        // Described first so the columns arrive with their types. A statement
-        // that cannot be described is reported as the server reports it — which
-        // is also how a multi-statement script is refused.
-        let statement = self
-            .client
-            .prepare(sql)
-            .await
-            .map_err(|error| map_describe_error(error, sql, options.statement_timeout))?;
-        let (columns, type_names) = describe_columns(&statement);
-
-        let stream = self
-            .client
+        let stream = client
             .simple_query_raw(sql)
             .await
             .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
+        self.statement_timeout = options.statement_timeout;
+        let (columns, type_names) = describe_columns(&statement);
 
         Ok(Box::new(PostgresCursor {
             columns,
@@ -716,7 +738,7 @@ struct PostgresCursor {
     columns: Vec<ColumnMeta>,
     type_names: Vec<String>,
     /// Boxed and pinned: `SimpleQueryStream` is not `Unpin`.
-    stream: std::pin::Pin<Box<SimpleQueryStream>>,
+    stream: Pin<Box<SimpleQueryStream>>,
     row_limit: Option<usize>,
     emitted: usize,
     finished: bool,

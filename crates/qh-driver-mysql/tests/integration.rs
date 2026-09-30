@@ -1180,3 +1180,135 @@ async fn the_timeout_is_sent_again_when_a_dropped_statement_costs_the_connection
     assert_eq!(bound, Value::Int(5000));
     session.close().await.expect("close");
 }
+
+/// A capped read skips the `COM_STMT_PREPARE` describe and takes its columns from its own result
+/// set (W3-T1, commit 2). The two must agree on every name, type and value, or the grid would
+/// draw a different result depending on whether a cap was set.
+#[tokio::test]
+async fn a_capped_read_reports_the_same_columns_and_values_as_a_described_one() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let capped = ExecuteOptions {
+        row_limit: Some(1000),
+        ..ExecuteOptions::default()
+    };
+    for sql in [
+        "SELECT * FROM type_zoo",
+        "SELECT CAST(1 AS SIGNED) AS n, 'x' AS t, CAST(1.50 AS DECIMAL(10,2)) AS amount, \
+         NULL AS nothing, 1 + 1 AS sum, NOW() AS at, CAST('a' AS BINARY) AS b, 1.5e0 AS f",
+    ] {
+        let mut described = session
+            .execute(sql, &ExecuteOptions::default())
+            .await
+            .expect("described");
+        let described_columns: Vec<_> = described
+            .columns()
+            .iter()
+            .map(|column| (column.name.to_string(), column.type_name.to_string()))
+            .collect();
+        let (described_rows, _) = drain(&mut described, 100).await;
+        drop(described);
+
+        let mut cursor = session.execute(sql, &capped).await.expect("capped");
+        let (rows, _) = drain(&mut cursor, 100).await;
+        let columns: Vec<_> = cursor
+            .columns()
+            .iter()
+            .map(|column| (column.name.to_string(), column.type_name.to_string()))
+            .collect();
+        drop(cursor);
+
+        assert_eq!(columns, described_columns, "{sql}");
+        // `NOW()` moves between the two runs; everything else is fixed.
+        if !sql.contains("NOW()") {
+            assert_eq!(rows, described_rows, "{sql}");
+        }
+    }
+    session.close().await.expect("close");
+}
+
+/// A capped statement whose connection is killed after its text was sent reports a permanent
+/// "lost connection" (2013) and is not sent again: the function bumped the counter exactly once.
+#[tokio::test]
+async fn a_capped_statement_on_a_killed_connection_is_reported_and_not_resent() {
+    let Some(config) = config() else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let mut admin = mysql_async::Conn::new(
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(config.host.clone())
+            .tcp_port(config.port)
+            // Creating a function that writes needs SUPER while the server logs binary changes,
+            // which the test user does not have; the dev container's root does.
+            .user(Some("root"))
+            .pass(Some("qh-dev-root-only"))
+            .db_name(config.database.clone())
+            .prefer_socket(false),
+    )
+    .await
+    .expect("connect to the dev container");
+    for sql in [
+        "DROP FUNCTION IF EXISTS qh_probe_bump",
+        "DROP TABLE IF EXISTS qh_probe_counter",
+        "CREATE TABLE qh_probe_counter (n INT) ENGINE=MyISAM",
+        "INSERT INTO qh_probe_counter VALUES (0)",
+        "CREATE FUNCTION qh_probe_bump() RETURNS INT DETERMINISTIC MODIFIES SQL DATA \
+         BEGIN UPDATE qh_probe_counter SET n = n + 1; RETURN 1; END",
+    ] {
+        admin.query_drop(sql).await.expect(sql);
+    }
+
+    let mut session = connect().await.expect("guarded above");
+    let id: u32 = {
+        let mut cursor = session
+            .execute("SELECT CONNECTION_ID()", &ExecuteOptions::default())
+            .await
+            .expect("id");
+        let (rows, _) = drain(&mut cursor, 10).await;
+        match &rows[0][0] {
+            Value::Int(id) => u32::try_from(*id).expect("an id"),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    let killer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let mut killer = mysql_async::Conn::new(
+            mysql_async::OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(53306)
+                .user(Some("qh"))
+                .pass(Some("qh-dev-only"))
+                .prefer_socket(false),
+        )
+        .await
+        .expect("killer connects");
+        killer.query_drop(format!("KILL {id}")).await.expect("kill");
+    });
+
+    let capped = ExecuteOptions {
+        row_limit: Some(10),
+        ..ExecuteOptions::default()
+    };
+    let error = match session
+        .execute("SELECT qh_probe_bump(), SLEEP(3)", &capped)
+        .await
+    {
+        Ok(mut cursor) => cursor.next_batch(10).await.expect_err("killed"),
+        Err(error) => error,
+    };
+    killer.await.expect("killer");
+    assert_eq!(error.code(), Some("2013"), "{error:?}");
+    assert_eq!(error.failure_kind(), FailureKind::Permanent, "{error:?}");
+
+    let n: Option<i32> = admin
+        .query_first("SELECT n FROM qh_probe_counter")
+        .await
+        .expect("read the counter");
+    assert_eq!(n, Some(1), "the statement ran once");
+    for sql in ["DROP FUNCTION qh_probe_bump", "DROP TABLE qh_probe_counter"] {
+        admin.query_drop(sql).await.expect(sql);
+    }
+}

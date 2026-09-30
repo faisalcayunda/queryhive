@@ -28,7 +28,9 @@
 //! `execute` waits for the producer's first message before returning, so
 //! `columns()` is valid immediately as the trait requires. Only the column
 //! descriptions have to arrive for that, and they come before any row — so this
-//! wait does not delay the first row.
+//! wait does not delay the first row. Where they come from is the `COM_STMT_PREPARE`
+//! describe the statement is sent with, except for a capped read (a preview), which skips it
+//! and takes them from its own result set: see `run_statement`.
 //!
 //! ## Cancelling
 //!
@@ -96,7 +98,9 @@ use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
 };
-use qh_sql::{statements_dialect, strip_terminator_dialect, Dialect};
+use qh_sql::{
+    classify_readings, statements_dialect, strip_terminator_dialect, Dialect, StatementKind,
+};
 use tokio::sync::mpsc;
 
 /// Whether `sql` is at most one statement under **every** lexer the server might be using.
@@ -141,6 +145,9 @@ const HAND_BACK_WAIT: Duration = Duration::from_millis(250);
 /// bounds the whole reset as well; this only stops a producer that never finishes from
 /// holding the reset for all of it.
 const RESET_WAIT: Duration = Duration::from_secs(2);
+
+/// TCP keepalive interval for every connection, in milliseconds (`OptsBuilder::tcp_keepalive`).
+const TCP_KEEPALIVE_MS: u32 = 60_000;
 
 /// What a statement does to the session's transaction, read from its first words.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -327,6 +334,7 @@ impl Driver for MysqlDriver {
             // `SET SESSION max_execution_time = 0` on its first statement and override a
             // bound the server's configuration set.
             statement_timeout: None,
+            select_limit: None,
         }))
     }
 }
@@ -351,7 +359,10 @@ fn build_opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
         // Connecting over a unix socket would ignore host and port entirely, and
         // in a container the socket usually is not there. Forced off so the
         // configured address is the address used.
-        .prefer_socket(false);
+        .prefer_socket(false)
+        // An idle pooled connection can sit behind a NAT that forgets it; a probe every minute
+        // keeps the mapping alive and lets a dead socket show up as one.
+        .tcp_keepalive(Some(TCP_KEEPALIVE_MS));
     // Absent means the connection is deliberately in clear: `mysql_async` never
     // offers a capability it was not given options for.
     if let Some(tls) = tls {
@@ -397,6 +408,9 @@ struct MysqlSession {
     /// The `max_execution_time` this session last sent to the server, so the `SET`
     /// is sent when the bound changes rather than on every statement.
     statement_timeout: Option<Duration>,
+    /// The `sql_select_limit` this session last sent, tracked like the timeout. `None` is the
+    /// server's own default, which is what a new or freshly reset connection has.
+    select_limit: Option<usize>,
 }
 
 impl MysqlSession {
@@ -445,6 +459,7 @@ impl MysqlSession {
         // A new connection starts at the server's own settings, whatever was sent to the
         // one it replaces.
         self.statement_timeout = None;
+        self.select_limit = None;
         Ok(conn)
     }
 
@@ -483,6 +498,19 @@ impl MysqlSession {
             self.idle = Some(conn);
             return Err(error);
         }
+        // Our own statements are never capped: a select limit left by a capped read on this
+        // session would silently shorten a tree level.
+        if let Err(error) = apply_session_settings(
+            &mut conn,
+            (self.statement_timeout, self.select_limit),
+            (self.statement_timeout, None),
+        )
+        .await
+        {
+            self.idle = Some(conn);
+            return Err(error);
+        }
+        self.select_limit = None;
         let outcome = async {
             let rows: Vec<mysql_async::Row> = conn
                 .query(sql)
@@ -562,11 +590,15 @@ impl MysqlSession {
             return Err(error);
         }
 
-        // The bound is a server setting, so it reaches the server before the statement
-        // does. Applied when it changed: `SET` is a round trip.
-        if let Err(error) =
-            apply_max_execution_time(&mut conn, self.statement_timeout, options.statement_timeout)
-                .await
+        // The bounds are server settings, so they reach the server before the statement does,
+        // in one `SET` and only when one of them changed: it is a round trip.
+        let select_limit = select_limit_for(sql, options);
+        if let Err(error) = apply_session_settings(
+            &mut conn,
+            (self.statement_timeout, self.select_limit),
+            (options.statement_timeout, select_limit),
+        )
+        .await
         {
             // The connection is still good — the bound was refused, the session was not
             // — so it goes back to the session rather than being thrown away.
@@ -574,20 +606,31 @@ impl MysqlSession {
             return Err(error);
         }
         self.statement_timeout = options.statement_timeout;
+        self.select_limit = select_limit;
 
         // Describe the statement **without running it**. `prep` is
         // COM_STMT_PREPARE: it returns the result columns and executes nothing, so
         // it costs one round trip and does no work.
         //
-        // This is not a tidy-up, it is what makes cancel reachable at all. MySQL
-        // sends a result set's column descriptions when the result set *begins*,
-        // and for a blocking query that is when the query finishes. Waiting for
-        // them here therefore waited for the whole query. Measured against the dev
-        // container: `execute(SELECT SLEEP(2))` returned after 2.002 s, and a long
-        // join had not returned after 5 s. During that window `execute` had not
-        // handed anything back, so the caller had no cursor to cancel and pressing
-        // stop did nothing. Describing that same join first returns in 915 µs.
-        let described = conn.prep(sql).await.ok();
+        // This is what makes cancel reachable through a *cursor*. MySQL sends a result
+        // set's column descriptions when the result set *begins*, and for a blocking query
+        // that is when the query finishes: without the describe, `execute` would return only
+        // then (measured: `SELECT SLEEP(2)` took 2.002 s to `execute`), and a caller holding
+        // no cursor could not cancel through it. The driver's own tests, and every caller that
+        // runs a statement to completion before the next one, rely on `execute` returning
+        // while the statement runs.
+        //
+        // A capped read is the one exception, and it skips the describe. Its only caller is
+        // the preview, which races `execute` against a Stop (dropping the call) and reaches the
+        // server through the connection id the producer publishes before it sends the query,
+        // so it needs no cursor to stop; and the round trip is the one a preview pays for on
+        // every Run. The columns then come from the result set's own definitions, as they do
+        // for a statement the server declined to describe.
+        let described = if options.row_limit.is_some() {
+            None
+        } else {
+            conn.prep(sql).await.ok()
+        };
         let (columns, column_types, binary) = describe(&described);
         // This describe is not the statement that runs — the producer prepares its
         // own, or runs the text it was given — so it is closed rather than left
@@ -652,10 +695,10 @@ impl MysqlSession {
                     affected,
                 }))
             }
-            Some(Message::Failed(error)) => Err(error),
-            Some(Message::Batch(_)) | None => Err(EngineError::Internal {
+            Some(Message::Failed(error)) => Err(sent_statement_failure(error)),
+            Some(Message::Batch(_)) | None => Err(sent_statement_failure(EngineError::Internal {
                 message: "the query task ended before describing its result".to_owned(),
-            }),
+            })),
         }
     }
 }
@@ -879,6 +922,7 @@ impl Session for MysqlSession {
         self.in_transaction = false;
         self.transaction_lost = false;
         self.statement_timeout = None;
+        self.select_limit = None;
         Ok(())
     }
 
@@ -950,7 +994,7 @@ struct Producer {
     column_types: Vec<mysql_async::consts::ColumnType>,
     binary: Vec<bool>,
     /// Whether the columns still have to be announced, because describing up front
-    /// did not work.
+    /// did not work or was skipped.
     announce_columns: bool,
     sender: mpsc::Sender<Message>,
     connection_id: Arc<AtomicU32>,
@@ -1476,26 +1520,86 @@ fn map_query_error(error: mysql_async::Error, sql: &str, timeout: Option<Duratio
     }
 }
 
+/// A failure that came back from a statement whose text has been sent.
+///
+/// A server's answer (it carries a code) and a timeout are reported as they are. Anything else
+/// (the socket dying, the task ending) does not say whether the server ran the statement, and the
+/// layers above resend an `execute` that failed as a transient connection error, which would run
+/// a statement with a side effect twice. So it is made permanent and coded like the client
+/// library's own "lost connection" (`2013`), and says so.
+fn sent_statement_failure(error: EngineError) -> EngineError {
+    match error {
+        EngineError::Connect { .. }
+        | EngineError::Internal { .. }
+        | EngineError::Query { code: None, .. } => EngineError::Query {
+            message: "the connection was lost after the statement was sent; it was not sent again"
+                .to_owned(),
+            code: Some("2013".to_owned()),
+            position: None,
+            kind: FailureKind::Permanent,
+        },
+        other => other,
+    }
+}
+
+/// The `sql_select_limit` a statement runs under, when it runs under one.
+///
+/// A capped preview asks the server to stop producing rows at the cap, so the session's
+/// connection ends the statement itself and goes back to the pool instead of being dropped
+/// mid-result. That is only sound for a statement whose rows are nothing but a result: for
+/// `INSERT … SELECT` or `CREATE TABLE … SELECT` the limit would cut the rows *written*, and for
+/// `SELECT … FOR UPDATE` the rows locked. So it is applied to a single statement that reads under
+/// **every** lexer the server might use ([`classify_readings`]), which leaves those out because
+/// their write or lock words classify them as writes. Anything else keeps the client-side cap
+/// alone, and its connection is dropped when the cap stops it. The statement text is never
+/// changed; an explicit `LIMIT` in it still wins over the session variable.
+fn select_limit_for(sql: &str, options: &ExecuteOptions) -> Option<usize> {
+    let limit = options.row_limit?;
+    (is_single_statement(sql)
+        && classify_readings(sql, Dialect::Mysql.readings()) == StatementKind::ReadOnly)
+        .then_some(limit)
+}
+
+/// The `SET` that takes the server from `current` to `wanted` (timeout, select limit), or `None`
+/// when they agree. One statement for both, so a preview that changes both costs one round trip.
+fn settings_statement(
+    current: (Option<Duration>, Option<usize>),
+    wanted: (Option<Duration>, Option<usize>),
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if current.0 != wanted.0 {
+        // `0` is `max_execution_time`'s own value for "no bound".
+        let milliseconds = wanted.0.map_or(0, |limit| {
+            u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
+        });
+        parts.push(format!("SESSION max_execution_time = {milliseconds}"));
+    }
+    if current.1 != wanted.1 {
+        parts.push(match wanted.1 {
+            Some(limit) => format!("SESSION sql_select_limit = {limit}"),
+            None => "SESSION sql_select_limit = DEFAULT".to_owned(),
+        });
+    }
+    (!parts.is_empty()).then(|| format!("SET {}", parts.join(", ")))
+}
+
 /// Put `wanted` in force on the server, when it is not there already.
 ///
 /// MySQL's server-side bound is the `max_execution_time` session variable, in
-/// milliseconds, and `0` is its own value for "no bound". It is enforced for read-only
-/// `SELECT` statements only — the module note says what that leaves uncovered.
-async fn apply_max_execution_time(
+/// milliseconds. It is enforced for read-only `SELECT` statements only — the module note says
+/// what that leaves uncovered. `sql_select_limit` rides in the same `SET`, see
+/// [`select_limit_for`].
+async fn apply_session_settings(
     conn: &mut Conn,
-    current: Option<Duration>,
-    wanted: Option<Duration>,
+    current: (Option<Duration>, Option<usize>),
+    wanted: (Option<Duration>, Option<usize>),
 ) -> Result<(), EngineError> {
-    if current == wanted {
+    let Some(statement) = settings_statement(current, wanted) else {
         return Ok(());
-    }
-    let milliseconds = wanted.map_or(0, |limit| {
-        u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)
-    });
-    let statement = format!("SET SESSION max_execution_time = {milliseconds}");
+    };
     conn.query_drop(&statement)
         .await
-        .map_err(|error| map_query_error(error, &statement, wanted))
+        .map_err(|error| map_query_error(error, &statement, wanted.0))
 }
 
 fn snippet(sql: &str) -> String {
@@ -1511,6 +1615,60 @@ fn snippet(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capped(rows: usize) -> ExecuteOptions {
+        ExecuteOptions {
+            row_limit: Some(rows),
+            ..ExecuteOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_select_limit_is_asked_only_for_a_single_read_with_a_row_limit() {
+        assert_eq!(select_limit_for("SELECT * FROM t", &capped(11)), Some(11));
+        assert_eq!(
+            select_limit_for("WITH x AS (SELECT 1) SELECT * FROM x;", &capped(5)),
+            Some(5)
+        );
+        // No cap, no limit.
+        assert_eq!(
+            select_limit_for("SELECT 1", &ExecuteOptions::default()),
+            None
+        );
+        // A limit on these would cut the rows written or locked.
+        for sql in [
+            "INSERT INTO t SELECT * FROM s",
+            "CREATE TABLE t2 AS SELECT * FROM t",
+            "SELECT * FROM t INTO OUTFILE '/tmp/x'",
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t LOCK IN SHARE MODE",
+            "CALL p()",
+            "REPLACE INTO t SELECT * FROM s",
+        ] {
+            assert_eq!(select_limit_for(sql, &capped(11)), None, "{sql}");
+        }
+        // More than one statement is refused before it is sent, and never limited.
+        assert_eq!(select_limit_for("SELECT 1; SELECT 2", &capped(11)), None);
+    }
+
+    #[test]
+    fn one_set_carries_the_timeout_and_the_select_limit() {
+        let second = Duration::from_secs(1);
+        assert_eq!(settings_statement((None, None), (None, None)), None);
+        assert_eq!(
+            settings_statement((None, None), (Some(second), Some(11))).as_deref(),
+            Some("SET SESSION max_execution_time = 1000, SESSION sql_select_limit = 11")
+        );
+        // Only what changed is sent, and a limit going away is the server's own default.
+        assert_eq!(
+            settings_statement((Some(second), Some(11)), (Some(second), None)).as_deref(),
+            Some("SET SESSION sql_select_limit = DEFAULT")
+        );
+        assert_eq!(
+            settings_statement((Some(second), None), (None, None)).as_deref(),
+            Some("SET SESSION max_execution_time = 0")
+        );
+    }
 
     #[test]
     fn this_driver_is_mysql_and_says_so() {

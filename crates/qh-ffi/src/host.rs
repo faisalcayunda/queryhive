@@ -175,6 +175,10 @@ impl Engine for PooledEngine {
             .await?;
         Ok(held)
     }
+
+    fn keeps_sessions(&self) -> bool {
+        true
+    }
 }
 
 /// The engine of a long operation: a session of its own, never pooled, on the shared tunnel.

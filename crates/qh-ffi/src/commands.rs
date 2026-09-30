@@ -1677,7 +1677,13 @@ async fn stream_rows(
             // The batch size is also the fetch size, so a flush that happens
             // early never asks the coordinator for more rows than the cap shows.
             max_batch_rows: Some(PREVIEW_BATCH),
-            row_limit: None,
+            // The cap plus the verdict row and not a row more, so the driver can stop reading
+            // (and MySQL can ask its server to stop producing) instead of pulling a whole page
+            // past what the grid shows. `emit_batches` still does the cutting.
+            row_limit: bounds
+                .limit
+                .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+                .map(|limit| limit.saturating_add(VERDICT_FETCH)),
             statement_timeout: bounds.timeout,
         },
         stop_grace(config),
@@ -1706,10 +1712,15 @@ async fn stream_rows(
     // session is stopped rather than merely closed, see [`stop_session`].
     let warning = if cancelled {
         stop_session(session, Some(cursor)).await
-    } else if truncated {
+    } else if truncated && !engine.keeps_sessions() {
         stop_session_in_background(session, Some(cursor));
         None
     } else {
+        // Complete, or capped on a pooled session: nothing is cancelled, because a cancel that
+        // lands late could hit the next statement of a session that is about to be reused. The
+        // pool settles it at checkin (PostgreSQL closes the socket and refills, MySQL's server
+        // ended the statement at the cap or the connection is dropped, Trino's reset deletes the
+        // query).
         drop(cursor);
         let _ = session.close().await;
         None

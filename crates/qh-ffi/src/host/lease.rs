@@ -159,19 +159,41 @@ impl LeaseState {
         }
     }
 
-    /// Whether the session must be closed rather than reset.
-    fn must_discard(&self) -> bool {
-        // A Trino session has no stream to leave behind (its reset stops the query), so an
-        // unfinished cursor only disqualifies the two drivers whose result lives on the connection.
-        let stream_matters = self.config.kind != DriverKind::Trino;
-        let abandoned = stream_matters
+    /// What becomes of the session when it comes back.
+    fn fate(&self) -> Fate {
+        // Only PostgreSQL's result lives on the connection with nothing else to say whether it
+        // was read through: the socket is the only thing that stops the backend. A MySQL
+        // session says so itself, because its reset needs the connection back from the producer
+        // and only a statement that ended (at the server's own cap, or by being read out) hands
+        // it back, so an unfinished one fails the reset and is closed there. A Trino session
+        // has no stream to leave behind: its reset deletes the query.
+        let left_behind = self.config.kind == DriverKind::Postgres
             && (self.dirty
                 || self
                     .last_cursor
                     .as_ref()
                     .is_some_and(|end| !end.clean.load(Ordering::SeqCst)));
-        self.cancelled.load(Ordering::SeqCst) || self.broken || self.unsettled || abandoned
+        if self.cancelled.load(Ordering::SeqCst) || self.broken || self.unsettled {
+            Fate::Discard
+        } else if left_behind {
+            // A capped preview, most likely: the session is closed (which stops the backend) and
+            // the pool opens the next one in the background.
+            Fate::DiscardAndRefill
+        } else {
+            Fate::Reset
+        }
     }
+}
+
+/// What the pool does with a session that comes back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fate {
+    /// Reset it and keep it.
+    Reset,
+    /// Close it: it was cancelled, broke, or is in an unknown state.
+    Discard,
+    /// Close it because its result was left unread, and open a replacement in the background.
+    DiscardAndRefill,
 }
 
 /// One call a lease forwards, described as data so the reconnect rule can run it twice.
@@ -296,7 +318,11 @@ impl Held {
         let mut outcome = self.attempt(op).await;
         if first && rerunnable {
             if let Err(error) = &outcome {
-                if produced_no_page(error) {
+                // Only a `Connect` failure proves nothing was sent: the drivers raise it before
+                // the statement text goes out (a closed socket, a refused connect). Any other
+                // failure without a server code may follow a statement the server already ran,
+                // and a rerun would repeat its side effects.
+                if matches!(error, EngineError::Connect { .. }) && produced_no_page(error) {
                     self.reconnect().await?;
                     outcome = self.attempt(op).await;
                 }
@@ -363,10 +389,12 @@ impl Held {
         let tunnel = self.tunnel.take();
         match (self.lease.take(), session) {
             (Some(lease), Some(session)) => {
-                let discard = lease.must_discard();
+                let fate = lease.fate();
+                let refill =
+                    (fate == Fate::DiscardAndRefill).then_some((lease.config, lease.settings));
                 lease
                     .pool
-                    .checkin(&lease.entry, lease.guard, session, tunnel, discard);
+                    .checkin(&lease.entry, lease.guard, session, tunnel, fate, refill);
             }
             (_, session) => {
                 // The session first, then the tunnel it rides on.

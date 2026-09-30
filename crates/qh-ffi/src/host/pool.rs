@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use qh_core::{EngineError, FailureKind};
 use qh_driver::{ConnectionConfig, DriverKind, Session, TlsMode, TunnelAuth, TunnelConfig};
 
-use super::lease::{Held, LeaseState};
+use super::lease::{Fate, Held, LeaseState};
 use super::{Connector, TunnelHandle};
 use crate::env::Settings;
 use crate::Engine;
@@ -637,25 +637,34 @@ impl SessionPool {
     ///
     /// Returns at once. The reset runs in the background, so the Run that ended never waits for
     /// it and the events it emitted keep their order.
+    ///
+    /// `refill` names the connection to open in the background when the session is discarded
+    /// because its result was left unread (a capped PostgreSQL preview): the next Run should
+    /// find a session again instead of paying a connect. It is used only when the key has no
+    /// idle session and none on its way.
     pub(crate) fn checkin(
         self: &Arc<Self>,
         entry: &Arc<Entry>,
         guard: LeaseGuard,
         session: Box<dyn Session>,
         tunnel: Option<Arc<dyn TunnelHandle>>,
-        discard: bool,
+        fate: Fate,
+        refill: Option<(ConnectionConfig, Settings)>,
     ) {
         let pending = guard.into_pending();
         let pool = Arc::clone(self);
         let entry = Arc::clone(entry);
         let work = async move {
-            let discard = discard
+            let discard = fate != Fate::Reset
                 || entry.is_retired()
                 || tunnel.as_ref().is_some_and(|tunnel| !tunnel.is_alive());
             if discard {
                 // Released first: a session that is only being closed must not make the next
                 // checkout wait for it.
                 drop(pending);
+                if let Some((config, settings)) = refill {
+                    pool.refill(&entry, config, settings);
+                }
                 pool.close_session(session).await;
                 return;
             }
@@ -708,11 +717,27 @@ impl SessionPool {
     /// after selecting a connection finds a warm one. Connects only: it sends no query.
     pub(crate) fn warm(self: &Arc<Self>, config: ConnectionConfig, settings: Settings) {
         let entry = self.entry_for(&PoolKey::of(&config, &settings));
+        self.open_idle(&entry, config, settings, true);
+    }
+
+    /// [`Self::warm`] for a key that is in use: the replacement for a session that was closed
+    /// after a capped preview. Other leases running on the key do not stop it.
+    fn refill(self: &Arc<Self>, entry: &Arc<Entry>, config: ConnectionConfig, settings: Settings) {
+        self.open_idle(entry, config, settings, false);
+    }
+
+    fn open_idle(
+        self: &Arc<Self>,
+        entry: &Arc<Entry>,
+        config: ConnectionConfig,
+        settings: Settings,
+        only_when_unused: bool,
+    ) {
         let pending = {
             let mut state = entry.state();
             if state.retired
                 || !state.idle.is_empty()
-                || state.leased != [0, 0]
+                || (only_when_unused && state.leased != [0, 0])
                 || state.pending > 0
             {
                 return;
@@ -720,10 +745,11 @@ impl SessionPool {
             state.pending += 1;
             PendingGuard {
                 pool: Arc::clone(self),
-                entry: Arc::clone(&entry),
+                entry: Arc::clone(entry),
             }
         };
         let pool = Arc::clone(self);
+        let entry = Arc::clone(entry);
         // A failure is dropped: the Run that follows reports the same error on its normal path.
         let _ = self.spawn(async move {
             if let Ok((mut session, tunnel)) = pool.open_session(&entry, &config, &settings).await {

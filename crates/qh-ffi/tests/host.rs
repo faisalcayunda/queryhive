@@ -510,11 +510,13 @@ fn the_pool_reuses_a_session_and_resets_it_between_runs() {
 
     // The second Run waits at most CHECKIN_WAIT for the session being reset, which is
     // shorter than the reset, so it opens a new session: this is the "no queue" rule.
-    block(host.pool().settle());
+    let pool = host.pool();
+    block(async { pool.settle().await });
     *world.reset_delay.lock().unwrap() = Duration::ZERO;
     let second = run_host(&host, EngineCommand::Preview, &pg_pairs("SELECT 2"));
     assert_eq!(last_event(&second, "done")["rows"], 3, "{second:?}");
-    block(host.pool().settle());
+    let pool = host.pool();
+    block(async { pool.settle().await });
 
     assert_eq!(
         world.connects(),
@@ -763,7 +765,8 @@ fn safe_mode_is_decided_per_run_on_a_shared_key() {
     a.push(("SAFE_MODE", "full"));
     let a = run_host(&host, EngineCommand::Preview, &a);
     assert_eq!(last_event(&a, "done")["rows"], 3, "{a:?}");
-    block(host.pool().settle());
+    let pool = host.pool();
+    block(async { pool.settle().await });
     let before = host.pool().stats();
 
     let mut b = pg_pairs("DELETE FROM t WHERE a = 1");
@@ -781,7 +784,8 @@ fn safe_mode_is_decided_per_run_on_a_shared_key() {
     c.push(("SAFE_MODE", "full"));
     let c = run_host(&host, EngineCommand::Preview, &c);
     assert_eq!(last_event(&c, "done")["rows"], 3, "{c:?}");
-    block(host.pool().settle());
+    let pool = host.pool();
+    block(async { pool.settle().await });
     assert_eq!(world.connects(), 1, "C reused A's session");
 }
 
@@ -955,6 +959,61 @@ fn the_host_path_emits_what_the_free_run_emits() {
     }
 }
 
+#[test]
+fn a_capped_preview_on_the_pool_is_not_cancelled_and_one_on_a_plain_engine_is() {
+    let (world, host) = fake_host();
+    let mut pairs = pg_pairs("SELECT 1");
+    pairs.push(("LIMIT", "2"));
+
+    // The fake answers `min(row_limit, 3)` rows, so a cap of 2 sees its verdict row only if the
+    // command asked the driver for cap + 1.
+    let events = run_host(&host, EngineCommand::Preview, &pairs);
+    let done = last_event(&events, "done");
+    assert_eq!(done["truncated"], true, "{events:?}");
+    assert_eq!(done["rows"], 2, "{events:?}");
+    let pool = host.pool();
+    block(async { pool.settle().await });
+    assert_eq!(
+        world.total(|probe| probe.cancels.load(Ordering::SeqCst)),
+        0,
+        "a pooled session is never cancelled because of a cap"
+    );
+
+    // The same run on an engine with no pool stops the statement, as before.
+    let plain_world = World::new();
+    let plain = FakeConnector(Arc::clone(&plain_world));
+    struct Plain(FakeConnector);
+    #[async_trait]
+    impl Engine for Plain {
+        fn kinds(&self) -> Vec<DriverKind> {
+            DriverKind::ALL.to_vec()
+        }
+        fn driver(&self, kind: DriverKind) -> &dyn Driver {
+            self.0.driver(kind)
+        }
+        async fn connect(
+            &self,
+            config: &ConnectionConfig,
+        ) -> Result<Box<dyn Session>, EngineError> {
+            self.0.connect(config, None).await
+        }
+    }
+    let mut out = Capture::new();
+    block(qh_ffi::run(
+        Command::Preview,
+        &settings(&pairs),
+        &mut out,
+        &Plain(plain),
+        &CancelFlag::new(),
+    ))
+    .expect("the free run succeeds");
+    block(async { tokio::time::sleep(Duration::from_millis(100)).await });
+    assert_eq!(
+        plain_world.total(|probe| probe.cancels.load(Ordering::SeqCst)),
+        1
+    );
+}
+
 #[tokio::test]
 async fn a_truncated_cursor_is_abandoned_and_a_drained_one_is_clean() {
     let (world, host) = fake_host();
@@ -970,17 +1029,24 @@ async fn a_truncated_cursor_is_abandoned_and_a_drained_one_is_clean() {
     s.close().await.expect("close");
     pool.settle().await;
     assert_eq!(pool.stats().idle, 1);
+    assert_eq!(pool.stats().closed, 0);
 
-    // Dropped after its first batch, still alive at checkin: abandoned, so discarded.
+    // Dropped after its first batch, still alive at checkin: abandoned, so the backend is
+    // stopped by closing the socket, and a replacement is opened in the background.
     let mut s = engine.connect(&config).await.expect("connect");
     let mut cursor = s.execute("SELECT 2", &no_options()).await.expect("execute");
     let _ = cursor.next_batch(10).await.expect("a batch");
     s.close().await.expect("close");
     drop(cursor);
     pool.settle().await;
-    assert_eq!(pool.stats().idle, 0, "{:?}", pool.stats());
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.closed, stats.idle, stats.opened),
+        (1, 1, 2),
+        "{stats:?}"
+    );
 
-    // Stopped by the row limit: the limit ended it, not the server.
+    // Stopped by the row limit: the limit ended it, not the server. Same fate.
     let mut s = engine.connect(&config).await.expect("connect");
     let limited = ExecuteOptions {
         row_limit: Some(2),
@@ -989,7 +1055,12 @@ async fn a_truncated_cursor_is_abandoned_and_a_drained_one_is_clean() {
     query(&mut s, "SELECT 3", &limited).await.expect("limited");
     s.close().await.expect("close");
     pool.settle().await;
-    assert_eq!(pool.stats().idle, 0, "a row-limited cursor is abandoned");
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.closed, stats.idle, stats.opened),
+        (2, 1, 3),
+        "a row-limited cursor is abandoned and refilled: {stats:?}"
+    );
 
     // An error that carries the server's code ends the stream on the server: clean.
     world.fail_stream.lock().unwrap().push((
@@ -1007,7 +1078,12 @@ async fn a_truncated_cursor_is_abandoned_and_a_drained_one_is_clean() {
         .is_err());
     s.close().await.expect("close");
     pool.settle().await;
-    assert_eq!(pool.stats().idle, 1, "a coded error is the server's answer");
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.closed, stats.idle, stats.opened),
+        (2, 1, 3),
+        "a coded error is the server's answer: {stats:?}"
+    );
 
     // An error with no code (a decode failure, a transport error) proves nothing: discarded.
     world.fail_stream.lock().unwrap().push((
@@ -1025,7 +1101,55 @@ async fn a_truncated_cursor_is_abandoned_and_a_drained_one_is_clean() {
         .is_err());
     s.close().await.expect("close");
     pool.settle().await;
-    assert_eq!(pool.stats().idle, 0, "{:?}", pool.stats());
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.closed, stats.idle, stats.opened),
+        (3, 1, 4),
+        "{stats:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_capped_mysql_or_trino_cursor_is_left_to_the_reset_and_a_cancelled_one_is_not_refilled() {
+    let (world, host) = fake_host();
+    let pool = host.pool();
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    let limited = ExecuteOptions {
+        row_limit: Some(2),
+        ..ExecuteOptions::default()
+    };
+
+    // MySQL says by itself whether its connection came back (its reset fails when it did not),
+    // and Trino's reset deletes the query: the cursor's own end decides nothing for either, so
+    // the session is reset and kept.
+    for kind in [DriverKind::Mysql, DriverKind::Trino] {
+        let config = ConnectionConfig::new(kind, "db.example", 1234, "u")
+            .password("p1")
+            .database("d")
+            .tls(TlsMode::Disable);
+        let mut s = engine.connect(&config).await.expect("connect");
+        query(&mut s, "SELECT 3", &limited).await.expect("limited");
+        s.close().await.expect("close");
+        pool.settle().await;
+        let stats = pool.stats();
+        assert_eq!(stats.closed, 0, "{kind:?} keeps its session: {stats:?}");
+        assert_eq!(stats.idle, if kind == DriverKind::Mysql { 1 } else { 2 });
+    }
+    assert_eq!(
+        world.total(|probe| probe.resets_done.load(Ordering::SeqCst)),
+        2
+    );
+
+    // A Stop discards, and nothing refills after it: the user asked for the query to end.
+    let config = pg_config("p2");
+    let mut s = engine.connect(&config).await.expect("connect");
+    let _ = s.execute("SELECT 4", &no_options()).await.expect("execute");
+    s.cancel().await.expect("cancel");
+    s.close().await.expect("close");
+    pool.settle().await;
+    let stats = pool.stats();
+    assert_eq!(stats.closed, 1, "{stats:?}");
+    assert_eq!(stats.opened, 3, "no replacement was opened: {stats:?}");
 }
 
 #[test]
@@ -1034,7 +1158,8 @@ fn count_drains_its_cursor_so_its_session_goes_back_to_the_pool() {
     for _ in 0..2 {
         let events = run_host(&host, EngineCommand::Count, &pg_pairs("SELECT 1"));
         assert_eq!(last_event(&events, "done")["event"], "done", "{events:?}");
-        block(host.pool().settle());
+        let pool = host.pool();
+        block(async { pool.settle().await });
     }
     assert_eq!(
         world.connects(),
@@ -1636,4 +1761,450 @@ async fn ssh_one_tunnel_for_preview_objects_and_export() {
         session.close().await.expect("close");
     }
     pool.settle().await;
+}
+
+// --------------------------------------------------------------------------- //
+// L10 - L14: capped previews and the pipelined read, live (commit 2)
+// --------------------------------------------------------------------------- //
+
+const PG_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "postgres"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "55432"),
+    ("DB_USER", "qh"),
+    ("DB_PASSWORD", "qh-dev-only"),
+    ("DB_DATABASE", "qh"),
+    ("DB_SCHEMA", "public"),
+    ("DB_SSLMODE", "disable"),
+];
+
+const MYSQL_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "mysql"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "53306"),
+    ("DB_USER", "qh"),
+    ("DB_PASSWORD", "qh-dev-only"),
+    ("DB_DATABASE", "qh"),
+    ("DB_SSLMODE", "disable"),
+];
+
+const TRINO_ENV: &[(&str, &str)] = &[
+    ("DB_KIND", "trino"),
+    ("DB_HOST", "127.0.0.1"),
+    ("DB_PORT", "58080"),
+    ("DB_USER", "queryhive"),
+    ("DB_DATABASE", "tpch"),
+    ("DB_SCHEMA", "sf1"),
+];
+
+/// A billion rows from a three-way cross join, streaming from the first second on.
+const MYSQL_BIG_FROM: &str = "WITH RECURSIVE n AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM n \
+                              WHERE x < 1000) SELECT {} FROM n a, n b, n c";
+
+/// A preview through the host, blocking. Returns its events.
+fn host_preview(host: &EngineHost, env: &[(&str, &str)], sql: &str, limit: &str) -> Vec<Json> {
+    let mut pairs = env.to_vec();
+    pairs.extend([("RETRIES", "0"), ("SQL", sql), ("LIMIT", limit)]);
+    run_host(host, EngineCommand::Preview, &pairs)
+}
+
+/// Every row the `rows` events carried, in order, as text.
+fn preview_rows(events: &[Json]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter(|event| event["event"] == "rows")
+        .flat_map(|event| event["data"].as_array().expect("rows are an array").clone())
+        .map(|row| {
+            row.as_array()
+                .expect("a row is an array")
+                .iter()
+                .map(|cell| cell.as_str().unwrap_or("NULL").to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+fn assert_capped(events: &[Json], rows: u64) {
+    let done = last_event(events, "done");
+    assert_eq!(done["truncated"], true, "{events:?}");
+    assert_eq!(done["rows"], rows, "{events:?}");
+    assert!(done.get("error").is_none(), "{events:?}");
+}
+
+#[test]
+fn postgres_truncated_preview_discards_and_refills() {
+    if live_pg().is_none() {
+        eprintln!("{PG_SKIP}");
+        return;
+    }
+    let host = EngineHost::new();
+    let pool = Arc::clone(host.pool());
+
+    let events = host_preview(
+        &host,
+        PG_ENV,
+        "SELECT pg_backend_pid() AS pid, g FROM generate_series(1, 1000000) AS g",
+        "10",
+    );
+    assert_capped(&events, 10);
+    let old_pid = preview_rows(&events)[0][0].clone();
+    block(async { pool.settle().await });
+    let stats = pool.stats();
+    assert_eq!(
+        stats.closed, 1,
+        "the abandoned session was closed: {stats:?}"
+    );
+    assert_eq!(stats.idle, 1, "and the pool refilled itself: {stats:?}");
+
+    let next = preview_rows(&host_preview(
+        &host,
+        PG_ENV,
+        "SELECT pg_backend_pid()",
+        "10",
+    ));
+    assert_ne!(next[0][0], old_pid, "the next Run got a different backend");
+    assert_eq!(
+        pool.stats().opened,
+        2,
+        "the refill served it, nothing else opened"
+    );
+
+    // The old backend stopped when its socket closed.
+    let check = format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {old_pid}");
+    let waiting = Instant::now();
+    loop {
+        let events = host_preview(&host, PG_ENV, &check, "10");
+        if preview_rows(&events)[0][0] == "0" {
+            break;
+        }
+        assert!(
+            waiting.elapsed() < Duration::from_secs(1),
+            "the capped backend is still there"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    block(async { pool.settle().await });
+}
+
+/// Payloads the generic lexer reads as one statement and the server as two. The statement is
+/// described before it is sent, so the server refuses it and nothing after the first `;` runs,
+/// whichever way the engine's classifier read it. Run on a *reused* session in `read_only` mode.
+#[test]
+fn postgres_a_read_only_run_cannot_smuggle_a_delete_on_a_reused_session() {
+    let Some(config) = live_pg() else {
+        eprintln!("{PG_SKIP}");
+        return;
+    };
+    let host = EngineHost::new();
+    let pool = Arc::clone(host.pool());
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    let table = "qh_smuggle_tmp";
+    block(async {
+        let mut s = lease(&*engine, &config).await;
+        for sql in [
+            format!("DROP TABLE IF EXISTS {table}"),
+            format!("CREATE TABLE {table} AS SELECT g FROM generate_series(1, 5) g"),
+        ] {
+            one(&mut s, &sql).await;
+        }
+        s.close().await.expect("close");
+        pool.settle().await;
+    });
+    let count = || -> String {
+        block(async {
+            let mut s = lease(&*engine, &config).await;
+            let n = one(&mut s, &format!("SELECT count(*) FROM {table}")).await;
+            s.close().await.expect("close");
+            pool.settle().await;
+            n
+        })
+    };
+    assert_eq!(count(), "5");
+
+    let payloads = [
+        format!("SELECT E'x\\' AS a, '; DELETE FROM {table}; --'"),
+        format!("SELECT 1 /* /* */ ' */; DELETE FROM {table}; --'"),
+        format!("SELECT 1 AS a$x$; DELETE FROM {table}; --$x$"),
+    ];
+    for payload in &payloads {
+        let mut pairs = PG_ENV.to_vec();
+        pairs.extend([
+            ("RETRIES", "0"),
+            ("SQL", payload.as_str()),
+            ("LIMIT", "10"),
+            ("SAFE_MODE", "read_only"),
+        ]);
+        // Warm the key so the payload runs on a reused session.
+        let warm = host_preview(&host, PG_ENV, "SELECT 1", "10");
+        assert_eq!(last_event(&warm, "done")["rows"], 1, "{warm:?}");
+        block(async { pool.settle().await });
+        let events = run_host(&host, EngineCommand::Preview, &pairs);
+        block(async { pool.settle().await });
+        assert_eq!(count(), "5", "{payload} deleted rows: {events:?}");
+    }
+    block(async {
+        let mut s = lease(&*engine, &config).await;
+        one(&mut s, &format!("DROP TABLE {table}")).await;
+        s.close().await.expect("close");
+        pool.settle().await;
+    });
+}
+
+#[test]
+fn postgres_type_zoo_through_the_host_matches_the_cli() {
+    if live_pg().is_none() {
+        eprintln!("{PG_SKIP}");
+        return;
+    }
+    let sql = "SELECT * FROM type_zoo ORDER BY 1";
+    let mut pairs = PG_ENV.to_vec();
+    pairs.extend([("RETRIES", "0"), ("SQL", sql), ("LIMIT", "100")]);
+
+    let mut out = Capture::new();
+    block(qh_ffi::run(
+        Command::Preview,
+        &settings(&pairs),
+        &mut out,
+        &qh_ffi::RealEngine::with_settings(settings(&pairs)),
+        &CancelFlag::new(),
+    ))
+    .expect("the CLI path succeeds");
+    let cli = without_timing(out.lines);
+
+    // The first Run opens the session, the second reuses it.
+    let host = EngineHost::new();
+    for run in 1..=2 {
+        let hosted = without_timing(run_host(&host, EngineCommand::Preview, &pairs));
+        assert_eq!(hosted, cli, "run {run} through the host");
+        block(async { host.pool().settle().await });
+    }
+    assert_eq!(
+        host.pool().stats().reused,
+        1,
+        "the second Run reused the session"
+    );
+}
+
+#[test]
+fn mysql_capped_preview_keeps_its_session() {
+    if live_mysql().is_none() {
+        eprintln!("{MYSQL_SKIP}");
+        return;
+    }
+    let host = EngineHost::new();
+    let pool = Arc::clone(host.pool());
+    let big = MYSQL_BIG_FROM.replace("{}", "CONNECTION_ID() AS id, a.x AS ax");
+
+    let events = host_preview(&host, MYSQL_ENV, &big, "10");
+    assert_capped(&events, 10);
+    let id = preview_rows(&events)[0][0].clone();
+    block(async { pool.settle().await });
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.idle, stats.closed),
+        (1, 0),
+        "the session was kept: {stats:?}"
+    );
+
+    // The next Run is on the same connection, and without a cap the limit is back to the
+    // server's default (a capped read sees its own cap in the variable, so this one is uncapped).
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    let config = live_mysql().expect("guarded above");
+    block(async {
+        let mut s = lease(&*engine, &config).await;
+        let next = query(
+            &mut s,
+            "SELECT CONNECTION_ID(), @@SESSION.sql_select_limit",
+            &no_options(),
+        )
+        .await
+        .expect("the next run");
+        assert_eq!(next[0][0], id, "the connection was reused");
+        assert_eq!(
+            next[0][1], "18446744073709551615",
+            "sql_select_limit is back to its default"
+        );
+        s.close().await.expect("close");
+        pool.settle().await;
+    });
+
+    // An explicit LIMIT larger than the cap: the rows are right and nothing fails. The server
+    // does not stop at the cap here, so the connection is dropped and the session is not kept.
+    let explicit = host_preview(&host, MYSQL_ENV, &format!("{} LIMIT 100000", big), "10");
+    assert_capped(&explicit, 10);
+    block(async { pool.settle().await });
+    assert_eq!(
+        pool.stats().closed,
+        1,
+        "the connection the cap stopped was closed: {:?}",
+        pool.stats()
+    );
+
+    // A limit on a write's SELECT would cut the rows written: none is applied.
+    block(async {
+        let mut s = lease(&*engine, &config).await;
+        for sql in [
+            "DROP TABLE IF EXISTS qh_capped_scratch",
+            "CREATE TABLE qh_capped_scratch (x INT)",
+        ] {
+            one(&mut s, sql).await;
+        }
+        let capped = ExecuteOptions {
+            row_limit: Some(10),
+            ..ExecuteOptions::default()
+        };
+        query(
+            &mut s,
+            "INSERT INTO qh_capped_scratch \
+             WITH RECURSIVE n AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM n WHERE x < 1000) \
+             SELECT x FROM n",
+            &capped,
+        )
+        .await
+        .expect("the insert runs");
+        assert_eq!(
+            one(&mut s, "SELECT COUNT(*) FROM qh_capped_scratch").await,
+            "1000"
+        );
+        // The same connection then reads without a limit: the one set for the read is gone.
+        assert_eq!(
+            query(
+                &mut s,
+                "SELECT x FROM qh_capped_scratch",
+                &ExecuteOptions::default()
+            )
+            .await
+            .expect("a full read")
+            .len(),
+            1000
+        );
+        one(&mut s, "DROP TABLE qh_capped_scratch").await;
+        s.close().await.expect("close");
+        pool.settle().await;
+    });
+}
+
+#[test]
+fn trino_truncated_preview_deletes_its_query() {
+    if std::env::var("QH_TEST_TRINO").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_TRINO=1 with deploy/dev/up.sh trino running");
+        return;
+    }
+    let host = EngineHost::new();
+    let pool = Arc::clone(host.pool());
+    let marker = format!(
+        "qh-trino-capped-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let events = host_preview(
+        &host,
+        TRINO_ENV,
+        &format!("SELECT * FROM lineitem /* {marker} */"),
+        "10",
+    );
+    assert_capped(&events, 10);
+
+    let check = format!(
+        "SELECT count(*) FROM system.runtime.queries WHERE state = 'RUNNING' \
+         AND query LIKE '%{marker}%' AND query NOT LIKE '%system.runtime.queries%'"
+    );
+    let waiting = Instant::now();
+    loop {
+        let running = preview_rows(&host_preview(&host, TRINO_ENV, &check, "10"));
+        if running[0][0] == "0" {
+            break;
+        }
+        assert!(
+            waiting.elapsed() < Duration::from_secs(2),
+            "the capped query is still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    block(async { pool.settle().await });
+    let stats = pool.stats();
+    assert_eq!(
+        (stats.opened, stats.closed),
+        (1, 0),
+        "one session served every Run and was kept: {stats:?}"
+    );
+}
+
+/// A capped statement whose connection dies after its text was sent is not sent again, neither
+/// by the pool's reconnect rule nor by the retry policy: a function with a side effect ran once.
+#[test]
+fn mysql_a_connection_lost_after_the_statement_was_sent_is_not_resent() {
+    let Some(config) = live_mysql() else {
+        eprintln!("{MYSQL_SKIP}");
+        return;
+    };
+    let host = EngineHost::new();
+    let pool = Arc::clone(host.pool());
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    block(async {
+        let mut s = lease(&*engine, &config).await;
+        for sql in [
+            "DROP TABLE IF EXISTS qh_kill_counter",
+            // Not transactional: what the killed statement wrote stays written.
+            "CREATE TABLE qh_kill_counter (n INT, s INT) ENGINE=MyISAM",
+        ] {
+            one(&mut s, sql).await;
+        }
+        s.close().await.expect("close");
+        pool.settle().await;
+
+        // An idle session in the pool, so the next lease is a *reused* one on its first call.
+        let mut warm = lease(&*engine, &config).await;
+        let id = one(&mut warm, "SELECT CONNECTION_ID()").await;
+        warm.close().await.expect("close");
+        pool.settle().await;
+
+        let killer_engine = pool.engine(Lane::Metadata, settings(&[]));
+        let killer_config = config.clone();
+        let killer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let mut k = lease(&*killer_engine, &killer_config).await;
+            let _ = query(&mut k, &format!("KILL {id}"), &no_options()).await;
+            k.close().await.expect("close");
+        });
+
+        let mut s = lease(&*engine, &config).await;
+        let capped = ExecuteOptions {
+            row_limit: Some(10),
+            ..ExecuteOptions::default()
+        };
+        let policy = RetryPolicy::new(2, Duration::from_millis(1));
+        // 300 rows at 10 ms each: killed after 1.5 s it has written about half of them, and a
+        // second run of it would write 300 more.
+        let insert = "INSERT INTO qh_kill_counter \
+                      WITH RECURSIVE n AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM n \
+                      WHERE x < 300) SELECT x, SLEEP(0.01) FROM n";
+        let outcome = retry::execute(&mut s, &policy, insert, &capped).await;
+        let error = match outcome {
+            Ok(mut cursor) => cursor
+                .next_batch(10)
+                .await
+                .expect_err("the statement was killed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), Some("2013"), "{error:?}");
+        killer.await.expect("killer");
+        s.close().await.expect("close");
+        pool.settle().await;
+
+        let mut check = lease(&*engine, &config).await;
+        let written: usize = one(&mut check, "SELECT COUNT(*) FROM qh_kill_counter")
+            .await
+            .parse()
+            .expect("a count");
+        assert!(
+            written < 300,
+            "the statement was cut short and not run again: {written} rows"
+        );
+        one(&mut check, "DROP TABLE qh_kill_counter").await;
+        check.close().await.expect("close");
+        pool.settle().await;
+    });
 }
