@@ -19,6 +19,7 @@
 
 mod classify;
 mod ident;
+mod lex;
 mod scan;
 mod wrap;
 
@@ -30,9 +31,10 @@ pub use classify::{
     ScriptStatement, StatementDecision, StatementKind, SAFE_MODES,
 };
 pub use ident::{quote_ident, IdentStyle};
+pub use lex::{lex, Token, TokenKind};
 pub use scan::{
-    has_significant_text, scan, scan_dialect, statement_count, statement_count_dialect, Dialect,
-    Lexer, Scan,
+    first_significant, has_significant_text, scan, scan_dialect, statement_count,
+    statement_count_dialect, walk, Dialect, EndState, Lexer, OpaqueKind, Scan, Visitor,
 };
 pub use wrap::{
     count_statement, count_statement_dialect, strip_terminator, strip_terminator_dialect, SqlError,

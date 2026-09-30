@@ -367,9 +367,91 @@ pub fn scan(sql: &str) -> Scan {
 /// scan it would turn a useful error message into a second error.
 pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
     let lexer: Lexer = dialect.into();
-    let bytes = sql.as_bytes();
-    let mut scan = Scan::default();
+    let mut collect = Collect {
+        sql,
+        scan: Scan::default(),
+    };
+    walk(sql.as_bytes(), lexer, &mut collect);
+    let mut scan = collect.scan;
+    scan.leading_keyword = leading_keyword(sql, lexer);
+    scan.ends_with_terminator = sql.trim_end().ends_with(';');
+    scan
+}
+
+/// What [`scan_dialect`] gathers from a [`walk`]: the separators and the bare words.
+struct Collect<'a> {
+    sql: &'a str,
+    scan: Scan,
+}
+
+impl Visitor for Collect<'_> {
+    fn separator(&mut self, at: usize) {
+        self.scan.separators.push(at);
+    }
+
+    fn word(&mut self, start: usize, end: usize) {
+        self.scan
+            .keywords
+            .push(self.sql[start..end].to_ascii_uppercase());
+    }
+}
+
+/// The kind of text a [`Visitor`] is told is opaque: text that is not syntax, so a `;` or a
+/// keyword inside it means nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpaqueKind {
+    /// A `'…'` string, including PostgreSQL's `E'…'`, `U&'…'`, `B'…'` and `X'…'` (the prefix is
+    /// part of the region) and a string continued across a newline.
+    SingleQuote,
+    /// A `"…"` string or quoted identifier.
+    DoubleQuote,
+    /// A `` `…` `` quoted identifier.
+    Backtick,
+    /// A `-- …` or MySQL `# …` comment, up to but not including its line end.
+    LineComment,
+    /// A `/* … */` comment. A MySQL executable comment (`/*! … */`) is code, not this.
+    BlockComment,
+    /// A PostgreSQL `$tag$ … $tag$` string, tags included.
+    DollarQuote,
+}
+
+/// Where a [`walk`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndState {
+    /// Outside every opaque region.
+    Normal,
+    /// The text ended inside this region (a quote never closed, a block comment never
+    /// ended, a line comment with no newline after it).
+    Open(OpaqueKind),
+}
+
+/// What a [`walk`] reports. Every method has an empty default, so a visitor takes only what
+/// it needs. Offsets are byte offsets into the slice `walk` was given, and every region is
+/// reported once, in order, when it ends (or at the end of the text if it never does).
+pub trait Visitor {
+    /// A `;` outside every opaque region: a real statement separator.
+    fn separator(&mut self, _at: usize) {}
+    /// An opaque region `[start, end)`. `end` is the text's length for a region left open.
+    fn opaque(&mut self, _kind: OpaqueKind, _start: usize, _end: usize) {}
+    /// A bare word `[start, end)`: letters, digits and `_` (and `$`, and bytes at or above
+    /// 0x80 where the lexer's identifiers allow them) that start with a letter or `_`,
+    /// outside every opaque region.
+    fn word(&mut self, _start: usize, _end: usize) {}
+}
+
+/// Walk `bytes` once under one lexer's rules, telling `visitor` where the separators, the
+/// opaque regions and the bare words are. This is the single pass every scan is made of;
+/// [`scan_dialect`] is a [`Visitor`] over it, and the editor's lexer is another.
+///
+/// Permissive like [`scan_dialect`]: any bytes are accepted, and text that is not valid SQL
+/// still walks. It never panics on its own account and holds no state between calls.
+pub fn walk(bytes: &[u8], dialect: impl Into<Lexer>, visitor: &mut impl Visitor) -> EndState {
+    let lexer: Lexer = dialect.into();
     let mut state = State::Normal;
+    // Where the region being read began and what it is, for `Visitor::opaque`. Set on every
+    // move out of `Normal`; the initial values are never reported.
+    let mut region_start = 0usize;
+    let mut region_kind = OpaqueKind::SingleQuote;
     let mut dollar_tag: Vec<u8> = Vec::new();
     // How many `/*` are open, for a lexer whose block comments nest.
     let mut comment_depth = 0usize;
@@ -381,14 +463,20 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
             State::Normal => match byte {
                 b'\'' => {
                     state = State::SingleQuoted;
+                    region_start = index;
+                    region_kind = OpaqueKind::SingleQuote;
                     index += 1;
                 }
                 b'"' => {
                     state = State::DoubleQuoted;
+                    region_start = index;
+                    region_kind = OpaqueKind::DoubleQuote;
                     index += 1;
                 }
                 b'`' if lexer.backtick_quotes() => {
                     state = State::BacktickQuoted;
+                    region_start = index;
+                    region_kind = OpaqueKind::Backtick;
                     index += 1;
                 }
                 // An executable comment `/*! … */` is code the server runs, so its
@@ -398,19 +486,25 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                 }
                 b'-' if dash_opens_comment(bytes, index, lexer) => {
                     state = State::LineComment;
+                    region_start = index;
+                    region_kind = OpaqueKind::LineComment;
                     index += 2;
                 }
                 b'#' if lexer.hash_comment() => {
                     state = State::LineComment;
+                    region_start = index;
+                    region_kind = OpaqueKind::LineComment;
                     index += 1;
                 }
                 b'/' if bytes.get(index + 1) == Some(&b'*') => {
                     state = State::BlockComment;
+                    region_start = index;
+                    region_kind = OpaqueKind::BlockComment;
                     comment_depth = 1;
                     index += 2;
                 }
                 b';' => {
-                    scan.separators.push(index);
+                    visitor.separator(index);
                     index += 1;
                 }
                 // MySQL has no dollar quoting: `$` is an identifier character there, so
@@ -421,6 +515,8 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     if let Some((tag, next)) = read_dollar_tag(bytes, index, lexer) {
                         dollar_tag = tag;
                         state = State::DollarQuoted;
+                        region_start = index;
+                        region_kind = OpaqueKind::DollarQuote;
                         index = next;
                     } else {
                         index += 1;
@@ -451,11 +547,13 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                         };
                         if let Some((quoted, width)) = next {
                             state = quoted;
+                            region_start = start;
+                            region_kind = OpaqueKind::SingleQuote;
                             index += width;
                             continue;
                         }
                     }
-                    scan.keywords.push(sql[start..index].to_ascii_uppercase());
+                    visitor.word(start, index);
                 }
                 _ => {
                     index += 1;
@@ -474,8 +572,9 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
                         index = next;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
@@ -490,8 +589,9 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
                         index = next;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
@@ -504,8 +604,9 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     } else if let Some(next) = string_continuation(bytes, index + 1, lexer) {
                         index = next;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
@@ -518,8 +619,9 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     if let Some(next) = string_continuation(bytes, index + 1, lexer) {
                         index = next;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
@@ -534,8 +636,9 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     if bytes.get(index + 1) == Some(&b'"') {
                         index += 2;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
@@ -546,15 +649,18 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     if bytes.get(index + 1) == Some(&b'`') {
                         index += 2;
                     } else {
-                        state = State::Normal;
                         index += 1;
+                        visitor.opaque(region_kind, region_start, index);
+                        state = State::Normal;
                     }
                 } else {
                     index += 1;
                 }
             }
             State::LineComment => {
+                // The line end is not part of the comment; the next byte is code.
                 if ends_line(byte, lexer) {
+                    visitor.opaque(region_kind, region_start, index);
                     state = State::Normal;
                 }
                 index += 1;
@@ -567,10 +673,11 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
                     index += 2;
                 } else if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
                     comment_depth -= 1;
+                    index += 2;
                     if comment_depth == 0 {
+                        visitor.opaque(region_kind, region_start, index);
                         state = State::Normal;
                     }
-                    index += 2;
                 } else {
                     index += 1;
                 }
@@ -578,6 +685,7 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
             State::DollarQuoted => {
                 if byte == b'$' && bytes[index..].starts_with(&dollar_tag) {
                     index += dollar_tag.len();
+                    visitor.opaque(region_kind, region_start, index);
                     state = State::Normal;
                 } else {
                     index += 1;
@@ -586,9 +694,12 @@ pub fn scan_dialect(sql: &str, dialect: impl Into<Lexer>) -> Scan {
         }
     }
 
-    scan.leading_keyword = leading_keyword(sql, lexer);
-    scan.ends_with_terminator = sql.trim_end().ends_with(';');
-    scan
+    if state == State::Normal {
+        EndState::Normal
+    } else {
+        visitor.opaque(region_kind, region_start, bytes.len());
+        EndState::Open(region_kind)
+    }
 }
 
 /// Whether `byte` starts an identifier under `lexer`.
@@ -796,7 +907,7 @@ pub(crate) fn has_significant_text_dialect(sql: &str, dialect: impl Into<Lexer>)
 /// when the piece it was split into opens with a header comment. Sharing the
 /// skip logic with [`has_significant_text`] is the point: the two cannot
 /// disagree about where the real text begins.
-pub(crate) fn first_significant(sql: &str, dialect: impl Into<Lexer>) -> Option<usize> {
+pub fn first_significant(sql: &str, dialect: impl Into<Lexer>) -> Option<usize> {
     let lexer: Lexer = dialect.into();
     let bytes = sql.as_bytes();
     let mut index = 0;

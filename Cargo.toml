@@ -20,6 +20,7 @@ members = [
     "crates/qh-rt",
     "crates/qh-result-store",
     "crates/qh-sql",
+    "crates/qh-sql-grammar",
     "crates/qh-storage",
     "crates/qh-sync",
     "crates/qh-tunnel",
@@ -45,6 +46,7 @@ qh-import = { path = "crates/qh-import" }
 qh-rt = { path = "crates/qh-rt" }
 qh-result-store = { path = "crates/qh-result-store" }
 qh-sql = { path = "crates/qh-sql" }
+qh-sql-grammar = { path = "crates/qh-sql-grammar" }
 qh-storage = { path = "crates/qh-storage" }
 qh-sync = { path = "crates/qh-sync" }
 qh-tunnel = { path = "crates/qh-tunnel" }
@@ -65,6 +67,15 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # UUIDv7 for row identity: time-ordered, so an index on the primary key stays close to
 # insertion order instead of scattering like a random UUID.
 uuid = { version = "1", features = ["v7"] }
+# The editor's parser: tree-sitter with the SQL grammar vendored in `crates/qh-sql-grammar`
+# (docs/architecture/blueprints/fase-4b-editor-analysis.md §3). Pinned with `=` because the
+# workspace's `rust-version` is 1.85 and tree-sitter 0.27 / tree-sitter-language 0.1.8 need
+# 1.90; a resolver that ignores the MSRV would pick them on the next `cargo update`.
+tree-sitter = "=0.26.13"
+tree-sitter-language = "=0.1.7"
+# Already in the graph through `ring` and `libsqlite3-sys`; named here so the grammar's
+# `build.rs` and the tree-sitter runtime share the one version.
+cc = "1.4"
 
 # Release profile for the FFI artifact.
 #
@@ -76,3 +87,12 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+# The C parser and the tree-sitter runtime are compiled by `cc`, which reads OPT_LEVEL per
+# package. Without this they are built -O0 in a debug build, and every debug-mode test that
+# parses runs against a parser several times slower than the one that ships.
+[profile.dev.package.qh-sql-grammar]
+opt-level = 2
+
+[profile.dev.package.tree-sitter]
+opt-level = 2

@@ -1,0 +1,27 @@
+[package]
+name = "qh-sql-grammar"
+version = "0.1.0"
+description = "The tree-sitter SQL grammar (DerekStride/tree-sitter-sql 0.3.11), vendored with one scanner fix"
+edition.workspace = true
+rust-version.workspace = true
+# The grammar is MIT (Copyright (c) 2021 Derek Stride); see LICENSE and PROVENANCE.md.
+license = "MIT"
+repository.workspace = true
+links = "tree-sitter-sql"
+build = "build.rs"
+# `vendor/parser.c` is generated C; nothing here is meant to be read line by line.
+include = ["/build.rs", "/src", "/vendor", "/LICENSE", "/PROVENANCE.md", "/grammar.js", "/node-types.json"]
+
+[dependencies]
+tree-sitter-language.workspace = true
+
+[build-dependencies]
+cc.workspace = true
+
+[dev-dependencies]
+tree-sitter.workspace = true
+
+# The one crate in the workspace that may contain `unsafe`: the C entry point below and
+# the leak test. Everything else stays `forbid`.
+[lints.rust]
+unsafe_code = "deny"
