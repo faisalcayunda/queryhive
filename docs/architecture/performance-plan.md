@@ -355,12 +355,12 @@ Prasyarat P dan Fase 3. Blueprint `code-architect` dibuat lebih dulu. Pendekatan
 
 1. **Seam `ResultRows`** (protokol Swift): `count`, `columns`, `cell(row, col) -> CellText` (prefix tampilan + flag null/kosong/openable/numerik/terpotong), `fullValue`, dan `rows(in:)` untuk copy dan `WritePlan`.
    - `ArrayRows` membungkus `[[String?]]` dan `QueryTab.displayedRows` yang ada.
-   - 28 pemakai `preview.rows`/`displayedRows` di `ResultGrid.swift`, `QueryTab.swift`, dan `Snapshot.swift` dipindah ke seam ini.
+   - 28 pembaca `preview.rows`/`displayedRows` di `ResultGrid.swift`, `QueryTab.swift`, `Panels.swift`, dan `BenchMode.swift`, ditambah pembaca yang dibawa W4-T1, dipindah ke seam ini. `Snapshot.swift` hanya menulis.
    - `WritePlan.build` menerima accessor, bukan array penuh.
 2. **`ResultGridTable: NSViewRepresentable`** membungkus `NSScrollView` + subclass `NSTableView`.
    - Tinggi baris tetap (setelan Data) dengan `usesAutomaticRowHeights = false`, `intercellSpacing = .zero`, dan `gridStyleMask = []`. Garis vertikal bawaan AppKit membuat subview per kolom; TablePro mengukurnya kuadratik, dan kita ukur ulang sendiri.
    - `allowsColumnReordering = false`, karena memindah kolom tetap lewat menu (paritas).
-   - `viewFor` mengembalikan `nil` untuk kolom data. `GridRowView` menggambar stripe, seleksi, tint dan titik staged, garis pemisah, gaya NULL/∅, dan teks lewat `CTLine`, hanya untuk kolom yang memotong rect kotor (`columnIndexes(in:)`).
+   - Gambar di `GridTableView.draw(_:)` pada tabel mode sel dengan satu `NSTableColumn` (D-1/D-2), tanpa `viewFor`, dan tanpa `NSTableRowView` kecuali fallback row view bila P-4 gagal. `GridRowPainter` (`GridRowView.swift`) menggambar stripe, seleksi, tint dan titik staged, garis pemisah, gaya NULL/∅, dan teks lewat `CTLine`, hanya untuk kolom yang memotong rect kotor.
    - Gutter nomor baris digambar di row view dan ikut tergeser horizontal seperti hari ini (tidak di-pin), demi paritas.
 3. **Header.** `NSTableHeaderView` kustom menggambar label, chevron dari `activeSort`, dan funnel. Funnel membuka `NSPopover` yang menampung konten filter SwiftUI yang ada (`NSHostingController`). Menu konteks header adalah `NSMenu` dengan item yang sama, dan teks tooltip-nya sama.
 4. **Interaksi.**
@@ -525,7 +525,7 @@ Setiap item diuji A/B dan hanya dipertahankan bila memberi ≥ 10% pada sumbunya
 6. **Sesi dipakai ulang tetapi di-reset per Run.** Rekomendasinya tidak mengubah semantik. Bila pemilik memilih sesi yang lengket, `SET`, `USE`, dan tabel temp akan bertahan di antara Run.
 7. **Batas `rowLimit`.** 100.000 dulu, lalu 5.000.000 setelah Fase 6.
 8. **Editor.** Pewarnaan dan folding sekarang bekerja di atas 200k karakter, dan tampilan warnanya berubah (V-12, PRD §6.5). Karakter yang baru diketik mewarisi warna tetangga selama ≤ 1 frame, dengan aturan §7.5 blueprint 4B.
-9. **Grid.** Tooltip AppKit (sistem yang sama dengan `.help` SwiftUI), dan nilainya penuh. Field editor AppKit menggantikan `TextField` SwiftUI, dengan perilaku Return, Esc, dan undo yang dikunci tes. Kolom tidak bisa di-drag untuk dipindah, sama seperti hari ini.
+9. **Grid.** Tooltip AppKit (sistem yang sama dengan `.help` SwiftUI), dan nilainya penuh hingga 8.192 unit UTF-16. Field editor AppKit menggantikan `TextField` SwiftUI, dengan perilaku Return, Esc, dan undo yang dikunci tes. Kolom tidak bisa di-drag untuk dipindah, sama seperti hari ini. Tiga perubahan kecil lain (blueprint `fase-5-grid.md` §14.3): banner sort tidak ikut tergeser horizontal (hanya bila D-13 jalan pertama); overlay editor sel berakhir bila kunci selnya tidak lagi menunjuk baris yang sama, misalnya saat urutan berubah; klik pada grid mengambil fokus keyboard.
 10. **Sort dan search dengan edit tertunda ditolak** dengan pesan (Fase 3).
 11. **Pemecahan statement di editor mengikuti `scan.rs`** (4B, dan W4-T2b untuk Run), jadi editor sepakat dengan engine. Perbedaan terhadap `sqlStatements` Swift hari ini:
     - `;` di dalam `"a;b"` atau `` `a;b` `` tidak lagi memecah;

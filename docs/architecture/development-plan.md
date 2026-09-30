@@ -519,14 +519,16 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
 **W5-T1. Fase 5: grid `NSTableView`.** Ukuran L. Implementer **GP-o**, karena permukaan paritasnya paling luas, dan fokus SwiftUI ke AppKit, IME, serta AX semuanya bertemu di sini.
 - Cakupan: FR-GRID-01, FR-GRID-07 (dasar), NFR-P4.
 - Berkas:
-  - baru: `Views/{ResultGridTable,GridRowView,GridHeaderView,GridAccessibility}.swift`, `Models/ResultRows.swift`;
-  - diubah: `Views/ResultGrid.swift` (body diganti), `Models/{QueryTab,GridValue,ColumnFormat,WritePlan,CellSelection}.swift`, `Support/Snapshot.swift`;
-  - tes: `ResultGridTests`, `GridColumnsTests`, `GridParityTests` baru, dan tes pohon AX.
+  - baru: `Views/{ResultGridTable,GridRowView,GridHeaderView,GridAccessibility}.swift`, `Models/{ResultRows,GridMetrics}.swift`;
+  - diubah: `Views/ResultGrid.swift` (body diganti), `Views/Panels.swift`, `Models/{QueryTab,ColumnFormat,WritePlan,CellSelection,UpdateStatements,CellEdits}.swift`, `Support/BenchMode.swift`;
+  - tes: `ResultGridTests`, `GridColumnsTests`, `GridParityTests` baru, `ResultRowsTests`, `GridMetricsTests`, `GridAccessibilityTests` (tes pohon AX), dan `CellSelectionTests`;
+  - urutan: W4-T1 → W4-T2b → 5a → probe P-2 sampai P-6 → 5b (P-2 dijalankan terhadap baseline pasca-V-1);
+  - 5a juga merekam scene baseline tambahan dari renderer SwiftUI yang masih ada: `explain-*` dan satu scene grid berisi baris baru, tab, spasi awal, karakter kontrol, dan chip yang dibungkus. Disetujui pemilik sebagai scene baru saja; baseline yang ada tidak disentuh.
 - Gate: SR, TD (`ResultRows`, `CellText`), AX, UX, AR, CR, PO.
 - Verifikasi:
   - G-SWIFT, G-VIS (grid, tanpa rekam ulang);
   - daftar paritas `performance-plan.md` §9;
-  - `--bench scroll-1m`, `scroll-500c`, `open-500c` ≤ 30 ms; TTFR S1 tidak mundur.
+  - `--bench scroll-30x1m`, `scroll-500x10k`, `open-500x10k` ≤ 30 ms; TTFR S1 tidak mundur.
 - Commit: dua, masing-masing dengan gate:
   - 5a `refactor(grid): every reader of rows goes through a ResultRows seam`;
   - 5b `perf(grid): an NSTableView that draws its cells, and the SwiftUI grid is gone`.
@@ -561,6 +563,7 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
 - Gate: SR, SF, AR, CR, PO.
 - Verifikasi:
   - G-SWIFT, G-VIS (terhadap baseline Fase 5), tes diferensial W4-T4;
+  - P-1 lewat tangkapan compositor harus lulus sebelum `productRowLimitCeiling` naik ke 5.000.000. Pemilik yang menjalankannya (butuh Screen Recording), atau sesi eksklusif. Bila gagal, `WindowedRows` masuk W6-T1;
   - G-LEAK;
   - G-BENCH(1 S2, 2, 3) dan window.
 - Commit: `perf(app): results live in the Rust store, and the grid reads windows`.
@@ -772,12 +775,13 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 
 | Tingkat | Yang termasuk | Reviewer | Putaran maksimal |
 |---|---|---|---|
-| Tinggi | Tugas berimplementer opus, dan yang menyentuh Safe Mode, kripto dan spill, kepercayaan (SSH, JWT, CA), umur proses atau handle, pool sesi, atau batas FFI | opus, hanya spesialis yang relevan dari kolom Gate (bukan seluruh daftar) | 3 |
+| Tinggi | Tugas berimplementer opus, dan yang menyentuh Safe Mode, kripto dan spill, kepercayaan (SSH, JWT, CA), umur proses atau handle, pool sesi, atau batas FFI | opus, hanya spesialis yang relevan dari kolom Gate (bukan seluruh daftar) | 2 (O-19) |
 | Sedang | Tugas implementasi lain | satu reviewer, yang paling relevan dari kolom Gate | 2 |
 | Rendah | Dokumen, ADR, tooling, hanya tes, hanya pemindahan kode, dan pembersihan (`Wx-C`) | satu reviewer sonnet, atau cukup gate | 1 |
 
 - Hanya temuan yang **memblokir** memicu satu putaran. Saran dan nit dicatat di laporan tugas, bukan putaran.
 - Implementer sonnet secara default. Opus hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b.
+- **O-20 (kebijakan sesi berjalan):** semua pekerjaan mahal (implementasi, blueprint, dokumen, bench) berjalan di sonnet atau haiku. Reviewer boleh opus tetapi hanya satu putaran. Setelah temuan yang memblokir, sonnet memperbaiki, orkestrator memverifikasi dengan tes dan gate, meng-commit, lalu mencatat "pending review" di ledger. Ini mengesampingkan tabel model dan batas putaran di atas selama sesi ini.
 - Verdict tetap "approved" dengan daftar berkas (§8). Yang berubah adalah jumlah reviewer dan putarannya, bukan bukti verifikasinya.
 
 ## 7. Paralelisme dan kepemilikan berkas
@@ -807,7 +811,7 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 | `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0. Sesudahnya, satu pemilik per extension. |
 | `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W11-T4 → W12-T2 → W12-T4 → W13-T1 |
 | `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T5 → W10-T3 → W12-T4 → W13-T1 → W13-T3 |
-| `Views/ResultGridTable.swift`, `GridRowView`, `GridHeaderView` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
+| `Views/ResultGridTable.swift`, `GridRowView`, `GridHeaderView`, `Views/GridAccessibility.swift` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
 | `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W10-T6 → W10-T7 → W12-T2 |
 | `Views/Workspace.swift` | W2-T3 → W9-T1 → W9-T4 → W9-T8 → W12-T2 |
 | `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 → W13-T8b |
@@ -854,7 +858,7 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 
 1. **Galat build:** swift-build-resolver atau rust-build-resolver, maksimal 3 putaran.
 2. **Tes atau gate merah:** debugger (opus) mendiagnosis, maksimal 2 putaran. Implementer memperbaiki sekali berdasarkan diagnosis itu.
-3. **Reviewer meminta perubahan (O-17):** hanya temuan yang memblokir memicu putaran; saran dan nit dicatat saja. Implementer memperbaiki lalu review ulang, dengan batas menurut tingkat risiko: tinggi maksimal 3 putaran, sedang maksimal 2, rendah 1. Bila masih buntu, `architect` memutuskan sekali.
+3. **Reviewer meminta perubahan (O-17; sesi berjalan mengikuti O-20 di §6):** hanya temuan yang memblokir memicu putaran; saran dan nit dicatat saja. Implementer memperbaiki lalu review ulang, dengan batas global maksimal 2 putaran (O-19; rendah 1). Setelah putaran terakhir, perbaikan yang tersisa diverifikasi lewat tes dan gate lalu dicatat sebagai pending review, tanpa putaran ketiga.
 4. **Bila semua putaran habis:**
    - buang perubahan tugas itu (worktree dihapus, atau `git restore` pada berkas milik tugas itu saja);
    - tandai **TERBLOKIR** di ledger dengan bukti, lalu lewati tugas yang bergantung padanya;
