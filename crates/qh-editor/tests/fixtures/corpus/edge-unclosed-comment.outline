@@ -1,0 +1,3 @@
+statement 0 8
+issue unclosed-comment 10 2
+issue syntax-error 10 15

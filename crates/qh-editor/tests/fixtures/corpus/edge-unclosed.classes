@@ -1,0 +1,2 @@
+0 6 keyword "select"
+7 23 string "'abc\nfrom t;\nselect 2;\n"

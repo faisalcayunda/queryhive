@@ -1,0 +1,36 @@
+statement 0 58
+statement 59 240
+statement 241 353
+statement 354 510
+statement 511 558
+statement 559 811
+statement 812 927
+statement 928 1090
+statement 1091 1349
+statement 1350 1408
+statement 1409 1548
+statement 1549 1657
+statement 1658 1765
+statement 1766 1924
+statement 1925 1972
+statement 1973 2133
+statement 2134 3334
+statement 3335 3589
+statement 3590 3752
+fold statement lines 0-6 header 0 body 82..242 "SELECT"
+fold statement lines 8-10 header 243 body 289..355 "INSERT"
+fold statement lines 12-14 header 356 body 412..512 "CREATE"
+fold statement lines 17-23 header 561 body 578..813 "WITH"
+fold cte lines 20-22 header 691 body 706..772 "CTE"
+fold statement lines 25-27 header 814 body 862..929 "INSERT"
+fold statement lines 29-31 header 930 body 949..1092 "UPDATE"
+fold statement lines 33-39 header 1093 body 1110..1351 "WITH"
+fold cte lines 36-38 header 1229 body 1244..1310 "CTE"
+fold statement lines 41-45 header 1352 body 1432..1550 "INSERT"
+fold statement lines 47-49 header 1551 body 1592..1659 "INSERT"
+fold statement lines 51-53 header 1660 body 1700..1767 "INSERT"
+fold statement lines 55-57 header 1768 body 1825..1926 "CREATE"
+fold statement lines 60-62 header 1975 body 1995..2135 "UPDATE"
+fold statement lines 66-72 header 3337 body 3354..3591 "WITH"
+fold cte lines 69-71 header 3469 body 3484..3550 "CTE"
+fold statement lines 74-78 header 3592 body 3623..3754 "SELECT"

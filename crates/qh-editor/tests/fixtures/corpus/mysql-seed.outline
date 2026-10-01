@@ -1,0 +1,20 @@
+statement 0 93
+statement 94 516
+statement 517 720
+statement 721 1819
+statement 1820 1845
+statement 1846 1940
+statement 1941 2404
+statement 2405 2981
+statement 2982 3016
+fold statement lines 0-1 header 0 body 63..95 "DROP"
+fold statement lines 2-33 header 95 body 120..518 "CREATE"
+fold statement lines 35-37 header 519 body 599..722 "SET"
+fold statement lines 39-76 header 723 body 745..1821 "INSERT"
+fold cte lines 40-44 header 745 body 773..839 "CTE"
+fold statement lines 80-81 header 1848 body 1911..1942 "DROP"
+fold statement lines 83-99 header 1943 body 1967..2406 "CREATE"
+fold statement lines 101-120 header 2407 body 2437..2983 "INSERT"
+issue syntax-error 1822 24
+issue syntax-error 2097 2
+issue syntax-error 2100 290

@@ -1,0 +1,2 @@
+0 6 keyword "select"
+7 18 quotedIdentifier "\"open\n; select 4;\n"

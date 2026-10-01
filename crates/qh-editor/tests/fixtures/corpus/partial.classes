@@ -1,0 +1,7 @@
+0 6 keyword "SELECT"
+7 1 punctuation "*"
+9 4 keyword "FROM"
+22 1 punctuation ","
+30 1 punctuation ";"
+32 6 keyword "SELECT"
+39 148 string "'unterminated FROM t;\nSELECT 2;\n/* unterminated comment\nSELECT 1;\nSELECT * FROM t WHERE (a = 1;\nSELEC 1;\nSELECT 1;\nSELECT * FROM t WHERE;\nSELECT 3;\n"

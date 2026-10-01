@@ -1,0 +1,9 @@
+statement 0 81
+statement 82 103
+statement 104 107
+statement 108 169
+fold statement lines 0-1 header 0 body 75..81 "SELECT"
+issue syntax-error 20 3
+issue syntax-error 25 1
+issue syntax-error 105 3
+issue syntax-error 116 7

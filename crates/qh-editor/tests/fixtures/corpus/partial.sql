@@ -1,0 +1,11 @@
+SELECT * FROM
+SELECT a, FROM t;
+SELECT 'unterminated FROM t;
+SELECT 2;
+/* unterminated comment
+SELECT 1;
+SELECT * FROM t WHERE (a = 1;
+SELEC 1;
+SELECT 1;
+SELECT * FROM t WHERE;
+SELECT 3;

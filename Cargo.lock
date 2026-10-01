@@ -2549,6 +2549,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qh-editor"
+version = "0.1.0"
+dependencies = [
+ "qh-sql",
+ "qh-sql-grammar",
+ "thiserror 2.0.20",
+ "tree-sitter",
+]
+
+[[package]]
 name = "qh-export"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,4 @@
+statement 0 28
+fold statement lines 0-1 header 0 body 18..28 "SELECT"
+issue unclosed-dollar 7 5
+issue syntax-error 7 17

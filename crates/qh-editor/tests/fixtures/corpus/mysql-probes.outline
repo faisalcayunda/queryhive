@@ -1,0 +1,30 @@
+statement 0 58
+statement 59 116
+statement 117 137
+statement 138 178
+statement 179 254
+statement 255 284
+statement 285 328
+statement 329 454
+statement 455 491
+statement 492 535
+statement 536 623
+statement 624 675
+statement 676 713
+statement 714 726
+statement 727 779
+statement 780 836
+statement 837 889
+statement 890 901
+fold statement lines 15-16 header 781 body 808..838 "SELECT"
+issue syntax-error 67 33
+issue syntax-error 102 5
+issue syntax-error 131 7
+issue syntax-error 280 4
+issue syntax-error 293 18
+issue syntax-error 480 6
+issue syntax-error 516 19
+issue syntax-error 609 7
+issue syntax-error 656 19
+issue syntax-error 804 2
+issue syntax-error 891 11

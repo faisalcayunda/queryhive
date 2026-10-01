@@ -1,0 +1,7 @@
+statement 0 134
+statement 135 168
+statement 169 206
+fold statement lines 0-5 header 0 body 64..136 "CREATE"
+issue syntax-error 170 5
+issue syntax-error 182 16
+issue syntax-error 204 2

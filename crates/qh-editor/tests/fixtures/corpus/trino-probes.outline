@@ -1,0 +1,27 @@
+statement 0 40
+statement 41 84
+statement 85 145
+statement 146 192
+statement 193 241
+statement 242 308
+statement 309 323
+statement 324 347
+statement 348 361
+statement 362 446
+statement 447 506
+statement 507 576
+statement 577 634
+statement 635 699
+statement 700 755
+statement 756 799
+statement 800 836
+issue missing-token 118 0
+issue syntax-error 119 27
+issue syntax-error 227 14
+issue syntax-error 270 38
+issue syntax-error 310 14
+issue syntax-error 325 23
+issue syntax-error 349 13
+issue syntax-error 492 4
+issue syntax-error 810 17
+issue missing-token 836 0

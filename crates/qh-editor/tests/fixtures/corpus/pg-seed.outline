@@ -1,0 +1,16 @@
+statement 0 93
+statement 94 493
+statement 494 1705
+statement 1706 1725
+statement 1726 1820
+statement 1821 1846
+statement 1847 1896
+statement 1897 2431
+statement 2432 3230
+fold statement lines 0-1 header 0 body 63..95 "DROP"
+fold statement lines 2-33 header 95 body 120..495 "CREATE"
+fold statement lines 35-69 header 496 body 575..1707 "INSERT"
+fold statement lines 73-74 header 1728 body 1791..1822 "DROP"
+fold statement lines 79-100 header 1899 body 1923..2433 "CREATE"
+fold statement lines 102-127 header 2434 body 2464..3232 "INSERT"
+issue syntax-error 1708 18

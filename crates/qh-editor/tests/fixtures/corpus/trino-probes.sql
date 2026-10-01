@@ -1,0 +1,17 @@
+SELECT * FROM tpch.sf1.lineitem LIMIT 10;
+SELECT transform(ARRAY[1,2,3], x -> x * 2);
+SELECT * FROM UNNEST(ARRAY[1,2]) WITH ORDINALITY AS t(v, i);
+SELECT ROW(1, 'a'), MAP(ARRAY['a'], ARRAY[1]);
+SELECT * FROM orders TABLESAMPLE BERNOULLI (10);
+SELECT * FROM t ORDER BY a OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY;
+SHOW CATALOGS;
+SHOW SCHEMAS FROM tpch;
+USE tpch.sf1;
+SELECT TRY_CAST('1' AS integer), date '2020-01-01', timestamp '2020-01-01 00:00:00';
+SELECT a, count(*) FROM t GROUP BY GROUPING SETS ((a), ());
+SELECT date_trunc('month', orderdate) + INTERVAL '1' DAY FROM orders;
+SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name);
+CREATE TABLE memory.default.t AS SELECT * FROM tpch.tiny.nation;
+SELECT element_at(m, 'k'), cardinality(a), a[1] FROM t;
+SELECT * FROM t WHERE x IS DISTINCT FROM y;
+EXPLAIN (TYPE DISTRIBUTED) SELECT 1;

@@ -1,0 +1,26 @@
+statement 0 22
+statement 23 110
+statement 111 151
+statement 152 173
+statement 174 204
+statement 205 248
+statement 249 335
+statement 336 429
+statement 430 556
+statement 557 602
+statement 603 665
+statement 666 710
+statement 711 775
+statement 776 813
+statement 814 879
+statement 880 943
+statement 944 1037
+statement 1038 1063
+statement 1064 1085
+statement 1086 1112
+statement 1113 1131
+issue syntax-error 291 3
+issue syntax-error 777 5
+issue syntax-error 789 16
+issue syntax-error 811 2
+issue syntax-error 1121 8

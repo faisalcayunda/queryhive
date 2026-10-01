@@ -1,0 +1,17 @@
+[package]
+name = "qh-editor"
+version = "0.1.0"
+description = "Editor analysis: statements, one tree-sitter tree per statement, colour classes, folds and issues"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-sql.workspace = true
+qh-sql-grammar.workspace = true
+tree-sitter.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
