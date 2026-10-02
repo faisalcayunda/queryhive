@@ -8,6 +8,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/qh-columnar",
     "crates/qh-core",
     "crates/qh-credentials",
     "crates/qh-driver",
@@ -35,6 +36,7 @@ authors = ["Faisal Nugraha Cayunda"]
 repository = "https://github.com/data-ecosystem/queryhive"
 
 [workspace.dependencies]
+qh-columnar = { path = "crates/qh-columnar" }
 qh-core = { path = "crates/qh-core" }
 qh-driver = { path = "crates/qh-driver" }
 qh-driver-mysql = { path = "crates/qh-driver-mysql" }
@@ -54,6 +56,22 @@ qh-sync = { path = "crates/qh-sync" }
 qh-tunnel = { path = "crates/qh-tunnel" }
 thiserror = "2"
 serde_json = { version = "1", features = ["preserve_order"] }
+# The Fase 6 data plane (blueprint fase-6-data-plane.md D-1): the result store
+# holds one Arrow RecordBatch per chunk. Pinned to 59.3, the same version as the
+# `parquet` writer already in Cargo.lock (F-1), so the graph keeps one Arrow.
+arrow-array = "59.3"
+arrow-schema = "59.3"
+arrow-buffer = "59.3"
+arrow-data = "59.3"
+arrow-ipc = "59.3"
+# View work (sort, filter, search) runs here, off the main thread.
+rayon = "1"
+# Grid text metrics (grapheme counts) and case folding.
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+unicode-properties = "0.1"
+# AES-256-GCM for spill (NFR-S3) and zeroizing the key buffer seed.
+ring = "0.17"
 # The Keychain, and the values that hold a password. `security-framework-sys` is the
 # raw attribute list and `SecItem*` calls; `core-foundation` builds the dictionary
 # they take. See crates/qh-credentials for why the item is spelled out by hand.

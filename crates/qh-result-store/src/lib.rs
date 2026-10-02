@@ -1,47 +1,58 @@
 //! The columnar result store: where a running query's rows live, and how the
 //! grid reads a window of them.
 //!
-//! Why this exists rather than a `Vec<Vec<Value>>`
-//! ----------------------------------------------
-//! The problem being solved is described in the blueprint, section 1.5: the grid
-//! has to scroll 500,000 rows by 30 columns without the UI stalling, and the
-//! process has to stay under 800 MB doing it. A row-major nested `Vec` fails both
-//! — every cell is an enum in its own heap slot, and reading row 300,000 walks
-//! through 300,000 rows of pointers first.
+//! One result is a sequence of sealed Arrow chunks plus an index. The writer
+//! seals at 65,536 rows or an estimated 2 MiB; the reader asks for a window of
+//! rows and gets one packed `QHW1` buffer. A result larger than the budget
+//! spills, encrypted with a key that exists only in this process.
 //!
-//! The layout
-//! ----------
-//! Each batch is encoded column by column. Per column: an array of `u32` offsets
-//! into that column's blob, one offset per row plus a final sentinel. A cell is
-//! therefore two array indexes and a byte range — no walking, no pointer chase,
-//! and a window of rows costs one slice per column.
+//! The pieces:
 //!
-//! The cost of that convenience is explicit: four bytes of offset per cell, so a
-//! full 500,000 × 30 result carries 60 MB of offsets. That is inside the memory
-//! budget and is what buys random access; it is stated here rather than
-//! discovered later.
-//!
-//! Spilling
-//! --------
-//! Past a configurable threshold, the oldest batches are written to one file and
-//! dropped from memory. A spilled batch reads back with `read_exact_at`, and the
-//! decoded values are identical to the in-memory ones — there is one encoder and
-//! one decoder, and spill stores the same bytes the in-memory form holds, so
-//! there is no second code path that could disagree.
-//!
-//! What is deliberately not here yet
-//! ---------------------------------
-//! [`ResultStore::window`] returns decoded, owned values for the rows asked for.
-//! The blueprint's zero-copy plan (section 4.2) has the grid read offsets into a
-//! borrowed buffer instead. That is deferred to Fase 3 with a measurement, per
-//! ADR-0008, because the decision depends on the measured cost of copying a page
-//! and building it before measuring would be guessing. Until then a window pays
-//! for one allocation per requested cell — bounded by the page size the grid
-//! asks for, not by the result size.
+//! | Module | What it owns |
+//! |---|---|
+//! | [`store`] | the shared state: chunks, phase, budget accounting |
+//! | [`registry`] | store identity, the global budget, eviction order |
+//! | [`chunk`] | one sealed chunk and its grid flags |
+//! | [`view`] | filter, search, sort, and the distinct-value picker |
+//! | [`render`] | the `QHW1` window buffer and the width stats |
+//! | [`spill`] | AES-256-GCM records and the orphan sweep |
+//! | [`collate`] | the Swift collation ports and the natural key |
+//! | [`logical`] | the logical schema SQL sees (§5.4) |
 
 #![forbid(unsafe_code)]
 
-mod codec;
+mod chunk;
+mod collate;
+mod logical;
+mod registry;
+mod render;
+mod spill;
 mod store;
+mod view;
 
-pub use store::{ResultStore, StoreConfig, StoreError};
+pub use chunk::{seal_store_chunk, ChunkFlags, ColumnStats, StoreChunk};
+pub use collate::{
+    ci_contains, ci_equal, fold, natural_key, natural_key_prefix, swift_double, swift_plain_number,
+    NumKey,
+};
+pub use logical::{
+    logical_batch, logical_batches, logical_names, logical_schema, logical_type, LogicalSchema,
+};
+pub use registry::{
+    Origin, QueryLease, RegistryStats, Reservation, StoreConfig, StoreHandle, StoreId,
+    StoreRegistry, StoreWriter,
+};
+pub use render::{
+    json_validate, render_window, truncate_utf16, ColumnFormat, CowCell, HeadWidths, Window,
+    WindowSpec, CELL_EMPTY, CELL_NULL, CELL_NUMERIC, CELL_OPENABLE, CELL_TRUNCATED, FLAG_COMPLETE,
+    FLAG_CUT, FLAG_VIEWED, HEADER_LEN, TRUNCATE_UTF16,
+};
+pub use spill::{
+    decode_record, encode_record, sweep_spill_dir, FaultyMedium, FileMedium, SpillCipher,
+    SpillFile, SpillMedium, SweepReport,
+};
+pub use store::{ChunkRef, Outcome, Phase, StoreError, StoreShared};
+pub use view::{
+    compute_view, distinct_values, matches_text, DistinctValues, FilterSpec, SortKey, View,
+    ViewInfo, ViewSpec,
+};

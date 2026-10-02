@@ -189,6 +189,26 @@ where
     }
 }
 
+/// The pool grid view work runs on: sort, filter, search, distinct.
+///
+/// Built once: one worker per performance core at `USER_INITIATED`, the same
+/// class as the interactive tokio pool. A rayon pool rather than tasks on the
+/// main runtime, so data-parallel scans never contend with async I/O, and
+/// ingest never competes with a view for the same workers.
+///
+/// Every view computation runs inside `view_pool().install(..)`.
+pub fn view_pool() -> &'static rayon::ThreadPool {
+    static VIEW: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    VIEW.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cores().performance.max(1))
+            .thread_name(|index| format!("qh-view-{index}"))
+            .start_handler(|_| set_thread_qos(Qos::UserInitiated))
+            .build()
+            .expect("a pool of one or more workers should build")
+    })
+}
+
 /// Set this thread's QoS class.
 ///
 /// The only `unsafe` in the crate, and it exists because macOS offers no safe way

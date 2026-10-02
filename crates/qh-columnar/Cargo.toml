@@ -1,0 +1,19 @@
+[package]
+name = "qh-columnar"
+version = "0.1.0"
+description = "The Value to Arrow mapping, chunk builder, and tagged codec for the result store"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+qh-core.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+arrow-buffer.workspace = true
+arrow-ipc.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

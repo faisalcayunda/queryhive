@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+# View work (result-store sort, filter, search) runs on this pool, off the main
+# thread, at USER_INITIATED on P cores (blueprint fase-6-data-plane.md §13.1).
+rayon = { workspace = true }
 
 # macOS only. The QoS class API and `sysctlbyname` are what this crate exists for,
 # and both are Darwin-specific; on other platforms the crate still builds and runs,

@@ -62,40 +62,61 @@ use crate::value::{IntervalValue, Value};
 /// JSON value is `null`. Collapsing that decision here would take it away from the
 /// writers.
 pub fn to_text(value: &Value) -> Option<String> {
-    Some(match value {
-        Value::Null => return None,
-        Value::Bool(flag) => if *flag { "true" } else { "false" }.to_owned(),
-        Value::Int(number) => number.to_string(),
-        Value::UInt(number) => number.to_string(),
-        Value::Float(number) => format_float(*number),
-        Value::Decimal { unscaled, scale } => format_decimal(*unscaled, *scale),
-        Value::Text(text) => text.to_string(),
-        Value::Bytes(bytes) => hex_encode(bytes),
+    if value.is_null() {
+        return None;
+    }
+    let mut text = String::new();
+    write_text(value, &mut text);
+    Some(text)
+}
+
+/// Append the canonical text form of a value to `out`.
+///
+/// The single rendering implementation behind [`to_text`]: callers that
+/// already hold a buffer (the store window path) reuse it instead of paying
+/// one `String` per cell. `Value::Null` appends nothing; the `None` versus
+/// empty distinction stays with `to_text`.
+pub fn write_text(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => {}
+        Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        Value::Int(number) => {
+            let _ = write!(out, "{number}");
+        }
+        Value::UInt(number) => {
+            let _ = write!(out, "{number}");
+        }
+        Value::Float(number) => write_float(*number, out),
+        Value::Decimal { unscaled, scale } => write_decimal(*unscaled, *scale, out),
+        Value::Text(text) => out.push_str(text),
+        Value::Bytes(bytes) => write_hex(bytes, out),
         Value::Timestamp {
             micros,
             offset_secs,
-        } => format_timestamp(*micros, *offset_secs),
-        Value::Date { days } => format_date(*days),
-        Value::Time { micros } => format_time(*micros),
-        Value::Interval(interval) => format_interval(*interval),
+        } => {
+            write_timestamp(*micros, *offset_secs, out);
+        }
+        Value::Date { days } => write_date(*days, out),
+        Value::Time { micros } => write_time(*micros, out),
+        Value::Interval(interval) => write_interval(*interval, out),
         // Kept verbatim: Postgres `jsonb` does not promise key order but `json`
         // does, and re-encoding would throw away the difference the user can see.
-        Value::Json(text) => text.to_string(),
+        Value::Json(text) => out.push_str(text),
         // Python passes anything that is a list, tuple or dict to
         // `json.dumps(default=str, ensure_ascii=False)`, so a nested value is
         // rendered as JSON with Python's own separators.
-        Value::Array(items) => json_like(&Value::Array(items.clone())),
-        Value::Row(items) => json_like(&Value::Row(items.clone())),
-        Value::Map(entries) => json_like(&Value::Map(entries.clone())),
+        Value::Array(items) => write_json_array(items, out),
+        Value::Row(items) => write_json_array(items, out),
+        Value::Map(entries) => write_json_map(entries, out),
         // A type this crate does not model. The text form is what the driver could
         // render, and it is better than losing the cell; the type name travels with
         // the value so a caller can still see what it was.
         Value::Unknown { text, raw, .. } => match (text, raw) {
-            (Some(text), _) => text.to_string(),
-            (None, Some(bytes)) => hex_encode(bytes),
-            (None, None) => String::new(),
+            (Some(text), _) => out.push_str(text),
+            (None, Some(bytes)) => write_hex(bytes, out),
+            (None, None) => {}
         },
-    })
+    }
 }
 
 /// The JSON-native form of a value.
@@ -160,50 +181,62 @@ pub fn to_json_value(value: &Value) -> Json {
 /// - a large or tiny magnitude switches to exponent form, at Python's own
 ///   thresholds (1e16 up, 1e-5 down), because `str(1e20)` is `1e+20`.
 pub fn format_float(number: f64) -> String {
+    let mut text = String::new();
+    write_float(number, &mut text);
+    text
+}
+
+/// The same float text, appended to `out` instead of allocated.
+pub fn write_float(number: f64, out: &mut String) {
     if number.is_nan() {
-        return "nan".to_owned();
+        out.push_str("nan");
+        return;
     }
     if number.is_infinite() {
-        return if number.is_sign_negative() {
-            "-inf".to_owned()
+        out.push_str(if number.is_sign_negative() {
+            "-inf"
         } else {
-            "inf".to_owned()
-        };
+            "inf"
+        });
+        return;
     }
     if number == 0.0 {
-        return if number.is_sign_negative() {
-            "-0.0".to_owned()
+        out.push_str(if number.is_sign_negative() {
+            "-0.0"
         } else {
-            "0.0".to_owned()
-        };
+            "0.0"
+        });
+        return;
     }
 
     // The decimal exponent of the leading digit, which is what Python's repr looks at
     // when it decides between `123.0` and `1.23e+02`.
     let magnitude = number.abs().log10().floor() as i32;
     if !(-4..16).contains(&magnitude) {
-        return format_scientific(number);
+        write_scientific(number, out);
+        return;
     }
 
-    let mut text = format!("{number}");
+    let text = format!("{number}");
+    out.push_str(&text);
     if !text.contains('.') {
-        text.push_str(".0");
+        out.push_str(".0");
     }
-    text
 }
 
-/// `1.5e+20`-style text: Rust's `{:e}` with Python's exponent spelling.
-fn format_scientific(number: f64) -> String {
+/// `1.5e+20`-style text, appended to `out`.
+fn write_scientific(number: f64, out: &mut String) {
     let rusty = format!("{number:e}"); // 1.5e20, 1.5e-7
     let Some((mantissa, exponent)) = rusty.split_once('e') else {
-        return rusty;
+        out.push_str(&rusty);
+        return;
     };
     let (sign, digits) = match exponent.strip_prefix('-') {
         Some(rest) => ('-', rest),
         None => ('+', exponent),
     };
     // A two-digit minimum, like Python: `e+07`, not `e+7`.
-    format!("{mantissa}e{sign}{digits:0>2}")
+    let _ = write!(out, "{mantissa}e{sign}{digits:0>2}");
 }
 
 /// `unscaled / 10^scale` as text, with the scale's trailing zeros kept.
@@ -211,24 +244,36 @@ fn format_scientific(number: f64) -> String {
 /// `1.50` is not `1.5` in an exact type, and Python's `str(Decimal("1.50"))` says
 /// so.
 pub fn format_decimal(unscaled: i128, scale: u8) -> String {
+    let mut text = String::new();
+    write_decimal(unscaled, scale, &mut text);
+    text
+}
+
+/// `unscaled / 10^scale` appended to `out`, scale's trailing zeros kept.
+pub fn write_decimal(unscaled: i128, scale: u8, out: &mut String) {
     if scale == 0 {
-        return unscaled.to_string();
+        let _ = write!(out, "{unscaled}");
+        return;
     }
     let negative = unscaled < 0;
     let digits = unscaled.unsigned_abs().to_string();
     let scale = usize::from(scale);
-    let padded = if digits.len() <= scale {
-        format!("{}{}", "0".repeat(scale - digits.len() + 1), digits)
+    if negative {
+        out.push('-');
+    }
+    if digits.len() <= scale {
+        out.push('0');
+        out.push('.');
+        for _ in 0..(scale - digits.len()) {
+            out.push('0');
+        }
+        out.push_str(&digits);
     } else {
-        digits
-    };
-    let split = padded.len() - scale;
-    format!(
-        "{}{}.{}",
-        if negative { "-" } else { "" },
-        &padded[..split],
-        &padded[split..]
-    )
+        let split = digits.len() - scale;
+        out.push_str(&digits[..split]);
+        out.push('.');
+        out.push_str(&digits[split..]);
+    }
 }
 
 /// The nearest float, or `None` when the value cannot be one.
@@ -240,13 +285,28 @@ fn decimal_to_f64(unscaled: i128, scale: u8) -> Option<f64> {
 
 /// Days since the epoch as `YYYY-MM-DD`.
 pub fn format_date(days: i32) -> String {
+    let mut text = String::new();
+    write_date(days, &mut text);
+    text
+}
+
+/// Days since the epoch as `YYYY-MM-DD`, appended to `out`.
+pub fn write_date(days: i32, out: &mut String) {
     let (year, month, day) = civil_from_days(i64::from(days));
-    format!("{year:04}-{month:02}-{day:02}")
+    let _ = write!(out, "{year:04}-{month:02}-{day:02}");
 }
 
 /// Microseconds since midnight as `HH:MM:SS`, with a fraction only when there is
 /// one — Python omits `.000000` entirely.
 pub fn format_time(micros: i64) -> String {
+    let mut text = String::new();
+    write_time(micros, &mut text);
+    text
+}
+
+/// Microseconds since midnight as `HH:MM:SS`, appended to `out`, with a
+/// fraction only when there is one — Python omits `.000000` entirely.
+pub fn write_time(micros: i64, out: &mut String) {
     let negative = micros < 0;
     let micros = micros.unsigned_abs();
     let seconds_of_day = micros / 1_000_000;
@@ -257,11 +317,10 @@ pub fn format_time(micros: i64) -> String {
     let seconds = seconds_of_day % 60;
 
     let sign = if negative { "-" } else { "" };
-    let mut text = format!("{sign}{hours:02}:{minutes:02}:{seconds:02}");
+    let _ = write!(out, "{sign}{hours:02}:{minutes:02}:{seconds:02}");
     if fraction != 0 {
-        text.push_str(&format!(".{fraction:06}"));
+        let _ = write!(out, ".{fraction:06}");
     }
-    text
 }
 
 /// A point in time as `YYYY-MM-DD HH:MM:SS[.ffffff][±HH:MM]`.
@@ -273,32 +332,46 @@ pub fn format_time(micros: i64) -> String {
 /// 12:00:00+07:00` is therefore stored as 05:00Z with an offset of 25200, and printed
 /// back as 12:00+07:00.
 ///
-/// A value with no zone is the wall clock it holds, with no suffix: a naive
-/// `TIMESTAMP` must not acquire a `+00:00` it was never given.
+/// A point in time as `YYYY-MM-DD HH:MM:SS[.ffffff][±HH:MM]`.
+///
+/// **`micros` is the instant, and the offset says which zone to show it in.**
+/// That is the model Python's `datetime` has, so it is the model the snapshots
+/// were recorded with. A value with no zone is the wall clock it holds, with
+/// no suffix: a naive `TIMESTAMP` must not acquire a `+00:00` it was never
+/// given.
 pub fn format_timestamp(micros: i64, offset_secs: Option<i32>) -> String {
-    // Moved into the reported zone before the day and the time are taken out of it, so
-    // that a value near midnight lands on the day the user's calendar shows rather
-    // than the UTC one.
+    let mut text = String::new();
+    write_timestamp(micros, offset_secs, &mut text);
+    text
+}
+
+/// A point in time as `YYYY-MM-DD HH:MM:SS[.ffffff][±HH:MM]`, appended.
+pub fn write_timestamp(micros: i64, offset_secs: Option<i32>, out: &mut String) {
+    // Moved into the reported zone before the day and the time are taken out
+    // of it, so that a value near midnight lands on the day the user's
+    // calendar shows rather than the UTC one.
     let local = match offset_secs {
         Some(offset) => micros + i64::from(offset) * 1_000_000,
         None => micros,
     };
-    // Floored division, so a value before the epoch lands on the right day rather
-    // than one day later with a positive remainder.
+    // Floored division, so a value before the epoch lands on the right day
+    // rather than one day later with a positive remainder.
     let days = local.div_euclid(86_400_000_000);
     let within_day = local.rem_euclid(86_400_000_000);
 
-    let mut text = format!("{} {}", format_date(days as i32), format_time(within_day));
+    write_date(days as i32, out);
+    out.push(' ');
+    write_time(within_day, out);
     if let Some(offset) = offset_secs {
         let sign = if offset < 0 { '-' } else { '+' };
         let offset = offset.unsigned_abs();
-        text.push_str(&format!(
+        let _ = write!(
+            out,
             "{sign}{:02}:{:02}",
             offset / 3600,
             (offset % 3600) / 60
-        ));
+        );
     }
-    text
 }
 
 /// `3 days, 4:05:06` — Python's `str(timedelta)`, which is what `to_text` reached
@@ -313,20 +386,30 @@ pub fn format_timestamp(micros: i64, offset_secs: Option<i32>) -> String {
 /// The JSON quotes Python's fallback wrapped around the string are dropped: delta D-2.
 pub fn format_interval(interval: IntervalValue) -> String {
     let mut text = String::new();
+    write_interval(interval, &mut text);
+    text
+}
+
+/// `3 days, 4:05:06` — Python's `str(timedelta)` — appended to `out`.
+///
+/// The three parts stay apart: a month is not a fixed number of days and a
+/// day is not a fixed number of microseconds once daylight saving is
+/// involved, so they are never collapsed into one number.
+pub fn write_interval(interval: IntervalValue, out: &mut String) {
     if interval.months != 0 {
         let _ = write!(
-            text,
+            out,
             "{} month{}",
             interval.months,
             if interval.months.abs() == 1 { "" } else { "s" }
         );
     }
     if interval.days != 0 {
-        if !text.is_empty() {
-            text.push_str(", ");
+        if !out.is_empty() {
+            out.push_str(", ");
         }
         let _ = write!(
-            text,
+            out,
             "{} day{}",
             interval.days,
             if interval.days.abs() == 1 { "" } else { "s" }
@@ -355,23 +438,35 @@ pub fn format_interval(interval: IntervalValue) -> String {
             seconds % 60
         )
     };
-    if !text.is_empty() {
-        text.push_str(", ");
+    if !out.is_empty() {
+        out.push_str(", ");
     }
     if negative {
-        text.push('-');
+        out.push('-');
     }
-    text.push_str(&time);
-    text
+    out.push_str(&time);
 }
 
 /// Lowercase hex, which is what Python's `bytes.hex()` produces.
+///
+/// Table-driven: one lookup per nibble, no allocation per byte. The old code
+/// called `format!` per byte, so a 10 MB blob meant 10 million allocations
+/// for one cell.
 pub fn hex_encode(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push_str(&format!("{byte:02x}"));
-    }
+    write_hex(bytes, &mut text);
     text
+}
+
+/// Append lowercase hex to `out`. The single implementation behind
+/// [`hex_encode`] and every caller that already holds a buffer.
+pub fn write_hex(bytes: &[u8], out: &mut String) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    out.reserve(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
 }
 
 /// The civil date for a count of days since the Unix epoch.
@@ -404,48 +499,68 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Render a structured value the way Python's `json.dumps(default=str,
-/// ensure_ascii=False)` would.
+/// ensure_ascii=False)` would, appended to `out`.
 ///
 /// Python's default separators are `", "` and `": "`, and `ensure_ascii=False`
 /// leaves non-ASCII characters alone rather than escaping them. Both show up in
 /// exported files, so both are matched.
-fn json_like(value: &Value) -> String {
+fn write_json_like(value: &Value, out: &mut String) {
     match value {
-        Value::Array(items) | Value::Row(items) => {
-            let rendered: Vec<String> = items.iter().map(json_like).collect();
-            format!("[{}]", rendered.join(", "))
+        Value::Array(items) | Value::Row(items) => write_json_array(items, out),
+        Value::Map(entries) => write_json_map(entries, out),
+        Value::Null => out.push_str("null"),
+        // JSON's own scalars are written as scalars. This is not a detail:
+        // quoted, `[1, 2]` becomes `["1", "2"]`, and a downstream reader then
+        // has strings where the query returned numbers.
+        Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        Value::Int(number) => {
+            let _ = write!(out, "{number}");
         }
-        Value::Map(entries) => {
-            let rendered: Vec<String> = entries
-                .iter()
-                .map(|(key, entry)| {
-                    let key = to_text(key).unwrap_or_default();
-                    format!("{}: {}", json_string(&key), json_like(entry))
-                })
-                .collect();
-            format!("{{{}}}", rendered.join(", "))
+        Value::UInt(number) => {
+            let _ = write!(out, "{number}");
         }
-        Value::Null => "null".to_owned(),
-        // JSON's own scalars are written as scalars. This is not a detail: quoted,
-        // `[1, 2]` becomes `["1", "2"]`, and a downstream reader then has strings
-        // where the query returned numbers.
-        Value::Bool(flag) => if *flag { "true" } else { "false" }.to_owned(),
-        Value::Int(number) => number.to_string(),
-        Value::UInt(number) => number.to_string(),
-        Value::Float(number) => format_float(*number),
-        // Everything else reaches Python's `default=str` and arrives as a quoted
-        // string, a Decimal included: `json` has no exact-decimal scalar, and Python
-        // would raise rather than guess.
-        other => match to_text(other) {
-            Some(text) => json_string(&text),
-            None => "null".to_owned(),
-        },
+        Value::Float(number) => write_float(*number, out),
+        // Everything else reaches Python's `default=str` and arrives as a
+        // quoted string, a Decimal included: `json` has no exact-decimal
+        // scalar, and Python would raise rather than guess.
+        other => {
+            let mut text = String::new();
+            write_text(other, &mut text);
+            write_json_string(&text, out);
+        }
     }
 }
 
-/// A JSON string literal with Python's `ensure_ascii=False` escaping.
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
+/// A JSON array or row literal: `[1, "a"]`.
+fn write_json_array(items: &[Value], out: &mut String) {
+    out.push('[');
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        write_json_like(item, out);
+    }
+    out.push(']');
+}
+
+/// A JSON object literal with Python's separators and key order.
+fn write_json_map(entries: &[(Value, Value)], out: &mut String) {
+    out.push('{');
+    for (index, (key, entry)) in entries.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let key = to_text(key).unwrap_or_default();
+        write_json_string(&key, out);
+        out.push_str(": ");
+        write_json_like(entry, out);
+    }
+    out.push('}');
+}
+
+/// A JSON string literal with Python's `ensure_ascii=False` escaping,
+/// appended to `out`.
+fn write_json_string(text: &str, out: &mut String) {
     out.push('"');
     for character in text.chars() {
         match character {
@@ -462,7 +577,6 @@ fn json_string(text: &str) -> String {
         }
     }
     out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -726,5 +840,41 @@ mod tests {
             to_text(&Value::unknown_bytes("geometry", vec![0x00, 0xff])).as_deref(),
             Some("00ff")
         );
+    }
+    #[test]
+    fn write_text_matches_to_text() {
+        use crate::value::IntervalValue;
+        let values = vec![
+            Value::Bool(true),
+            Value::Int(-7),
+            Value::Float(-0.0),
+            Value::Decimal {
+                unscaled: -125,
+                scale: 2,
+            },
+            Value::Text("café".into()),
+            Value::Bytes(vec![0x00, 0xff]),
+            Value::Timestamp {
+                micros: -1,
+                offset_secs: None,
+            },
+            Value::Date { days: 19_782 },
+            Value::Time {
+                micros: 43_200_123_456,
+            },
+            Value::Interval(IntervalValue {
+                months: 1,
+                days: 3,
+                micros: 14_706_000_000,
+            }),
+            Value::Json(r#"{"b":1}"#.into()),
+            Value::Array(vec![Value::Int(1), Value::Null]),
+            Value::unknown_bytes("geometry", vec![0x00, 0xff]),
+        ];
+        for value in &values {
+            let mut buffered = String::new();
+            write_text(value, &mut buffered);
+            assert_eq!(Some(buffered), to_text(value), "{value:?}");
+        }
     }
 }
