@@ -109,14 +109,14 @@ final class GridColumnsTests: XCTestCase {
     func testASortFollowsAMovedColumn() {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"])
 
         // Move `a` from first to last on screen. Its identity has not changed, so the order must
         // not either; only the chevron's place moves.
         tab.moveColumn(from: 0, to: 2)
 
-        XCTAssertEqual(tab.gridSort, GridSort(column: 0, direction: .ascending))
+        XCTAssertEqual(tab.activeSort, ActiveSort(column: 0, direction: .ascending, origin: .memory))
         XCTAssertEqual(tab.visibleColumnSources, [1, 2, 0])
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"],
                        "still ordered by source column 0")
@@ -138,35 +138,35 @@ final class GridColumnsTests: XCTestCase {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
         tab.columnFilters[1] = .text("y")
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.moveColumn(from: 2, to: 0)
 
         XCTAssertEqual(tab.columnFilters[1], .text("y"))
-        XCTAssertEqual(tab.gridSort, GridSort(column: 0, direction: .ascending))
+        XCTAssertEqual(tab.activeSort, ActiveSort(column: 0, direction: .ascending, origin: .memory))
     }
 
     func testHidingTheSortedColumnDropsTheSort() {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.setColumnHidden(0, true)
 
         // The order cannot stay: its chevron has nowhere to stand, and an invisible order is a grid
         // that looks unsorted while not being in the server's order.
-        XCTAssertNil(tab.gridSort)
+        XCTAssertNil(tab.activeSort)
         XCTAssertFalse(tab.columnLayout.isVisible(0))
     }
 
     func testHidingAnotherColumnKeepsTheSort() {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.setColumnHidden(1, true)
 
-        XCTAssertEqual(tab.gridSort, GridSort(column: 0, direction: .ascending))
+        XCTAssertEqual(tab.activeSort, ActiveSort(column: 0, direction: .ascending, origin: .memory))
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"])
     }
 
@@ -187,12 +187,12 @@ final class GridColumnsTests: XCTestCase {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
         tab.columnFilters[0] = .text("2")
-        tab.setGridSort(GridSort(column: 1, direction: .descending))
+        tab.applyMemorySort(GridSort(column: 1, direction: .descending))
 
         tab.renameColumn(0, to: "kode")
 
         XCTAssertEqual(tab.columnFilters[0], .text("2"))
-        XCTAssertEqual(tab.gridSort, GridSort(column: 1, direction: .descending))
+        XCTAssertEqual(tab.activeSort, ActiveSort(column: 1, direction: .descending, origin: .memory))
     }
 
     func testASelectionIsClearedByAHideOrAMoveButNotByARename() {
@@ -260,11 +260,11 @@ final class GridColumnsTests: XCTestCase {
     func testASearchNarrowsTheRowsAndIsResetLikeAFilter() {
         let tab = QueryTab(title: "Q")
         tab.preview = threeColumns()
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.gridSearch = "y"
 
-        XCTAssertNil(tab.gridSort, "a search is a claim about a new set of rows")
+        XCTAssertNil(tab.activeSort, "a search is a claim about a new set of rows")
         XCTAssertEqual(tab.displayedRows.count, 2)
         XCTAssertEqual(tab.displayedRows.map { $0[1] }, ["y", "y"])
         XCTAssertTrue(tab.hasGridSearch)

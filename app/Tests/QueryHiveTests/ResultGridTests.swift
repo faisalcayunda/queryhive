@@ -131,22 +131,22 @@ final class ResultGridTests: XCTestCase {
         // Assigning `preview` is what "new rows arrived" means, and an order over the old rows
         // cannot describe the new ones.
         let tab = QueryTab(title: "Query 1")
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.preview = PreviewResult(columns: [Event.Column(name: "a", type: "bigint")],
                                     rows: [["1"]], truncated: false, queryID: nil, elapsedMS: 0)
 
-        XCTAssertNil(tab.gridSort)
+        XCTAssertNil(tab.activeSort)
     }
 
     func testAChangedFilterClearsTheSort() {
         // The sort is an order over the rows on screen; a filter changes which rows those are.
         let tab = QueryTab(title: "Query 1")
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.columnFilters[0] = .values(["x"])
 
-        XCTAssertNil(tab.gridSort)
+        XCTAssertNil(tab.activeSort)
     }
 
     func testTheDisplayedRowsCacheFollowsTheThreeThingsThatChangeIt() {
@@ -159,10 +159,10 @@ final class ResultGridTests: XCTestCase {
                                     truncated: false, queryID: nil, elapsedMS: 0)
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "server order first")
 
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"], "the sort is followed")
 
-        tab.setGridSort(nil)
+        tab.applyMemorySort(nil)
         XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "clearing it too")
 
         tab.preview = PreviewResult(columns: columns, rows: [["9"], ["8"]],
@@ -182,7 +182,7 @@ final class ResultGridTests: XCTestCase {
         tab.cellSelection = CellRange(from: (row: 0, column: 0), to: (row: 1, column: 0))
         tab.cellEdits.edit("9", at: CellKey(row: 0, column: 0), original: "1")
 
-        tab.setGridSort(GridSort(column: 0, direction: .ascending))
+        tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         XCTAssertNil(tab.cellSelection)
         XCTAssertTrue(tab.cellEdits.isEmpty)
@@ -278,7 +278,7 @@ final class ResultGridTests: XCTestCase {
                 .background(Tone.canvas),
                    named: "cell-reader-hex.png", size: CGSize(width: 640, height: 300))
         try render(
-            GridSortBanner(column: "nama", direction: .ascending, fetched: 1000, onClear: {})
+            PartialOrderNote(fetched: 1000)
                 .background(Tone.canvas)
                 .frame(width: 620, height: 30),
             named: "grid-sort-banner.png", size: CGSize(width: 620, height: 30)

@@ -1,4 +1,5 @@
 import AppKit
+import QueryHiveFFI
 import SwiftUI
 
 /// The nine output formats the engine can write, with the display metadata the picker grid and
@@ -310,6 +311,13 @@ struct PreviewResult {
     }
 }
 
+/// The "off" rule before the result store lands: a base result is kept only
+/// when holding it beside the active one does not double a large buffer.
+enum BaseResultCache {
+    static let limit = 10_000
+    static func shouldStore(rowCount: Int) -> Bool { rowCount <= limit }
+}
+
 /// Which panel is showing under the SQL editor.
 ///
 /// No longer includes Columns: the grid's own header carries every column name and its type chip,
@@ -486,7 +494,7 @@ final class QueryTab: Identifiable {
     /// covered too.
     var preview: PreviewResult? {
         didSet {
-            gridSort = nil
+            if activeSort?.origin == .memory { activeSort = nil }
             // A layout describes the column set it was built from: hiding "nama" in one result must
             // not hide whatever column 1 is in the next one. Only a change in the number of columns
             // resets it, so a repaint of the same result — a streaming run paints several times —
@@ -549,10 +557,7 @@ final class QueryTab: Identifiable {
             cellSelection = nil
             cellEdits.discard()
             clearEditUndo()
-            // A filter narrows the rows a sort was an order over, so the order is dropped with the
-            // selection and the edits. Kept here, beside them, because all three are the same kind
-            // of state: a claim about a specific set of rows that no longer exists.
-            gridSort = nil
+            if activeSort?.origin == .memory { activeSort = nil }
             gridRevision += 1
         }
     }
@@ -570,12 +575,34 @@ final class QueryTab: Identifiable {
             cellSelection = nil
             cellEdits.discard()
             clearEditUndo()
-            gridSort = nil
+            if activeSort?.origin == .memory { activeSort = nil }
             gridRevision += 1
         }
     }
 
     var hasGridSearch: Bool { !gridSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// Whether the rows on screen are the server's answer to the field's term.
+    var isServerSearched: Bool {
+        guard let server = serverSearch else { return false }
+        return server == gridSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The in-memory order over the fetched rows, or nil when the server owns
+    /// the order (or there is none): a server order is never re-applied here.
+    private var memorySort: GridSort? {
+        guard let sort = activeSort, sort.origin == .memory else { return nil }
+        return GridSort(column: sort.column, direction: sort.direction)
+    }
+
+    /// The term the grid filters in memory, or nil when the server already
+    /// applied the same term: filtering twice would only risk diverging.
+    private var effectiveLocalSearch: String? {
+        let term = gridSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return nil }
+        if let server = serverSearch, server == term { return nil }
+        return term
+    }
 
     /// The grid's column presentation: order, visibility and labels. Rendering only — see
     /// `GridColumnLayout`. Mutated through the methods below so the sort is reconciled against it.
@@ -590,27 +617,32 @@ final class QueryTab: Identifiable {
     /// written to disk. `FilterPresetStore`'s own note carries the decision.
     var localPresets: [FilterPreset] = []
 
-    /// The order the grid is drawing the filtered rows in, or `nil` for the server's own order.
-    ///
-    /// Set through `setGridSort`, never directly from a view: changing it reorders the rows on
-    /// screen, and the selection and the queued edits are positions in that order.
-    private(set) var gridSort: GridSort?
+    /// The order the grid is drawing in, or nil for the server's own order.
+    /// The single source of truth: one value, so two indicators cannot differ.
+    var activeSort: ActiveSort?
 
-    /// The server-side order the rows are in, when "Sort on server" ran, or `nil`.
-    ///
-    /// Set by `AppModel.sortOnServer` and cleared by any ordinary run. Separate from `gridSort`
-    /// because the two are different claims: one says the grid ordered what it fetched, the other
-    /// says the server ordered the whole result. New rows clear the in-memory order through
-    /// `preview`'s own `didSet`, which is why `runPreview` is what re-sets this mark.
-    var serverSort: ServerSortMark?
+    /// The term the server searched for, or nil when the rows are unsearched.
+    /// While it equals the field's term the server owns the search, so the
+    /// grid does not filter the same rows a second time in memory.
+    var serverSearch: String?
 
-    /// Sort the grid by a column, dropping the positional state the new order invalidates.
-    ///
-    /// The selection and the edits are indices into the rows on screen — the same hazard a filter
-    /// has — so reordering those rows has to clear them for the same reason. This is the only way
-    /// `gridSort` changes.
-    func setGridSort(_ sort: GridSort?) {
-        gridSort = sort
+    /// The base result kept for "off": restored without a query when small.
+    var baseResult: PreviewResult?
+
+    /// Sort the fetched rows in memory: the fallback when the server route
+    /// does not apply. Drops the positional state the new order invalidates.
+    func applyMemorySort(_ sort: GridSort?) {
+        activeSort = sort.map { ActiveSort(column: $0.column, direction: $0.direction, origin: .memory) }
+        cellSelection = nil
+        cellEdits.discard()
+        clearEditUndo()
+        gridRevision += 1
+    }
+
+    /// Mark the rows server-ordered: set before the re-run, kept on failure
+    /// so a server error is shown, never silently replaced by a fallback.
+    func applyServerSort(column: Int, direction: GridSort.Direction) {
+        activeSort = ActiveSort(column: column, direction: direction, origin: .server)
         cellSelection = nil
         cellEdits.discard()
         clearEditUndo()
@@ -673,8 +705,9 @@ final class QueryTab: Identifiable {
     /// no longer drawn has no chevron to say so, so the sort goes with the column. A move or a
     /// rename leaves it alone, because the column it names has not changed.
     private func reconcileColumns() {
-        if let sort = gridSort, !columnLayout.isVisible(sort.column) {
-            setGridSort(nil)
+        if let sort = activeSort, !columnLayout.isVisible(sort.column) {
+            activeSort = nil
+            gridRevision += 1
         }
     }
 
@@ -815,7 +848,7 @@ final class QueryTab: Identifiable {
     /// It exists so `displayedRows` can be cached: the grid reads that value several times per
     /// render, and filtering and sorting a large result on each read is work the user pays for on
     /// every hover and selection. Bumped in the places that can change what is on screen —
-    /// `preview`, `columnFilters`, `gridSearch` and `setGridSort`.
+    /// `preview`, `columnFilters`, `gridSearch` and the sort setters.
     private(set) var gridRevision = 0
 
     /// The cached answer, and the revision it was computed for.
@@ -839,11 +872,10 @@ final class QueryTab: Identifiable {
                 }
             // The cross-column search narrows the same set the filters do, and before the sort for
             // the same reason: the order is over what survives.
-            if hasGridSearch {
-                let term = gridSearch
+            if let term = effectiveLocalSearch {
                 filtered = filtered.filter { GridSearch.matches($0, term: term) }
             }
-            rows = gridSort.map { $0.order(filtered) } ?? filtered
+            rows = memorySort.map { $0.order(filtered) } ?? filtered
         } else {
             rows = []
         }
@@ -1046,59 +1078,58 @@ final class QueryTab: Identifiable {
 /// Every statement in a script, in one pass, with the range each one occupies.
 ///
 /// The scanner "Run Current Statement" and the editor's folding both need statement boundaries, and
-/// this is the one place they come from — a second scanner with the same rules would be a second
-/// answer to the same question. It is a single pass on purpose: the previous shape ran the whole
-/// scan once per statement to find each boundary, which is quadratic on a file with many statements.
+/// this is the one place they come from: the engine's own `scan.rs`, through the commit-A FFI
+/// `sql_statement_ranges`. One splitter for the band/run marks and for Run, so `select "a;b"` is
+/// one statement in both places instead of Run sending `select "a`.
 ///
-/// A scanner, not a parser: it splits on a `;` that is outside a single-quoted string and outside
-/// a `--` or `/* */` comment, which is what a file of ordinary statements needs. A semicolon inside
-/// a Postgres dollar-quoted body would fool it, and that is a deliberate trade — such a script is
-/// rare, and refusing to guess beats splitting wrongly and running half a statement.
+/// A splitter, not a parser: pieces hold more than whitespace, comments and `;`
+/// (`statements_with_lines`), so a comment-only stretch is no statement at all. The dialect is
+/// `.generic`: this free function sees no tab and therefore no connection to read one from, and
+/// per-tab dialect wiring belongs to W10-T6, which already owns the `EditorDocument` dialect.
 ///
 /// The range starts where the previous `;` left off, so it can carry the whitespace between two
 /// statements; the text is trimmed. A caller that needs the statement's own first line steps over
 /// that whitespace itself (folding does).
+///
+/// If the FFI refuses the text (past the editor ceiling), the whole script comes back as one
+/// piece rather than nothing, so Run still sends the user's SQL and the engine splits it itself.
 func sqlStatements(in sql: String) -> [(range: Range<String.Index>, text: String)] {
+    let flat: [UInt32]
+    do {
+        flat = try sqlStatementRanges(sql: sql, dialect: .generic)
+    } catch {
+        let text = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return [] }
+        return [(sql.startIndex..<sql.endIndex, text)]
+    }
+    // The pairs arrive ascending, so one forward walk maps every UTF-16 offset.
+    var utf16Cursor = sql.utf16.startIndex
+    var base = 0
+
+    func stringIndex(atUTF16Offset target: Int) -> String.Index? {
+        guard target >= base,
+              let next = sql.utf16.index(utf16Cursor, offsetBy: target - base,
+                                         limitedBy: sql.utf16.endIndex),
+              let mapped = String.Index(next, within: sql) else { return nil }
+        utf16Cursor = next
+        base = target
+        return mapped
+    }
     var found: [(Range<String.Index>, String)] = []
-    var start = sql.startIndex
-    var index = sql.startIndex
-    var inString = false
-    var inLineComment = false
-    var inBlockComment = false
-
-    func peek() -> Character? {
-        let next = sql.index(after: index)
-        return next < sql.endIndex ? sql[next] : nil
+    found.reserveCapacity(flat.count / 2)
+    var pair = 0
+    while pair + 1 < flat.count {
+        let startOffset = Int(flat[pair])
+        let endOffset = Int(flat[pair + 1])
+        pair += 2
+        guard endOffset >= startOffset,
+              let lower = stringIndex(atUTF16Offset: startOffset),
+              let upper = stringIndex(atUTF16Offset: endOffset),
+              lower <= upper else { continue }
+        let text = String(sql[lower..<upper]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { continue }
+        found.append((lower..<upper, text))
     }
-    func take() {
-        let text = sql[start..<index].trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty { found.append((start..<index, text)) }
-        start = sql.index(after: index)
-    }
-
-    while index < sql.endIndex {
-        let character = sql[index]
-        if inLineComment {
-            if character == "\n" { inLineComment = false }
-        } else if inBlockComment {
-            if character == "*", peek() == "/" { inBlockComment = false; index = sql.index(after: index) }
-        } else if inString {
-            if character == "'" { inString = false }
-        } else if character == "'" {
-            inString = true
-        } else if character == "-", peek() == "-" {
-            inLineComment = true
-            index = sql.index(after: index)
-        } else if character == "/", peek() == "*" {
-            inBlockComment = true
-            index = sql.index(after: index)
-        } else if character == ";" {
-            take()
-        }
-        index = sql.index(after: index)
-    }
-    let tail = sql[start...].trimmingCharacters(in: .whitespacesAndNewlines)
-    if !tail.isEmpty { found.append((start..<sql.endIndex, tail)) }
     return found
 }
 

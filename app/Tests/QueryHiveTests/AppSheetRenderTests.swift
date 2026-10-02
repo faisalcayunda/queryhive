@@ -50,20 +50,14 @@ final class AppSheetRenderTests: XCTestCase {
     }
 
     @MainActor
-    func testTheServerSortBannersRender() throws {
-        // The in-memory banner with its escalation offer, and the server banner that replaces it.
-        // Rendered because a row of text plus a button is exactly where a layout breaks silently.
+    func testThePartialOrderNoteRenders() throws {
+        // The one thin row for an in-memory order over a cut-short result.
+        // Rendered because a row of text is exactly where a layout breaks silently.
         try render(
-            GridSortBanner(column: "jumlah_jiwa", direction: .ascending, fetched: 1000,
-                           truncated: true, onClear: {}, onServerSort: {})
+            PartialOrderNote(fetched: 1000)
                 .background(Tone.canvas)
                 .frame(width: 720, height: 30),
             named: "grid-sort-banner-truncated.png", size: CGSize(width: 720, height: 30))
-        try render(
-            GridServerSortBanner(column: "jumlah_jiwa", direction: .descending)
-                .background(Tone.canvas)
-                .frame(width: 620, height: 30),
-            named: "grid-server-sort-banner.png", size: CGSize(width: 620, height: 30))
     }
 
     @MainActor

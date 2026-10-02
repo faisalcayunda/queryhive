@@ -1,15 +1,5 @@
 import Foundation
 
-/// The server-side order the grid is showing, when "Sort on server" ran.
-///
-/// Kept apart from `GridSort`, which is the in-memory order over the rows fetched: the two are
-/// different claims about what the rows are, and the header has to be able to tell them apart.
-struct ServerSortMark: Equatable {
-    /// The server's own name for the column, not the display label and not the source index.
-    var column: String
-    var direction: GridSort.Direction
-}
-
 /// The grid's server-side sort: the statement the in-memory order escalates to.
 ///
 /// The grid sorts the rows it has, and says so. When the result was cut short by the row limit, an

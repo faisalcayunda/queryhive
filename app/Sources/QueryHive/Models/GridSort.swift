@@ -1,5 +1,35 @@
 import Foundation
 
+/// Which engine produced the order the grid is showing: the server over the
+/// whole result, or the grid over the rows it had already fetched.
+enum SortOrigin: Equatable {
+    case server
+    case memory
+}
+
+/// The one source of truth for the grid's sort: what the chevron follows.
+/// Replaces the old `gridSort`/`serverSort` pair, which could disagree.
+struct ActiveSort: Equatable {
+    /// By position: a result may repeat a name, the grid draws by position.
+    var column: Int
+    var direction: GridSort.Direction
+    var origin: SortOrigin
+}
+
+/// Server-first routing: memory is only the fallback for a refused builder,
+/// a plan on screen, or an object inspector's preview. Everywhere else the
+/// server answers, because fetched rows cannot order the whole result.
+enum SortRoute: Equatable {
+    case server, memory
+}
+
+enum SortPolicy {
+    static func route(builderRefused: Bool, showingPlan: Bool,
+                      isObjectResult: Bool) -> SortRoute {
+        (builderRefused || showingPlan || isObjectResult) ? .memory : .server
+    }
+}
+
 /// A sort the result grid is applying, as a value the tests can reach.
 ///
 /// The grid holds `[String?]`, so a sort has to settle two questions a column type would have

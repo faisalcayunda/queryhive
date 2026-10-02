@@ -27,6 +27,15 @@ enum GridSearch {
         }
         return false
     }
+    /// Server search policy: one query per pause, not per keystroke.
+    static let minimumLength = 3
+    static let debounceInterval: TimeInterval = 0.25
+    /// The term worth a round trip, or nil below the minimum (then cleared).
+    static func searchableTerm(_ term: String) -> String? {
+        let needle = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard needle.count >= minimumLength else { return nil }
+        return needle
+    }
 }
 
 /// The server side of the cross-column search: the statement the term becomes.

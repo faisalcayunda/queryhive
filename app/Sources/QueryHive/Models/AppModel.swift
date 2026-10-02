@@ -1971,11 +1971,12 @@ final class AppModel {
                                                  safeMode: connection.safeMode) {
             awaitConfirmation(request) { [weak self] in
                 self?.runPreview(tab, sql: sql, connection: connection,
-                                 env: env.merging(RunConfirmation.approvalSettings(true)) { _, new in new })
+                                 env: env.merging(RunConfirmation.approvalSettings(true)) { _, new in new },
+                                 baseRun: true)
             }
             return
         }
-        runPreview(tab, sql: sql, connection: connection, env: env)
+        runPreview(tab, sql: sql, connection: connection, env: env, baseRun: true)
     }
 
     /// The statements a script holds, split the way the engine splits them, so the confirmation
@@ -2228,6 +2229,9 @@ final class AppModel {
     }
 
 
+    /// One pending debounced search per tab: a keystroke cancels the one before it.
+    private var searchTasks: [UUID: DispatchWorkItem] = [:]
+
     /// Escalate the grid's in-memory search: run the same statement again with the term turned into
     /// a cross-column `WHERE`, so the server finds rows the grid never fetched.
     ///
@@ -2237,6 +2241,11 @@ final class AppModel {
     /// and is refused rather than guessed when the text holds more than one statement.
     func searchOnServer(_ tab: QueryTab, term: String) {
         guard !tab.previewing, tab.stage != .running else { return }
+        if let blocked = serverActionBlockedByEdits(tab) {
+            tab.note(.error, blocked)
+            tab.panel = .log
+            return
+        }
         guard let connection = connection(for: tab) else { return }
         guard let original = tab.previewBaseSQL ?? tab.previewedSQL, !original.isEmpty else {
             tab.note(.warning, "Run the query before searching the server.")
@@ -2262,7 +2271,7 @@ final class AppModel {
         }
         tab.note(.info, "Searching the server for “\(term)” across every column…")
         runPreview(tab, sql: statement, connection: connection, env: env, clearSearch: false,
-                   baseSQL: original)
+                   baseSQL: original, serverSearch: term)
     }
 
     /// Why an escalation could not be built, in the words the user needs to fix it.
@@ -2288,8 +2297,11 @@ final class AppModel {
     /// streaming are the same as a Run; only the SQL differs. The statement is built by
     /// `ServerSort`, which wraps the user's SQL inside a derived table rather than editing it, and
     /// is refused rather than guessed when the text holds more than one statement.
-    func sortOnServer(_ tab: QueryTab, column: Event.Column, direction: GridSort.Direction) {
+    func sortOnServer(_ tab: QueryTab, column: Event.Column, source: Int, direction: GridSort.Direction) {
         guard !tab.previewing, tab.stage != .running else { return }
+        if let blocked = serverActionBlockedByEdits(tab) {
+            tab.note(.error, blocked); tab.panel = .log; return
+        }
         guard let connection = connection(for: tab) else { return }
         guard let original = tab.previewBaseSQL ?? tab.previewedSQL, !original.isEmpty else {
             tab.note(.warning, "Run the query before sorting it on the server.")
@@ -2301,8 +2313,7 @@ final class AppModel {
             statement = try ServerSort.order(sql: original, column: column.name,
                                              direction: direction, kind: connection.kind)
         } catch {
-            tab.note(.error, sortFailureMessage(error))
-            tab.panel = .log
+            tab.applyMemorySort(GridSort(column: source, direction: direction))
             return
         }
         let env: [String: String]
@@ -2312,32 +2323,115 @@ final class AppModel {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
+        tab.applyServerSort(column: source, direction: direction)
         tab.note(.info, "Sorting on the server by \(column.name) "
                 + "\(direction == .ascending ? "↑" : "↓") — the whole result, not only the rows fetched.")
         runPreview(tab, sql: statement, connection: connection, env: env, clearSearch: false,
-                   baseSQL: original,
-                   serverSort: ServerSortMark(column: column.name, direction: direction))
+                   baseSQL: original, activeSort: tab.activeSort)
     }
 
-    /// Why a server sort could not be built, in the words the user needs to fix it.
-    private func sortFailureMessage(_ error: Error) -> String {
-        guard let failure = error as? ServerSort.Failure else {
-            return "Cannot sort on the server: \(error.localizedDescription)"
+    /// A server round trip re-runs the query and drops staged edits, so it is
+    /// refused while any are queued: silent loss is worse than a refusal.
+    static let stagedEditsMessage = "Save or discard your changes first."
+
+    func serverActionBlockedByEdits(_ tab: QueryTab) -> String? {
+        tab.cellEdits.isEmpty ? nil : Self.stagedEditsMessage
+    }
+
+    /// A header click, server-first: the first click sorts on the server, the
+    /// second flips, the third clears. Falls back to memory only for a plan,
+    /// an object preview, or a statement the builder refuses to wrap.
+    func toggleSort(_ tab: QueryTab, column: Event.Column, source: Int) {
+        let current = tab.activeSort.flatMap {
+            $0.column == source ? GridSort(column: source, direction: $0.direction) : nil
         }
-        switch failure {
-        case .noColumn:
-            return "Cannot sort on the server: this column has no name to order by."
-        case .multipleStatements(let count):
-            return "Sorting on the server needs one statement, and this result's text has \(count). "
-                + "Run the one you mean, then sort again."
+        let next = GridSort.next(current, clickedColumn: source,
+                                 firstDirection: DataPreferences.shared.firstSortDirection)
+        setSort(tab, column: column, source: source, sort: next)
+    }
+
+    /// One explicit order, routed like a click: server unless a fallback case
+    /// holds. A refused builder falls back inside `sortOnServer` itself.
+    func setSort(_ tab: QueryTab, column: Event.Column, source: Int, sort: GridSort?) {
+        guard let sort else { clearSort(tab); return }
+        if SortPolicy.route(builderRefused: false, showingPlan: tab.showingPlan,
+                            isObjectResult: tab.isObjects) == .memory {
+            tab.applyMemorySort(sort)
+            return
         }
+        sortOnServer(tab, column: column, source: source, direction: sort.direction)
+    }
+
+    /// The cycle's "off": a memory order just lifts, a server order returns
+    /// to the base rows — from the store when small, by re-running when not.
+    func clearSort(_ tab: QueryTab) {
+        guard let sort = tab.activeSort else { return }
+        tab.activeSort = nil
+        guard sort.origin == .server, tab.serverSearch == nil else { return }
+        if tab.baseResult == nil { rerunBaseSQL(tab); return }
+        tab.preview = tab.baseResult
+    }
+
+    /// The base statement again, for an "off" with no stored base: holding
+    /// two large buffers would double memory, so a large base is re-read.
+    func rerunBaseSQL(_ tab: QueryTab) {
+        guard let sql = tab.previewBaseSQL, !sql.isEmpty,
+              let connection = connection(for: tab) else { return }
+        guard let env = try? previewEnvironment(for: tab, connection: connection, sql: sql) else {
+            tab.previewError = "Couldn't re-run the base query."
+            return
+        }
+        runPreview(tab, sql: sql, connection: connection, env: env)
+    }
+
+    /// Queue one server search per pause in typing; a keystroke cancels the
+    /// one before it. Below the minimum the active server search is cleared.
+    func scheduleServerSearch(_ tab: QueryTab) {
+        searchTasks[tab.id]?.cancel()
+        let term = tab.gridSearch
+        let id = tab.id
+        let work = DispatchWorkItem { [weak self] in
+            self?.searchTasks[id] = nil
+            self?.fireServerSearch(tab, term: term)
+        }
+        searchTasks[tab.id] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + GridSearch.debounceInterval, execute: work)
+    }
+
+    /// The debounced fire: no-ops when a run is in flight, when the term is
+    /// below the minimum, or when memory already owns the search. A refused
+    /// builder stays in memory, which is already narrowing the fetched rows.
+    func fireServerSearch(_ tab: QueryTab, term: String) {
+        guard !tab.previewing, tab.stage != .running else { return }
+        guard let searchable = GridSearch.searchableTerm(term) else {
+            if tab.serverSearch != nil { clearSearch(tab) }
+            return
+        }
+        if tab.showingPlan || tab.isObjects { return }
+        if tab.serverSearch == searchable { return }
+        if !tab.cellEdits.isEmpty { return }
+        guard let original = tab.previewBaseSQL ?? tab.previewedSQL, !original.isEmpty,
+              let connection = connection(for: tab),
+              (try? SearchStatement.crossColumn(sql: original, term: searchable,
+                                               columns: tab.preview?.columns ?? [],
+                                               kind: connection.kind)) != nil else { return }
+        searchOnServer(tab, term: searchable)
+    }
+
+    /// Drop the server search: back to the stored base, or re-run it when the
+    /// base was too large to keep. The field keeps its text; only the rows go.
+    func clearSearch(_ tab: QueryTab) {
+        tab.serverSearch = nil
+        if tab.baseResult == nil { rerunBaseSQL(tab); return }
+        tab.preview = tab.baseResult
     }
 
     /// The body of a preview run, shared by Run and the search escalation: put the tab into its
     /// "a new result is arriving" state and start the engine.
     private func runPreview(_ tab: QueryTab, sql: String, connection: Connection,
                             env: [String: String], clearSearch: Bool = true,
-                            baseSQL: String? = nil, serverSort: ServerSortMark? = nil) {
+                            baseSQL: String? = nil, activeSort: ActiveSort? = nil,
+                            serverSearch: String? = nil, baseRun: Bool = false) {
         PerfSignposts.runBegin()
         tab.previewing = true
         tab.previewError = nil
@@ -2345,9 +2439,12 @@ final class AppModel {
         tab.showingPlan = false
         tab.previewedSQL = sql
         tab.previewBaseSQL = baseSQL ?? sql
-        // Set on every run, so an ordinary Run clears the mark left by a server sort — the rows it
-        // is about to replace are the ones the mark described.
-        tab.serverSort = serverSort
+        // Set on every run, so an ordinary Run clears the order a sort left.
+        tab.activeSort = activeSort
+        tab.serverSearch = serverSearch
+        // A fresh base run retires the stored one; sort and search runs keep
+        // it, because "off" must return to the rows they started from.
+        if baseRun { tab.baseResult = nil }
 
         // The filters described rows that are about to be replaced, and clearing them is also what
         // drops the cell selection — see `columnFilters`' own note. The last total described them
@@ -2401,7 +2498,8 @@ final class AppModel {
             case "done":
                 PerfSignposts.runDone()
                 finished = true
-                stopped = Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab)
+                stopped = Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab,
+                                                storeBase: baseRun)
             default:
                 break
             }
@@ -2446,12 +2544,17 @@ final class AppModel {
     /// honest. `done.warnings` (for instance "the server did not confirm the stop") go to the log.
     @discardableResult
     static func applyPreviewDone(_ event: Event, columns: [Event.Column], rows: [[String?]],
-                                 to tab: QueryTab) -> Bool {
+                                 to tab: QueryTab, storeBase: Bool = false) -> Bool {
         let stopped = event.cancelled ?? false
         let truncated = (event.truncated ?? false) || (stopped && !rows.isEmpty)
         tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
                                     queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0,
                                     stopped: stopped)
+        // The base run keeps its rows for "off", but only when holding them
+        // beside the active ones does not double a large buffer.
+        if storeBase, !stopped, BaseResultCache.shouldStore(rowCount: rows.count) {
+            tab.baseResult = tab.preview
+        }
         if stopped {
             tab.note(.warning, rows.isEmpty ? "Stopped before any rows arrived"
                                             : "Stopped · \(pluralized(rows.count, "row")) fetched")
@@ -2855,6 +2958,8 @@ final class AppModel {
         tab.previewError = nil
         tab.preview = nil
         tab.previewedSQL = sql
+        tab.activeSort = nil
+        tab.serverSearch = nil
         tab.showingPlan = true
         tab.panel = .result
         panelCollapsed = false

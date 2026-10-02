@@ -68,11 +68,12 @@ final class ServerSortTests: XCTestCase {
         }
     }
 
-    func testTheMarkKeepsTheServersNameNotTheDisplayLabel() {
-        // The header can be renamed and columns can move; the order the server was asked for keeps
-        // the name it was given.
-        let mark = ServerSortMark(column: "nama", direction: .descending)
-        XCTAssertEqual(mark, ServerSortMark(column: "nama", direction: .descending))
-        XCTAssertNotEqual(mark, ServerSortMark(column: "Nama", direction: .descending))
+    func testTheActiveSortKeepsOriginBesideColumnAndDirection() {
+        // One value holds the column, the direction and which engine produced
+        // the order, so the header cannot read two marks that disagree.
+        let server = ActiveSort(column: 2, direction: .descending, origin: .server)
+        XCTAssertEqual(server, ActiveSort(column: 2, direction: .descending, origin: .server))
+        XCTAssertNotEqual(server, ActiveSort(column: 2, direction: .descending, origin: .memory))
+        XCTAssertNotEqual(server, ActiveSort(column: 2, direction: .ascending, origin: .server))
     }
 }

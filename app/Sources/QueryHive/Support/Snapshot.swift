@@ -580,7 +580,7 @@ enum Snapshot {
             // the server's. Sorted on `jumlah_jiwa`, which is the column the rows below are not
             // already in order by — so the scene shows the sort doing something.
             if scene == "grid-sorted" {
-                tab.setGridSort(GridSort(column: 2, direction: .ascending))
+                tab.applyMemorySort(GridSort(column: 2, direction: .ascending))
             }
             // The rendering-only column work: one column renamed, one hidden, one moved, and a
             // cross-column search narrowing the rows. Drawn from the same model calls the UI makes,
@@ -627,7 +627,7 @@ enum Snapshot {
                 tab.setColumnHidden(4, true)
                 tab.setColumnHidden(5, true)
                 tab.columnFilters[1] = .text("KPM")
-                tab.setGridSort(GridSort(column: 2, direction: .ascending))
+                tab.applyMemorySort(GridSort(column: 2, direction: .ascending))
                 tab.cellEdits.edit("KPM Cibadak Baru", at: CellKey(row: 1, column: 1),
                                    original: "KPM Cibadak")
                 tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
