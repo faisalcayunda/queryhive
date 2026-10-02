@@ -12,6 +12,10 @@ struct FoldRegion: Equatable {
         case statement
         /// The parenthesised body of a CTE inside a `WITH`.
         case cte
+        /// A parenthesised subquery spanning more than one line.
+        case subquery
+        /// The body between two `$tag$` quotes of a function definition.
+        case body
     }
 
     let kind: Kind
@@ -36,16 +40,6 @@ struct FoldRegion: Equatable {
 /// Pure: it reads a string and returns ranges and offsets, with no text view and no window. The
 /// editor owns the actual hiding (`SQLFoldStyler`), which is why this file can be tested directly.
 enum SQLFolding {
-    /// The largest document this will fold, in UTF-16 units.
-    ///
-    /// Above it, `regions` answers nothing and the editor shows no fold marks — the text is left
-    /// alone, which is the same thing TablePro does above its own limit. The reason this one is
-    /// deliberately **lower** than TablePro's 2,000,000: this scanner locates each statement by
-    /// re-running the statement scanner and searching for its text, which is not a single pass yet
-    /// (plan §12.2.3), so an unbounded document would pay a superlinear cost on every keystroke.
-    /// The limit rises when the boundary list comes from `qh-sql`, which already scans once.
-    static let foldingSizeLimit = 200_000
-
     // MARK: Lines
 
     /// UTF-16 offset of each line's first character.
@@ -87,153 +81,57 @@ enum SQLFolding {
 
     // MARK: Regions
 
-    /// Every foldable region in the text, outermost/earliest first.
-    ///
-    /// Statements come from the same scanner "Run Current Statement" uses, so a fold and a run
-    /// cannot disagree about where a statement is. CTE bodies are found separately, because the
-    /// statement scanner answers "which statement", not "which parentheses".
+    /// Every foldable region in the text, outermost/earliest first: statements, CTE bodies,
+    /// subqueries and `$tag$` bodies, from one outline of the tree-sitter analysis. Over the
+    /// ceiling there are no regions: no fold marks and no cost, never a fold cut short.
     static func regions(in sql: String) -> [FoldRegion] {
         regions(in: sql, statements: nil)
     }
-
-    /// The same, for a caller that already has the statement ranges — the editor computes both off
-    /// the main thread, and scanning twice would double the one expensive step.
+    /// The same, for a caller that already has the statement ranges. The ranges are not reused —
+    /// the outline answers statements, folds and issues together — but the parameter stays so
+    /// the gutter's call sites keep their shape.
     static func regions(in sql: String, statements known: [NSRange]?) -> [FoldRegion] {
+        _ = known
         let text = sql as NSString
-        // Over the limit the editor gets no regions at all, so no fold marks and no cost. The
-        // alternative — folding part of a document — would be a fold whose body is cut short.
-        guard text.length <= foldingSizeLimit else { return [] }
+        guard text.length <= SQLSyntax.ceiling,
+              let analysis = try? EditorAnalysis(text: sql),
+              let outline = try? analysis.drainForTesting().outline else { return [] }
         let starts = lineStarts(in: text)
-        var regions: [FoldRegion] = []
-
-        // One call, shared by the statements and the CTEs below. It is the expensive part, and
-        // asking twice was the previous shape.
-        let statements = known ?? statementRanges(in: sql)
-
-        for range in statements {
-            // The scanner's range starts where the previous `;` left off, so it can carry the
-            // whitespace between two statements — which may sit on the previous line. The header is
-            // the statement's own first line, so both ends are pulled in to non-whitespace.
-            var first = range.location
-            var last = NSMaxRange(range) - 1
-            while first <= last, isSpace(text.character(at: first)) { first += 1 }
-            while last >= first, isSpace(text.character(at: last)) { last -= 1 }
-            guard first <= last else { continue }
-            let headerLine = line(containing: first, lineStarts: starts)
-            let lastLine = line(containing: last, lineStarts: starts)
-            guard lastLine > headerLine else { continue }
-            regions.append(FoldRegion(
-                kind: .statement,
-                headerLine: headerLine,
-                lastLine: lastLine,
-                header: starts[headerLine],
-                bodyStart: starts[headerLine + 1],
-                bodyEnd: lineEnd(lastLine, starts: starts, length: text.length),
-                summary: leadingKeyword(text, from: first) ?? "statement"))
-        }
-
-        // A fold is identified by its header offset, so two regions must never share one. A CTE
-        // whose `(` sits on the statement's own first line — `WITH x AS (` — has exactly the same
-        // header as the statement, and the statement's fold already hides everything the CTE's
-        // would. Keeping only the first there is what makes the gutter show one marker per line
-        // instead of two markers on top of each other that fold different amounts.
-        var headers = Set(regions.map(\.header))
-        for region in cteRegions(in: sql, statements: statements, text: text, starts: starts) where !headers.contains(region.header) {
-            regions.append(region)
-            headers.insert(region.header)
-        }
-        return regions.sorted { ($0.header, $0.lastLine) < ($1.header, $1.lastLine) }
+        let sorted = outline.folds.compactMap {
+            foldRegion($0, starts: starts, length: text.length)
+        }.sorted { ($0.header, $0.lastLine) < ($1.header, $1.lastLine) }
+        // One marker per line: a fold opening on its statement's own first line shares the
+        // statement's header, and the statement's fold is the superset.
+        var seen = Set<Int>()
+        return sorted.filter { seen.insert($0.header).inserted }
     }
 
-    /// The scanner's statement boundaries as character ranges.
+    /// The statement boundaries as character ranges, without their `;`.
     ///
-    /// It comes from `sqlStatements`, the same single pass "Run Current Statement" uses, so a fold
-    /// and a run cannot disagree about where a statement ends — and the boundary list is computed
-    /// once for the whole document rather than once per statement.
+    /// The same splitter Run uses, over the FFI, so a fold and a run cannot disagree about where
+    /// a statement ends — and the boundary list is computed once, not once per statement.
     static func statementRanges(in sql: String) -> [NSRange] {
-        sqlStatements(in: sql).map { NSRange($0.range, in: sql) }
+        (try? editorStatementRanges(sql)) ?? []
     }
 
     // MARK: CTEs
-
-    /// CTE bodies: an `AS (` inside a statement that also holds a `WITH`.
-    ///
-    /// Deliberately not a full `WITH` grammar. A real parser would track the CTE list; this tracks
-    /// the one shape worth folding — `AS (` with a matching `)` — and gates it on a `WITH` word in
-    /// the same statement. That gate is what keeps `CREATE TABLE ... AS (SELECT ...)` out, since a
-    /// CTAS has no `WITH` and folding its body would be an odd thing to offer.
-    static func cteRegions(in sql: String, statements: [NSRange], text: NSString,
-                           starts: [Int]) -> [FoldRegion] {
-        var out: [FoldRegion] = []
-        for range in statements {
-            let statement = text.substring(with: range)
-            let ns = statement as NSString
-            guard containsWord("WITH", in: ns) else { continue }
-            for open in cteOpenParens(in: ns) {
-                guard let close = matchingParen(in: ns, from: open) else { continue }
-                let headerLine = line(containing: range.location + open, lineStarts: starts)
-                let lastLine = line(containing: range.location + close, lineStarts: starts)
-                guard lastLine > headerLine else { continue }
-                out.append(FoldRegion(
-                    kind: .cte,
-                    headerLine: headerLine,
-                    lastLine: lastLine,
-                    header: starts[headerLine],
-                    bodyStart: starts[headerLine + 1],
-                    bodyEnd: lineEnd(lastLine, starts: starts, length: text.length),
-                    summary: "CTE"))
-            }
+    /// One outline fold as a `FoldRegion`, its hidden body snapped to whole lines.
+    static func foldRegion(_ fold: EditorFoldData, starts: [Int], length: Int) -> FoldRegion? {
+        let kind: FoldRegion.Kind
+        switch fold.kind {
+        case .statement: kind = .statement
+        case .cte: kind = .cte
+        case .subquery: kind = .subquery
+        case .body: kind = .body
         }
-        return out
-    }
-
-    /// Offsets (within `statement`) of `(` that open a CTE body: one that follows `AS`, or
-    /// `AS MATERIALIZED` / `AS NOT MATERIALIZED`. Strings and comments are skipped, so an `AS`
-    /// inside a literal is not one.
-    static func cteOpenParens(in statement: NSString) -> [Int] {
-        var result: [Int] = []
-        var index = 0
-        while index < statement.length {
-            let (word, next) = nextToken(in: statement, from: index)
-            guard let word else { index = next; continue }
-            if word == "AS" {
-                var cursor = skipTrivia(statement, from: next)
-                let (modifier, modifierEnd) = nextToken(in: statement, from: cursor)
-                if modifier == "NOT" {
-                    cursor = skipTrivia(statement, from: modifierEnd)
-                    let (second, secondEnd) = nextToken(in: statement, from: cursor)
-                    if second == "MATERIALIZED" { cursor = skipTrivia(statement, from: secondEnd) }
-                } else if modifier == "MATERIALIZED" {
-                    cursor = skipTrivia(statement, from: modifierEnd)
-                }
-                if cursor < statement.length, statement.character(at: cursor) == 0x28 {   // (
-                    result.append(cursor)
-                }
-            }
-            index = next
-        }
-        return result
-    }
-
-    /// The offset of the `)` matching the `(` at `open`, or nil when it never closes.
-    static func matchingParen(in text: NSString, from open: Int) -> Int? {
-        var depth = 0
-        var index = open
-        while index < text.length {
-            let character = text.character(at: index)
-            if isLiteralStart(character, in: text, at: index) {
-                // A quote or a comment: step over the whole thing, so a `)` inside it is content.
-                index = nextToken(in: text, from: index).advance
-                continue
-            }
-            if character == 0x28 { depth += 1 }
-            if character == 0x29 {
-                depth -= 1
-                if depth == 0 { return index }
-            }
-            index += 1
-        }
-        return nil
+        guard fold.lastLine > fold.headerLine, fold.headerLine >= 0,
+              fold.lastLine < starts.count else { return nil }
+        let bodyStart = fold.headerLine + 1 < starts.count ? starts[fold.headerLine + 1] : length
+        let bodyEnd = fold.lastLine + 1 < starts.count ? starts[fold.lastLine + 1] : length
+        guard bodyEnd > bodyStart else { return nil }
+        return FoldRegion(kind: kind, headerLine: fold.headerLine, lastLine: fold.lastLine,
+                          header: starts[fold.headerLine], bodyStart: bodyStart, bodyEnd: bodyEnd,
+                          summary: fold.summary)
     }
 
     // MARK: Edits
@@ -269,133 +167,5 @@ enum SQLFolding {
             // Otherwise the offset was inside the replaced span: drop it.
         }
         return shifted
-    }
-
-    // MARK: Lexing helpers
-
-    /// Whitespace and newlines only — not `;`, which is a separator and not spacing.
-    private static func isSpace(_ character: unichar) -> Bool {
-        guard let scalar = Unicode.Scalar(character) else { return false }
-        return CharacterSet.whitespacesAndNewlines.contains(scalar)
-    }
-
-    private static func lineEnd(_ line: Int, starts: [Int], length: Int) -> Int {
-        line + 1 < starts.count ? starts[line + 1] : length
-    }
-
-    private static func containsWord(_ word: String, in text: NSString) -> Bool {
-        var index = 0
-        while index < text.length {
-            let (token, next) = nextToken(in: text, from: index)
-            if token == word { return true }
-            index = next
-        }
-        return false
-    }
-
-    private static func leadingKeyword(_ text: NSString, from offset: Int) -> String? {
-        let start = skipTrivia(text, from: offset)
-        return nextToken(in: text, from: start).word
-    }
-
-    /// Whether the character at `index` starts a string or a comment, so a caller can step over it.
-    private static func isLiteralStart(_ character: unichar, in text: NSString, at index: Int) -> Bool {
-        if character == 0x27 || character == 0x22 || character == 0x60 { return true }
-        if character == 0x2D, index + 1 < text.length, text.character(at: index + 1) == 0x2D { return true }
-        if character == 0x2F, index + 1 < text.length, text.character(at: index + 1) == 0x2A { return true }
-        return false
-    }
-
-    /// The next word or punctuation, skipping the contents of comments and quoted strings, plus the
-    /// offset to continue from. A word is uppercased so keywords compare without case folding at
-    /// every call site.
-    private static func nextToken(in text: NSString, from index: Int) -> (word: String?, advance: Int) {
-        guard index >= 0, index < text.length else { return (nil, text.length) }
-        let character = text.character(at: index)
-
-        if character == 0x2D, index + 1 < text.length, text.character(at: index + 1) == 0x2D {
-            var cursor = index
-            while cursor < text.length, text.character(at: cursor) != 0x0A { cursor += 1 }
-            return (nil, cursor)
-        }
-        if character == 0x2F, index + 1 < text.length, text.character(at: index + 1) == 0x2A {
-            var cursor = index + 2
-            while cursor + 1 < text.length,
-                  !(text.character(at: cursor) == 0x2A && text.character(at: cursor + 1) == 0x2F) {
-                cursor += 1
-            }
-            return (nil, min(cursor + 2, text.length))
-        }
-        if character == 0x27 {
-            // A doubled quote is an escaped quote, not the end of the literal.
-            var cursor = index + 1
-            while cursor < text.length {
-                if text.character(at: cursor) == 0x27 {
-                    if cursor + 1 < text.length, text.character(at: cursor + 1) == 0x27 {
-                        cursor += 2
-                        continue
-                    }
-                    cursor += 1
-                    break
-                }
-                cursor += 1
-            }
-            return (nil, cursor)
-        }
-        if character == 0x22 || character == 0x60 {
-            var cursor = index + 1
-            while cursor < text.length {
-                let current = text.character(at: cursor)
-                cursor += 1
-                if current == character {
-                    if cursor < text.length, text.character(at: cursor) == character {
-                        cursor += 1
-                        continue
-                    }
-                    break
-                }
-            }
-            return (nil, cursor)
-        }
-        if isWordStart(character) {
-            var cursor = index
-            while cursor < text.length, isWordCharacter(text.character(at: cursor)) { cursor += 1 }
-            return (text.substring(with: NSRange(location: index, length: cursor - index)).uppercased(), cursor)
-        }
-        return (nil, index + 1)
-    }
-
-    /// Whitespace and comments, from `index` to the first character that is neither.
-    private static func skipTrivia(_ text: NSString, from index: Int) -> Int {
-        var cursor = index
-        while cursor < text.length {
-            let character = text.character(at: cursor)
-            if let scalar = Unicode.Scalar(character), CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                cursor += 1
-                continue
-            }
-            if character == 0x2D, cursor + 1 < text.length, text.character(at: cursor + 1) == 0x2D {
-                cursor = nextToken(in: text, from: cursor).advance
-                continue
-            }
-            if character == 0x2F, cursor + 1 < text.length, text.character(at: cursor + 1) == 0x2A {
-                cursor = nextToken(in: text, from: cursor).advance
-                continue
-            }
-            break
-        }
-        return cursor
-    }
-
-    static func isWordStart(_ character: unichar) -> Bool {
-        guard let scalar = Unicode.Scalar(character) else { return false }
-        return CharacterSet.letters.contains(scalar) || character == 0x5F
-    }
-
-    static func isWordCharacter(_ character: unichar) -> Bool {
-        guard let scalar = Unicode.Scalar(character) else { return false }
-        return CharacterSet.alphanumerics.contains(scalar)
-            || character == 0x5F   // _
-            || character == 0x24   // $
     }
 }

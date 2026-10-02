@@ -409,17 +409,33 @@ final class EditorFindAndFoldingTests: XCTestCase {
 
     // MARK: Size limit
 
-    func testAnOversizedDocumentIsNotFoldedAtAll() {
-        // The cap, and the reason it exists: this scanner locates each statement by re-running the
-        // statement scanner and searching for its text, which is not one pass yet, so an unbounded
-        // document would pay a superlinear cost on every keystroke. Over the limit the editor gets
-        // no regions — no fold marks and no cost — rather than a fold whose body is cut short.
-        let big = String(repeating: "SELECT 1;\n", count: SQLFolding.foldingSizeLimit / 10 + 1)
-        XCTAssertGreaterThan((big as NSString).length, SQLFolding.foldingSizeLimit)
+    func testAnOversizedDocumentIsNotFoldedAtAll() throws {
+        // The ceiling is the analysis ceiling: over it the editor gets no regions — no fold
+        // marks and no cost — rather than a fold whose body is cut short.
+        let ceiling = try editorCeiling()
+        let big = String(repeating: "SELECT 1;\n", count: ceiling / 10 + 1)
+        XCTAssertGreaterThan((big as NSString).length, ceiling)
         XCTAssertTrue(SQLFolding.regions(in: big).isEmpty)
 
         // Just under it still folds, so this is a limit and not a blanket refusal.
         let small = "SELECT a,\n       b\nFROM t;"
         XCTAssertFalse(SQLFolding.regions(in: small).isEmpty)
+    }
+
+    func testASubquerySpanningLinesIsFoldable() {
+        let sql = "SELECT *\nFROM (\n  SELECT 1\n) AS sub;\nSELECT 2;"
+        let subs = SQLFolding.regions(in: sql).filter { $0.kind == .subquery }
+        XCTAssertEqual(subs.count, 1)
+        XCTAssertEqual(subs[0].headerLine, 1)
+        XCTAssertEqual(subs[0].lastLine, 3)
+    }
+
+    func testADollarQuotedBodySpanningLinesIsFoldable() {
+        // The tags stand on their own lines: that is the shape the tree reports as a body.
+        let sql = "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS\n$body$\nSELECT 1;\nSELECT 2;\n$body$;"
+        let bodies = SQLFolding.regions(in: sql).filter { $0.kind == .body }
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(bodies[0].headerLine, 1)
+        XCTAssertEqual(bodies[0].lastLine, 3)
     }
 }

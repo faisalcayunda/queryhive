@@ -674,19 +674,27 @@ that is in flight rather than looking empty.
 ### Colouring the query
 
 The editor colours SQL by what each token *is*: keywords in violet, functions in ice, strings in
-mint, numbers in amber, quoted identifiers in gold, `null` / `true` / `false` in coral, comments in
-dim italic, punctuation in grey.
+mint, numbers in amber, quoted identifiers in gold, `null` / `true` / `false` and parameters in
+coral, comments in dim italic, punctuation in grey.
 
-One scan, six ordered alternatives, then the words are classified. Ordering rather than state is
-what handles the cases a naive splitter gets wrong — a `--` inside a string and a quote inside a
-comment are resolved by the alternatives being tried in sequence, the same way a reader resolves
-them. A word is a function when a `(` follows it, which is the only thing that distinguishes
-`count(` from a column called `count`.
+The analysis is tree-sitter, one tree per statement, in Rust (`qh-editor`): statement boundaries
+come from the same `scan.rs` splitter Run uses, each statement parses on its own, and the classes
+cross the FFI as codes 1–9. What the tree cannot read — an unclosed quote, an error node, a
+statement past 256 KiB — a lexical pass colours instead, so an unfinished line still reads right.
+A keyword the grammar does not know (`describe`, `grant`, `fetch`) still reads as one through the
+same fallback, and a name used where the grammar expects a keyword reads as plain text.
 
-Two things it deliberately does not do. It **stops past 200,000 characters** rather than paying for
-a full scan on every keystroke of a pasted dump. And it sets **attributes only**, never the string:
-that is what keeps it from looping back through `textDidChange`, and why the binding keeps exactly
-what was typed.
+Colours are temporary `NSLayoutManager` attributes (`.foregroundColor`), never storage
+attributes: the storage carries the base font and paragraph style plus italics on comments only.
+A repaint skips every run that already carries the right colour, and a keystroke inside a string,
+a comment or a word inherits its neighbour's colour for the turn the analysis takes. Each
+temporary key has one owner: syntax owns `.foregroundColor`, the find bar owns `.backgroundColor`,
+diagnostics will own the underline keys — no feature ever clears another's.
+
+Two things it deliberately does not do. It **stops past 2,000,000 characters** rather than paying
+for a full analysis on every keystroke of a pasted dump. And it sets **attributes only**, never
+the string: that is what keeps it from looping back through `textDidChange`, and why the binding
+keeps exactly what was typed.
 
 `updateNSView` cannot do the colouring — it returns early when the string already matches, and
 re-running the scan on every SwiftUI update would make typing pay for the model's changes. Text

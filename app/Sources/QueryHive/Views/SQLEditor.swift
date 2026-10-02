@@ -86,7 +86,7 @@ struct SQLEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
-        textView.font = FontChoice.codeNSFont(size: 13, weight: .regular)
+        textView.font = FontChoice.codeNSFont(size: 12.5, weight: .regular)
         // Adaptive, not pinned white: this NSTextView draws on `Tone.canvas`, which is near-black
         // in a dark appearance and off-white in a light one. AppKit resolves both of these per
         // appearance, so the caret and the default text colour follow the canvas with no observer.
@@ -102,6 +102,10 @@ struct SQLEditor: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isAutomaticTextCompletionEnabled = false
+        textView.inlinePredictionType = .no
         textView.smartInsertDeleteEnabled = false
         textView.textContainerInset = LineNumberRulerView.textInset
         textView.isVerticallyResizable = true
@@ -285,27 +289,28 @@ struct SQLEditor: NSViewRepresentable {
         /// an edit: it is followed by a full rebuild of everything the tracking would have kept.
         private var isReplacingText = false
 
-        // MARK: Colour
-
-        /// Ranges whose attributes are owed: an edit made them stale and they have not been painted.
-        /// Kept in the coordinates of the current text.
-        private var dirty: [NSRange] = []
-        /// Whether the document is small enough to be coloured at all.
-        private var wasColourable = true
-        /// A statement longer than this is not scanned whole for one keystroke; the line is.
-        private static let paintLimit = 30_000
-
         // MARK: Analysis
 
-        private var analysisItem: DispatchWorkItem?
-        private var analysisRevision = -1
-        private var analysisInFlight = false
-        private var analysisAgain = false
-        private static let analysisQueue = DispatchQueue(label: "QueryHive.editor.analysis", qos: .utility)
-        /// A load up to this size is analysed on the spot, so a tab opens with its gutter marks
-        /// already there; anything bigger is analysed off the main thread.
-        private static let synchronousAnalysisLimit = 60_000
-        private static let analysisDelay: TimeInterval = 0.12
+        /// The tree-sitter analysis of this document (Fase 4B). Rebuilt when text arrives from
+        /// outside; keystrokes flow through `replace`, never through a rebuild.
+        private var analysis: EditorAnalysis?
+        /// The outline revision the gutter is wearing: statements, folds, run marks and rotor.
+        private var outlineRevision: UInt64 = 0
+        /// The paint revision last applied to the layout manager. Tests poll this.
+        private(set) var appliedRevision: UInt64 = 0
+        /// The revision keystrokes have reached; tests wait for `appliedRevision` to catch up.
+        var pendingRevisionForTesting: UInt64 { analysis?.revision ?? appliedRevision }
+        /// The edit's range, for the neighbour-colour inheritance in `textDidChange`.
+        private var lastEditRange = NSRange(location: 0, length: 0)
+        private var visibleScheduled = false
+        private var idleItem: DispatchWorkItem?
+        private static let idleDelay: TimeInterval = 0.5
+        private static let idleQueue = DispatchQueue(label: "qh.editor.idle", qos: .utility)
+        /// This size or smaller paints synchronously, so a tab opens coloured; anything bigger
+        /// paints off the main thread, visible window first.
+        private static let synchronousPaintLimit = 256_000
+        /// The analysis window budget per turn, in UTF-16 units.
+        private static let visibleBudget = 131_072
 
         // MARK: Folds
 
@@ -316,6 +321,10 @@ struct SQLEditor: NSViewRepresentable {
         /// line numbers — a line number belongs to a text, and the text is the thing that keeps
         /// changing — and moved through every edit, so a fold stays on the lines it was made on.
         private var folded: [Int: NSRange] = [:]
+
+        /// The statements as a rotor source (FR-ED-09): the list assistive navigation jumps
+        /// through, rebuilt with every outline. W10-T6 adds "Query issues" as the second source.
+        private(set) var rotor: StatementsRotorSource?
 
         private var findVisible = false
         private var findMatches: [NSRange] = []
@@ -470,10 +479,8 @@ struct SQLEditor: NSViewRepresentable {
             ruler?.textEdited(range: editedRange, delta: delta)
             edit.apply(to: &statementBounds)
             moveFolds(through: edit)
-            if storage.length <= SQLSyntax.ceiling {
-                for i in dirty.indices { dirty[i] = edit.grow(dirty[i]) }
-                addDirty(editedStatement(for: edit, in: storage.mutableString as NSString))
-            }
+            lastEditRange = NSRange(location: editedRange.location, length: editedRange.length)
+            forward(edit: edit, in: storage)
             publishLineCount()
             if let linesBefore, linesBefore != ruler?.lineCount {
                 // A line was added or removed: everything drawn against a line number below this
@@ -516,6 +523,22 @@ struct SQLEditor: NSViewRepresentable {
                 return FoldRegion(kind: region.kind, headerLine: ruler.line(containing: header),
                                   lastLine: ruler.line(containing: max(start, end - 1)),
                                   header: header, bodyStart: start, bodyEnd: end, summary: region.summary)
+            }
+        }
+
+        /// Hand the edit to the analysis, widened past surrogates; a failure rebuilds it.
+        private func forward(edit: TextEdit, in storage: NSTextStorage) {
+            guard let analysis else { return }
+            let text = storage.mutableString as NSString
+            do {
+                let widened = EditorAnalysis.widened(
+                    NSRange(location: edit.location, length: edit.newLength), in: text)
+                let oldLength = max(0, widened.length - edit.delta)
+                let replacement = widened.length > 0 ? text.substring(with: widened) : ""
+                try analysis.replace(
+                    range: NSRange(location: widened.location, length: oldLength), with: replacement)
+            } catch {
+                rebuildAnalysis()
             }
         }
 
@@ -605,7 +628,7 @@ struct SQLEditor: NSViewRepresentable {
             textView.layoutManager?.showsInvisibleCharacters = layout.showInvisibles
             if previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
             // The first pass has no regions to refresh: `recolour` follows it and does the analysis.
-            if let previous, previous.codeFolding != layout.codeFolding { analyse(immediately: true) }
+            if let previous, previous.codeFolding != layout.codeFolding { runIdle() }
             updateRunMarks()
             updateHighlight(textView)
         }
@@ -665,7 +688,8 @@ struct SQLEditor: NSViewRepresentable {
             textView.defaultParagraphStyle = style
             let whole = NSRange(location: 0, length: nsText.length)
             textView.textStorage?.addAttribute(.paragraphStyle, value: style, range: whole)
-            paintWhole(textView)
+            try? analysis?.markDirty(whole)
+            requestVisible()
         }
 
         /// The bands behind the text: the caret's statement first, then its line over it.
@@ -705,17 +729,12 @@ struct SQLEditor: NSViewRepresentable {
             scheduleSync()
             // The placeholder reads emptiness and the menus read blankness; either flip is written now.
             if Self.isBlank(nsText) != publishedBlank || (nsText.length == 0) != publishedText.isEmpty { flushToModel() }
-            let colourable = (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling
-            if colourable != wasColourable {
-                // Across the ceiling the whole document changes: colour it, or strip the colour.
-                paintWhole(textView)
-            } else if colourable {
-                paintDirty()
-            }
+            inheritNeighborColor()
+            requestVisible()
+            scheduleIdle()
             // The gutter changes with a line added or removed, which `textEdited` already redraws for,
             // and with wrapping, where a typed character can push a line onto another fragment.
             if parent.layout.wordWrap { ruler?.needsDisplay = true }
-            analyse(immediately: false)
             if findVisible { findQueryChanged(findBar?.query ?? "") }
             if suppressAutoTrigger {
                 // The change we just made was accepting a suggestion; re-opening the list over
@@ -735,58 +754,72 @@ struct SQLEditor: NSViewRepresentable {
         /// this cannot loop back through `textDidChange`, and the binding keeps whatever the user
         /// typed.
         func recolour() {
-            guard let textView else { return }
+            guard textView != nil else { return }
             ruler?.rebuildIndex()
             publishLineCount()
             statementBounds = []
-            paintWhole(textView)
-            analyse(immediately: true)
+            foldRegions = []
+            rebuildAnalysis()
         }
-
-        /// Colour the whole document. The one place that is allowed to: it is a load, or a setting
-        /// that changes every run, never a keystroke.
-        private func paintWhole(_ textView: NSTextView) {
-            dirty = []
-            wasColourable = (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling
-            SQLSyntax.apply(to: textView)
+        /// A new analysis for the text as it stands: a load, an outside replacement, or recovery
+        /// from a failed edit. Storage is reset to base attributes — colours live on the layout
+        /// manager now — and the visible window paints, synchronously when the document is small.
+        private func rebuildAnalysis() {
+            guard let textView, let storage = textView.textStorage,
+                  let layoutManager = textView.layoutManager else { return }
+            analysis = try? EditorAnalysis(text: textView.string)
+            outlineRevision = 0
+            let whole = NSRange(location: 0, length: storage.length)
+            storage.setAttributes(Self.baseAttributes(textView: textView), range: whole)
+            layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: whole)
+            textView.typingAttributes = Self.baseAttributes(textView: textView)
             ruler?.needsDisplay = true
+            if storage.length <= Self.synchronousPaintLimit, !textView.hasMarkedText() {
+                syncVisiblePaint()
+            } else {
+                requestVisible()
+            }
+            scheduleIdle()
         }
 
-        // MARK: Painting a statement
-
-        /// The statement an edit belongs to, from the cached bounds, or its lines when there is none.
-        private func editedStatement(for edit: TextEdit, in text: NSString) -> NSRange {
-            let touched = NSRange(location: edit.location, length: edit.newLength)
-            var low = 0, high = statementBounds.count
-            while low < high {
-                let mid = (low + high) / 2
-                if NSMaxRange(statementBounds[mid]) <= touched.location { low = mid + 1 } else { high = mid }
-            }
-            if low < statementBounds.count, statementBounds[low].location <= NSMaxRange(touched) {
-                var range = statementBounds[low]
-                var next = low
-                while next + 1 < statementBounds.count, statementBounds[next + 1].location < NSMaxRange(touched) {
-                    next += 1
-                }
-                range = NSUnionRange(range, statementBounds[next])
-                if range.length <= Self.paintLimit { return range }
-            }
-            return text.lineRange(for: NSIntersectionRange(touched, NSRange(location: 0, length: text.length)))
+        /// Storage carries base attributes only: the code font and the paragraph style. Colours
+        /// are temporary attributes, and comment italics arrive through the paint's fonts.
+        private static func baseAttributes(textView: NSTextView) -> [NSAttributedString.Key: Any] {
+            [.font: SQLSyntax.font(italic: false),
+             .paragraphStyle: textView.defaultParagraphStyle ?? NSParagraphStyle.default]
         }
 
-        private func addDirty(_ range: NSRange) {
-            guard range.length > 0 else { return }
-            dirty.append(range)
-            dirty.sort { $0.location < $1.location }
-            var merged: [NSRange] = []
-            for next in dirty {
-                if let last = merged.last, next.location <= NSMaxRange(last) {
-                    merged[merged.count - 1] = NSUnionRange(last, next)
-                } else {
-                    merged.append(next)
+        // MARK: Painting from the analysis
+
+        /// Paint the visible window now, on this thread. Only for small documents: the analysis
+        /// parses the visible statements synchronously, which costs milliseconds there.
+        private func syncVisiblePaint() {
+            guard let textView, let analysis = analysis, !textView.hasMarkedText() else { return }
+            let paint = try? analysis.paint(window: visibleCharacters(textView),
+                                            budget: Self.visibleBudget)
+            guard let paint else { return }
+            applyPaint(paint)
+        }
+
+        /// Paint the visible window off the main thread, coalesced: a burst of keystrokes
+        /// paints once, and a scroll schedules at most one paint per frame.
+        private func requestVisible() {
+            guard let analysis = analysis, textView != nil, !visibleScheduled else { return }
+            visibleScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textView = self.textView else {
+                    self?.visibleScheduled = false
+                    return
+                }
+                self.visibleScheduled = false
+                guard let analysis = self.analysis else { return }
+                let window = self.visibleCharacters(textView)
+                analysis.requestPaint(window: window, budget: Self.visibleBudget) {
+                    [weak self] result in
+                    guard let paint = try? result.get() else { return }
+                    self?.applyPaint(paint)
                 }
             }
-            dirty = merged
         }
 
         /// The characters on screen, and a screen either side of them: the margin is what keeps a
@@ -801,91 +834,129 @@ struct SQLEditor: NSViewRepresentable {
             return NSIntersectionRange(layoutManager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil), whole)
         }
 
-        /// Paint what an edit made stale, where the user can see it. What is off screen stays owed and
-        /// is painted when it scrolls into view.
-        private func paintDirty() {
-            guard let textView, !dirty.isEmpty, !textView.hasMarkedText() else { return }
-            guard (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling else {
-                dirty = []
+        /// Lay a paint onto the layout manager. Ranges with nothing to change are left alone —
+        /// each write invalidates its range, and redrawing one coloured line costs milliseconds.
+        private func applyPaint(_ paint: EditorPaintData) {
+            guard let textView, let storage = textView.textStorage,
+                  let layoutManager = textView.layoutManager, let analysis = analysis,
+                  analysis.revision == paint.revision, !textView.hasMarkedText(),
+                  storage.length == paint.length else {
+                // Lengths disagree: the analysis is not describing this text anymore. A stale
+                // revision alone just returns — its own request is already on the way.
+                if let length = textView?.textStorage?.length, analysis?.length != length {
+                    rebuildAnalysis()
+                }
                 return
             }
-            let visible = visibleCharacters(textView)
-            var owed: [NSRange] = []
-            for dirtyRange in dirty {
-                let range = widenedForQuotes(dirtyRange)
-                let paint = NSIntersectionRange(range, visible)
-                guard paint.length > 0 else {
-                    owed.append(range)
-                    continue
-                }
-                SQLSyntax.apply(to: textView, lexing: range, painting: paint)
-                if paint.location > range.location {
-                    owed.append(NSRange(location: range.location, length: paint.location - range.location))
-                }
-                if NSMaxRange(paint) < NSMaxRange(range) {
-                    owed.append(NSRange(location: NSMaxRange(paint), length: NSMaxRange(range) - NSMaxRange(paint)))
+            PerfSignposts.applyBegin()
+            let length = storage.length
+            if paint.inactive {
+                let window = NSIntersectionRange(paint.window, NSRange(location: 0, length: length))
+                layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: window)
+                try? analysis.markApplied(paint)
+                return
+            }
+            let whole = NSRange(location: 0, length: length)
+            for range in paint.ranges {
+                let clipped = NSIntersectionRange(range, whole)
+                guard clipped.length > 0 else { continue }
+                let runs = paint.runs.filter { NSIntersectionRange($0.range, clipped).length > 0 }
+                guard rangeNeedsPaint(clipped, runs: runs, in: layoutManager, length: length) else { continue }
+                layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: clipped)
+                for run in runs {
+                    let at = NSIntersectionRange(run.range, clipped)
+                    if let color = Self.paintColors[run.colorClass], at.length > 0 {
+                        layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: at)
+                    }
                 }
             }
-            dirty = owed
+            // Apply the paint's fonts to storage: comment italics live here, because a
+            // temporary attribute cannot carry a font.
+            let fonts = paint.fonts.filter { NSMaxRange($0.range) <= length }
+            if !fonts.isEmpty {
+                let upright = SQLSyntax.font(italic: false)
+                let italic = SQLSyntax.font(italic: true)
+                storage.beginEditing()
+                for font in fonts {
+                    storage.addAttribute(.font, value: font.italic ? italic : upright, range: font.range)
+                }
+                storage.endEditing()
+            }
+            try? analysis.markApplied(paint)
+            appliedRevision = paint.revision
+            if paint.moreInWindow || paint.dirtyElsewhere { requestVisible() }
         }
 
-        /// The statement splitter does not treat `"` or a backtick as quotes, and the colouring does, so a
-        /// statement holding `"a;b"` is cut in two where the colours read one string. A range with an
-        /// odd number of either is widened, statement by statement, first forward and then backward,
-        /// until it closes. The count is carried along rather than redone, the statements are found by
-        /// binary search, and the widening stops at `paintLimit`: a quote that never closes colours
-        /// what it can and leaves the rest alone, where following it to the end of the document made
-        /// typing a lone quote in a large document freeze.
-        private func widenedForQuotes(_ range: NSRange) -> NSRange {
+        /// Whether `range` needs touching: a run whose colour differs, or a gap between runs
+        /// that still carries a colour from a run that has since shrunk or gone.
+        private func rangeNeedsPaint(_ range: NSRange, runs: [EditorPaintRun],
+                                     in layoutManager: NSLayoutManager, length: Int) -> Bool {
+            guard length > 0 else { return true }
+            let whole = NSRange(location: 0, length: length)
+            for run in runs {
+                var effective = NSRange()
+                let at = min(run.range.location, length - 1)
+                let current = layoutManager.temporaryAttribute(.foregroundColor, atCharacterIndex: at,
+                    longestEffectiveRange: &effective, in: whole) as? NSColor
+                if current !== Self.paintColors[run.colorClass] { return true }
+            }
+            var cursor = range.location
+            for run in runs.sorted(by: { $0.range.location < $1.range.location }) {
+                if run.range.location > cursor, staleColor(at: cursor, in: layoutManager, length: length) { return true }
+                cursor = max(cursor, NSMaxRange(run.range))
+            }
+            return cursor < NSMaxRange(range) && staleColor(at: cursor, in: layoutManager, length: length)
+        }
+
+        /// The one colour instance per class: identity (`===`) is how a paint decides a run is
+        /// already right, so every paint must use these and nothing else.
+        static let paintColors: [EditorColorClass: NSColor] = [
+            .comment: SQLSyntax.colour(for: .comment),
+            .string: SQLSyntax.colour(for: .string),
+            .quotedIdentifier: SQLSyntax.colour(for: .quotedIdentifier),
+            .number: SQLSyntax.colour(for: .number),
+            .keyword: SQLSyntax.colour(for: .keyword),
+            .literal: SQLSyntax.colour(for: .literal),
+            .function: SQLSyntax.colour(for: .function),
+            .punctuation: SQLSyntax.colour(for: .punctuation),
+            .parameter: SQLSyntax.colour(for: .parameter),
+        ]
+
+        /// A temporary colour back to its class, by identity. `literal` and `parameter` share a
+        /// colour; neither inherits, so the overlap does not matter.
+        private static func classOf(_ color: NSColor) -> EditorColorClass? {
+            paintColors.first { $0.value === color }?.key
+        }
+
+        /// Whether a gap between runs still carries a colour: a run shrank or went, and its tail
+        /// was left behind.
+        private func staleColor(at index: Int, in layoutManager: NSLayoutManager, length: Int) -> Bool {
+            guard index < length else { return false }
+            return layoutManager.temporaryAttribute(.foregroundColor, atCharacterIndex: index,
+                longestEffectiveRange: nil, in: NSRange(location: 0, length: length)) != nil
+        }
+
+        /// Tint what was just typed with the colour before it, so a keystroke inside a string, a
+        /// comment or a word does not flash uncoloured for the turn the analysis takes. Anything
+        /// wrong here lasts one analysis turn: the paint corrects it.
+        private func inheritNeighborColor() {
+            guard let layoutManager = textView?.layoutManager else { return }
+            let inserted = lastEditRange
+            guard inserted.length > 0, inserted.location > 0 else { return }
             let text = nsText
-            let start = Self.quoteParity(text, range)
-            guard start != 0 else { return range }
-            let bounds = statementBounds
-            let length = text.length
-
-            var low = range.location, high = NSMaxRange(range), parity = start
-            var index = Self.firstIndex(in: bounds) { NSMaxRange($0) > high }
-            while parity != 0, high < length, high - low < Self.paintLimit, index < bounds.count {
-                let next = NSMaxRange(bounds[index])
-                parity ^= Self.quoteParity(text, NSRange(location: high, length: next - high))
-                high = next
-                index += 1
+            guard NSMaxRange(inserted) <= text.length else { return }
+            var effective = NSRange()
+            guard let color = layoutManager.temporaryAttribute(.foregroundColor,
+                atCharacterIndex: inserted.location - 1, longestEffectiveRange: &effective,
+                in: NSRange(location: 0, length: text.length)) as? NSColor,
+                  let cls = Self.classOf(color) else { return }
+            if cls == .string || cls == .comment {
+                layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
+            } else if let previous = UnicodeScalar(text.character(at: inserted.location - 1)),
+                      !CharacterSet.whitespacesAndNewlines.contains(previous),
+                      text.substring(with: inserted).rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
+                layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
             }
-            if parity == 0 { return NSRange(location: low, length: high - low) }
-
-            low = range.location
-            high = NSMaxRange(range)
-            parity = start
-            index = Self.firstIndex(in: bounds) { $0.location >= low } - 1
-            while parity != 0, low > 0, high - low < Self.paintLimit, index >= 0 {
-                let previous = min(bounds[index].location, low)
-                parity ^= Self.quoteParity(text, NSRange(location: previous, length: low - previous))
-                low = previous
-                index -= 1
-            }
-            return parity == 0 ? NSRange(location: low, length: high - low) : range
-        }
-
-        /// Bit 0: an odd number of `"`. Bit 1: an odd number of backticks.
-        private static func quoteParity(_ text: NSString, _ range: NSRange) -> Int {
-            guard range.length > 0 else { return 0 }
-            var units = [unichar](repeating: 0, count: range.length)
-            text.getCharacters(&units, range: range)
-            var parity = 0
-            for unit in units {
-                if unit == 0x22 { parity ^= 1 } else if unit == 0x60 { parity ^= 2 }
-            }
-            return parity
-        }
-
-        /// The first index whose element satisfies `test`, for a list where that is monotonic.
-        private static func firstIndex(in ranges: [NSRange], where test: (NSRange) -> Bool) -> Int {
-            var low = 0, high = ranges.count
-            while low < high {
-                let mid = (low + high) / 2
-                if test(ranges[mid]) { high = mid } else { low = mid + 1 }
-            }
-            return low
         }
 
         func observe(_ scrollView: NSScrollView) {
@@ -893,75 +964,37 @@ struct SQLEditor: NSViewRepresentable {
             observers.tokens.append(NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.paintDirty() }
+                MainActor.assumeIsolated { self?.requestVisible() }
             })
         }
 
         // MARK: Analysis
-
-        private struct Analysis: Sendable {
-            let revision: Int
-            let statements: [NSRange]
-            let regions: [FoldRegion]
+        /// The slow-moving parts — statements, folds, run marks, rotor — after a pause in typing.
+        private func scheduleIdle() {
+            idleItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in self?.runIdle() }
+            idleItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleDelay, execute: item)
         }
-
-        /// Recompute the statement ranges, the fold regions and, through them, the run marks. After a
-        /// short pause when typing, off the main thread; immediately, and on the spot when the
-        /// document is small, for a load.
-        private func analyse(immediately: Bool) {
-            analysisItem?.cancel()
-            let length = nsText.length
-            if immediately, length <= Self.synchronousAnalysisLimit, let textView {
-                apply(Self.compute(textView.string, revision: revision, folding: parent.layout.codeFolding))
-                return
-            }
-            let item = DispatchWorkItem { [weak self] in self?.startAnalysis() }
-            analysisItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + (immediately ? 0 : Self.analysisDelay), execute: item)
-        }
-
-        private func startAnalysis() {
-            guard let textView else { return }
-            guard !analysisInFlight else {
-                analysisAgain = true
-                return
-            }
-            analysisInFlight = true
-            let revision = self.revision
-            let text = textView.string
-            let folding = parent.layout.codeFolding
-            Self.analysisQueue.async {
-                let result = Self.compute(text, revision: revision, folding: folding)
-                DispatchQueue.main.async { [weak self] in self?.finishAnalysis(result) }
+        /// One idle pass: converge the error trees, then read the outline.
+        private func runIdle() {
+            guard let textView, let analysis = analysis, !textView.hasMarkedText() else { return }
+            Self.idleQueue.async { [weak self] in
+                guard let outcome = try? analysis.drainForTesting() else { return }
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyPaint(outcome.paint)
+                    self?.updateOutline(outcome.outline)
+                }
             }
         }
 
-        private func finishAnalysis(_ result: Analysis) {
-            analysisInFlight = false
-            // A result for text that has since changed is worth nothing: the edit that changed it
-            // scheduled its own analysis.
-            if result.revision == revision { apply(result) }
-            if analysisAgain || result.revision != revision {
-                analysisAgain = false
-                analyse(immediately: false)
-            }
-        }
-
-        nonisolated private static func compute(_ text: String, revision: Int, folding: Bool) -> Analysis {
-            let statements = SQLFolding.statementRanges(in: text)
-            let regions = folding ? SQLFolding.regions(in: text, statements: statements) : []
-            return Analysis(revision: revision, statements: statements, regions: regions)
-        }
-
-        /// A command that needs the regions as they are now — fold, unfold, a click on a marker — does
-        /// not wait for the pause: it computes them, once, and the analysis that was on its way is
-        /// then redundant.
+        /// A command that needs the regions as they are now — fold, unfold, a click on a
+        /// marker — outlines synchronously when the document is small, not after the idle pass.
         private func ensureFreshAnalysis() {
-            guard analysisRevision != revision else { return }
-            analysisItem?.cancel()
-            if let textView {
-                apply(Self.compute(textView.string, revision: revision, folding: parent.layout.codeFolding))
-            }
+            guard let textView, let analysis = analysis else { return }
+            guard outlineRevision != analysis.revision else { return }
+            guard nsText.length <= Self.synchronousPaintLimit, !textView.hasMarkedText() else { return }
+            if let outline = try? analysis.outline() { updateOutline(outline) }
         }
 
         /// The gutter asks before it resolves a click, so a marker's offset is never the offset of a
@@ -970,34 +1003,44 @@ struct SQLEditor: NSViewRepresentable {
             ensureFreshAnalysis()
         }
 
-        private func apply(_ result: Analysis) {
+        /// A synchronous paint plus outline, for tests: converge first so colours, folds and
+        /// issues match a fresh document.
+        func syncAnalysisForTesting() throws {
+            guard let analysis = analysis else { return }
+            let outcome = try analysis.drainForTesting()
+            applyPaint(outcome.paint)
+            updateOutline(outcome.outline)
+        }
+
+        /// Wear an outline: statements for the band, the run marks and the rotor; folds for the
+        /// gutter. Folds the user closed stay closed while their header is still a region's header.
+        private func updateOutline(_ outline: EditorOutlineData) {
             guard let textView else { return }
-            analysisRevision = result.revision
-            let before = Set(statementBounds)
-            statementBounds = result.statements
-            // A statement whose bounds moved may read differently: a quote typed mid-statement merges
-            // it with the next. Only those are owed a repaint, and only if there was an earlier answer
-            // to differ from.
-            if !before.isEmpty, (textView.textStorage?.length ?? 0) <= SQLSyntax.ceiling {
-                for range in result.statements where !before.contains(range) { addDirty(range) }
-                paintDirty()
-            }
+            // A result for text that has since changed is worth nothing: the edit that changed it
+            // scheduled its own idle pass.
+            guard outline.revision == analysis?.revision else { return }
+            outlineRevision = outline.revision
+            statementBounds = outline.statements
             if parent.layout.codeFolding {
-                foldRegions = result.regions
+                let starts = SQLFolding.lineStarts(in: nsText)
+                let length = nsText.length
+                foldRegions = outline.folds.compactMap {
+                    SQLFolding.foldRegion($0, starts: starts, length: length)
+                }.sorted { ($0.header, $0.lastLine) < ($1.header, $1.lastLine) }
                 let byHeader = Dictionary(foldRegions.map { ($0.header, $0) }, uniquingKeysWith: { first, _ in first })
-                // Only a header that is still a foldable region's header keeps its fold: a region that
-                // stopped being multi-line — its body deleted, say — must not stay collapsed.
+                // Only a header that is still a foldable region's header keeps its fold: a region
+                // that stopped being multi-line must not stay collapsed.
                 folded = folded.reduce(into: [:]) { kept, entry in
                     if let region = byHeader[entry.key] { kept[entry.key] = region.body }
                 }
                 unfoldRegions(containing: textView.selectedRange().location)
             } else {
                 // Folding off means no regions and no markers. The offsets are dropped with them: a
-                // fold that was collapsed when the switch went off would otherwise come back somewhere
-                // else when it went on again, because the text may have changed in between.
+                // fold collapsed when the switch went off would otherwise come back somewhere else.
                 foldRegions = []
                 folded = [:]
             }
+            rotor = StatementsRotorSource(statements: statementBounds, text: nsText)
             hideFolded()
             updateFoldMarks()
             updateRunMarks()
@@ -1445,6 +1488,50 @@ struct SQLEditor: NSViewRepresentable {
             let inWindow = window.convertFromScreen(screen)
             return container.convert(inWindow, from: nil)
         }
+    }
+}
+
+/// One stop in the editor's statement rotor: what it is called, and where it starts.
+struct EditorRotorItem: Equatable {
+    let label: String
+    let offset: Int
+}
+
+/// Something the editor can step through statement by statement: the "Statements" rotor today,
+/// "Query issues" with W10-T6. The coordinator rebuilds the list with every outline.
+protocol EditorRotorSource {
+    var title: String { get }
+    var items: [EditorRotorItem] { get }
+}
+
+/// The statements as rotor stops: "SELECT" reads better than "statement 2", so the leading
+/// keyword heads the label and the fallback keeps the position.
+struct StatementsRotorSource: EditorRotorSource, Equatable {
+    let title = "Statements"
+    var items: [EditorRotorItem]
+
+    init(statements: [NSRange], text: NSString) {
+        items = statements.enumerated().map { index, range in
+            EditorRotorItem(label: Self.label(index: index, range: range, text: text),
+                            offset: range.location)
+        }
+    }
+    static func label(index: Int, range: NSRange, text: NSString) -> String {
+        let limit = min(NSMaxRange(range), text.length)
+        var start = range.location
+        while start < limit, let scalar = UnicodeScalar(text.character(at: start)),
+              CharacterSet.whitespacesAndNewlines.contains(scalar) { start += 1 }
+        var end = start
+        while end < limit, Self.isWord(text.character(at: end)) { end += 1 }
+        let word = end > start
+            ? text.substring(with: NSRange(location: start, length: end - start)).uppercased()
+            : "STATEMENT"
+        return "\(index + 1) · \(word)"
+    }
+
+    private static func isWord(_ character: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(character) else { return false }
+        return CharacterSet.letters.contains(scalar) || character == 0x5F
     }
 }
 

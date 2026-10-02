@@ -207,7 +207,7 @@ enum BenchMode {
         case "open-500x10k": await open(scenario, rows: 10_000, columns: 500, repeats: repeats)
         case "type-10k": await type(scenario, lines: 10_000, minimumCharacters: 0, repeats: repeats)
         case "type-2m": await type(scenario, lines: 0, minimumCharacters: 2_000_000, repeats: repeats)
-        // Under `SQLSyntax.ceiling`, so the document is fully coloured and a keystroke repaints; the
+        // Under the analysis ceiling, so the document is fully coloured and a keystroke repaints;
         // typed text is SQL with keywords, and every 20th key is followed by a pause longer than the
         // editor's debounces, so the analysis and the model write run between keystrokes.
         case "type-coloured-195k": await type(scenario, lines: 0, minimumCharacters: 194_000, repeats: repeats, coloured: true)
@@ -543,7 +543,13 @@ enum BenchMode {
                              coloured: Bool = false) async {
         let model = AppModel()
         guard let tab = model.selectedTab else { return emitStatus(scenario, "[belum diukur]", "no tab") }
-        let document = sqlDocument(lines: lines, minimumCharacters: minimumCharacters)
+        var document = sqlDocument(lines: lines, minimumCharacters: minimumCharacters)
+        // The analysis colours nothing past its ceiling; a document longer than that would bench
+        // the uncoloured path under a coloured scenario's name.
+        let ceiling = (try? editorCeiling()) ?? 2_000_000
+        if (document as NSString).length > ceiling {
+            document = (document as NSString).substring(to: ceiling)
+        }
         let length = (document as NSString).length
         let window = openWindow(model)
         await sleep(1.0)
@@ -566,23 +572,27 @@ enum BenchMode {
         // measures the same shape instead of one line that grows by 200 characters a repeat.
         let text = Array(coloured ? "select id, name\nfrom t\nwhere x = 1 and y in (2);\n" : "x_foo bar_1 baz ")
         for _ in 0..<repeats {
-            var insert = [Double](), didChange = [Double](), keystroke = [Double]()
+            var insert = [Double](), didChange = [Double](), keystroke = [Double](), apply = [Double]()
             for i in 0..<200 {
                 PerfSignposts.keystrokeReset()
+                PerfSignposts.applyReset()
                 let started = CFAbsoluteTimeGetCurrent()
                 PerfSignposts.keystrokeBegin()
                 textView.insertText(String(text[i % text.count]),
                                     replacementRange: NSRange(location: NSNotFound, length: 0))
                 insert.append((CFAbsoluteTimeGetCurrent() - started) * 1000)
-                // One typing interval, which lets the turn that draws the change finish.
-                await sleep(0.03)
+                // The repaint, not a sleep: the next key waits for this one's colours to display.
+                _ = await wait(timeout: 10) { PerfSignposts.lastApplyMS != nil }
                 if coloured, i % 20 == 19 { await sleep(0.2) }
                 if let ms = PerfSignposts.lastDidChangeMS { didChange.append(ms) }
                 if let ms = PerfSignposts.lastKeystrokeMS { keystroke.append(ms) }
+                if let ms = PerfSignposts.lastApplyMS { apply.append(ms) }
             }
             let mode = textView.textLayoutManager != nil ? 2 : 1
             emit(scenario, ["keystroke_main_p50_ms": percentile(keystroke, 0.5),
                             "keystroke_main_p99_ms": percentile(keystroke, 0.99),
+                            "apply_main_p50_ms": percentile(apply, 0.5),
+                            "apply_main_p99_ms": percentile(apply, 0.99),
                             "did_change_p99_ms": percentile(didChange, 0.99),
                             "insert_text_p99_ms": percentile(insert, 0.99),
                             "characters_count": Double(length),

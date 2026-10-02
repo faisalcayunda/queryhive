@@ -108,6 +108,26 @@ final class EditorIncrementalTests: XCTestCase {
         rig.textView.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
+    /// Spin the run loop until the coordinator has applied the paint for every keystroke so far.
+    private func waitApplied(_ rig: Rig, timeout: TimeInterval = 10,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        let wanted = rig.coordinator.pendingRevisionForTesting
+        let deadline = Date().addingTimeInterval(timeout)
+        while rig.coordinator.appliedRevision != wanted, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertEqual(rig.coordinator.appliedRevision, wanted, "the paint never landed",
+                       file: file, line: line)
+    }
+
+    /// The temporary syntax colour at `index`, if the paint has put one there.
+    private func tempColor(at index: Int, in rig: Rig) -> NSColor? {
+        let length = rig.textView.string.utf16.count
+        guard index < length else { return nil }
+        return rig.layoutManager.temporaryAttribute(.foregroundColor, atCharacterIndex: index,
+            longestEffectiveRange: nil, in: NSRange(location: 0, length: length)) as? NSColor
+    }
+
     func testTheGutterFollowsTypingWithoutRescanning() {
         let rig = rig("SELECT 1;\nSELECT 2;")
         rig.textView.setSelectedRange(NSRange(location: 9, length: 0))
@@ -180,13 +200,15 @@ final class EditorIncrementalTests: XCTestCase {
     func testTypingInsideAStatementRepaintsItAndNothingElse() throws {
         let sql = "SELECT 1;\nselect 2 from t;\nSELECT 3;"
         let rig = rig(sql)
+        try rig.coordinator.syncAnalysisForTesting()
         rig.textView.setSelectedRange(NSRange(location: 21, length: 0))
-        let before = rig.textView.textStorage!.attributes(at: 0, effectiveRange: nil)[.foregroundColor]
+        let before = tempColor(at: 0, in: rig)
+        XCTAssertNotNil(before, "the keyword has no temporary colour after the load")
         type(" ", into: rig)
-        // The edited statement is painted; a keystroke elsewhere in the text leaves the rest as it was.
-        XCTAssertNotNil(rig.textView.textStorage!.attributes(at: 12, effectiveRange: nil)[.foregroundColor])
-        XCTAssertEqual(String(describing: rig.textView.textStorage!.attributes(at: 0, effectiveRange: nil)[.foregroundColor]),
-                       String(describing: before))
+        waitApplied(rig)
+        // The edited statement is painted; the untouched one keeps the very same colour object.
+        XCTAssertNotNil(tempColor(at: 12, in: rig))
+        XCTAssertTrue(tempColor(at: 0, in: rig) === before)
     }
 
     // MARK: Model flushes and who wins
@@ -231,30 +253,31 @@ final class EditorIncrementalTests: XCTestCase {
         XCTAssertEqual(rig.model.text, "SELECT 10")
     }
 
-    func testAStatementWithADoubleQuotedSemicolonIsColouredAsTheWholeDocumentIs() throws {
+    func testAStatementWithADoubleQuotedSemicolonStaysOneStatement() throws {
         let sql = "SELECT \"a;b\" FROM t;\nSELECT 2;"
         let rig = rig(sql)
+        try rig.coordinator.syncAnalysisForTesting()
         rig.textView.setSelectedRange(NSRange(location: 6, length: 0))
         type(" ", into: rig)
-        let text = rig.textView.string
-        let expected = SQLSyntax.attributes(for: text, baseFont: .systemFont(ofSize: 12), commentFont: .systemFont(ofSize: 12))
-        let index = (text as NSString).range(of: "b\"").location
-        let run = try XCTUnwrap(expected.first { NSLocationInRange(index, $0.0) })
-        XCTAssertEqual(String(describing: rig.textView.textStorage!.attributes(at: index, effectiveRange: nil)[.foregroundColor]),
-                       String(describing: run.1[.foregroundColor]))
+        waitApplied(rig)
+        try rig.coordinator.syncAnalysisForTesting()
+        // The `;` inside the quoted name splits nothing: two stops, the second past the newline.
+        XCTAssertEqual(rig.coordinator.rotor?.items.map(\.offset), [0, 21])
+        let index = (rig.textView.string as NSString).range(of: "b\"").location
+        XCTAssertTrue(tempColor(at: index, in: rig) === SQLEditor.Coordinator.paintColors[.quotedIdentifier])
     }
 
-    func testAnEditAfterTheSemicolonInsideAQuotedNameIsColouredAsTheWholeDocumentIs() throws {
+    func testAnEditAfterTheSemicolonInsideAQuotedNameStaysOneStatement() throws {
         let sql = "SELECT \"a;b\" FROM t;\nSELECT 2;"
         let rig = rig(sql)
+        try rig.coordinator.syncAnalysisForTesting()
         rig.textView.setSelectedRange(NSRange(location: 17, length: 0))
         type(" ", into: rig)
-        let text = rig.textView.string
-        let expected = SQLSyntax.attributes(for: text, baseFont: .systemFont(ofSize: 12), commentFont: .systemFont(ofSize: 12))
-        let index = (text as NSString).range(of: "b\"").location
-        let run = try XCTUnwrap(expected.first { NSLocationInRange(index, $0.0) })
-        XCTAssertEqual(String(describing: rig.textView.textStorage!.attributes(at: index, effectiveRange: nil)[.foregroundColor]),
-                       String(describing: run.1[.foregroundColor]))
+        waitApplied(rig)
+        try rig.coordinator.syncAnalysisForTesting()
+        XCTAssertEqual(rig.coordinator.rotor?.items.map(\.offset), [0, 21])
+        let index = (rig.textView.string as NSString).range(of: "b\"").location
+        XCTAssertTrue(tempColor(at: index, in: rig) === SQLEditor.Coordinator.paintColors[.quotedIdentifier])
     }
 
     /// A quote that never closes must not make a keystroke follow it to the end of the document. The

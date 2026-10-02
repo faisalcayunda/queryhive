@@ -45,16 +45,41 @@ final class EditorBenchTests: BenchCase {
         for short in [true, false] {
             let sql = document(lines: 10_000, short: short)
             let textView = headlessEditor(sql)
-            let samples = measureMs(iterations: 10, warmup: 1) { SQLSyntax.apply(to: textView) }
-            // A pass that painted nothing would be fast for the wrong reason: only the short form
-            // is under the ceiling, and it must have coloured something.
-            let storage = try XCTUnwrap(textView.textStorage)
-            var runs = 0
-            storage.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: min(4000, storage.length))) { _, _, _ in runs += 1 }
-            if short { XCTAssertGreaterThan(runs, 10, "SQLSyntax.apply left no token colours") }
-            report(short ? "bench-syntax-apply-10k" : "bench-syntax-apply-10k-over-ceiling", axis: 5, samples: samples,
-                   notes: "SQLSyntax.apply, 10,000 lines, \(sql.utf16.count) UTF-16 units; ceiling is 200000 so \(short ? "colouring runs" : "colouring is skipped")")
+            let analysis = try EditorAnalysis(text: sql)
+            let full = NSRange(location: 0, length: analysis.length)
+            let colors = Self.paintColors()
+            let (regular, italic) = Self.fonts()
+            // A pass that painted nothing would be fast for the wrong reason: the document is
+            // under the ceiling, and the analysis must have coloured something.
+            let first = try analysis.paint(window: full, budget: analysis.length)
+            XCTAssertGreaterThan(first.runs.count, 10, "the analysis left no token colours")
+            let samples = measureMs(iterations: 10, warmup: 1) {
+                try? analysis.markDirty(full)
+                if let paint = try? analysis.paint(window: full, budget: analysis.length) {
+                    analysis.apply(paint, to: textView, colors: colors,
+                                   regularFont: regular, italicFont: italic)
+                }
+            }
+            report(short ? "bench-syntax-apply-10k-short" : "bench-syntax-apply-10k-long", axis: 5, samples: samples,
+                   notes: "EditorAnalysis.paint plus temporary-attribute apply, 10,000 lines, \(sql.utf16.count) UTF-16 units")
         }
+    }
+
+    /// The palette instances the apply reads, built the way the coordinator builds them.
+    private static func paintColors() -> [EditorColorClass: NSColor] {
+        [.comment: SQLSyntax.colour(for: .comment),
+         .string: SQLSyntax.colour(for: .string),
+         .quotedIdentifier: SQLSyntax.colour(for: .quotedIdentifier),
+         .number: SQLSyntax.colour(for: .number),
+         .keyword: SQLSyntax.colour(for: .keyword),
+         .literal: SQLSyntax.colour(for: .literal),
+         .function: SQLSyntax.colour(for: .function),
+         .punctuation: SQLSyntax.colour(for: .punctuation),
+         .parameter: SQLSyntax.colour(for: .parameter)]
+    }
+
+    private static func fonts() -> (NSFont, NSFont) {
+        (SQLSyntax.font(italic: false), SQLSyntax.font(italic: true))
     }
 
     func testKeystroke10kLines() {
@@ -75,15 +100,25 @@ final class EditorBenchTests: BenchCase {
         let coordinator = editor.makeCoordinator()
         coordinator.textView = textView
         textView.delegate = coordinator
+        textView.textStorage?.delegate = coordinator
         coordinator.recolour()
 
         let middle = (sql as NSString).length / 2
         textView.setSelectedRange(NSRange(location: middle, length: 0))
         let samples = measureMs(iterations: 50, warmup: 3) {
             textView.insertText("a", replacementRange: textView.selectedRange())
+            // One full turn: the paint for this keystroke has landed before the next starts.
+            let wanted = coordinator.pendingRevisionForTesting
+            let deadline = Date().addingTimeInterval(10)
+            while coordinator.appliedRevision != wanted, Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
         }
-        XCTAssertGreaterThan(changes, 0, "the coordinator's textDidChange never ran")
-        report(short ? "bench-keystroke-10k" : "bench-keystroke-10k-over-ceiling", axis: 5, samples: samples,
-               notes: "insertText of one character mid-document through SQLTextView + Coordinator.textDidChange, \(sql.utf16.count) UTF-16 units")
+        XCTAssertEqual(coordinator.appliedRevision, coordinator.pendingRevisionForTesting,
+                       "the last keystroke's paint never landed")
+        coordinator.flushToModel()
+        XCTAssertGreaterThan(changes, 0, "typing never reached the model")
+        report(short ? "bench-keystroke-10k" : "bench-keystroke-10k-long", axis: 5, samples: samples,
+               notes: "insertText of one character mid-document plus its analysis repaint, \(sql.utf16.count) UTF-16 units")
     }
 }

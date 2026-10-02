@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import os
 
-/// Signposts for the four intervals the performance plan (§4, item 0.4) measures, plus a small
+/// Signposts for the five intervals the performance plan (§4, item 0.4) measures, plus a small
 /// stamp table that `--bench` reads. Nothing here changes what the app does: a signpost that no
 /// one is recording costs a check inside `os`, and the stamp table is only written while
 /// `recording` is on, which only `BenchMode` turns on.
@@ -14,6 +14,9 @@ import os
 /// - `run`: `runPreview` starts it; a `firstRowsEvent` event marks the first batch of rows reaching
 ///   the main queue; the first grid row appearing on screen ends it.
 /// - `keystroke`: the key going down in the editor, to the run-loop turn that displays the change.
+/// - `apply`: the analysis repaint starting, to the run-loop turn that displays the new colours.
+///   A keystroke that needs no repaint never opens one; `--bench type-*` waits for it instead
+///   of sleeping past it.
 /// - `cancel`: Stop pressed, to the run's exit reaching the app. The engine drops a stopped run's
 ///   `done` before the app sees it (`Sink` checks `isStopped`), so the exit is the last thing the
 ///   user can wait on; `engine.done` is stamped where the sink still sees it.
@@ -159,6 +162,40 @@ enum PerfSignposts {
 
     /// `textDidChange` measures itself: begin here, hand the token back at the end.
     static func didChangeBegin() -> CFAbsoluteTime { CFAbsoluteTimeGetCurrent() }
+
+    // MARK: apply
+
+    private static var applyState: OSSignpostIntervalState?
+    private static var applyStart: CFAbsoluteTime = 0
+    private static var applyObserver: CFRunLoopObserver?
+    /// The last finished repaint, apply start to display, in milliseconds.
+    private(set) static var lastApplyMS: Double?
+
+    /// The repaint starts; it ends in the run-loop turn that displays it, like `keystroke`.
+    static func applyBegin() {
+        guard recording || signposter.isEnabled, applyState == nil else { return }
+        lastApplyMS = nil
+        applyStart = CFAbsoluteTimeGetCurrent()
+        applyState = signposter.beginInterval("apply", id: signposter.makeSignpostID())
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, false, 2_000_001) { observer, _ in
+            if let state = applyState { signposter.endInterval("apply", state) }
+            lastApplyMS = (CFAbsoluteTimeGetCurrent() - applyStart) * 1000
+            applyState = nil
+            if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+            applyObserver = nil
+        }
+        applyObserver = observer
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+
+    /// Drops an open repaint, so the next one starts clean. For `--bench`, between inserts.
+    static func applyReset() {
+        if let state = applyState { signposter.endInterval("apply", state, "reset") }
+        if let observer = applyObserver { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+        applyState = nil
+        applyObserver = nil
+        lastApplyMS = nil
+    }
 
     static func didChangeEnd(started: CFAbsoluteTime) {
         lastDidChangeMS = (CFAbsoluteTimeGetCurrent() - started) * 1000
