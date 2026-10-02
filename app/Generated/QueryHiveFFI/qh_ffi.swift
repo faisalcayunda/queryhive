@@ -471,6 +471,38 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -537,6 +569,309 @@ fileprivate struct FfiConverterString: FfiConverter {
         writeBytes(&buf, value.utf8)
     }
 }
+
+
+
+
+/**
+ * One document's text and its analysis, behind two locks so the main thread never
+ * waits for analysis: `replace`, `mark_applied` and `mark_dirty` touch only the text
+ * lock, while `paint`, `outline` and `converge` replay the log onto the analyzer.
+ */
+public protocol EditorDocumentProtocol: AnyObject, Sendable {
+    
+    /**
+     * Re-parse from scratch every statement whose incremental tree holds an error.
+     * Background thread, when typing pauses. Not in blueprint §6's list, which the
+     * idle queue of §7.2 needs but never names: without it §4.4 cannot run.
+     */
+    func converge() throws 
+    
+    /**
+     * The text's length in UTF-16 units.
+     */
+    func lenUtf16() throws  -> UInt32
+    
+    /**
+     * The text's line count, for drift detection against the UI's own count.
+     */
+    func lineCount() throws  -> UInt32
+    
+    /**
+     * The UI applied a paint of `revision` over `ranges` (`(start, len)` pairs).
+     * Main thread. A stale revision is ignored, like the log does.
+     */
+    func markApplied(revision: UInt64, ranges: [UInt32]) throws 
+    
+    /**
+     * `[start_utf16, start_utf16 + len_utf16)` must be painted again. Main thread.
+     */
+    func markDirty(startUtf16: UInt32, lenUtf16: UInt32) throws 
+    
+    /**
+     * The statements, folds and issues as they are now. Background thread, after the
+     * debounce: replays the log first, so this never sees an older text than `paint`.
+     */
+    func outline(revision: UInt64) throws  -> EditorOutline
+    
+    /**
+     * What to draw for the window, at most `budget_utf16` units of it. Background
+     * thread: replays the log, resynchronizes the statements, re-parses what changed.
+     */
+    func paint(revision: UInt64, windowStart: UInt32, windowLen: UInt32, budgetUtf16: UInt32) throws  -> EditorPaint
+    
+    /**
+     * Replace `[start_utf16, start_utf16 + len_utf16)` with `text`; returns the new
+     * revision. Main thread: shifts the indexes, logs the edit, never parses.
+     */
+    func replace(startUtf16: UInt32, lenUtf16: UInt32, text: String) throws  -> UInt64
+    
+    /**
+     * The newest revision: 1 at creation, plus one per `replace`.
+     */
+    func revision() throws  -> UInt64
+    
+}
+/**
+ * One document's text and its analysis, behind two locks so the main thread never
+ * waits for analysis: `replace`, `mark_applied` and `mark_dirty` touch only the text
+ * lock, while `paint`, `outline` and `converge` replay the log onto the analyzer.
+ */
+open class EditorDocument: EditorDocumentProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_qh_ffi_fn_clone_editordocument(self.handle, $0) }
+    }
+    /**
+     * A document holding `text`, all of which needs painting.
+     */
+public convenience init(text: String, dialect: EditorDialect)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_constructor_editordocument_new(
+        FfiConverterString.lower(text),
+        FfiConverterTypeEditorDialect_lower(dialect),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_qh_ffi_fn_free_editordocument(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Re-parse from scratch every statement whose incremental tree holds an error.
+     * Background thread, when typing pauses. Not in blueprint §6's list, which the
+     * idle queue of §7.2 needs but never names: without it §4.4 cannot run.
+     */
+open func converge()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_converge(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The text's length in UTF-16 units.
+     */
+open func lenUtf16()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_len_utf16(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The text's line count, for drift detection against the UI's own count.
+     */
+open func lineCount()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_line_count(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The UI applied a paint of `revision` over `ranges` (`(start, len)` pairs).
+     * Main thread. A stale revision is ignored, like the log does.
+     */
+open func markApplied(revision: UInt64, ranges: [UInt32])throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_mark_applied(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),
+        FfiConverterSequenceUInt32.lower(ranges),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * `[start_utf16, start_utf16 + len_utf16)` must be painted again. Main thread.
+     */
+open func markDirty(startUtf16: UInt32, lenUtf16: UInt32)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_mark_dirty(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(startUtf16),
+        FfiConverterUInt32.lower(lenUtf16),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The statements, folds and issues as they are now. Background thread, after the
+     * debounce: replays the log first, so this never sees an older text than `paint`.
+     */
+open func outline(revision: UInt64)throws  -> EditorOutline  {
+    return try  FfiConverterTypeEditorOutline_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_outline(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * What to draw for the window, at most `budget_utf16` units of it. Background
+     * thread: replays the log, resynchronizes the statements, re-parses what changed.
+     */
+open func paint(revision: UInt64, windowStart: UInt32, windowLen: UInt32, budgetUtf16: UInt32)throws  -> EditorPaint  {
+    return try  FfiConverterTypeEditorPaint_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_paint(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),
+        FfiConverterUInt32.lower(windowStart),
+        FfiConverterUInt32.lower(windowLen),
+        FfiConverterUInt32.lower(budgetUtf16),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Replace `[start_utf16, start_utf16 + len_utf16)` with `text`; returns the new
+     * revision. Main thread: shifts the indexes, logs the edit, never parses.
+     */
+open func replace(startUtf16: UInt32, lenUtf16: UInt32, text: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_replace(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(startUtf16),
+        FfiConverterUInt32.lower(lenUtf16),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The newest revision: 1 at creation, plus one per `replace`.
+     */
+open func revision()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_revision(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorDocument: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = EditorDocument
+
+    public static func lift(_ handle: UInt64) throws -> EditorDocument {
+        return EditorDocument(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: EditorDocument) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorDocument {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: EditorDocument, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorDocument_lift(_ handle: UInt64) throws -> EditorDocument {
+    return try FfiConverterTypeEditorDocument.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorDocument_lower(_ value: EditorDocument) -> UInt64 {
+    return FfiConverterTypeEditorDocument.lower(value)
+}
+
+
 
 
 
@@ -1133,6 +1468,349 @@ public func FfiConverterTypeRunCancel_lower(_ value: RunCancel) -> UInt64 {
 
 
 /**
+ * One collapsible region. Lines are 0-based; offsets are UTF-16 units.
+ */
+public struct EditorFold: Equatable, Hashable {
+    public var kind: EditorFoldKind
+    /**
+     * The line that stays visible.
+     */
+    public var headerLine: UInt32
+    /**
+     * The last line hidden while folded.
+     */
+    public var lastLine: UInt32
+    /**
+     * Offset of the header line's first character: the fold's identity.
+     */
+    public var header: UInt32
+    /**
+     * The hidden body, whole lines.
+     */
+    public var bodyStart: UInt32
+    public var bodyEnd: UInt32
+    public var summary: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: EditorFoldKind, 
+        /**
+         * The line that stays visible.
+         */headerLine: UInt32, 
+        /**
+         * The last line hidden while folded.
+         */lastLine: UInt32, 
+        /**
+         * Offset of the header line's first character: the fold's identity.
+         */header: UInt32, 
+        /**
+         * The hidden body, whole lines.
+         */bodyStart: UInt32, bodyEnd: UInt32, summary: String) {
+        self.kind = kind
+        self.headerLine = headerLine
+        self.lastLine = lastLine
+        self.header = header
+        self.bodyStart = bodyStart
+        self.bodyEnd = bodyEnd
+        self.summary = summary
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorFold: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorFold: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorFold {
+        return
+            try EditorFold(
+                kind: FfiConverterTypeEditorFoldKind.read(from: &buf), 
+                headerLine: FfiConverterUInt32.read(from: &buf), 
+                lastLine: FfiConverterUInt32.read(from: &buf), 
+                header: FfiConverterUInt32.read(from: &buf), 
+                bodyStart: FfiConverterUInt32.read(from: &buf), 
+                bodyEnd: FfiConverterUInt32.read(from: &buf), 
+                summary: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorFold, into buf: inout [UInt8]) {
+        FfiConverterTypeEditorFoldKind.write(value.kind, into: &buf)
+        FfiConverterUInt32.write(value.headerLine, into: &buf)
+        FfiConverterUInt32.write(value.lastLine, into: &buf)
+        FfiConverterUInt32.write(value.header, into: &buf)
+        FfiConverterUInt32.write(value.bodyStart, into: &buf)
+        FfiConverterUInt32.write(value.bodyEnd, into: &buf)
+        FfiConverterString.write(value.summary, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorFold_lift(_ buf: RustBuffer) throws -> EditorFold {
+    return try FfiConverterTypeEditorFold.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorFold_lower(_ value: EditorFold) -> RustBuffer {
+    return FfiConverterTypeEditorFold.lower(value)
+}
+
+
+/**
+ * An issue at `[start, start + len)` in UTF-16 units of the document.
+ */
+public struct EditorIssue: Equatable, Hashable {
+    public var kind: EditorIssueKind
+    public var start: UInt32
+    public var len: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: EditorIssueKind, start: UInt32, len: UInt32) {
+        self.kind = kind
+        self.start = start
+        self.len = len
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorIssue: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorIssue: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorIssue {
+        return
+            try EditorIssue(
+                kind: FfiConverterTypeEditorIssueKind.read(from: &buf), 
+                start: FfiConverterUInt32.read(from: &buf), 
+                len: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorIssue, into buf: inout [UInt8]) {
+        FfiConverterTypeEditorIssueKind.write(value.kind, into: &buf)
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.len, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorIssue_lift(_ buf: RustBuffer) throws -> EditorIssue {
+    return try FfiConverterTypeEditorIssue.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorIssue_lower(_ value: EditorIssue) -> RustBuffer {
+    return FfiConverterTypeEditorIssue.lower(value)
+}
+
+
+/**
+ * The slow-moving parts of a document: the statements Run splits, the folds, and
+ * the issues.
+ */
+public struct EditorOutline: Equatable, Hashable {
+    public var revision: UInt64
+    /**
+     * `(start, end)` pairs without their `;`, as `statements_with_lines` gives.
+     */
+    public var statements: [UInt32]
+    public var folds: [EditorFold]
+    public var issues: [EditorIssue]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, 
+        /**
+         * `(start, end)` pairs without their `;`, as `statements_with_lines` gives.
+         */statements: [UInt32], folds: [EditorFold], issues: [EditorIssue]) {
+        self.revision = revision
+        self.statements = statements
+        self.folds = folds
+        self.issues = issues
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorOutline: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorOutline: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorOutline {
+        return
+            try EditorOutline(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                statements: FfiConverterSequenceUInt32.read(from: &buf), 
+                folds: FfiConverterSequenceTypeEditorFold.read(from: &buf), 
+                issues: FfiConverterSequenceTypeEditorIssue.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorOutline, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterSequenceUInt32.write(value.statements, into: &buf)
+        FfiConverterSequenceTypeEditorFold.write(value.folds, into: &buf)
+        FfiConverterSequenceTypeEditorIssue.write(value.issues, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorOutline_lift(_ buf: RustBuffer) throws -> EditorOutline {
+    return try FfiConverterTypeEditorOutline.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorOutline_lower(_ value: EditorOutline) -> RustBuffer {
+    return FfiConverterTypeEditorOutline.lower(value)
+}
+
+
+/**
+ * What to draw for a window: flat `(start, len)` pairs, `(start, len, class)` triples
+ * with class 1 to 9, and `(start, len, italic)` triples. All offsets are UTF-16 units,
+ * ascending and disjoint, and every run and font lies inside one range.
+ */
+public struct EditorPaint: Equatable, Hashable {
+    public var revision: UInt64
+    public var docLenUtf16: UInt32
+    public var windowStart: UInt32
+    public var windowLen: UInt32
+    /**
+     * Over the ceiling: no runs, and the ranges go back to the base colour.
+     */
+    public var inactive: Bool
+    /**
+     * The budget ran out before the window was done.
+     */
+    public var moreInWindow: Bool
+    /**
+     * Something outside the window needs repainting.
+     */
+    public var dirtyElsewhere: Bool
+    public var ranges: [UInt32]
+    public var runs: [UInt32]
+    public var fonts: [UInt32]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, docLenUtf16: UInt32, windowStart: UInt32, windowLen: UInt32, 
+        /**
+         * Over the ceiling: no runs, and the ranges go back to the base colour.
+         */inactive: Bool, 
+        /**
+         * The budget ran out before the window was done.
+         */moreInWindow: Bool, 
+        /**
+         * Something outside the window needs repainting.
+         */dirtyElsewhere: Bool, ranges: [UInt32], runs: [UInt32], fonts: [UInt32]) {
+        self.revision = revision
+        self.docLenUtf16 = docLenUtf16
+        self.windowStart = windowStart
+        self.windowLen = windowLen
+        self.inactive = inactive
+        self.moreInWindow = moreInWindow
+        self.dirtyElsewhere = dirtyElsewhere
+        self.ranges = ranges
+        self.runs = runs
+        self.fonts = fonts
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorPaint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorPaint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorPaint {
+        return
+            try EditorPaint(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                docLenUtf16: FfiConverterUInt32.read(from: &buf), 
+                windowStart: FfiConverterUInt32.read(from: &buf), 
+                windowLen: FfiConverterUInt32.read(from: &buf), 
+                inactive: FfiConverterBool.read(from: &buf), 
+                moreInWindow: FfiConverterBool.read(from: &buf), 
+                dirtyElsewhere: FfiConverterBool.read(from: &buf), 
+                ranges: FfiConverterSequenceUInt32.read(from: &buf), 
+                runs: FfiConverterSequenceUInt32.read(from: &buf), 
+                fonts: FfiConverterSequenceUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorPaint, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterUInt32.write(value.docLenUtf16, into: &buf)
+        FfiConverterUInt32.write(value.windowStart, into: &buf)
+        FfiConverterUInt32.write(value.windowLen, into: &buf)
+        FfiConverterBool.write(value.inactive, into: &buf)
+        FfiConverterBool.write(value.moreInWindow, into: &buf)
+        FfiConverterBool.write(value.dirtyElsewhere, into: &buf)
+        FfiConverterSequenceUInt32.write(value.ranges, into: &buf)
+        FfiConverterSequenceUInt32.write(value.runs, into: &buf)
+        FfiConverterSequenceUInt32.write(value.fonts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorPaint_lift(_ buf: RustBuffer) throws -> EditorPaint {
+    return try FfiConverterTypeEditorPaint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorPaint_lower(_ value: EditorPaint) -> RustBuffer {
+    return FfiConverterTypeEditorPaint.lower(value)
+}
+
+
+/**
  * One setting, as the environment would have carried it.
  *
  * The same keys the CLI reads (`DB_URL`, `DB_HOST`, `SQL_TEXT`, `TABLE_NAME`, …). They are
@@ -1193,6 +1871,384 @@ public func FfiConverterTypeSetting_lift(_ buf: RustBuffer) throws -> Setting {
 public func FfiConverterTypeSetting_lower(_ value: Setting) -> RustBuffer {
     return FfiConverterTypeSetting.lower(value)
 }
+
+
+/**
+ * The lexical family a document's SQL is read under. Only the `"` rule differs between
+ * them today; the app sends `.generic` until W10-T6 connects one document per tab.
+ */
+
+public enum EditorDialect: Equatable, Hashable {
+    
+    case generic
+    case postgres
+    case mysql
+    case trino
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorDialect: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorDialect: FfiConverterRustBuffer {
+    typealias SwiftType = EditorDialect
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorDialect {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .generic
+        
+        case 2: return .postgres
+        
+        case 3: return .mysql
+        
+        case 4: return .trino
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorDialect, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .generic:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .postgres:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .mysql:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .trino:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorDialect_lift(_ buf: RustBuffer) throws -> EditorDialect {
+    return try FfiConverterTypeEditorDialect.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorDialect_lower(_ value: EditorDialect) -> RustBuffer {
+    return FfiConverterTypeEditorDialect.lower(value)
+}
+
+
+
+/**
+ * Why an edit or a request was refused. The messages match [`EditError`]'s.
+ */
+public 
+enum EditorError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * The caller asked about a revision older than the text's.
+     */
+    case Stale
+    /**
+     * The range reaches past the text.
+     */
+    case OutOfBounds
+    /**
+     * An end of the range falls between the two halves of a surrogate pair.
+     */
+    case SplitsCharacter
+    /**
+     * The text would be larger than the editor handles.
+     */
+    case TooLarge
+    /**
+     * The analysis state is unusable: a poisoned lock, or a bad range list.
+     */
+    case Malformed
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension EditorError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorError: FfiConverterRustBuffer {
+    typealias SwiftType = EditorError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Stale
+        case 2: return .OutOfBounds
+        case 3: return .SplitsCharacter
+        case 4: return .TooLarge
+        case 5: return .Malformed
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .Stale:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .OutOfBounds:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .SplitsCharacter:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .TooLarge:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .Malformed:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorError_lift(_ buf: RustBuffer) throws -> EditorError {
+    return try FfiConverterTypeEditorError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorError_lower(_ value: EditorError) -> RustBuffer {
+    return FfiConverterTypeEditorError.lower(value)
+}
+
+
+
+public enum EditorFoldKind: Equatable, Hashable {
+    
+    case statement
+    case cte
+    case subquery
+    case body
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorFoldKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorFoldKind: FfiConverterRustBuffer {
+    typealias SwiftType = EditorFoldKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorFoldKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .statement
+        
+        case 2: return .cte
+        
+        case 3: return .subquery
+        
+        case 4: return .body
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorFoldKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .statement:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .cte:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .subquery:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .body:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorFoldKind_lift(_ buf: RustBuffer) throws -> EditorFoldKind {
+    return try FfiConverterTypeEditorFoldKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorFoldKind_lower(_ value: EditorFoldKind) -> RustBuffer {
+    return FfiConverterTypeEditorFoldKind.lower(value)
+}
+
+
+
+
+public enum EditorIssueKind: Equatable, Hashable {
+    
+    case unclosedQuote
+    case unclosedIdentifier
+    case unclosedComment
+    case unclosedDollar
+    case unbalancedParen
+    case syntaxError
+    case missingToken
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorIssueKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorIssueKind: FfiConverterRustBuffer {
+    typealias SwiftType = EditorIssueKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorIssueKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .unclosedQuote
+        
+        case 2: return .unclosedIdentifier
+        
+        case 3: return .unclosedComment
+        
+        case 4: return .unclosedDollar
+        
+        case 5: return .unbalancedParen
+        
+        case 6: return .syntaxError
+        
+        case 7: return .missingToken
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorIssueKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .unclosedQuote:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unclosedIdentifier:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unclosedComment:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unclosedDollar:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unbalancedParen:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .syntaxError:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .missingToken:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorIssueKind_lift(_ buf: RustBuffer) throws -> EditorIssueKind {
+    return try FfiConverterTypeEditorIssueKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorIssueKind_lower(_ value: EditorIssueKind) -> RustBuffer {
+    return FfiConverterTypeEditorIssueKind.lower(value)
+}
+
 
 
 /**
@@ -1437,6 +2493,31 @@ public func FfiConverterTypeEngineCommand_lower(_ value: EngineCommand) -> RustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -1454,6 +2535,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeEditorFold: FfiConverterRustBuffer {
+    typealias SwiftType = [EditorFold]
+
+    public static func write(_ value: [EditorFold], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEditorFold.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EditorFold] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EditorFold]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEditorFold.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeEditorIssue: FfiConverterRustBuffer {
+    typealias SwiftType = [EditorIssue]
+
+    public static func write(_ value: [EditorIssue], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEditorIssue.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EditorIssue] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EditorIssue]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEditorIssue.read(from: &buf))
         }
         return seq
     }
@@ -1482,6 +2613,30 @@ fileprivate struct FfiConverterSequenceTypeSetting: FfiConverterRustBuffer {
         }
         return seq
     }
+}
+/**
+ * Above this many UTF-16 units (inclusive) a document gets no colour, no trees and
+ * no folds; its statements are still counted.
+ */
+public func editorCeilingUtf16()throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_editor_ceiling_utf16(uniffiCallStatus
+    )
+})
+}
+/**
+ * The statements of `sql` for Run, as `(start, end)` pairs in UTF-16 units: the
+ * pieces between separators that hold more than whitespace, comments and `;`.
+ */
+public func sqlStatementRanges(sql: String, dialect: EditorDialect)throws  -> [UInt32]  {
+    return try  FfiConverterSequenceUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_sql_statement_ranges(
+        FfiConverterString.lower(sql),
+        FfiConverterTypeEditorDialect_lower(dialect),uniffiCallStatus
+    )
+})
 }
 /**
  * Every command this build offers, spelled as the CLI spells them.
@@ -1522,10 +2677,43 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_qh_ffi_checksum_func_editor_ceiling_utf16() != 55107) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_func_sql_statement_ranges() != 45986) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_qh_ffi_checksum_func_command_names() != 54298) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_func_engine_version() != 54811) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_converge() != 62221) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_len_utf16() != 19014) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_line_count() != 27877) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_mark_applied() != 51740) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_mark_dirty() != 26110) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_outline() != 50183) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_paint() != 64111) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_replace() != 21135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_revision() != 12711) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_enginehost_run() != 23792) {
@@ -1541,6 +2729,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_runcancel_request_cancel() != 1756) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_constructor_editordocument_new() != 7060) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_constructor_enginehost_new() != 32183) {

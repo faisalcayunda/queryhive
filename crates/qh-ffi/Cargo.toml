@@ -56,6 +56,7 @@ qh-driver.workspace = true
 qh-driver-mysql.workspace = true
 qh-driver-postgres.workspace = true
 qh-driver-trino.workspace = true
+qh-editor.workspace = true
 qh-export.workspace = true
 qh-import.workspace = true
 qh-rt.workspace = true

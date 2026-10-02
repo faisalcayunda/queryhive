@@ -259,6 +259,66 @@ typedef struct UniffiVTableCallbackInterfaceEventSink {
 } UniffiVTableCallbackInterfaceEventSink;
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EDITORDOCUMENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EDITORDOCUMENT
+uint64_t uniffi_qh_ffi_fn_clone_editordocument(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_EDITORDOCUMENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_EDITORDOCUMENT
+void uniffi_qh_ffi_fn_free_editordocument(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_EDITORDOCUMENT_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CONSTRUCTOR_EDITORDOCUMENT_NEW
+uint64_t uniffi_qh_ffi_fn_constructor_editordocument_new(RustBuffer text, RustBuffer dialect, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_CONVERGE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_CONVERGE
+void uniffi_qh_ffi_fn_method_editordocument_converge(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_LEN_UTF16
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_LEN_UTF16
+uint32_t uniffi_qh_ffi_fn_method_editordocument_len_utf16(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_LINE_COUNT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_LINE_COUNT
+uint32_t uniffi_qh_ffi_fn_method_editordocument_line_count(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_MARK_APPLIED
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_MARK_APPLIED
+void uniffi_qh_ffi_fn_method_editordocument_mark_applied(uint64_t ptr, uint64_t revision, RustBuffer ranges, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_MARK_DIRTY
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_MARK_DIRTY
+void uniffi_qh_ffi_fn_method_editordocument_mark_dirty(uint64_t ptr, uint32_t start_utf16, uint32_t len_utf16, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_OUTLINE
+RustBuffer uniffi_qh_ffi_fn_method_editordocument_outline(uint64_t ptr, uint64_t revision, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_PAINT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_PAINT
+RustBuffer uniffi_qh_ffi_fn_method_editordocument_paint(uint64_t ptr, uint64_t revision, uint32_t window_start, uint32_t window_len, uint32_t budget_utf16, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REPLACE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REPLACE
+uint64_t uniffi_qh_ffi_fn_method_editordocument_replace(uint64_t ptr, uint32_t start_utf16, uint32_t len_utf16, RustBuffer text, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REVISION
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REVISION
+uint64_t uniffi_qh_ffi_fn_method_editordocument_revision(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_ENGINEHOST
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_ENGINEHOST
 uint64_t uniffi_qh_ffi_fn_clone_enginehost(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -329,6 +389,17 @@ int8_t uniffi_qh_ffi_fn_method_runcancel_is_cancelled(uint64_t ptr, RustCallStat
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_REQUEST_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RUNCANCEL_REQUEST_CANCEL
 void uniffi_qh_ffi_fn_method_runcancel_request_cancel(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_EDITOR_CEILING_UTF16
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_EDITOR_CEILING_UTF16
+uint32_t uniffi_qh_ffi_fn_func_editor_ceiling_utf16(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
+RustBuffer uniffi_qh_ffi_fn_func_sql_statement_ranges(RustBuffer sql, RustBuffer dialect, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_COMMAND_NAMES
@@ -603,6 +674,18 @@ void ffi_qh_ffi_rust_future_free_void(uint64_t handle
 void ffi_qh_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_EDITOR_CEILING_UTF16
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_EDITOR_CEILING_UTF16
+uint16_t uniffi_qh_ffi_checksum_func_editor_ceiling_utf16(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
+uint16_t uniffi_qh_ffi_checksum_func_sql_statement_ranges(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_COMMAND_NAMES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_COMMAND_NAMES
 uint16_t uniffi_qh_ffi_checksum_func_command_names(void
@@ -612,6 +695,60 @@ uint16_t uniffi_qh_ffi_checksum_func_command_names(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_ENGINE_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_ENGINE_VERSION
 uint16_t uniffi_qh_ffi_checksum_func_engine_version(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_CONVERGE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_CONVERGE
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_converge(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_LEN_UTF16
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_LEN_UTF16
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_len_utf16(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_LINE_COUNT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_LINE_COUNT
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_line_count(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_MARK_APPLIED
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_MARK_APPLIED
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_mark_applied(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_MARK_DIRTY
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_MARK_DIRTY
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_mark_dirty(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_OUTLINE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_OUTLINE
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_outline(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_PAINT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_PAINT
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_paint(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REPLACE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REPLACE
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_replace(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REVISION
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REVISION
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_revision(void
     
 );
 #endif
@@ -642,6 +779,12 @@ uint16_t uniffi_qh_ffi_checksum_method_runcancel_is_cancelled(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RUNCANCEL_REQUEST_CANCEL
 uint16_t uniffi_qh_ffi_checksum_method_runcancel_request_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_EDITORDOCUMENT_NEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_CONSTRUCTOR_EDITORDOCUMENT_NEW
+uint16_t uniffi_qh_ffi_checksum_constructor_editordocument_new(void
     
 );
 #endif

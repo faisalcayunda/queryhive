@@ -90,6 +90,7 @@
 pub mod apply;
 pub mod commands;
 pub mod config;
+mod editor;
 pub mod env;
 pub mod events;
 /// Where the engine writes down every Safe Mode decision. The table and its chain are
