@@ -5,7 +5,7 @@
 //! "before the UI touches it" (§7 line 1037), and it is part of *connecting* — there
 //! is no tunnel command, and none was added. This module is the engine half of that:
 //! it turns `SSH_*` settings into [`TunnelConfig`] ([`settings`]), and — in
-//! [`crate::RealEngine::connect`] — opens the tunnel and hands the driver the
+//! [`open`] — opens the tunnel and hands the driver the
 //! loopback endpoint it listens on.
 //!
 //! # The `SSH_*` vocabulary, and why these names

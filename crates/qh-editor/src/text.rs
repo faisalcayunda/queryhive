@@ -2,7 +2,7 @@
 //!
 //! Text is UTF-8; every offset that crosses the API is UTF-16, because the app measures text in
 //! `NSString` units. Two indexes keep the conversion cheap after an edit in a 2 MB text: a
-//! checkpoint (byte, UTF-16) at most every [`CHUNK`] bytes, and the byte offset of every line
+//! checkpoint (byte, UTF-16) at most every `CHUNK` bytes, and the byte offset of every line
 //! (LF only; a CR is an ordinary character, as it is everywhere else in the editor).
 //!
 //! Both are shifted in place by an edit, so one keystroke costs O(edit + lines) and never a
@@ -50,14 +50,6 @@ pub enum LogEntry {
     Touch { start: u32, len: u32 },
     /// The UI applied a paint of `revision`: pairs `(start, len)` that are now up to date.
     Applied { revision: u64, ranges: Vec<u32> },
-}
-
-/// What [`TextBuffer::edit`] did, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Edited {
-    pub start: usize,
-    pub old_len: usize,
-    pub new_len: usize,
 }
 
 /// A text with UTF-16 and line indexes, a revision and a log.
@@ -200,7 +192,7 @@ impl TextBuffer {
 
     /// Replace the UTF-16 range `[start, start + len)` with `new`, without logging it. This is
     /// what the analyzer's mirror does; the main thread's [`TextBuffer::replace`] logs.
-    pub fn edit(&mut self, start: u32, len: u32, new: &str) -> Result<Edited, EditError> {
+    pub fn edit(&mut self, start: u32, len: u32, new: &str) -> Result<(), EditError> {
         let end = start.checked_add(len).ok_or(EditError::OutOfBounds)?;
         let from = self.byte_of(start)?;
         let to = self.byte_of(end)?;
@@ -255,11 +247,7 @@ impl TextBuffer {
         }
         self.marks.splice(keep..keep, fresh);
 
-        Ok(Edited {
-            start: from,
-            old_len: to - from,
-            new_len: new.len(),
-        })
+        Ok(())
     }
 
     /// Replace `[start, start + len)` (UTF-16) with `new`, log it, and return the new revision.

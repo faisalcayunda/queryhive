@@ -292,10 +292,6 @@ impl Analyzer {
         })
     }
 
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
     pub fn stats(&self) -> Stats {
         let len = self.mirror.len_bytes();
         Stats {

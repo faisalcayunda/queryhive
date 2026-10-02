@@ -33,7 +33,7 @@
 //!
 //! # Every call takes a sink and a cancel handle
 //!
-//! [`EngineHost::run`] is the shape an FFI caller can write: hand over a sink, hand over the handle that
+//! [`EngineHost::run`](crate::host::EngineHost::run) is the shape an FFI caller can write: hand over a sink, hand over the handle that
 //! stops the run, and the events arrive as the engine produces them rather than in one lump at
 //! the end. Two reasons that pairing is the whole surface rather than a convenience:
 //!
@@ -44,7 +44,7 @@
 //! - **Cancel is the caller's own handle, made before the call**, because it has to reach a run
 //!   that is already in flight. [`EngineHost::run`](crate::host::EngineHost::run) blocks until the command has ended, so a handle it
 //!   returned could only ever be used once there was nothing left to stop; the caller builds the
-//!   [`RunCancel`], hands it in, and calls `request_cancel()` from wherever its Stop button lives.
+//!   [`RunCancel`](crate::uniffi_api::RunCancel), hands it in, and calls `request_cancel()` from wherever its Stop button lives.
 //!   `request()` sets a flag the engine reads between rows and between statements, so a stopped
 //!   export finishes the statement it is on, keeps the bytes it already wrote, and reports `done`
 //!   with `cancelled: true` — the same outcome SIGTERM produces in the CLI, which is the other
@@ -61,7 +61,7 @@
 //! Nothing above changes the protocol. A `run` call emits exactly the lines the CLI writes, from
 //! the same [`crate::run`] the binary calls, with a sink in place of stdout, so the two entry
 //! points cannot drift — and the golden corpus, which is recorded against the CLI, still tests
-//! this path ([`SinkEmitter`] hands on the same [`serde_json::Value`] both of them serialise).
+//! this path (`SinkEmitter` hands on the same [`serde_json::Value`] both of them serialise).
 
 use std::io;
 use std::panic::AssertUnwindSafe;

@@ -82,6 +82,7 @@ impl Statements {
         self.list.len()
     }
 
+    // Not called anywhere; clippy's `len_without_is_empty` asks for it beside a public `len`.
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -99,11 +100,6 @@ impl Statements {
     /// The index of the statement holding `byte` (the later one, at a boundary).
     pub fn index_of(&self, byte: usize) -> usize {
         self.list.partition_point(|s| s.start <= byte) - 1
-    }
-
-    /// The byte offsets of the separators, for tests.
-    pub fn separators(&self) -> Vec<usize> {
-        self.list[1..].iter().map(|s| s.start - 1).collect()
     }
 
     /// Update the list for the edit that replaced `old_len` bytes at `start` with `new_len`

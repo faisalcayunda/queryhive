@@ -16,7 +16,7 @@
 //!
 //! # What goes where
 //!
-//! [`route`] is one `match` with no wildcard, so a command added later does not compile until
+//! `route` is one `match` with no wildcard, so a command added later does not compile until
 //! someone decides which of these it is:
 //!
 //! | Route | Commands | Session |

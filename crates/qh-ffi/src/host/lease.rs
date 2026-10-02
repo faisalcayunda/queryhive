@@ -19,9 +19,11 @@
 //!
 //! Only when nothing about it is in doubt. It is closed instead of reset when it was cancelled
 //! (a late `KILL QUERY` or `CancelRequest` must never reach the next statement), when a call on it
-//! was dropped half-way, when it broke, when a cursor was left before the server ended it, when
-//! its tunnel died, or when its credentials were retired. Closing is always safe; a reset of a
-//! session in an unknown state is not.
+//! was dropped half-way, when it broke, when its tunnel died, or when its credentials were
+//! retired. A cursor left before the server ended it closes the session too, but only on
+//! PostgreSQL, and the pool then opens a replacement in the background: the other two drivers say
+//! so themselves (MySQL's reset needs the connection back and fails without it, Trino's reset
+//! deletes the query). Closing is always safe; a reset of a session in an unknown state is not.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
