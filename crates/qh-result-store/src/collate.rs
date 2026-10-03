@@ -26,8 +26,19 @@ pub struct NumKey {
 }
 
 impl NumKey {
-    fn is_zero(&self) -> bool {
-        self.digits.is_empty()
+    /// -1, 0 or 1. Zero sits between the negatives and the positives.
+    fn sign(&self) -> i8 {
+        match (self.digits.is_empty(), self.neg) {
+            (true, _) => 0,
+            (false, true) => -1,
+            (false, false) => 1,
+        }
+    }
+
+    /// Decimal position of the leading digit: `digits * 10^adj_exp` is below
+    /// `10^magnitude`. Only meaningful for a non-zero key.
+    fn magnitude(&self) -> i64 {
+        i64::from(self.adj_exp) + self.digits.len() as i64
     }
 }
 
@@ -39,20 +50,16 @@ impl PartialOrd for NumKey {
 
 impl Ord for NumKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (self.is_zero(), other.is_zero()) {
-            (true, true) => return Ordering::Equal,
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
-            _ => {}
+        let sign = self.sign().cmp(&other.sign());
+        if sign != Ordering::Equal || self.sign() == 0 {
+            return sign;
         }
-        match (self.neg, other.neg) {
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
-            _ => {}
-        }
+        // Digits carry no leading or trailing zeros, so the magnitude decides
+        // first and a lexicographic digit compare (shorter prefix is smaller)
+        // decides the rest.
         let order = self
-            .adj_exp
-            .cmp(&other.adj_exp)
+            .magnitude()
+            .cmp(&other.magnitude())
             .then_with(|| self.digits.cmp(&other.digits));
         if self.neg {
             order.reverse()
@@ -105,7 +112,7 @@ pub fn swift_plain_number(text: &str) -> Option<NumKey> {
         return None;
     }
     let mut digits: Vec<u8> = int.bytes().chain(frac.bytes()).collect();
-    // Strip leading zeros without changing the exponent.
+    // Strip leading zeros; they carry no magnitude, so the exponent is untouched.
     let leading = digits.iter().take_while(|&&b| b == b'0').count();
     if leading > 0 {
         digits.drain(..leading);
@@ -117,13 +124,15 @@ pub fn swift_plain_number(text: &str) -> Option<NumKey> {
     }
     // The exponent arithmetic is i64: an exponent near i32::MIN would
     // overflow in i32 (a debug panic, a silent wrap in release).
-    let adj_exp = exp_given - frac.len() as i64 + leading as i64 + trailing as i64;
+    let adj_exp = exp_given - frac.len() as i64 + trailing as i64;
     if !(-166..=128).contains(&adj_exp) {
         return None;
     }
+    // Canonical zero, so the derived `Eq` agrees with `Ord`: -0 == 0.
+    let zero = digits.is_empty();
     Some(NumKey {
-        neg,
-        adj_exp: adj_exp as i32,
+        neg: neg && !zero,
+        adj_exp: if zero { 0 } else { adj_exp as i32 },
         digits,
     })
 }
@@ -134,7 +143,7 @@ pub fn swift_plain_number(text: &str) -> Option<NumKey> {
 /// The offsets are byte offsets from `char_indices`, not char counts: a
 /// leading NBSP or ideographic space is three bytes, and slicing at a char
 /// count would cut inside it.
-fn trim_zs_tab(s: &str) -> &str {
+pub(crate) fn trim_zs_tab(s: &str) -> &str {
     let is_zs_or_tab = |c: char| {
         matches!(
             c,
@@ -160,69 +169,43 @@ fn trim_zs_tab(s: &str) -> &str {
     }
 }
 
-/// Trim full Unicode whitespace (`White_Space` = Zs + control chars).
-/// Used for filter needles and search terms.
-fn trim_white_space(s: &str) -> &str {
-    let is_white = |c: char| c.is_whitespace() || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}');
-    let start = s
-        .char_indices()
-        .find(|(_, c)| !is_white(*c))
-        .map(|(index, _)| index)
-        .unwrap_or(s.len());
-    let end = s
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !is_white(*c))
-        .map(|(index, c)| index + c.len_utf8())
-        .unwrap_or(0);
-    if start >= end {
-        ""
-    } else {
-        &s[start..end]
-    }
-}
-
 /// `swift_double` = `f64::from_str` (decimal, `inf`/`infinity`/`nan` case-insensitive)
-/// plus a hand-written hex-float parser (`0x1.8p3`), because Swift's
-/// `Double(String)` accepts it.
+/// plus a hand-written hex-float parser (`0x10`, `0x1.8p3`), because Swift's
+/// `Double(String)` accepts it with the `p` exponent optional. Like Swift,
+/// it does not trim: `"  7 "` is `None`.
 pub fn swift_double(text: &str) -> Option<f64> {
-    let t = trim_white_space(text);
-    if t.is_empty() {
-        return None;
-    }
     // Fast path: standard decimal float.
-    if let Ok(f) = t.parse::<f64>() {
+    if let Ok(f) = text.parse::<f64>() {
         return Some(f);
     }
-    // Hex float: 0x[0-9a-fA-F]+(.[0-9a-fA-F]*)?p[+-]?[0-9]+
-    if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        let parts = rest.split('p').collect::<Vec<_>>();
-        if parts.len() != 2 {
-            return None;
-        }
-        let mantissa = parts[0];
-        let exp_text = parts[1];
-        let (int, frac) = match mantissa.split_once('.') {
-            Some((i, f)) => (i, Some(f)),
-            None => (mantissa, None),
-        };
-        if !int.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
-        }
-        if let Some(f) = frac {
-            if !f.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-        }
-        let exp: i32 = exp_text.parse().ok()?;
-        let mut value: f64 = u128::from_str_radix(int, 16).ok()? as f64;
-        if let Some(f) = frac {
-            let denom = 16f64.powi(f.len() as i32);
-            value += u128::from_str_radix(f, 16).ok()? as f64 / denom;
-        }
-        return Some(value * 2f64.powi(exp));
+    // Hex float: [+-]0x[0-9a-fA-F]*(.[0-9a-fA-F]*)?(p[+-]?[0-9]+)?, at least one hex digit.
+    let (neg, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let rest = rest
+        .strip_prefix("0x")
+        .or_else(|| rest.strip_prefix("0X"))?;
+    let (mantissa, exp) = match rest.find(['p', 'P']) {
+        Some(index) => (&rest[..index], rest[index + 1..].parse::<i32>().ok()?),
+        None => (rest, 0),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if int.len() + frac.len() == 0
+        || !int.bytes().all(|b| b.is_ascii_hexdigit())
+        || !frac.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
     }
-    None
+    let digit = |b: u8| f64::from((b as char).to_digit(16).unwrap_or(0));
+    let mut value = int.bytes().fold(0.0, |acc, b| acc * 16.0 + digit(b));
+    let mut scale = 1.0 / 16.0;
+    for b in frac.bytes() {
+        value += digit(b) * scale;
+        scale /= 16.0;
+    }
+    let value = value * 2f64.powi(exp);
+    Some(if neg { -value } else { value })
 }
 
 /// Fold a string for case-insensitive comparison: NFC, full lowercase,
@@ -558,5 +541,48 @@ mod tests {
         let mut k10 = Vec::new();
         natural_key("10", &mut k10);
         assert!(k2 < k10);
+    }
+
+    #[test]
+    fn num_key_orders_zero_between_negatives_and_positives() {
+        let key = |t: &str| swift_plain_number(t).unwrap();
+        assert!(key("-3") < key("-0"));
+        assert!(key("-0") < key("3"));
+        assert_eq!(key("-0").cmp(&key("0")), Ordering::Equal);
+        assert_eq!(key("-0"), key("0"));
+    }
+
+    #[test]
+    fn num_key_ignores_leading_zeros() {
+        let key = |t: &str| swift_plain_number(t).unwrap();
+        assert_eq!(key("007").cmp(&key("7")), Ordering::Equal);
+        assert!(key("007") < key("10"));
+        assert!(key("0.1") < key("1"));
+        assert!(key("0.1") > key("0.05"));
+    }
+
+    #[test]
+    fn num_key_compares_magnitude_before_digits() {
+        let key = |t: &str| swift_plain_number(t).unwrap();
+        assert!(key(".5") < key("1.5"));
+        assert!(key("1.5") < key("15"));
+        assert!(key("-1.5") > key("-15"));
+        assert!(key("1") < key("1.5"));
+    }
+
+    #[test]
+    fn swift_double_accepts_hex_without_exponent() {
+        assert_eq!(swift_double("0x10"), Some(16.0));
+        assert_eq!(swift_double("-0x1.8"), Some(-1.5));
+        assert_eq!(swift_double("0x"), None);
+        assert_eq!(swift_double("0xg"), None);
+    }
+
+    #[test]
+    fn swift_double_does_not_trim() {
+        assert_eq!(swift_double("  7 "), None);
+        assert_eq!(swift_double("7 "), None);
+        assert_eq!(swift_double("\n7"), None);
+        assert_eq!(swift_double("7"), Some(7.0));
     }
 }

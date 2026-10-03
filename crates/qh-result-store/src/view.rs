@@ -20,7 +20,7 @@ use qh_columnar::Encoding;
 use qh_core::Value;
 
 use crate::collate::{
-    ci_contains, ci_equal, natural_key, swift_double, swift_plain_number, NumKey,
+    ci_contains, ci_equal, natural_key, swift_double, swift_plain_number, trim_zs_tab, NumKey,
 };
 use crate::store::{ChunkRef, StoreError, StoreShared};
 
@@ -120,8 +120,9 @@ impl FilterSpec {
                 }
             },
             FilterSpec::Text { needle, .. } => match value {
-                // A NULL cell has no text, so no needle matches it.
-                Value::Null => false,
+                // Swift tests for a blank needle before it looks at the cell, so a
+                // blank needle keeps NULL rows; any other needle drops them.
+                Value::Null => trim_zs_tab(needle).is_empty(),
                 other => {
                     let text = qh_core::render::to_text(other).unwrap_or_default();
                     matches_text(&text, needle)
@@ -140,7 +141,7 @@ impl FilterSpec {
 /// test. `=` is case-insensitive; the others compare as doubles when both
 /// sides parse, and as NFC-normalized strings otherwise.
 pub fn matches_text(value: &str, needle: &str) -> bool {
-    let trimmed = trim_white_space(needle);
+    let trimmed = trim_zs_tab(needle);
     if trimmed.is_empty() {
         return true;
     }
@@ -148,7 +149,7 @@ pub fn matches_text(value: &str, needle: &str) -> bool {
         let Some(rest) = trimmed.strip_prefix(op) else {
             continue;
         };
-        let operand = trim_white_space(rest);
+        let operand = trim_zs_tab(rest);
         if operand.is_empty() {
             break;
         }
@@ -187,11 +188,12 @@ fn compare_string(op: &str, left: &str, right: &str) -> bool {
     }
 }
 
-/// Trim Unicode whitespace, the same set Swift's `White_Space` names.
+/// Port of `trimmingCharacters(in: .whitespacesAndNewlines)`, which the grid search uses (the
+/// column filter trims `.whitespaces` only, see `trim_zs_tab`).
 ///
 /// Byte offsets from `char_indices`, not char counts: a leading multi-byte
 /// whitespace (NBSP, ideographic space) would otherwise be sliced mid-char.
-fn trim_white_space(s: &str) -> &str {
+fn trim_search(s: &str) -> &str {
     let is_white = |c: char| c.is_whitespace() || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}');
     let start = s
         .char_indices()
@@ -225,11 +227,11 @@ pub struct ViewSpec {
 impl ViewSpec {
     /// An empty spec is the identity view: no permutation, no scan.
     pub fn is_identity(&self) -> bool {
-        self.sort.is_none() && self.filters.is_empty() && trim_white_space(&self.search).is_empty()
+        self.sort.is_none() && self.filters.is_empty() && trim_search(&self.search).is_empty()
     }
 
     fn needs_rows(&self) -> bool {
-        !self.filters.is_empty() || !trim_white_space(&self.search).is_empty()
+        !self.filters.is_empty() || !trim_search(&self.search).is_empty()
     }
 }
 
@@ -272,7 +274,7 @@ pub fn scan_chunk(
     out: &mut Vec<u32>,
 ) {
     let width = chunk.batch.num_columns();
-    let search = trim_white_space(&spec.search);
+    let search = trim_search(&spec.search);
     for row in 0..reference.rows as usize {
         let source = reference.first_row + row as u32;
         if !spec
@@ -655,4 +657,46 @@ pub fn build_view(
     let streaming = !store.phase().is_finished();
     let info = qh_rt::view_pool().install(|| compute_view(store, &spec))?;
     Ok(Arc::new(View::new(id, spec, info, streaming)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_filter(needle: &str) -> FilterSpec {
+        FilterSpec::Text {
+            column: 0,
+            needle: needle.to_owned(),
+        }
+    }
+
+    #[test]
+    fn blank_needle_matches_null_and_every_value() {
+        for needle in ["", "   ", "\t", "\u{a0}"] {
+            let filter = text_filter(needle);
+            assert!(filter.matches(&Value::Null), "{needle:?} on NULL");
+            assert!(
+                filter.matches(&Value::Text("x".into())),
+                "{needle:?} on text"
+            );
+        }
+        assert!(!text_filter("x").matches(&Value::Null));
+        assert!(!text_filter(">=1").matches(&Value::Null));
+    }
+
+    #[test]
+    fn filter_needle_trims_spaces_and_tabs_but_not_newlines() {
+        assert_eq!(trim_zs_tab(" \t\u{3000}x\u{a0}"), "x");
+        assert_eq!(trim_zs_tab("\nx\n"), "\nx\n");
+        // The newline stays in the operand, so it is not the number 3 and the compare is
+        // textual: "2" >= "\n3" is true, where 2 >= 3 would be false.
+        assert!(matches_text("2", ">=\n3"));
+        assert!(!matches_text("2", ">= 3"));
+    }
+
+    #[test]
+    fn search_trim_still_removes_newlines() {
+        assert_eq!(trim_search("\n x \n"), "x");
+        assert_eq!(trim_search("\n"), "");
+    }
 }
