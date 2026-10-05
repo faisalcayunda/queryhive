@@ -184,6 +184,10 @@ tetap tidak melewati `f64`.
 
 Yang harus dijaga test: nilai tidak boleh kehilangan digit, dan `scale` tidak boleh ikut berubah.
 
+Sel kedua `trino_type_zoo_live` (`-1E-10` di golden, `-0.0000000001` sekarang) masuk entri ini
+juga, ditemukan pada larian 5 Okt 2026: Trino mengirim DECIMAL yang sama, dan pyspark/trino
+client menguraikannya menjadi `Decimal` sebesar psycopg, jadi jalurnya identik.
+
 ### D-2 — Teks INTERVAL: kutip JSON dibuang, dan bulan ikut tampil · **Perbaikan disengaja**
 
 `timedelta(days=3, hours=4, minutes=5, seconds=6)` dirender sebagai `"3 days, 4:05:06"`
@@ -203,6 +207,9 @@ Sep 2026). PyMySQL mengembalikan `datetime.timedelta`, yang bukan tipe JSON, jad
 `23:59:59.999999`. Angka byte MySQL di D-9 (398 menjadi 399) adalah jumlah dua selisih ini, bukan
 efek array (MySQL tidak punya array): `tiny_negative` `-1E-10` menjadi `-0.0000000001` (+7 byte) dan
 kutip `a_time` yang dibuang (-6 byte, karena CSV menggandakan kutip dan membungkus selnya).
+
+Sel interval `trino_type_zoo_live` (baris `rows`, sel ketujuh: golden `"3 days, 4:05:06"` dengan
+kutip, sekarang `3 days, 4:05:06` tanpa) masuk entri ini juga, ditemukan pada larian 5 Okt 2026.
 
 Sel `a_uuid` di kasus yang sama kehilangan kutipnya lewat jalur yang sama, dan itu perlu disebut
 karena sel itu ikut menentukan angka byte di D-9. psycopg mengembalikan `uuid.UUID`, yang bukan tipe
@@ -239,6 +246,17 @@ sebabnya. Empat yang hijau, `postgres_catalogs_live`, `postgres_tables_live`, `p
 dan `postgres_count_live`, hijau karena tidak memancarkan `columns` sama sekali, bukan karena
 tipenya kebetulan cocok.
 
+**MySQL ikut, Trino tidak — dan itu terukur, bukan ditebak.** Diukur 5 Okt 2026. MySQL mengirim
+kode juga: `mysql_batching_live` dan `mysql_explain_live` merah **hanya** di medan ini (golden
+`8` / `252` / `253`, kode DBAPI PyMySQL; sekarang `bigint` / `blob` / `varchar`), dan
+`mysql_type_zoo_live` serta `mysql_export_live` ikut merah di medan ini **di samping** selisih
+yang sudah tercatat di D-1, D-2 dan D-9. Trino tidak: `trino_nation_live`, `trino_explain_live`
+dan `trino_batching_live` memancarkan medan yang sama dan cocok persis, karena client Trino sudah
+mengirim nama tipe (`varchar(721)` di golden, bukan `12`) — sebab itulah `trino_type_zoo_live`
+merah karena D-1 dan D-2 saja. Kasus yang tidak memancarkan `columns` sama sekali: `postgres` empat
+(`tables`, `objects`, `count`, `catalogs`), `mysql` empat (`tables`, `count`, dan `objects` serta
+`schemas` yang merah karena D-10 dan D-4), `trino` dua (`objects`, `count`).
+
 ### D-9 — Nilai array Postgres tetap literal server, bukan daftar JSON · **Bukan regresi**
 
 Mesin Python mengirim daftar JSON — `[1, null, 3]` — karena psycopg sudah mendekode array itu
@@ -268,6 +286,28 @@ type_zoo` yang sama ditulis mesin lama sebagai **508** byte CSV Postgres, sekara
 MySQL **398** menjadi **399**. Karena itu `postgres_export_live` dan `mysql_export_live` merah
 pada `files.bytes` di peristiwa `done`, dan baris `files.bytes` itulah satu-satunya tempat di
 korpus ini di mana besar sebuah keputusan perender terlihat sebagai angka.
+
+### D-10 — `Rows` pada `mysql_objects_live` adalah **estimasi InnoDB**, dan estimasi itu bergerak · **Bukan regresi**
+
+Golden merekam `["type_zoo", "InnoDB", "1", ""]`, sekarang `"0"` — hanya baris `type_zoo`; baris
+`wide_500k` (`476354`) cocok persis di kedua sisi.
+
+Nilai itu `information_schema.tables.TABLE_ROWS`, yang bukan jumlah baris melainkan **perkiraan
+InnoDB** (catatan pada `.meta.json`-nya sudah menulis "(estimated) row count"). Diukur 5 Okt 2026
+di container dev: perkiraan untuk `type_zoo` **0**, `COUNT(*)` sesungguhnya **1**; perkiraan
+`wide_500k` **476354** terhadap `COUNT(*)` **500000**. Jadi kedua mesin membaca kolom yang sama dan
+mendapat jawaban yang sama — yang berbeda adalah angka perkiraan itu sendiri, karena statistik
+tabel berubah tiap kali seed di-*replay* (`deploy/dev/up.sh`) dan tiap kali tabel disentuh.
+
+Ini kategori yang sudah dimaskir alat ini untuk hal yang sama: `normalise` membuang **id objek**
+karena "cluster's history", dan `Rows` adalah angka dari kelas yang sama — sejarah server, bukan
+jawaban engine. Ia tidak dimaskir karena kasusnya hanya satu dan angkanya ikut terbaca sebagai
+"data nyata" di `.meta.json`.
+
+Kalau kasus ini harus hijau, ada dua jalur dan keduanya keputusan pemilik, bukan efek samping:
+maskir `Rows` di `tools/golden/normalise.py` (bersama id objek), atau rekam ulang dengan
+`live_cases.py --record --force mysql_objects_live`. Memilih yang kedua menyembunyikan gerakan
+statistik berikutnya juga, jadi yang pertama adalah yang konsisten dengan alasan masking ada.
 
 ## Temuan yang sudah ditutup
 
