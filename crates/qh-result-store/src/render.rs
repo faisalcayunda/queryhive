@@ -295,7 +295,8 @@ fn render_cell_into(
     cell.text.clear();
     cell.flags = 0;
 
-    let is_null = array.is_null(row);
+    // A NullArray has no validity buffer, so `is_null` is false for it: the encoding decides.
+    let is_null = enc == Encoding::Null || array.is_null(row);
     if is_null {
         cell.flags |= CELL_NULL;
         return Ok(());
