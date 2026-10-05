@@ -5,7 +5,8 @@
 //! cargo run --release -p qh-ffi --example bench_ffi -- <scenario> [--repeat N]
 //! ```
 //!
-//! Scenarios: `local-loop`, `emit-only`, `preview-wide`, or `all` (the default). `--repeat`
+//! Scenarios: `local-loop`, `emit-only`, `preview-wide`, `window`, `window-json`, `view-sort`,
+//! `view-sort-text`, `view-filter`, `view-search`, or `all` (the default). `--repeat`
 //! defaults to 5. `preview-wide` needs the dev PostgreSQL (`deploy/dev/up.sh`) on
 //! 127.0.0.1:55432 with `wide_500k` seeded (`BENCH_FFI_PG_PORT` overrides the port).
 //!
@@ -28,10 +29,26 @@
 //!   `sink_ms` (time inside `on_event`), `sink_share_ratio` (`sink_ms / total_ms`). The sink
 //!   only counts, so the share is a floor for a real sink.
 //!
+//! - `window` (scenario `ffi-window`): `window_p50_ms`, `window_p95_ms`, `window_p99_ms`,
+//!   `window_max_ms` over 5,000 random 128 x 30 windows of a 1M x 30 synthetic store (bigint,
+//!   double and text columns, all resident), through `ResultHandle::window`. This is the Rust
+//!   side including the buffer copy; the UniFFI crossing is `StoreWindowBench` on the Swift side.
+//!   The target is p99 <= 0.5 ms (NFR-P8); a miss goes to W8-T2, it does not fail the run.
+//! - `window-json` (scenario `ffi-window-json`): the same numbers for 128 x 8 windows whose
+//!   columns are JSON text shown with `CellFormat::Json`. Recorded, never gated: the printer
+//!   re-parses every cell (blueprint section 11.5).
+//! - `view-sort`, `view-sort-text`, `view-filter`, `view-search` (scenarios `ffi-view-*`):
+//!   `view_ms`, the time `set_view` blocks on the 1M x 30 store, with the view pool's thread
+//!   count as `view_threads`. Sort by a bigint, sort by a text column (natural key), a `Text`
+//!   filter, and a search over every column.
+//!
 //! A run that reports an `error` event, or a `preview-wide` run that returns no rows, prints
 //! the reason on stderr and exits 1 without printing any sample.
 
 use qh_ffi::host::EngineHost;
+use qh_ffi::store_api::{
+    CellFormat, ColumnWire, FilterSpec, ResultHandle, SortSpec, StoreFfiError, ViewSpec,
+};
 use qh_ffi::uniffi_api::{EngineCommand, EventSink, RunCancel, Setting};
 use serde_json::{json, Value as Json};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -223,6 +240,239 @@ fn preview_wide(repeat: u32) {
     );
 }
 
+// ---- the data plane -------------------------------------------------------------------------
+
+const BENCH_ROWS: u32 = 1_000_000;
+const BENCH_COLUMNS: u32 = 30;
+
+/// The registry, configured once: no spill and a budget the whole bench store fits in, so what
+/// is measured is the resident path, which is the one the 0.5 ms target is about.
+fn stores() -> &'static Arc<EngineHost> {
+    static CONFIGURED: OnceLock<()> = OnceLock::new();
+    CONFIGURED.get_or_init(|| {
+        host()
+            .configure_result_stores(None, 3 * 1024 * 1024 * 1024)
+            .unwrap_or_else(|error| die(&format!("configure_result_stores: {error}")));
+    });
+    host()
+}
+
+fn die(message: &str) -> ! {
+    eprintln!("bench_ffi: {message}");
+    std::process::exit(1);
+}
+
+fn ok<T>(what: &str, result: Result<T, StoreFfiError>) -> T {
+    result.unwrap_or_else(|error| die(&format!("{what}: {error}")))
+}
+
+/// 1M x 30 synthetic rows, built once and shared by every data-plane scenario.
+fn big_store() -> &'static Arc<ResultHandle> {
+    static STORE: OnceLock<Arc<ResultHandle>> = OnceLock::new();
+    STORE.get_or_init(|| {
+        let started = Instant::now();
+        let store = ok(
+            "store_synthetic",
+            stores().store_synthetic(BENCH_ROWS, BENCH_COLUMNS, 42),
+        );
+        eprintln!(
+            "built a {BENCH_ROWS} x {BENCH_COLUMNS} store in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        store
+    })
+}
+
+/// 20,000 rows of 8 JSON-text columns, for `window-json`.
+fn json_store() -> &'static Arc<ResultHandle> {
+    static STORE: OnceLock<Arc<ResultHandle>> = OnceLock::new();
+    STORE.get_or_init(|| {
+        let columns = (0..8)
+            .map(|k| ColumnWire {
+                name: format!("j{k}"),
+                type_name: "json".to_owned(),
+            })
+            .collect();
+        let rows = (0..20_000u32)
+            .map(|r| {
+                (0..8u32)
+                    .map(|k| {
+                        Some(format!(
+                            r#"{{"id":{r},"col":{k},"name":"item {r}-{k}","tags":["a","b","c"],"nested":{{"x":{},"y":[1,2,3,4,5],"z":"lorem ipsum dolor sit amet"}}}}"#,
+                            r * 7 + k
+                        ))
+                    })
+                    .collect()
+            })
+            .collect();
+        ok("store_from_rows", stores().store_from_rows(columns, rows))
+    })
+}
+
+/// A small deterministic generator, so a run is repeatable.
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
+    sorted_ms[(((sorted_ms.len() - 1) as f64) * p).round() as usize]
+}
+
+/// Time `calls` random windows and report the percentiles.
+fn window_case(
+    scenario: &str,
+    store: &ResultHandle,
+    rows: u32,
+    window_rows: u32,
+    columns: u32,
+    format: CellFormat,
+    repeat: u32,
+) {
+    const CALLS: usize = 5_000;
+    const WARMUP: usize = 200;
+    let cols: Vec<u32> = (0..columns).collect();
+    let formats = vec![format; columns as usize];
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut bytes = 0usize;
+    let mut times: Vec<f64> = Vec::with_capacity(CALLS);
+    for call in 0..WARMUP + CALLS {
+        let first = (xorshift(&mut state) % u64::from(rows - window_rows)) as u32;
+        let started = Instant::now();
+        let buffer = ok(
+            "window",
+            store.window(0, first, window_rows, cols.clone(), formats.clone()),
+        );
+        let took = ms(started.elapsed());
+        bytes = buffer.len();
+        if call >= WARMUP {
+            times.push(took);
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    emit(
+        scenario,
+        json!("window"),
+        repeat,
+        json!({
+            "window_p50_ms": percentile(&times, 0.50),
+            "window_p95_ms": percentile(&times, 0.95),
+            "window_p99_ms": percentile(&times, 0.99),
+            "window_max_ms": times[times.len() - 1],
+            "window_rows": window_rows, "window_columns": columns, "window_bytes": bytes,
+        }),
+    );
+}
+
+fn window(repeat: u32) {
+    window_case(
+        "ffi-window",
+        big_store(),
+        BENCH_ROWS,
+        128,
+        BENCH_COLUMNS,
+        CellFormat::Raw,
+        repeat,
+    );
+}
+
+fn window_json(repeat: u32) {
+    window_case(
+        "ffi-window-json",
+        json_store(),
+        20_000,
+        128,
+        8,
+        CellFormat::Json,
+        repeat,
+    );
+}
+
+fn view_case(scenario: &str, spec: impl Fn() -> ViewSpec, repeat: u32) {
+    let store = big_store();
+    let started = Instant::now();
+    let info = ok("set_view", store.set_view(spec()));
+    let took = ms(started.elapsed());
+    emit(
+        scenario,
+        json!(null),
+        repeat,
+        json!({
+            "view_ms": took, "view_visible": info.visible, "view_rows": info.fetched,
+            "view_threads": qh_rt::view_pool().current_num_threads(),
+        }),
+    );
+    // Back to the identity view, so the next case starts from the same place and the window
+    // scenarios, which ask for view 0, still can.
+    ok(
+        "set_view",
+        store.set_view(ViewSpec {
+            sort: None,
+            filters: vec![],
+            search: None,
+        }),
+    );
+}
+
+fn view_sort(repeat: u32) {
+    view_case(
+        "ffi-view-sort",
+        || ViewSpec {
+            sort: Some(SortSpec {
+                column: 0,
+                descending: false,
+            }),
+            filters: vec![],
+            search: None,
+        },
+        repeat,
+    );
+}
+
+fn view_sort_text(repeat: u32) {
+    view_case(
+        "ffi-view-sort-text",
+        || ViewSpec {
+            sort: Some(SortSpec {
+                column: 2,
+                descending: true,
+            }),
+            filters: vec![],
+            search: None,
+        },
+        repeat,
+    );
+}
+
+fn view_filter(repeat: u32) {
+    view_case(
+        "ffi-view-filter",
+        || ViewSpec {
+            sort: None,
+            filters: vec![FilterSpec::Text {
+                column: 2,
+                needle: "r99".to_owned(),
+            }],
+            search: None,
+        },
+        repeat,
+    );
+}
+
+fn view_search(repeat: u32) {
+    view_case(
+        "ffi-view-search",
+        || ViewSpec {
+            sort: None,
+            filters: vec![],
+            search: Some("r123456-".to_owned()),
+        },
+        repeat,
+    );
+}
+
 type Scenario = (&'static str, fn(u32));
 
 fn main() {
@@ -240,10 +490,16 @@ fn main() {
         ("local-loop", local_loop),
         ("emit-only", emit_only),
         ("preview-wide", preview_wide),
+        ("window", window),
+        ("window-json", window_json),
+        ("view-sort", view_sort),
+        ("view-sort-text", view_sort_text),
+        ("view-filter", view_filter),
+        ("view-search", view_search),
     ];
     assert!(
         scenario == "all" || scenarios.iter().any(|(n, _)| *n == scenario),
-        "unknown scenario {scenario:?}; one of local-loop, emit-only, preview-wide, all"
+        "unknown scenario {scenario:?}; one of local-loop, emit-only, preview-wide, window, window-json, view-sort, view-sort-text, view-filter, view-search, all"
     );
     for (name, f) in scenarios {
         if scenario == "all" || scenario == *name {

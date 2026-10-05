@@ -570,6 +570,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -879,11 +897,24 @@ public func FfiConverterTypeEditorDocument_lower(_ value: EditorDocument) -> UIn
 /**
  * The engine, for the app's whole lifetime.
  *
- * It holds the session pool and the local SQLite handle, and nothing else. Creating one does no
+ * It holds the session pool, the local SQLite handle and the result stores' registry, and nothing else. Creating one does no
  * I/O: the pool is empty, SQLite opens on the first local command, and the runtime is built the
  * first time something needs it.
  */
 public protocol EngineHostProtocol: AnyObject, Sendable {
+    
+    /**
+     * Build the result stores' registry once, and sweep the spill directory (blueprint fase-6
+     * section 9.7). Call it off the main thread, before the first store is made. A second call
+     * is an `InvalidArgument`: the budget and the spill directory are fixed for the process.
+     */
+    func configureResultStores(spillDir: String?, budgetBytes: UInt64) throws  -> StoreSweep
+    
+    /**
+     * An empty store for the next run, made before the run so the tab can hold its handle
+     * from the start. The columns arrive with the run.
+     */
+    func createResultStore() throws  -> ResultHandle
     
     /**
      * Run one command, sending each event to `sink` as it is produced.
@@ -896,6 +927,28 @@ public protocol EngineHostProtocol: AnyObject, Sendable {
     func run(command: EngineCommand, settings: [Setting], sink: EventSink, cancel: RunCancel) 
     
     /**
+     * Run `preview` or `explain` into `store` instead of into `rows` events.
+     *
+     * Like `run`: blocks until the command has ended, a failure is an `error` event on `sink`
+     * and never a thrown error, and it does not belong on the main thread. The rows go to the
+     * store; the sink sees `step`, `columns`, `progress` and `done`. The store ends `Complete`,
+     * `Cancelled` or `Failed`, whichever the run did, so a grid polling `row_count` always sees
+     * a terminal phase. Any other command is a usage `error`, and a store that already holds a
+     * run is refused: one store, one run.
+     */
+    func runWithStore(command: EngineCommand, settings: [Setting], store: ResultHandle, sink: EventSink, cancel: RunCancel) 
+    
+    /**
+     * A store made from rows already in hand: the sample data, tests, a scene snapshot.
+     */
+    func storeFromRows(columns: [ColumnWire], rows: [[String?]]) throws  -> ResultHandle
+    
+    /**
+     * The registry's numbers, for the diagnostics bundle.
+     */
+    func storeStats() throws  -> StoreStats
+    
+    /**
      * Open one session in the background for the connection these settings describe, when it has
      * none, so the first Run finds it warm. Returns at once; a failure is dropped and the Run
      * that follows reports the same error on its normal path. It connects and sends no query.
@@ -906,7 +959,7 @@ public protocol EngineHostProtocol: AnyObject, Sendable {
 /**
  * The engine, for the app's whole lifetime.
  *
- * It holds the session pool and the local SQLite handle, and nothing else. Creating one does no
+ * It holds the session pool, the local SQLite handle and the result stores' registry, and nothing else. Creating one does no
  * I/O: the pool is empty, SQLite opens on the first local command, and the runtime is built the
  * first time something needs it.
  */
@@ -972,6 +1025,35 @@ public convenience init() {
 
     
     /**
+     * Build the result stores' registry once, and sweep the spill directory (blueprint fase-6
+     * section 9.7). Call it off the main thread, before the first store is made. A second call
+     * is an `InvalidArgument`: the budget and the spill directory are fixed for the process.
+     */
+open func configureResultStores(spillDir: String?, budgetBytes: UInt64)throws  -> StoreSweep  {
+    return try  FfiConverterTypeStoreSweep_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_configure_result_stores(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(spillDir),
+        FfiConverterUInt64.lower(budgetBytes),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * An empty store for the next run, made before the run so the tab can hold its handle
+     * from the start. The columns arrive with the run.
+     */
+open func createResultStore()throws  -> ResultHandle  {
+    return try  FfiConverterTypeResultHandle_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_create_result_store(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Run one command, sending each event to `sink` as it is produced.
      *
      * The contract the free `run` had, kept as it was: blocks until the command has ended, events
@@ -989,6 +1071,55 @@ open func run(command: EngineCommand, settings: [Setting], sink: EventSink, canc
         FfiConverterTypeRunCancel_lower(cancel),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Run `preview` or `explain` into `store` instead of into `rows` events.
+     *
+     * Like `run`: blocks until the command has ended, a failure is an `error` event on `sink`
+     * and never a thrown error, and it does not belong on the main thread. The rows go to the
+     * store; the sink sees `step`, `columns`, `progress` and `done`. The store ends `Complete`,
+     * `Cancelled` or `Failed`, whichever the run did, so a grid polling `row_count` always sees
+     * a terminal phase. Any other command is a usage `error`, and a store that already holds a
+     * run is refused: one store, one run.
+     */
+open func runWithStore(command: EngineCommand, settings: [Setting], store: ResultHandle, sink: EventSink, cancel: RunCancel)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_run_with_store(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEngineCommand_lower(command),
+        FfiConverterSequenceTypeSetting.lower(settings),
+        FfiConverterTypeResultHandle_lower(store),
+        FfiConverterTypeEventSink_lower(sink),
+        FfiConverterTypeRunCancel_lower(cancel),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * A store made from rows already in hand: the sample data, tests, a scene snapshot.
+     */
+open func storeFromRows(columns: [ColumnWire], rows: [[String?]])throws  -> ResultHandle  {
+    return try  FfiConverterTypeResultHandle_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_store_from_rows(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeColumnWire.lower(columns),
+        FfiConverterSequenceSequenceOptionString.lower(rows),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The registry's numbers, for the diagnostics bundle.
+     */
+open func storeStats()throws  -> StoreStats  {
+    return try  FfiConverterTypeStoreStats_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_enginehost_store_stats(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1276,6 +1407,286 @@ public func FfiConverterTypeEventSink_lower(_ value: EventSink) -> UInt64 {
 
 
 /**
+ * One result, held by the app for as long as its tab shows it.
+ */
+public protocol ResultHandleProtocol: AnyObject, Sendable {
+    
+    /**
+     * One cell's full text, `None` for NULL.
+     */
+    func cellText(viewId: UInt64, row: UInt32, column: UInt32, format: CellFormat) throws  -> String?
+    
+    /**
+     * The width statistics for the columns, in UTF-16 units of the head of the result.
+     */
+    func columnWidths() throws  -> [UInt32]
+    
+    /**
+     * The columns, empty until the run has reported them.
+     */
+    func columns() throws  -> [ColumnWire]
+    
+    /**
+     * The distinct values of one column, at most `limit` of them.
+     */
+    func distinctValues(column: UInt32, limit: UInt32) throws  -> DistinctValues
+    
+    /**
+     * Let go of the rows now. Idempotent; every other method then answers `StaleHandle`.
+     */
+    func release() throws 
+    
+    /**
+     * Atomic loads only, no side effects: safe to call on every display-link tick.
+     */
+    func rowCount() throws  -> RowCount
+    
+    /**
+     * The same layout with `CUT` clear and the full text of every cell, for copy and export.
+     */
+    func rowsText(viewId: UInt64, firstRow: UInt32, rowCount: UInt32, columns: [UInt32]) throws  -> Data
+    
+    /**
+     * Install a view. Blocks while it is computed: call off the main thread.
+     */
+    func setView(spec: ViewSpec) throws  -> ViewInfo
+    
+    /**
+     * A window of the view as one `QHW1` buffer, cells cut at 256 UTF-16 units.
+     */
+    func window(viewId: UInt64, firstRow: UInt32, rowCount: UInt32, columns: [UInt32], formats: [CellFormat]) throws  -> Data
+    
+}
+/**
+ * One result, held by the app for as long as its tab shows it.
+ */
+open class ResultHandle: ResultHandleProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_qh_ffi_fn_clone_resulthandle(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_qh_ffi_fn_free_resulthandle(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * One cell's full text, `None` for NULL.
+     */
+open func cellText(viewId: UInt64, row: UInt32, column: UInt32, format: CellFormat)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_cell_text(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(viewId),
+        FfiConverterUInt32.lower(row),
+        FfiConverterUInt32.lower(column),
+        FfiConverterTypeCellFormat_lower(format),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The width statistics for the columns, in UTF-16 units of the head of the result.
+     */
+open func columnWidths()throws  -> [UInt32]  {
+    return try  FfiConverterSequenceUInt32.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_column_widths(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The columns, empty until the run has reported them.
+     */
+open func columns()throws  -> [ColumnWire]  {
+    return try  FfiConverterSequenceTypeColumnWire.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_columns(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The distinct values of one column, at most `limit` of them.
+     */
+open func distinctValues(column: UInt32, limit: UInt32)throws  -> DistinctValues  {
+    return try  FfiConverterTypeDistinctValues_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_distinct_values(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(column),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Let go of the rows now. Idempotent; every other method then answers `StaleHandle`.
+     */
+open func release()throws   {try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_release(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Atomic loads only, no side effects: safe to call on every display-link tick.
+     */
+open func rowCount()throws  -> RowCount  {
+    return try  FfiConverterTypeRowCount_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_row_count(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The same layout with `CUT` clear and the full text of every cell, for copy and export.
+     */
+open func rowsText(viewId: UInt64, firstRow: UInt32, rowCount: UInt32, columns: [UInt32])throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_rows_text(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(viewId),
+        FfiConverterUInt32.lower(firstRow),
+        FfiConverterUInt32.lower(rowCount),
+        FfiConverterSequenceUInt32.lower(columns),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Install a view. Blocks while it is computed: call off the main thread.
+     */
+open func setView(spec: ViewSpec)throws  -> ViewInfo  {
+    return try  FfiConverterTypeViewInfo_lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_set_view(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeViewSpec_lower(spec),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * A window of the view as one `QHW1` buffer, cells cut at 256 UTF-16 units.
+     */
+open func window(viewId: UInt64, firstRow: UInt32, rowCount: UInt32, columns: [UInt32], formats: [CellFormat])throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_resulthandle_window(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(viewId),
+        FfiConverterUInt32.lower(firstRow),
+        FfiConverterUInt32.lower(rowCount),
+        FfiConverterSequenceUInt32.lower(columns),
+        FfiConverterSequenceTypeCellFormat.lower(formats),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeResultHandle: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = ResultHandle
+
+    public static func lift(_ handle: UInt64) throws -> ResultHandle {
+        return ResultHandle(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: ResultHandle) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ResultHandle {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ResultHandle, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeResultHandle_lift(_ handle: UInt64) throws -> ResultHandle {
+    return try FfiConverterTypeResultHandle.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeResultHandle_lower(_ value: ResultHandle) -> UInt64 {
+    return FfiConverterTypeResultHandle.lower(value)
+}
+
+
+
+
+
+
+/**
  * The handle that stops a run, built by the caller and handed to [`EngineHost::run`](crate::host::EngineHost::run).
  *
  * A handle rather than a function that cancels "whatever is running", because this crate can
@@ -1465,6 +1876,132 @@ public func FfiConverterTypeRunCancel_lower(_ value: RunCancel) -> UInt64 {
 }
 
 
+
+
+/**
+ * One column of a result, as the grid draws its header.
+ */
+public struct ColumnWire: Equatable, Hashable {
+    public var name: String
+    public var typeName: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, typeName: String) {
+        self.name = name
+        self.typeName = typeName
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ColumnWire: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeColumnWire: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ColumnWire {
+        return
+            try ColumnWire(
+                name: FfiConverterString.read(from: &buf), 
+                typeName: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ColumnWire, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.typeName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeColumnWire_lift(_ buf: RustBuffer) throws -> ColumnWire {
+    return try FfiConverterTypeColumnWire.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeColumnWire_lower(_ value: ColumnWire) -> RustBuffer {
+    return FfiConverterTypeColumnWire.lower(value)
+}
+
+
+/**
+ * The distinct values of one column.
+ */
+public struct DistinctValues: Equatable, Hashable {
+    /**
+     * `None` is NULL.
+     */
+    public var values: [String?]
+    /**
+     * True when the column held more than the limit; `values` is then empty.
+     */
+    public var more: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `None` is NULL.
+         */values: [String?], 
+        /**
+         * True when the column held more than the limit; `values` is then empty.
+         */more: Bool) {
+        self.values = values
+        self.more = more
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DistinctValues: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDistinctValues: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DistinctValues {
+        return
+            try DistinctValues(
+                values: FfiConverterSequenceOptionString.read(from: &buf), 
+                more: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DistinctValues, into buf: inout [UInt8]) {
+        FfiConverterSequenceOptionString.write(value.values, into: &buf)
+        FfiConverterBool.write(value.more, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDistinctValues_lift(_ buf: RustBuffer) throws -> DistinctValues {
+    return try FfiConverterTypeDistinctValues.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDistinctValues_lower(_ value: DistinctValues) -> RustBuffer {
+    return FfiConverterTypeDistinctValues.lower(value)
+}
 
 
 /**
@@ -1811,6 +2348,89 @@ public func FfiConverterTypeEditorPaint_lower(_ value: EditorPaint) -> RustBuffe
 
 
 /**
+ * What `row_count` answers: atomics only, no side effects, cheap enough for a display link.
+ */
+public struct RowCount: Equatable, Hashable {
+    /**
+     * Rows the store holds.
+     */
+    public var fetched: UInt32
+    /**
+     * Rows the current view shows.
+     */
+    public var visible: UInt32
+    /**
+     * The current view; 0 is the identity view.
+     */
+    public var viewId: UInt64
+    public var phase: StorePhase
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Rows the store holds.
+         */fetched: UInt32, 
+        /**
+         * Rows the current view shows.
+         */visible: UInt32, 
+        /**
+         * The current view; 0 is the identity view.
+         */viewId: UInt64, phase: StorePhase) {
+        self.fetched = fetched
+        self.visible = visible
+        self.viewId = viewId
+        self.phase = phase
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RowCount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRowCount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RowCount {
+        return
+            try RowCount(
+                fetched: FfiConverterUInt32.read(from: &buf), 
+                visible: FfiConverterUInt32.read(from: &buf), 
+                viewId: FfiConverterUInt64.read(from: &buf), 
+                phase: FfiConverterTypeStorePhase.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RowCount, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.fetched, into: &buf)
+        FfiConverterUInt32.write(value.visible, into: &buf)
+        FfiConverterUInt64.write(value.viewId, into: &buf)
+        FfiConverterTypeStorePhase.write(value.phase, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowCount_lift(_ buf: RustBuffer) throws -> RowCount {
+    return try FfiConverterTypeRowCount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRowCount_lower(_ value: RowCount) -> RustBuffer {
+    return FfiConverterTypeRowCount.lower(value)
+}
+
+
+/**
  * One setting, as the environment would have carried it.
  *
  * The same keys the CLI reads (`DB_URL`, `DB_HOST`, `SQL_TEXT`, `TABLE_NAME`, …). They are
@@ -1871,6 +2491,417 @@ public func FfiConverterTypeSetting_lift(_ buf: RustBuffer) throws -> Setting {
 public func FfiConverterTypeSetting_lower(_ value: Setting) -> RustBuffer {
     return FfiConverterTypeSetting.lower(value)
 }
+
+
+/**
+ * Sort by one column.
+ */
+public struct SortSpec: Equatable, Hashable {
+    public var column: UInt32
+    public var descending: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(column: UInt32, descending: Bool) {
+        self.column = column
+        self.descending = descending
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SortSpec: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSortSpec: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SortSpec {
+        return
+            try SortSpec(
+                column: FfiConverterUInt32.read(from: &buf), 
+                descending: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SortSpec, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.column, into: &buf)
+        FfiConverterBool.write(value.descending, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSortSpec_lift(_ buf: RustBuffer) throws -> SortSpec {
+    return try FfiConverterTypeSortSpec.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSortSpec_lower(_ value: SortSpec) -> RustBuffer {
+    return FfiConverterTypeSortSpec.lower(value)
+}
+
+
+/**
+ * The registry's diagnostics.
+ */
+public struct StoreStats: Equatable, Hashable {
+    public var stores: UInt32
+    public var residentBytes: UInt64
+    /**
+     * Always 0 in this build: the registry does not report spilled bytes yet.
+     */
+    public var spilledBytes: UInt64
+    public var budgetBytes: UInt64
+    public var spillEnabled: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(stores: UInt32, residentBytes: UInt64, 
+        /**
+         * Always 0 in this build: the registry does not report spilled bytes yet.
+         */spilledBytes: UInt64, budgetBytes: UInt64, spillEnabled: Bool) {
+        self.stores = stores
+        self.residentBytes = residentBytes
+        self.spilledBytes = spilledBytes
+        self.budgetBytes = budgetBytes
+        self.spillEnabled = spillEnabled
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StoreStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStoreStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StoreStats {
+        return
+            try StoreStats(
+                stores: FfiConverterUInt32.read(from: &buf), 
+                residentBytes: FfiConverterUInt64.read(from: &buf), 
+                spilledBytes: FfiConverterUInt64.read(from: &buf), 
+                budgetBytes: FfiConverterUInt64.read(from: &buf), 
+                spillEnabled: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StoreStats, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.stores, into: &buf)
+        FfiConverterUInt64.write(value.residentBytes, into: &buf)
+        FfiConverterUInt64.write(value.spilledBytes, into: &buf)
+        FfiConverterUInt64.write(value.budgetBytes, into: &buf)
+        FfiConverterBool.write(value.spillEnabled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreStats_lift(_ buf: RustBuffer) throws -> StoreStats {
+    return try FfiConverterTypeStoreStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreStats_lower(_ value: StoreStats) -> RustBuffer {
+    return FfiConverterTypeStoreStats.lower(value)
+}
+
+
+/**
+ * What the startup sweep of the spill directory did.
+ */
+public struct StoreSweep: Equatable, Hashable {
+    public var removed: UInt32
+    public var spillEnabled: Bool
+    /**
+     * Why spill is off, when it is.
+     */
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(removed: UInt32, spillEnabled: Bool, 
+        /**
+         * Why spill is off, when it is.
+         */reason: String?) {
+        self.removed = removed
+        self.spillEnabled = spillEnabled
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StoreSweep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStoreSweep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StoreSweep {
+        return
+            try StoreSweep(
+                removed: FfiConverterUInt32.read(from: &buf), 
+                spillEnabled: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StoreSweep, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.removed, into: &buf)
+        FfiConverterBool.write(value.spillEnabled, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreSweep_lift(_ buf: RustBuffer) throws -> StoreSweep {
+    return try FfiConverterTypeStoreSweep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreSweep_lower(_ value: StoreSweep) -> RustBuffer {
+    return FfiConverterTypeStoreSweep.lower(value)
+}
+
+
+/**
+ * A view that has been installed.
+ */
+public struct ViewInfo: Equatable, Hashable {
+    public var viewId: UInt64
+    public var visible: UInt32
+    public var fetched: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(viewId: UInt64, visible: UInt32, fetched: UInt32) {
+        self.viewId = viewId
+        self.visible = visible
+        self.fetched = fetched
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ViewInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeViewInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ViewInfo {
+        return
+            try ViewInfo(
+                viewId: FfiConverterUInt64.read(from: &buf), 
+                visible: FfiConverterUInt32.read(from: &buf), 
+                fetched: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ViewInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.viewId, into: &buf)
+        FfiConverterUInt32.write(value.visible, into: &buf)
+        FfiConverterUInt32.write(value.fetched, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeViewInfo_lift(_ buf: RustBuffer) throws -> ViewInfo {
+    return try FfiConverterTypeViewInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeViewInfo_lower(_ value: ViewInfo) -> RustBuffer {
+    return FfiConverterTypeViewInfo.lower(value)
+}
+
+
+/**
+ * A view: filters, then search, then sort (the order `QueryTab.displayedRows` applies them).
+ */
+public struct ViewSpec: Equatable, Hashable {
+    public var sort: SortSpec?
+    public var filters: [FilterSpec]
+    public var search: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sort: SortSpec?, filters: [FilterSpec], search: String?) {
+        self.sort = sort
+        self.filters = filters
+        self.search = search
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ViewSpec: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeViewSpec: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ViewSpec {
+        return
+            try ViewSpec(
+                sort: FfiConverterOptionTypeSortSpec.read(from: &buf), 
+                filters: FfiConverterSequenceTypeFilterSpec.read(from: &buf), 
+                search: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ViewSpec, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeSortSpec.write(value.sort, into: &buf)
+        FfiConverterSequenceTypeFilterSpec.write(value.filters, into: &buf)
+        FfiConverterOptionString.write(value.search, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeViewSpec_lift(_ buf: RustBuffer) throws -> ViewSpec {
+    return try FfiConverterTypeViewSpec.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeViewSpec_lower(_ value: ViewSpec) -> RustBuffer {
+    return FfiConverterTypeViewSpec.lower(value)
+}
+
+
+/**
+ * How a column's stored text is shown.
+ */
+
+public enum CellFormat: Equatable, Hashable {
+    
+    case raw
+    case text
+    case uuid
+    case unixTimestamp
+    case json
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CellFormat: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCellFormat: FfiConverterRustBuffer {
+    typealias SwiftType = CellFormat
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CellFormat {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .raw
+        
+        case 2: return .text
+        
+        case 3: return .uuid
+        
+        case 4: return .unixTimestamp
+        
+        case 5: return .json
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CellFormat, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .raw:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .text:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .uuid:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unixTimestamp:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .json:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCellFormat_lift(_ buf: RustBuffer) throws -> CellFormat {
+    return try FfiConverterTypeCellFormat.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCellFormat_lower(_ value: CellFormat) -> RustBuffer {
+    return FfiConverterTypeCellFormat.lower(value)
+}
+
 
 
 /**
@@ -2490,6 +3521,395 @@ public func FfiConverterTypeEngineCommand_lower(_ value: EngineCommand) -> RustB
 }
 
 
+
+/**
+ * One filter of a view; the filters of a view are ANDed.
+ */
+
+public enum FilterSpec: Equatable, Hashable {
+    
+    /**
+     * The cell is one of `values`; `None` stands for NULL.
+     */
+    case values(column: UInt32, values: [String?]
+    )
+    /**
+     * The cell matches a comparison needle (`>= 5`, `= abc`, or a substring).
+     */
+    case text(column: UInt32, needle: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FilterSpec: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFilterSpec: FfiConverterRustBuffer {
+    typealias SwiftType = FilterSpec
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FilterSpec {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .values(column: try FfiConverterUInt32.read(from: &buf), values: try FfiConverterSequenceOptionString.read(from: &buf)
+        )
+        
+        case 2: return .text(column: try FfiConverterUInt32.read(from: &buf), needle: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FilterSpec, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .values(column,values):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt32.write(column, into: &buf)
+            FfiConverterSequenceOptionString.write(values, into: &buf)
+            
+        
+        case let .text(column,needle):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt32.write(column, into: &buf)
+            FfiConverterString.write(needle, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilterSpec_lift(_ buf: RustBuffer) throws -> FilterSpec {
+    return try FfiConverterTypeFilterSpec.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilterSpec_lower(_ value: FilterSpec) -> RustBuffer {
+    return FfiConverterTypeFilterSpec.lower(value)
+}
+
+
+
+/**
+ * What a store call can throw.
+ */
+public 
+enum StoreFfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * The handle was released (the tab closed).
+     */
+    case StaleHandle
+    /**
+     * The caller's view id is not the current one; reload from `current`.
+     */
+    case StaleView(current: UInt64
+    )
+    /**
+     * A newer `set_view` replaced this one before it finished.
+     */
+    case Superseded
+    /**
+     * A sort needs every row to have arrived.
+     */
+    case Streaming
+    case TooLarge(neededBytes: UInt64, budgetBytes: UInt64, message: String
+    )
+    /**
+     * DiskFull, SpillAuth, SpillUnavailable, Io.
+     */
+    case Spill(message: String
+    )
+    case InvalidArgument(message: String
+    )
+    case Corrupt(message: String
+    )
+    /**
+     * A caught panic, or a poisoned lock.
+     */
+    case Internal(message: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension StoreFfiError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStoreFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = StoreFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StoreFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .StaleHandle
+        case 2: return .StaleView(
+            current: try FfiConverterUInt64.read(from: &buf)
+            )
+        case 3: return .Superseded
+        case 4: return .Streaming
+        case 5: return .TooLarge(
+            neededBytes: try FfiConverterUInt64.read(from: &buf), 
+            budgetBytes: try FfiConverterUInt64.read(from: &buf), 
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .Spill(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .InvalidArgument(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .Corrupt(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 9: return .Internal(
+            message: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StoreFfiError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .StaleHandle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .StaleView(current):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt64.write(current, into: &buf)
+            
+        
+        case .Superseded:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .Streaming:
+            writeInt(&buf, Int32(4))
+        
+        
+        case let .TooLarge(neededBytes,budgetBytes,message):
+            writeInt(&buf, Int32(5))
+            FfiConverterUInt64.write(neededBytes, into: &buf)
+            FfiConverterUInt64.write(budgetBytes, into: &buf)
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Spill(message):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .InvalidArgument(message):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Corrupt(message):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Internal(message):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreFfiError_lift(_ buf: RustBuffer) throws -> StoreFfiError {
+    return try FfiConverterTypeStoreFfiError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStoreFfiError_lower(_ value: StoreFfiError) -> RustBuffer {
+    return FfiConverterTypeStoreFfiError.lower(value)
+}
+
+
+/**
+ * Where a result stands.
+ */
+
+public enum StorePhase: Equatable, Hashable {
+    
+    case empty
+    case streaming
+    case complete
+    case cancelled
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StorePhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorePhase: FfiConverterRustBuffer {
+    typealias SwiftType = StorePhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorePhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .empty
+        
+        case 2: return .streaming
+        
+        case 3: return .complete
+        
+        case 4: return .cancelled
+        
+        case 5: return .failed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StorePhase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .empty:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .streaming:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .complete:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorePhase_lift(_ buf: RustBuffer) throws -> StorePhase {
+    return try FfiConverterTypeStorePhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorePhase_lower(_ value: StorePhase) -> RustBuffer {
+    return FfiConverterTypeStorePhase.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSortSpec: FfiConverterRustBuffer {
+    typealias SwiftType = SortSpec?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSortSpec.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSortSpec.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2535,6 +3955,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeColumnWire: FfiConverterRustBuffer {
+    typealias SwiftType = [ColumnWire]
+
+    public static func write(_ value: [ColumnWire], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeColumnWire.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ColumnWire] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ColumnWire]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeColumnWire.read(from: &buf))
         }
         return seq
     }
@@ -2610,6 +4055,106 @@ fileprivate struct FfiConverterSequenceTypeSetting: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeSetting.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeCellFormat: FfiConverterRustBuffer {
+    typealias SwiftType = [CellFormat]
+
+    public static func write(_ value: [CellFormat], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCellFormat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CellFormat] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CellFormat]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCellFormat.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFilterSpec: FfiConverterRustBuffer {
+    typealias SwiftType = [FilterSpec]
+
+    public static func write(_ value: [FilterSpec], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFilterSpec.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FilterSpec] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FilterSpec]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFilterSpec.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = [String?]
+
+    public static func write(_ value: [String?], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterOptionString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String?] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String?]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterOptionString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceSequenceOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = [[String?]]
+
+    public static func write(_ value: [[String?]], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterSequenceOptionString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [[String?]] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [[String?]]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterSequenceOptionString.read(from: &buf))
         }
         return seq
     }
@@ -2716,10 +4261,52 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_method_editordocument_revision() != 12711) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_qh_ffi_checksum_method_enginehost_configure_result_stores() != 44125) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_enginehost_create_result_store() != 13247) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_qh_ffi_checksum_method_enginehost_run() != 23792) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_qh_ffi_checksum_method_enginehost_run_with_store() != 20421) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_enginehost_store_from_rows() != 17639) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_enginehost_store_stats() != 41672) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_qh_ffi_checksum_method_enginehost_warm_up() != 10635) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_cell_text() != 33816) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_column_widths() != 41598) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_columns() != 48729) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_distinct_values() != 46313) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_release() != 4891) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_row_count() != 36770) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_rows_text() != 22343) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_set_view() != 35853) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_resulthandle_window() != 33171) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_eventsink_on_event() != 4791) {

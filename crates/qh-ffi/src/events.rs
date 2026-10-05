@@ -23,12 +23,51 @@
 
 use std::io::{self, Write};
 
+use qh_result_store::StoreWriter;
 use serde_json::{Map, Value as Json};
 
 /// Where events go. A command writes to this and never to stdout directly, so the
 /// same command can be driven by a test that captures the events instead.
 pub trait Emitter {
     fn emit(&mut self, event: Json) -> io::Result<()>;
+
+    /// The result store this run writes its rows into, when its host attached one.
+    ///
+    /// `None` for every emitter but [`StoreEmitter`], which is what makes
+    /// `RESULT_SINK=store` reachable only through the app's engine host: the CLI, the MCP
+    /// server, the golden harness and the exporters write through emitters that keep this
+    /// default, so their `preview` and `explain` stay NDJSON (invariant 11).
+    fn result_store(&self) -> Option<StoreWriter> {
+        None
+    }
+}
+
+/// An emitter that forwards every event to `inner` and hands `preview` and `explain` a
+/// result store to write rows into (blueprint fase-6 section 12.3).
+pub struct StoreEmitter<E: Emitter> {
+    inner: E,
+    writer: StoreWriter,
+}
+
+impl<E: Emitter> StoreEmitter<E> {
+    pub fn new(inner: E, writer: StoreWriter) -> Self {
+        Self { inner, writer }
+    }
+
+    /// The wrapped emitter back, for a test that reads what it captured.
+    pub fn into_inner(self) -> E {
+        self.inner
+    }
+}
+
+impl<E: Emitter> Emitter for StoreEmitter<E> {
+    fn emit(&mut self, event: Json) -> io::Result<()> {
+        self.inner.emit(event)
+    }
+
+    fn result_store(&self) -> Option<StoreWriter> {
+        Some(self.writer.clone())
+    }
 }
 
 /// Events as JSON lines on a writer, flushed one at a time.

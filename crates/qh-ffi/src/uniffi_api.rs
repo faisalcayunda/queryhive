@@ -3,7 +3,8 @@
 //! ADR-0004 splits the app's two paths: the control plane — connect, introspect, run, cancel,
 //! events, at low frequency — goes through UniFFI, because what it needs is *correct error and
 //! type mapping*; the data plane does not, because marshalling every cell as a string is the
-//! very problem this migration exists to remove. This module is only the first of those.
+//! very problem this migration exists to remove. This module is only the first of those; the data
+//! plane is [`crate::store_api`] (`ResultHandle`, one packed window buffer per call).
 //!
 //! # Why the events are JSON lines
 //!
@@ -316,7 +317,7 @@ pub(crate) fn settings_of(settings: Vec<Setting>) -> Settings {
 pub(crate) fn run_with(
     command: Command,
     settings: &Settings,
-    out: &mut SinkEmitter,
+    out: &mut dyn Emitter,
     engine: &dyn Engine,
     cancel: &CancelFlag,
     storage: Option<SharedStorage>,

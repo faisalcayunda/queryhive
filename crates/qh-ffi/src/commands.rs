@@ -30,6 +30,7 @@ use qh_driver::{
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
+use qh_result_store::{Outcome, StoreError, StoreWriter};
 use qh_sql::{
     Decision, Dialect, FloorSource, SafeMode, SafeModeFloor, StatementDecision, StatementKind,
     SAFE_MODES,
@@ -1537,13 +1538,24 @@ pub async fn preview(
     // nothing about the statement.
     let limit = settings.number("LIMIT", PREVIEW_LIMIT)?.max(1) as u64;
     let config = connection(settings, engine)?;
+    let mut target = row_target(settings, out)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
     let bounds = PageBounds {
         limit: Some(limit),
         timeout,
     };
-    let streamed = stream_rows(settings, out, engine, &config, &sql, bounds, cancel).await?;
+    let streamed = stream_rows(
+        settings,
+        out,
+        engine,
+        &config,
+        &sql,
+        bounds,
+        cancel,
+        &mut *target,
+    )
+    .await?;
     let cancelled = streamed.cancelled;
     let done = event("done")
         .field("rows", streamed.rows)
@@ -1578,6 +1590,7 @@ pub async fn explain(
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     let config = connection(settings, engine)?;
+    let mut target = row_target(settings, out)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
 
@@ -1592,7 +1605,7 @@ pub async fn explain(
         &policy,
         &statement,
         &ExecuteOptions {
-            max_batch_rows: Some(PREVIEW_BATCH),
+            max_batch_rows: Some(target.max_batch_rows()),
             row_limit: None,
             statement_timeout: timeout,
         },
@@ -1614,7 +1627,8 @@ pub async fn explain(
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
     // branch on it.
-    let (rows, _, cancelled) = emit_batches(out, &mut cursor, primed, None, Some(cancel)).await?;
+    let (rows, _, cancelled) =
+        pump_result(out, &mut cursor, primed, None, Some(cancel), &mut *target).await?;
     let query_id = session.query_id();
     let warning = if cancelled {
         stop_session(session, Some(cursor)).await
@@ -1663,6 +1677,7 @@ fn stopped_run(
 /// `preview` and `explain` share this: both put a database result set on the wire
 /// for the grid to paint, and neither may grow a second copy of the batching rule.
 /// They differ only in the cap, which is what `limit: None` means.
+#[allow(clippy::too_many_arguments)]
 async fn stream_rows(
     settings: &Settings,
     out: &mut dyn Emitter,
@@ -1671,6 +1686,7 @@ async fn stream_rows(
     sql: &str,
     bounds: PageBounds,
     cancel: &CancelFlag,
+    target: &mut dyn RowTarget,
 ) -> Result<Streamed, CliError> {
     let stopped = |query_id, warning| Streamed {
         rows: 0,
@@ -1691,10 +1707,10 @@ async fn stream_rows(
         &ExecuteOptions {
             // The batch size is also the fetch size, so a flush that happens
             // early never asks the coordinator for more rows than the cap shows.
-            max_batch_rows: Some(PREVIEW_BATCH),
+            max_batch_rows: Some(target.max_batch_rows()),
             // The cap plus the verdict row and not a row more, so the driver can stop reading
             // (and MySQL can ask its server to stop producing) instead of pulling a whole page
-            // past what the grid shows. `emit_batches` still does the cutting.
+            // past what the grid shows. `pump_result` still does the cutting.
             row_limit: bounds
                 .limit
                 .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
@@ -1721,7 +1737,7 @@ async fn stream_rows(
     };
     let primed = primed?;
     let (rows, truncated, cancelled) =
-        emit_batches(out, &mut cursor, primed, bounds.limit, Some(cancel)).await?;
+        pump_result(out, &mut cursor, primed, bounds.limit, Some(cancel), target).await?;
     let query_id = session.query_id();
     // A capped or stopped result leaves the statement unfinished on the server, so the
     // session is stopped rather than merely closed, see [`stop_session`].
@@ -1759,13 +1775,260 @@ struct Streamed {
     warning: Option<String>,
 }
 
-/// Send `columns`, then `rows` in `PREVIEW_BATCH` batches, honouring an optional cap.
+/// Where [`pump_result`] puts the rows of a result set (blueprint fase-6 section 16.1).
 ///
-/// The values are the writers' own canonical text (`qh-core::render::to_text`), so a
-/// cell is always a string or `null`: `null` is how the grid renders a NULL, and a
-/// decimal or a timestamp never becomes a native JSON number or a second JSON type
-/// in the same column. The batches go out under `data`, never under `rows` — `rows`
-/// is the integer count `done` carries, and one key cannot be two types.
+/// The loop that fetches, caps, probes for the verdict and honours a Stop is one copy;
+/// what differs is only what happens to a batch once it is in hand. `NdjsonTarget` is the
+/// behaviour the CLI, the MCP server and the golden corpus have always had; `StoreTarget`
+/// writes into the result store the app's engine host attached.
+trait RowTarget {
+    /// The cursor's own batch ceiling for this target.
+    fn max_batch_rows(&self) -> usize;
+    /// Called once, with the columns, before the first row.
+    fn begin(&mut self, out: &mut dyn Emitter, columns: &[ColumnMeta]) -> Result<(), CliError>;
+    /// How many rows to ask the cursor for next. `remaining` is what is left under the cap.
+    fn fetch_size(&mut self, remaining: Option<u64>) -> usize;
+    /// Take the rows `rows` of `batch`. `Released` from a store means the tab is gone.
+    fn accept(
+        &mut self,
+        out: &mut dyn Emitter,
+        batch: &ColumnBatch,
+        rows: std::ops::Range<usize>,
+    ) -> Result<(), CliError>;
+    /// The result ended without a failure. Returns the rows delivered.
+    fn finish(
+        &mut self,
+        out: &mut dyn Emitter,
+        truncated: bool,
+        cancelled: bool,
+    ) -> Result<u64, CliError>;
+    /// The result ended in `error`. The default does nothing: an NDJSON consumer already
+    /// holds the rows it was sent, and the `error` event is the whole story.
+    fn abort(&mut self, _error: &CliError) {}
+}
+
+/// `rows` events of `PREVIEW_BATCH` cells each, exactly what the app and the frozen
+/// snapshots have always seen.
+struct NdjsonTarget {
+    pending: Vec<Json>,
+    emitted: u64,
+}
+
+impl NdjsonTarget {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            emitted: 0,
+        }
+    }
+}
+
+impl RowTarget for NdjsonTarget {
+    fn max_batch_rows(&self) -> usize {
+        PREVIEW_BATCH
+    }
+
+    fn begin(&mut self, out: &mut dyn Emitter, columns: &[ColumnMeta]) -> Result<(), CliError> {
+        out.emit(
+            event("columns")
+                .field("columns", columns_json(columns))
+                .build(),
+        )?;
+        Ok(())
+    }
+
+    fn fetch_size(&mut self, _remaining: Option<u64>) -> usize {
+        PREVIEW_BATCH
+    }
+
+    fn accept(
+        &mut self,
+        out: &mut dyn Emitter,
+        batch: &ColumnBatch,
+        rows: std::ops::Range<usize>,
+    ) -> Result<(), CliError> {
+        for index in rows {
+            self.pending.push(Json::Array(
+                row_of(batch, index)
+                    .iter()
+                    .map(|value| match qh_core::render::to_text(value) {
+                        Some(text) => Json::String(text),
+                        None => Json::Null,
+                    })
+                    .collect(),
+            ));
+            if self.pending.len() >= PREVIEW_BATCH {
+                out.emit(
+                    event("rows")
+                        .field("data", Json::Array(std::mem::take(&mut self.pending)))
+                        .build(),
+                )?;
+                self.emitted += PREVIEW_BATCH as u64;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        out: &mut dyn Emitter,
+        _truncated: bool,
+        _cancelled: bool,
+    ) -> Result<u64, CliError> {
+        if !self.pending.is_empty() {
+            self.emitted += self.pending.len() as u64;
+            out.emit(
+                event("rows")
+                    .field("data", Json::Array(std::mem::take(&mut self.pending)))
+                    .build(),
+            )?;
+        }
+        Ok(self.emitted)
+    }
+}
+
+/// The biggest batch a store run asks a cursor for.
+const STORE_FETCH_MAX: usize = 16_384;
+
+/// The fewest milliseconds between two `progress` events of a store run.
+const STORE_PROGRESS_MS: u128 = 16;
+
+/// Rows into the result store, with no `rows` event at all: the grid reads them back
+/// through the handle. The first fetch stays `PREVIEW_BATCH` so the time to first row does
+/// not change; after that the batch grows for throughput.
+struct StoreTarget {
+    writer: StoreWriter,
+    next_fetch: usize,
+    last_progress: Option<Instant>,
+    delivered: u64,
+}
+
+impl StoreTarget {
+    fn new(writer: StoreWriter) -> Self {
+        Self {
+            writer,
+            next_fetch: PREVIEW_BATCH,
+            last_progress: None,
+            delivered: 0,
+        }
+    }
+}
+
+impl RowTarget for StoreTarget {
+    fn max_batch_rows(&self) -> usize {
+        STORE_FETCH_MAX
+    }
+
+    fn begin(&mut self, out: &mut dyn Emitter, columns: &[ColumnMeta]) -> Result<(), CliError> {
+        // A statement with no columns (a write) has nothing to store, and the store refuses a
+        // zero-width result; the run still reports `columns` and `done` like any other.
+        if !columns.is_empty() {
+            self.writer.begin(columns.to_vec())?;
+        }
+        out.emit(
+            event("columns")
+                .field("columns", columns_json(columns))
+                .build(),
+        )?;
+        Ok(())
+    }
+
+    fn fetch_size(&mut self, remaining: Option<u64>) -> usize {
+        let size = self.next_fetch;
+        self.next_fetch = (self.next_fetch * 4).min(STORE_FETCH_MAX);
+        match remaining {
+            Some(left) => size.min(usize::try_from(left).unwrap_or(usize::MAX)).max(1),
+            None => size,
+        }
+    }
+
+    fn accept(
+        &mut self,
+        out: &mut dyn Emitter,
+        batch: &ColumnBatch,
+        rows: std::ops::Range<usize>,
+    ) -> Result<(), CliError> {
+        if batch.width() == 0 {
+            return Ok(());
+        }
+        let taken = rows.len();
+        if rows.start == 0 && rows.end == batch.rows() {
+            self.writer.push(batch)?;
+        } else {
+            let cut = ColumnBatch::new(
+                batch
+                    .columns()
+                    .iter()
+                    .map(|column| column[rows.clone()].to_vec())
+                    .collect(),
+            )
+            .map_err(|error| CliError::Internal(error.to_string()))?;
+            self.writer.push(&cut)?;
+        }
+        self.delivered += taken as u64;
+        let due = self
+            .last_progress
+            .is_none_or(|at| at.elapsed().as_millis() >= STORE_PROGRESS_MS);
+        if due {
+            self.last_progress = Some(Instant::now());
+            out.emit(event("progress").field("rows", self.delivered).build())?;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        _out: &mut dyn Emitter,
+        truncated: bool,
+        cancelled: bool,
+    ) -> Result<u64, CliError> {
+        let outcome = if cancelled {
+            Outcome::Cancelled
+        } else {
+            Outcome::Complete { truncated }
+        };
+        match self.writer.finish(outcome) {
+            Ok(()) => {}
+            // The tab closed while the last batch was in flight: nothing is left to finish.
+            Err(StoreError::Released) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(self.delivered)
+    }
+
+    fn abort(&mut self, error: &CliError) {
+        let _ = self.writer.finish(Outcome::Failed {
+            detail: error.message(),
+        });
+    }
+}
+
+/// The target a `preview` or `explain` writes into.
+///
+/// `RESULT_SINK=store` needs a store the host attached to the emitter, so a CLI, MCP or
+/// golden run, whose emitters never carry one, can only ever be NDJSON. Decided before the
+/// network is touched, like every other usage error.
+fn row_target(settings: &Settings, out: &dyn Emitter) -> Result<Box<dyn RowTarget>, CliError> {
+    if settings.text("RESULT_SINK", "") == "store" {
+        return match out.result_store() {
+            Some(writer) => Ok(Box::new(StoreTarget::new(writer))),
+            None => Err(CliError::Usage(
+                "RESULT_SINK=store needs a result store, which only the app's engine host attaches"
+                    .to_owned(),
+            )),
+        };
+    }
+    Ok(Box::new(NdjsonTarget::new()))
+}
+
+/// Send the columns, then the rows to `target`, honouring an optional cap.
+///
+/// The NDJSON target sends `columns` and then `rows` in `PREVIEW_BATCH` batches. The values
+/// are the writers' own canonical text (`qh-core::render::to_text`), so a cell is always a
+/// string or `null`: `null` is how the grid renders a NULL, and a decimal or a timestamp
+/// never becomes a native JSON number or a second JSON type in the same column. The
+/// batches go out under `data`, never under `rows` — `rows` is the integer count `done`
+/// carries, and one key cannot be two types.
 ///
 /// The cap costs one row past it, pulled for the verdict and then dropped: a page
 /// that ends exactly on the cap with more behind it is not the same result as one
@@ -1780,29 +2043,52 @@ struct Streamed {
 /// would drop a page that had already arrived, which is what a Stop pressed while the
 /// first page was in flight would look like, and it buys nothing — formatting a row
 /// this process already holds is not the expensive part of the wait.
-async fn emit_batches(
+///
+/// Returns the rows delivered, whether the cap cut the result, and whether a stop did.
+async fn pump_result(
     out: &mut dyn Emitter,
     cursor: &mut Box<dyn Cursor>,
     primed: Option<ColumnBatch>,
     limit: Option<u64>,
     cancel: Option<&CancelFlag>,
+    target: &mut dyn RowTarget,
 ) -> Result<(u64, bool, bool), CliError> {
-    out.emit(
-        event("columns")
-            .field("columns", columns_json(cursor.columns()))
-            .build(),
-    )?;
+    let looped = pump_loop(out, cursor, primed, limit, cancel, target).await;
+    match looped {
+        Ok((truncated, cancelled)) => {
+            let delivered = match target.finish(out, truncated, cancelled) {
+                Ok(delivered) => delivered,
+                Err(error) => {
+                    target.abort(&error);
+                    return Err(error);
+                }
+            };
+            Ok((delivered, truncated, cancelled))
+        }
+        Err(error) => {
+            target.abort(&error);
+            Err(error)
+        }
+    }
+}
 
-    let mut emitted: u64 = 0;
+async fn pump_loop(
+    out: &mut dyn Emitter,
+    cursor: &mut Box<dyn Cursor>,
+    primed: Option<ColumnBatch>,
+    limit: Option<u64>,
+    cancel: Option<&CancelFlag>,
+    target: &mut dyn RowTarget,
+) -> Result<(bool, bool), CliError> {
+    target.begin(out, cursor.columns())?;
+
+    let mut accepted: u64 = 0;
     let mut truncated = false;
     let mut cancelled = false;
-    let mut pending: Vec<Json> = Vec::new();
     let mut next = primed;
     'outer: loop {
-        // The Python loop's own condition: it is `emitted` — the flushed count — that
-        // gates the next fetch, and a partial batch is not `emitted` yet.
         if let Some(limit) = limit {
-            if emitted >= limit {
+            if accepted >= limit {
                 // The cap was reached without a row to spare, so whether more exists has
                 // to be asked: the grid's footer claims the whole result when nothing is
                 // truncated, and a result that is exactly the cap is not the same as one
@@ -1846,17 +2132,16 @@ async fn emit_batches(
                         break 'outer;
                     }
                 }
+                let size = target.fetch_size(limit.map(|limit| limit.saturating_sub(accepted)));
                 let fetched = match cancel {
-                    Some(cancel) => {
-                        match until_stopped(cancel, cursor.next_batch(PREVIEW_BATCH)).await {
-                            Some(fetched) => fetched?,
-                            None => {
-                                cancelled = true;
-                                break 'outer;
-                            }
+                    Some(cancel) => match until_stopped(cancel, cursor.next_batch(size)).await {
+                        Some(fetched) => fetched?,
+                        None => {
+                            cancelled = true;
+                            break 'outer;
                         }
-                    }
-                    None => cursor.next_batch(PREVIEW_BATCH).await?,
+                    },
+                    None => cursor.next_batch(size).await?,
                 };
                 match fetched {
                     Some(batch) => batch,
@@ -1869,40 +2154,29 @@ async fn emit_batches(
             // it waits for rows.
             continue;
         }
-        for index in 0..batch.rows() {
-            if let Some(limit) = limit {
-                if emitted + pending.len() as u64 >= limit {
-                    // One row past the cap: the query had more to give, so the cap
-                    // is what stopped this, not the end of the result. The row is
-                    // the whole point of the fetch and is then discarded.
-                    truncated = true;
-                    break 'outer;
-                }
+        let take = match limit {
+            Some(limit) => limit.saturating_sub(accepted).min(batch.rows() as u64) as usize,
+            None => batch.rows(),
+        };
+        match target.accept(out, &batch, 0..take) {
+            Ok(()) => {}
+            // The tab was closed under the run: a cancel, not a failure.
+            Err(CliError::Store(StoreError::Released)) => {
+                cancelled = true;
+                break 'outer;
             }
-            pending.push(Json::Array(
-                row_of(&batch, index)
-                    .iter()
-                    .map(|value| match qh_core::render::to_text(value) {
-                        Some(text) => Json::String(text),
-                        None => Json::Null,
-                    })
-                    .collect(),
-            ));
-            if pending.len() >= PREVIEW_BATCH {
-                out.emit(
-                    event("rows")
-                        .field("data", Json::Array(std::mem::take(&mut pending)))
-                        .build(),
-                )?;
-                emitted += PREVIEW_BATCH as u64;
-            }
+            Err(error) => return Err(error),
+        }
+        accepted += take as u64;
+        if take < batch.rows() {
+            // One row past the cap: the query had more to give, so the cap is what
+            // stopped this, not the end of the result. The row is the whole point of the
+            // fetch and is then discarded.
+            truncated = true;
+            break;
         }
     }
-    if !pending.is_empty() {
-        emitted += pending.len() as u64;
-        out.emit(event("rows").field("data", Json::Array(pending)).build())?;
-    }
-    Ok((emitted, truncated, cancelled))
+    Ok((truncated, cancelled))
 }
 
 /// `count`: how many rows the caller's statement really returns.

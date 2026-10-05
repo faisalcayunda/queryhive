@@ -335,14 +335,94 @@ uint64_t uniffi_qh_ffi_fn_constructor_enginehost_new(RustCallStatus *_Nonnull ou
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_CONFIGURE_RESULT_STORES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_CONFIGURE_RESULT_STORES
+RustBuffer uniffi_qh_ffi_fn_method_enginehost_configure_result_stores(uint64_t ptr, RustBuffer spill_dir, uint64_t budget_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_CREATE_RESULT_STORE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_CREATE_RESULT_STORE
+uint64_t uniffi_qh_ffi_fn_method_enginehost_create_result_store(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN
 void uniffi_qh_ffi_fn_method_enginehost_run(uint64_t ptr, RustBuffer command, RustBuffer settings, uint64_t sink, uint64_t cancel, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN_WITH_STORE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_RUN_WITH_STORE
+void uniffi_qh_ffi_fn_method_enginehost_run_with_store(uint64_t ptr, RustBuffer command, RustBuffer settings, uint64_t store, uint64_t sink, uint64_t cancel, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_STORE_FROM_ROWS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_STORE_FROM_ROWS
+uint64_t uniffi_qh_ffi_fn_method_enginehost_store_from_rows(uint64_t ptr, RustBuffer columns, RustBuffer rows, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_STORE_STATS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_STORE_STATS
+RustBuffer uniffi_qh_ffi_fn_method_enginehost_store_stats(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_WARM_UP
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_ENGINEHOST_WARM_UP
 void uniffi_qh_ffi_fn_method_enginehost_warm_up(uint64_t ptr, RustBuffer settings, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_RESULTHANDLE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_RESULTHANDLE
+uint64_t uniffi_qh_ffi_fn_clone_resulthandle(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_RESULTHANDLE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FREE_RESULTHANDLE
+void uniffi_qh_ffi_fn_free_resulthandle(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_CELL_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_CELL_TEXT
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_cell_text(uint64_t ptr, uint64_t view_id, uint32_t row, uint32_t column, RustBuffer format, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_COLUMN_WIDTHS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_COLUMN_WIDTHS
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_column_widths(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_COLUMNS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_COLUMNS
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_columns(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_DISTINCT_VALUES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_DISTINCT_VALUES
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_distinct_values(uint64_t ptr, uint32_t column, uint32_t limit, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_RELEASE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_RELEASE
+void uniffi_qh_ffi_fn_method_resulthandle_release(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_ROW_COUNT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_ROW_COUNT
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_row_count(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_ROWS_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_ROWS_TEXT
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_rows_text(uint64_t ptr, uint64_t view_id, uint32_t first_row, uint32_t row_count, RustBuffer columns, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_SET_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_SET_VIEW
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_set_view(uint64_t ptr, RustBuffer spec, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_WINDOW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_RESULTHANDLE_WINDOW
+RustBuffer uniffi_qh_ffi_fn_method_resulthandle_window(uint64_t ptr, uint64_t view_id, uint32_t first_row, uint32_t row_count, RustBuffer columns, RustBuffer formats, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_CLONE_EVENTSINK
@@ -752,15 +832,99 @@ uint16_t uniffi_qh_ffi_checksum_method_editordocument_revision(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_CONFIGURE_RESULT_STORES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_CONFIGURE_RESULT_STORES
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_configure_result_stores(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_CREATE_RESULT_STORE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_CREATE_RESULT_STORE
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_create_result_store(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN
 uint16_t uniffi_qh_ffi_checksum_method_enginehost_run(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN_WITH_STORE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_RUN_WITH_STORE
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_run_with_store(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_STORE_FROM_ROWS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_STORE_FROM_ROWS
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_store_from_rows(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_STORE_STATS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_STORE_STATS
+uint16_t uniffi_qh_ffi_checksum_method_enginehost_store_stats(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_WARM_UP
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_ENGINEHOST_WARM_UP
 uint16_t uniffi_qh_ffi_checksum_method_enginehost_warm_up(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_CELL_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_CELL_TEXT
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_cell_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_COLUMN_WIDTHS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_COLUMN_WIDTHS
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_column_widths(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_COLUMNS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_COLUMNS
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_columns(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_DISTINCT_VALUES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_DISTINCT_VALUES
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_distinct_values(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_RELEASE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_RELEASE
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_release(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_ROW_COUNT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_ROW_COUNT
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_row_count(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_ROWS_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_ROWS_TEXT
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_rows_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_SET_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_SET_VIEW
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_set_view(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_WINDOW
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_RESULTHANDLE_WINDOW
+uint16_t uniffi_qh_ffi_checksum_method_resulthandle_window(void
     
 );
 #endif

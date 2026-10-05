@@ -35,6 +35,7 @@
 //! | `table_op` | `step`, `progress`, `done` |
 //! | `preview` | `step`, `columns`, `rows`, `done` |
 //! | `explain` | `step`, `columns`, `rows`, `done` |
+//! | `preview`, `explain` with a result store (`EngineHost::run_with_store`) | `step`, `columns`, `progress`, `done`: the rows go to the store, never into an event |
 //! | `count` | `step`, `count`, `done` |
 //! | any failure | one `error`, exit 1 |
 //!
@@ -108,6 +109,7 @@ pub mod mcp;
 pub mod progress;
 pub mod retry;
 pub mod sql_ident;
+pub mod store_api;
 pub mod tunnel;
 // The scaffolding has to be generated in the crate root: it defines the `UniFfiTag` the
 // other derivations name, and the module path it records is the namespace the bindings
@@ -127,7 +129,7 @@ use qh_driver::{ConnectionConfig, Driver, DriverKind, Session};
 use thiserror::Error;
 
 pub use env::{SettingError, Settings};
-pub use events::{Capture, Emitter, JsonLines};
+pub use events::{Capture, Emitter, JsonLines, StoreEmitter};
 pub use progress::Progress;
 
 /// Everything a command can fail with.
@@ -196,9 +198,36 @@ pub enum CliError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
+    /// The result store refused a write: the disk filled up mid-stream, the spill key was
+    /// unavailable, the budget could not take a chunk. `Released` is not shown to the user:
+    /// the tab was closed, and the run treats it as a cancel.
+    #[error("{}", store_message(.0))]
+    Store(#[from] qh_result_store::StoreError),
+
     /// A defect in this program, including a caught panic.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// What the user is told when the store cannot take the rows.
+fn store_message(error: &qh_result_store::StoreError) -> String {
+    use qh_result_store::StoreError;
+    match error {
+        StoreError::DiskFull => {
+            "the disk is full: the result no longer fits in memory and could not be spilled to disk"
+                .to_owned()
+        }
+        StoreError::SpillUnavailable { reason } => {
+            format!("the result is larger than the memory budget and spilling to disk is unavailable: {reason}")
+        }
+        StoreError::SpillAuth { .. } => {
+            "a spilled part of the result failed its integrity check".to_owned()
+        }
+        StoreError::BudgetExceeded { needed, budget } => {
+            format!("the result needs {needed} bytes but the memory budget is {budget} bytes")
+        }
+        other => other.to_string(),
+    }
 }
 
 impl CliError {

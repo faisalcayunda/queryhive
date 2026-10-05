@@ -2717,6 +2717,7 @@ dependencies = [
  "qh-editor",
  "qh-export",
  "qh-import",
+ "qh-result-store",
  "qh-rt",
  "qh-sql",
  "qh-storage",
