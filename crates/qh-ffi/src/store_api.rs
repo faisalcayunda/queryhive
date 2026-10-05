@@ -26,6 +26,7 @@
 
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use qh_core::ColumnMeta;
@@ -129,7 +130,7 @@ pub struct DistinctValues {
 pub struct StoreStats {
     pub stores: u32,
     pub resident_bytes: u64,
-    /// Always 0 in this build: the registry does not report spilled bytes yet.
+    /// Bytes written to the live stores' spill files.
     pub spilled_bytes: u64,
     pub budget_bytes: u64,
     pub spill_enabled: bool,
@@ -245,6 +246,15 @@ pub(crate) fn panic_text(payload: &Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "panicked".to_owned())
 }
 
+fn too_large(needed: usize, limit: usize) -> StoreFfiError {
+    StoreFfiError::TooLarge {
+        needed_bytes: needed as u64,
+        budget_bytes: limit as u64,
+        message: "the text of these rows is too large for one request; ask for fewer rows"
+            .to_owned(),
+    }
+}
+
 fn invalid(message: impl Into<String>) -> StoreFfiError {
     StoreFfiError::InvalidArgument {
         message: message.into(),
@@ -279,11 +289,23 @@ fn phase_of(phase: store::Phase) -> Option<StorePhase> {
 pub struct ResultHandle {
     handle: store::StoreHandle,
     registry: Arc<StoreRegistry>,
+    /// Set by the first `run_with_store`; one store holds one run.
+    run_claimed: AtomicBool,
 }
 
 impl ResultHandle {
     pub(crate) fn new(handle: store::StoreHandle, registry: Arc<StoreRegistry>) -> Arc<Self> {
-        Arc::new(Self { handle, registry })
+        Arc::new(Self {
+            handle,
+            registry,
+            run_claimed: AtomicBool::new(false),
+        })
+    }
+
+    /// Claim the store for one run; false when a run already has it. Atomic, so two racing
+    /// `run_with_store` calls cannot both pass.
+    pub(crate) fn claim_run(&self) -> bool {
+        !self.run_claimed.swap(true, Ordering::AcqRel)
     }
 
     /// The write side, for `run_with_store` and for tests driving a command with a
@@ -353,6 +375,7 @@ impl ResultHandle {
 
     /// The one window builder: `window`, `rows_text` and `cell_text` differ only in `full`
     /// (no 256-unit cut, `CUT` clear) and in the formats they pass.
+    #[allow(clippy::too_many_arguments)]
     fn read_window(
         &self,
         view_id: u64,
@@ -361,6 +384,7 @@ impl ResultHandle {
         columns: &[u32],
         formats: Vec<store::ColumnFormat>,
         full: bool,
+        limit: Option<usize>,
     ) -> Result<Vec<u8>, StoreFfiError> {
         let shared = self.live()?;
         let columns = Self::check_request(shared, row_count, columns)?;
@@ -404,15 +428,19 @@ impl ResultHandle {
         let mut parts: Vec<Part> = Vec::new();
         let mut loaded: Option<(ChunkRef, Arc<StoreChunk>)> = None;
         let mut at = 0;
+        let mut estimated = 0usize;
         while at < sources.len() {
             let row = sources[at];
             let reuse = loaded.as_ref().is_some_and(|(chunk, _)| {
                 row >= chunk.first_row && row - chunk.first_row < chunk.rows
             });
             if !reuse {
-                let chunk = shared
-                    .chunk_for_row(row)
-                    .ok_or_else(|| invalid(format!("row {row} is not in the result")))?;
+                let Some(chunk) = shared.chunk_for_row(row) else {
+                    // A release racing this read empties the chunk table; that is a stale
+                    // handle, not a bad row.
+                    self.live()?;
+                    return Err(invalid(format!("row {row} is not in the result")));
+                };
                 let data = shared.load_chunk(chunk.index)?;
                 loaded = Some((chunk, data));
             }
@@ -422,6 +450,22 @@ impl ResultHandle {
                     .iter()
                     .take_while(|&&r| r >= chunk.first_row && r - chunk.first_row < chunk.rows)
                     .count();
+            if let Some(limit) = limit {
+                // Before anything is materialised: the columns' share of this chunk, plus a
+                // text-width allowance per cell. Rendered text can be bigger than the stored
+                // form, so the actual size is checked again once the part is built.
+                let share = (end - at) as f64 / f64::from(chunk.rows.max(1));
+                estimated += columns
+                    .iter()
+                    .map(|&c| {
+                        (data.batch.column(c).get_array_memory_size() as f64 * share) as usize
+                    })
+                    .sum::<usize>()
+                    + (end - at) * columns.len() * 8;
+                if estimated > limit {
+                    return Err(too_large(estimated, limit));
+                }
+            }
             let spec = store::WindowSpec {
                 rows: sources[at..end]
                     .iter()
@@ -432,6 +476,16 @@ impl ResultHandle {
                 global_flags: flags,
             };
             let window = store::render_window(data, &spec, &mut scratch, full)?;
+            if let Some(limit) = limit {
+                let built: usize = parts
+                    .iter()
+                    .map(|part| part.window.data.len())
+                    .sum::<usize>()
+                    + window.data.len();
+                if built > limit {
+                    return Err(too_large(built, limit));
+                }
+            }
             parts.push(Part {
                 window,
                 source_rows: sources[at..end].to_vec(),
@@ -524,10 +578,14 @@ impl ResultHandle {
         guarded(|| {
             let shared = self.live()?;
             let phase = phase_of(shared.phase()).ok_or(StoreFfiError::StaleHandle)?;
+            // One snapshot, so `visible` and `view_id` always belong to the same view.
+            let view = shared.current_view();
             Ok(RowCount {
                 fetched: shared.rows(),
-                visible: shared.visible_rows(),
-                view_id: shared.view_id(),
+                visible: view
+                    .as_ref()
+                    .map_or_else(|| shared.rows(), |view| view.row_count()),
+                view_id: view.as_ref().map_or(0, |view| view.id()),
                 phase,
             })
         })
@@ -565,6 +623,7 @@ impl ResultHandle {
                 &columns,
                 formats.into_iter().map(Into::into).collect(),
                 false,
+                None,
             )
         })
     }
@@ -579,15 +638,18 @@ impl ResultHandle {
     ) -> Result<Vec<u8>, StoreFfiError> {
         guarded(|| {
             let formats = vec![store::ColumnFormat::Raw; columns.len()];
-            let data = self.read_window(view_id, first_row, row_count, &columns, formats, true)?;
+            let data = self.read_window(
+                view_id,
+                first_row,
+                row_count,
+                &columns,
+                formats,
+                true,
+                Some(MAX_ROWS_TEXT_BYTES),
+            )?;
+            // The parts are checked as they are built; the joined buffer adds its offsets.
             if data.len() > MAX_ROWS_TEXT_BYTES {
-                return Err(StoreFfiError::TooLarge {
-                    needed_bytes: data.len() as u64,
-                    budget_bytes: MAX_ROWS_TEXT_BYTES as u64,
-                    message:
-                        "the text of these rows is too large for one request; ask for fewer rows"
-                            .to_owned(),
-                });
+                return Err(too_large(data.len(), MAX_ROWS_TEXT_BYTES));
             }
             Ok(data)
         })
@@ -602,7 +664,8 @@ impl ResultHandle {
         format: CellFormat,
     ) -> Result<Option<String>, StoreFfiError> {
         guarded(|| {
-            let data = self.read_window(view_id, row, 1, &[column], vec![format.into()], true)?;
+            let data =
+                self.read_window(view_id, row, 1, &[column], vec![format.into()], true, None)?;
             // One row, one column: header, one source row, two offsets, one flag, the heap.
             if le32(&data, 12) != 1 {
                 return Err(invalid(format!("row {row} is out of range")));

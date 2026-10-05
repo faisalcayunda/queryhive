@@ -431,6 +431,11 @@ impl SpillFile {
         }
     }
 
+    /// Bytes appended so far (the file only grows; a released store drops the whole file).
+    pub fn written_bytes(&self) -> u64 {
+        self.next_offset
+    }
+
     /// Append a sealed record; returns its offset and on-disk length.
     pub fn append(&mut self, record: &[u8]) -> Result<(u64, u32), StoreError> {
         let offset = self.next_offset;

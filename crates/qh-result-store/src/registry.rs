@@ -80,6 +80,8 @@ pub struct RegistryStats {
     pub budget_bytes: usize,
     /// Chunks currently held decrypted after a spill read.
     pub decoded_chunks: usize,
+    /// Bytes written to the spill files of the live stores.
+    pub spilled_bytes: u64,
 }
 
 /// The registry: the cipher, the live-store table, the budget, the clock.
@@ -556,6 +558,16 @@ impl StoreRegistry {
                 .map(|live| live.values().filter(|weak| weak.strong_count() > 0).count())
                 .unwrap_or(0),
             resident_bytes: self.resident.load(Ordering::Acquire),
+            spilled_bytes: self
+                .live
+                .lock()
+                .map(|live| {
+                    live.values()
+                        .filter_map(Weak::upgrade)
+                        .map(|s| s.spilled_bytes())
+                        .sum()
+                })
+                .unwrap_or(0),
             budget_bytes: self.config.budget_bytes,
             decoded_chunks: self
                 .decoded
@@ -569,16 +581,25 @@ impl StoreRegistry {
     /// fd, and drop it from the live table. Idempotent.
     pub fn release(&self, id: StoreId) {
         let shared = {
+            // This runs from `Drop` and from the UniFFI free path, so a poisoned table is
+            // recovered, never a panic.
             let mut table = self
                 .live
                 .lock()
-                .expect("the live table should not be poisoned");
+                .unwrap_or_else(|poison| poison.into_inner());
             table.remove(&id).and_then(|weak| weak.upgrade())
         };
         if let Some(shared) = shared {
             shared.release(self);
         }
         self.purge_decoded(id);
+    }
+
+    /// Panics while holding the live-table lock, so it is poisoned. For the poison test only.
+    #[doc(hidden)]
+    pub fn poison_live_for_test(&self) {
+        let _guard = self.live.lock();
+        panic!("poisoning the live table on purpose");
     }
 
     /// Test and bench seam: a registry with spill off and a known budget.

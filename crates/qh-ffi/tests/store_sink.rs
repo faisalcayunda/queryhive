@@ -1242,3 +1242,245 @@ fn windows_cross_chunk_boundaries_and_follow_a_view() {
     let distinct = store.distinct_values(1, 10).unwrap();
     assert!(distinct.more && distinct.values.is_empty());
 }
+
+// --------------------------------------------------------------------------- //
+// W5-C: the golden fixtures through both targets, and the review backlog
+// --------------------------------------------------------------------------- //
+
+/// The golden corpus's type zoo (`tests/golden.rs`, copied: test binaries cannot share code),
+/// three rows whose cells change type from row to row within a column.
+fn golden_type_zoo() -> Vec<Vec<Value>> {
+    fn decimal(text: &str) -> Value {
+        // Parsed here rather than hard-coded so the digits in the snapshot and the
+        // digits in this file cannot drift apart.
+        let (sign, digits) = match text.strip_prefix('-') {
+            Some(rest) => (-1i128, rest),
+            None => (1i128, text),
+        };
+        let (whole, fraction) = match digits.split_once('.') {
+            Some((whole, fraction)) => (whole, fraction),
+            None => (digits, ""),
+        };
+        let unscaled: i128 = format!("{whole}{fraction}").parse().expect("digits");
+        Value::Decimal {
+            unscaled: sign * unscaled,
+            scale: fraction.len() as u8,
+        }
+    }
+
+    // `2026-01-31 12:00:00.123456+07:00` as a driver reports it: `micros` is the
+    // instant (05:00:00.123456Z) and `offset_secs` is the zone to show it in, which is
+    // the convention all three decoders share (`docs/golden-deltas.md` T-1).
+    let aware = Value::Timestamp {
+        micros: 1_769_835_600_123_456,
+        offset_secs: Some(25_200), // +07:00
+    };
+    let naive = Value::Timestamp {
+        micros: 1_769_860_800_000_000,
+        offset_secs: None,
+    };
+
+    vec![
+        vec![
+            decimal("1234567890123456789012345678.1234567890"),
+            decimal("-0.0000000001"),
+            decimal("0"),
+            aware,
+            naive,
+            Value::Date { days: 20_484 },
+            Value::Time {
+                micros: 86_399_999_999,
+            },
+            Value::Interval(qh_core::IntervalValue {
+                months: 0,
+                days: 3,
+                micros: 14_706_000_000,
+            }),
+            Value::Bool(true),
+            Value::Bool(false),
+        ],
+        vec![
+            Value::Int(i64::MIN),
+            Value::UInt(u64::MAX),
+            Value::Float(1.5),
+            Value::Float(-0.0),
+            Value::Text("unicode: é中😀".into()),
+            Value::Text("tab\tand\nnewline".into()),
+            Value::Json(r#"{"b":1,"a":2}"#.into()),
+            Value::Text("[1,null,3]".into()),
+            Value::Bytes(vec![0x00, 0x01, 0xff]),
+            Value::Null,
+        ],
+        vec![
+            Value::Text("550e8400-e29b-41d4-a716-446655440000".into()),
+            Value::Text("active".into()),
+            Value::Text("(1,2)".into()),
+            Value::Text("".into()),
+            Value::Text("NULL".into()),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Text("  padded  ".into()),
+            Value::Text("\u{0}embedded-nul".into()),
+        ],
+    ]
+}
+
+fn golden_type_zoo_columns() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("high_precision", "decimal(38,10)"),
+        ("tiny_negative", "decimal(38,10)"),
+        ("zero_decimal", "decimal(38,10)"),
+        ("tz_aware", "timestamp(6) with time zone"),
+        ("tz_naive", "timestamp(6)"),
+        ("a_date", "date"),
+        ("a_time", "time(6)"),
+        ("an_interval", "interval day to second"),
+        ("a_bool", "boolean"),
+        ("another_bool", "boolean"),
+    ]
+}
+
+fn golden_script(batch: usize) -> Script {
+    let columns = golden_type_zoo_columns()
+        .into_iter()
+        .map(|(name, kind)| ColumnMeta::new(name, kind))
+        .collect();
+    script(columns, &golden_type_zoo(), batch)
+}
+
+#[test]
+fn the_golden_type_zoo_reads_back_cell_for_cell_like_the_ndjson() {
+    for batch in [3, 1] {
+        let host = host(golden_script(batch), 1 << 24, None);
+        let events = ndjson(&host, None);
+        assert!(events.iter().all(|e| e["event"] != "error"), "{events:?}");
+        let (store, sink) = into_store(&host, None);
+        assert!(sink.events().iter().all(|e| e["event"] != "error"));
+        assert_eq!(store.row_count().unwrap().fetched, 3);
+        assert_same_cells(&events, &store);
+    }
+}
+
+#[test]
+fn two_racing_runs_on_one_store_let_exactly_one_through() {
+    let (columns, rows) = numbered(50);
+    let host = host(script(columns, &rows, 20), 1 << 24, None);
+    for _ in 0..20 {
+        let store = host.create_result_store().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let (host, store, barrier) =
+                    (Arc::clone(&host), Arc::clone(&store), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    let sink = Recorder::default();
+                    barrier.wait();
+                    host.run_with_store(
+                        EngineCommand::Preview,
+                        pairs("SELECT 1", None),
+                        store,
+                        Arc::new(sink.clone()),
+                        RunCancel::new(),
+                    );
+                    sink.events()
+                })
+            })
+            .collect();
+        let results: Vec<Vec<Json>> = runs.into_iter().map(|run| run.join().unwrap()).collect();
+        let refused = results
+            .iter()
+            .filter(|events| events.iter().any(|e| e["event"] == "error"))
+            .count();
+        assert_eq!(refused, 1, "exactly one run is refused: {results:?}");
+        assert_eq!(
+            store.row_count().unwrap().fetched,
+            50,
+            "the winner's rows, once"
+        );
+    }
+}
+
+#[test]
+fn closing_the_tab_before_the_first_page_ends_cancelled_and_not_as_an_error() {
+    let (columns, rows) = numbered(400);
+    let slot: Arc<Mutex<Option<Arc<ResultHandle>>>> = Arc::default();
+    let hook_slot = Arc::clone(&slot);
+    let mut script = script(columns, &rows, 200);
+    // Served after the primed batch, before `begin` declares the columns.
+    script.hook = Some(Arc::new(move |served| {
+        if served == 1 {
+            if let Some(store) = hook_slot.lock().unwrap().as_ref() {
+                store.release().unwrap();
+            }
+        }
+    }));
+    let host = host(script, 1 << 24, None);
+    let store = host.create_result_store().unwrap();
+    *slot.lock().unwrap() = Some(Arc::clone(&store));
+    let sink = Recorder::default();
+    host.run_with_store(
+        EngineCommand::Preview,
+        pairs("SELECT 1", None),
+        Arc::clone(&store),
+        Arc::new(sink.clone()),
+        RunCancel::new(),
+    );
+    let events = sink.events();
+    assert!(events.iter().all(|e| e["event"] != "error"), "{events:?}");
+    assert_eq!(last(&events, "done")["cancelled"], true);
+}
+
+#[test]
+fn rows_text_refuses_an_oversized_request_with_too_large() {
+    // 80 rows of 1 MiB: 80 MiB of text against the 64 MiB limit.
+    let cell = "x".repeat(1 << 20);
+    let rows: Vec<Vec<Option<String>>> = (0..80).map(|_| vec![Some(cell.clone())]).collect();
+    let host = host(Script::default(), 512 << 20, None);
+    let store = host
+        .store_from_rows(
+            vec![ColumnWire {
+                name: "c".to_owned(),
+                type_name: "text".to_owned(),
+            }],
+            rows,
+        )
+        .unwrap();
+    assert!(matches!(
+        store.rows_text(0, 0, 80, vec![0]),
+        Err(StoreFfiError::TooLarge { .. })
+    ));
+    // Under the limit it still answers, and a single cell is never limited.
+    assert!(store.rows_text(0, 0, 10, vec![0]).is_ok());
+    assert_eq!(
+        store
+            .cell_text(0, 0, 0, CellFormat::Raw)
+            .unwrap()
+            .unwrap()
+            .len(),
+        1 << 20
+    );
+}
+
+#[test]
+fn row_count_and_set_view_agree_on_the_view() {
+    let (columns, rows) = numbered(100);
+    let host = host(script(columns, &rows, 50), 1 << 24, None);
+    let (store, _) = into_store(&host, None);
+    let info = store
+        .set_view(ViewSpec {
+            sort: Some(SortSpec {
+                column: 0,
+                descending: true,
+            }),
+            filters: vec![FilterSpec::Text {
+                column: 0,
+                needle: ">= 90".to_owned(),
+            }],
+            search: None,
+        })
+        .unwrap();
+    let count = store.row_count().unwrap();
+    assert_eq!((count.view_id, count.visible), (info.view_id, info.visible));
+    assert_eq!(host.store_stats().unwrap().spilled_bytes, 0);
+}

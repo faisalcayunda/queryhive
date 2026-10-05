@@ -2557,7 +2557,7 @@ public struct StoreStats: Equatable, Hashable {
     public var stores: UInt32
     public var residentBytes: UInt64
     /**
-     * Always 0 in this build: the registry does not report spilled bytes yet.
+     * Bytes written to the live stores' spill files.
      */
     public var spilledBytes: UInt64
     public var budgetBytes: UInt64
@@ -2567,7 +2567,7 @@ public struct StoreStats: Equatable, Hashable {
     // declare one manually.
     public init(stores: UInt32, residentBytes: UInt64, 
         /**
-         * Always 0 in this build: the registry does not report spilled bytes yet.
+         * Bytes written to the live stores' spill files.
          */spilledBytes: UInt64, budgetBytes: UInt64, spillEnabled: Bool) {
         self.stores = stores
         self.residentBytes = residentBytes

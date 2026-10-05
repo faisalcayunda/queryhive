@@ -1627,8 +1627,14 @@ pub async fn explain(
     // No row cap, so no `truncated` in `done`: a plan is a handful of rows and is
     // never cut short, and a field that is always false only invites someone to
     // branch on it.
-    let (rows, _, cancelled) =
-        pump_result(out, &mut cursor, primed, None, Some(cancel), &mut *target).await?;
+    let pumped = pump_result(out, &mut cursor, primed, None, Some(cancel), &mut *target).await;
+    let (rows, _, cancelled) = match pumped {
+        Ok(done) => done,
+        Err(error) => {
+            stop_session_in_background(session, Some(cursor));
+            return Err(error);
+        }
+    };
     let query_id = session.query_id();
     let warning = if cancelled {
         stop_session(session, Some(cursor)).await
@@ -1736,8 +1742,16 @@ async fn stream_rows(
         return Ok(stopped(query_id, stop_session(session, Some(cursor)).await));
     };
     let primed = primed?;
-    let (rows, truncated, cancelled) =
-        pump_result(out, &mut cursor, primed, bounds.limit, Some(cancel), target).await?;
+    let pumped = pump_result(out, &mut cursor, primed, bounds.limit, Some(cancel), target).await;
+    let (rows, truncated, cancelled) = match pumped {
+        Ok(done) => done,
+        Err(error) => {
+            // The result was left unfinished (a store that failed mid-stream, a dead emitter):
+            // stop the session like the capped path rather than dropping it mid-statement.
+            stop_session_in_background(session, Some(cursor));
+            return Err(error);
+        }
+    };
     let query_id = session.query_id();
     // A capped or stopped result leaves the statement unfinished on the server, so the
     // session is stopped rather than merely closed, see [`stop_session`].
@@ -2080,7 +2094,12 @@ async fn pump_loop(
     cancel: Option<&CancelFlag>,
     target: &mut dyn RowTarget,
 ) -> Result<(bool, bool), CliError> {
-    target.begin(out, cursor.columns())?;
+    match target.begin(out, cursor.columns()) {
+        Ok(()) => {}
+        // The tab was closed before the first page: a cancel, like `Released` from `accept`.
+        Err(CliError::Store(StoreError::Released)) => return Ok((false, true)),
+        Err(error) => return Err(error),
+    }
 
     let mut accepted: u64 = 0;
     let mut truncated = false;

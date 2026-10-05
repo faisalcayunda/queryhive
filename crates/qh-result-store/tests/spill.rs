@@ -227,6 +227,37 @@ fn a_spilled_chunk_reads_back_identical() {
 }
 
 #[test]
+fn the_registry_reports_the_spilled_bytes_of_live_stores() {
+    let dir = temp_dir("spilled_bytes");
+    let registry = spilling_registry(&dir, 200 * 1024);
+    let (handle, _) = push_text(&registry, 500, 5);
+    handle.shared().force_spill_all_for_test(&registry);
+    let spilled = registry.stats().spilled_bytes;
+    assert!(spilled > 0, "spilled bytes are reported");
+    assert_eq!(spilled, handle.shared().spilled_bytes());
+    registry.release(handle.id());
+    assert_eq!(
+        registry.stats().spilled_bytes,
+        0,
+        "a released store reports none"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn releasing_a_store_survives_a_poisoned_live_table() {
+    let registry = StoreRegistry::for_test(StoreConfig::default());
+    let handle = registry.create();
+    let id = handle.id();
+    // Poison the table the way a panic under the lock would.
+    let poisoner = Arc::clone(&registry);
+    let _ = std::thread::spawn(move || poisoner.poison_live_for_test()).join();
+    registry.release(id);
+    assert_eq!(handle.shared().phase(), qh_result_store::Phase::Released);
+    drop(handle);
+}
+
+#[test]
 fn modes_are_0700_and_0600() {
     let dir = temp_dir("modes");
     let report = sweep_spill_dir(&dir);

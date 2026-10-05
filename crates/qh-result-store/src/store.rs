@@ -959,6 +959,14 @@ impl StoreShared {
             .flatten()
     }
 
+    /// Bytes written to this store's spill file so far; 0 before the first spill.
+    pub fn spilled_bytes(&self) -> u64 {
+        self.spill
+            .lock()
+            .map(|spill| spill.as_ref().map_or(0, SpillFile::written_bytes))
+            .unwrap_or(0)
+    }
+
     /// Whether anything has been spilled.
     pub fn has_spilled(&self) -> bool {
         self.chunks

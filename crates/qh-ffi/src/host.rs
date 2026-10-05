@@ -394,7 +394,7 @@ impl EngineHost {
             Ok(StoreStats {
                 stores: u32::try_from(stats.stores).unwrap_or(u32::MAX),
                 resident_bytes: stats.resident_bytes as u64,
-                spilled_bytes: 0,
+                spilled_bytes: stats.spilled_bytes,
                 budget_bytes: stats.budget_bytes as u64,
                 spill_enabled: registry.cipher().is_some(),
             })
@@ -519,6 +519,10 @@ impl EngineHost {
             Some(StorePhase::Empty) => {}
             Some(_) => return refuse("this result store already holds a run"),
             None => return refuse("the result was closed"),
+        }
+        // The phase check alone is check-then-act: two callers can both see `Empty`.
+        if !store.claim_run() {
+            return refuse("this result store already holds a run");
         }
         // The sink is the host's to choose: whatever the caller wrote for it is overwritten.
         let mut settings: Vec<Setting> = settings
