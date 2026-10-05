@@ -70,5 +70,17 @@ protocol EngineRun: AnyObject {
 /// The engine the app runs on, and the composition root the blueprint's §1.6 rule needs: only this
 /// line names a concrete engine, so every call site follows from here.
 enum Engine {
-    static let current: any DatabaseEngine = RustEngine()
+    /// A `--snapshot` render draws fixture connections (`trino.internal` and friends) and must not
+    /// dial them, so it gets an engine that accepts every run and never answers.
+    static let current: any DatabaseEngine = Snapshot.requestedPath() != nil ? SilentEngine() : RustEngine()
+}
+
+/// Accepts every command and never reports anything, so a fixture's panes stay in their loading
+/// state instead of retrying a host that does not exist.
+struct SilentEngine: DatabaseEngine {
+    private final class Idle: EngineRun { func terminate() {} }
+    func run(_ command: String, env: [String: String], onEvent: @escaping (Event) -> Void,
+             onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? { Idle() }
+    func terminateAll() {}
+    func runBlocking(_ command: String, env: [String: String]) {}
 }

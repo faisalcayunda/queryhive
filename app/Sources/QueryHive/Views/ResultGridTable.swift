@@ -97,25 +97,6 @@ struct GridCommands {
     var selectionChanged: () -> Void
 }
 
-/// The table's side of `GridCommands`, for the paths that come *from* the table rather than from a
-/// SwiftUI view: a double-click that opens the editor, a Return that commits one, and the menu's
-/// own Edit Cell item, which has to reach the overlay inside the table.
-///
-/// A tiny handle rather than a delegate, so `ResultGrid` can hold it in `@State` before the table
-/// exists — `NSViewRepresentable` builds its coordinator after `body` has already run.
-@MainActor
-final class GridTableHandle {
-    weak var coordinator: ResultGridTable.Coordinator?
-
-    func beginEdit(at key: CellKey) { coordinator?.beginEdit(at: key) }
-    func commitEdit(at key: CellKey, text: String) { coordinator?.commitEdit(at: key, text: text) }
-    func cancelEdit() { coordinator?.cancelEdit() }
-    func selectCells(anchor: CellPos, focus: CellPos) { coordinator?.selectCells(anchor: anchor, focus: focus) }
-    func scrollToVisible(row: Int) { coordinator?.scrollToVisible(row: row) }
-    func rowsDidGrow() { coordinator?.rowsDidGrow() }
-    func copy(withHeaders: Bool) { coordinator?.copy(withHeaders: withHeaders) }
-}
-
 /// The result grid, as an `NSTableView` that draws every pixel of itself.
 ///
 /// A thin `NSViewRepresentable`: the table, its header and the coordinator that owns the rows,
@@ -126,11 +107,9 @@ struct ResultGridTable: NSViewRepresentable {
     var model: AppModel
     var inputs: GridInputs
     var commands: GridCommands
-    /// Filled in by the coordinator when it is built, so the SwiftUI menus can reach inside.
-    var handle: GridTableHandle
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(tab: tab, model: model, commands: commands, handle: handle)
+        Coordinator(tab: tab, model: model, commands: commands)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -172,7 +151,6 @@ struct ResultGridTable: NSViewRepresentable {
         var tab: QueryTab
         var model: AppModel
         var commands: GridCommands
-        let handle: GridTableHandle
 
         /// The inputs last applied, which is what makes `updateNSView`'s diff possible.
         private(set) var applied: GridInputs?
@@ -213,13 +191,11 @@ struct ResultGridTable: NSViewRepresentable {
         /// `GridToolTip.local` say which coordinate system AppKit's point is in.
         private var tooltipWindowRect: NSRect?
 
-        init(tab: QueryTab, model: AppModel, commands: GridCommands, handle: GridTableHandle) {
+        init(tab: QueryTab, model: AppModel, commands: GridCommands) {
             self.tab = tab
             self.model = model
             self.commands = commands
-            self.handle = handle
             super.init()
-            handle.coordinator = self
         }
 
         func attach(table: GridTableView) {
@@ -559,7 +535,7 @@ struct ResultGridTable: NSViewRepresentable {
             dragAnchor = nil
             table?.selection = tab.cellSelection
             commands.settleSelection()
-            announceSelectionForAX()
+            if tab.cellSelection != nil { announceSelectionForAX() }
             prebuildIfWorthIt()
         }
 
@@ -689,6 +665,7 @@ struct ResultGridTable: NSViewRepresentable {
             commands.commitEdit(key, text)
             if let selection = tab.cellSelection, selection.cellCount > 1 {
                 tab.fillCellEdits(text, over: selection)
+                tab.cancelCellEdit()  // the fill replaces the session; do not leave it open
             } else {
                 tab.typeCellEdit(text)
                 tab.endCellEdit()

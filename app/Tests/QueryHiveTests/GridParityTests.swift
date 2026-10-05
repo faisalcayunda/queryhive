@@ -229,6 +229,22 @@ final class GridParityTests: XCTestCase {
         XCTAssertTrue(fixture.tab.cellEdits.isEmpty)
     }
 
+    /// The block fill replaces the editing session, so a stray keystroke afterwards must not be
+    /// staged into the cell the closed editor was over.
+    func testBlockFillLeavesNoEditSessionOpen() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 1, column: 1), clickCount: 1)
+        fixture.coordinator.drag(to: fixture.pointInCell(row: 3, column: 2))
+        let key = CellKey(row: 1, column: 1)
+        fixture.coordinator.beginEdit(at: key)
+        fixture.coordinator.commitEdit(at: key, text: "filled")
+
+        fixture.tab.typeCellEdit("stale")
+        fixture.tab.endCellEdit()
+        XCTAssertEqual(fixture.tab.cellEdits.value(at: key), "filled")
+    }
+
     /// Escape ends the overlay and leaves the queue exactly as it was: what was already staged
     /// stays staged, and nothing new appears (§13 item 4).
     func testEscLeavesTheQueueUntouched() throws {

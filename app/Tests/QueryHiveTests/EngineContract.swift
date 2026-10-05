@@ -19,12 +19,16 @@ final class RunRecord {
     /// Events that arrived after the exit, which the protocol says cannot happen.
     private(set) var eventsAfterExit = 0
 
+    // `exited` and `continuation` are read and written from the callback queue and from the
+    // awaiting test, so the check-then-set in `waitForExit` runs under one lock.
+    private let lock = NSLock()
     private var exited = false
     private var continuation: CheckedContinuation<Void, Never>?
 
     func record(event: Event, onMainThread: Bool) {
         if !onMainThread { deliveriesOffMainThread += 1 }
-        if exited { eventsAfterExit += 1 }
+        lock.lock(); let done = exited; lock.unlock()
+        if done { eventsAfterExit += 1 }
         events.append(event)
     }
 
@@ -33,18 +37,27 @@ final class RunRecord {
         exits += 1
         exitStatus = status
         self.stderr = stderr
-        exited = true
         // Resuming a continuation that was never stored is the synchronous case: an engine that
         // cannot start calls `onExit` before `run` returns.
-        continuation?.resume()
+        lock.lock()
+        exited = true
+        let waiting = continuation
         continuation = nil
+        lock.unlock()
+        waiting?.resume()
     }
 
     /// Waits for the exit, or returns immediately when it has already happened.
     func waitForExit() async {
-        guard !exited else { return }
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if exited {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
         }
     }
 }

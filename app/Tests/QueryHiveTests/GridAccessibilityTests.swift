@@ -188,6 +188,18 @@ final class GridAccessibilityTests: XCTestCase {
         XCTAssertNil(fixture.coordinator.lastAXAnnouncement)
     }
 
+    /// A release with no selection has nothing to announce, not "0 × 0 cells selected".
+    func testReleaseWithoutASelectionAnnouncesNothing() {
+        let fixture = makeGrid(rowCount: 40)
+        fixture.apply()
+        _ = fixture.table.accessibilityChildren()
+        XCTAssertTrue(fixture.coordinator.axClientAttached)
+        XCTAssertNil(fixture.tab.cellSelection)
+
+        fixture.coordinator.release()
+        XCTAssertNil(fixture.coordinator.lastAXAnnouncement)
+    }
+
     // MARK: Focus
 
     /// VoiceOver's focus is the **cursor**, and reading it must not move the selection: a client

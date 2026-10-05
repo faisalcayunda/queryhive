@@ -40,7 +40,6 @@ final class GridFixture {
     let model: AppModel
     let log: GridCommandLog
     let commands: GridCommands
-    let handle: GridTableHandle
     let coordinator: ResultGridTable.Coordinator
     let table: GridTableView
     let scroll: NSScrollView
@@ -82,7 +81,6 @@ final class GridFixture {
         self.model = AppModel()
         self.log = log
         self.commands = commands
-        self.handle = GridTableHandle()
         self.style = style
         self.columns = columns
         self.naturalWidths = GridMetrics.naturalWidths(headerCounts: columns.map(\.name.count),
@@ -90,8 +88,7 @@ final class GridFixture {
         self.rowCount = rows.count
 
         let table = GridTableView()
-        let coordinator = ResultGridTable.Coordinator(tab: tab, model: model, commands: commands,
-                                                      handle: handle)
+        let coordinator = ResultGridTable.Coordinator(tab: tab, model: model, commands: commands)
         self.coordinator = coordinator
         self.table = table
         table.coordinator = coordinator
