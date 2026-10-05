@@ -33,6 +33,7 @@ final class GridAXTree {
     private var cells: [CellKey: GridAXCell] = [:]
     private var rows: [Int: GridAXRow] = [:]
     private var headers: [Int: GridAXHeader] = [:]
+    private var columnElems: [Int: GridAXColumn] = [:]
 
     init(coordinator: ResultGridTable.Coordinator) {
         self.coordinator = coordinator
@@ -44,8 +45,14 @@ final class GridAXTree {
         return visibleRows + columns
     }
 
-    /// A header for every drawn column, in display order.
-    var columns: [GridAXHeader] {
+    /// A header element for every drawn column, in display order: what
+    /// `accessibilityColumnHeaderUIElements` answers with.
+    ///
+    /// Deliberately a different set from `columns`. A header is a `.button` that runs the sort
+    /// cycle; a column is a `.column` that groups cells. VoiceOver reads them through different
+    /// attributes, and handing it buttons where it asked for columns is how a table ends up with
+    /// no column headers at all.
+    var columnHeaders: [GridAXHeader] {
         refresh()
         return coordinator.visibleSources.enumerated().map { display, source in
             let header = headers[source] ?? {
@@ -55,6 +62,27 @@ final class GridAXTree {
             }()
             header.column = display
             return header
+        }
+    }
+
+    /// One lightweight `.column` element per drawn column, in display order.
+    ///
+    /// Cached by source column and re-indexed on every question, the way the headers are: a column
+    /// dragged or hidden must not leave VoiceOver holding an element whose position it no longer
+    /// has, and rebuilding all of them on every call would hand a client a different object each
+    /// time and make it lose its place.
+    var columns: [GridAXColumn] {
+        refresh()
+        let visible = coordinator.visibleSources
+        for source in columnElems.keys where !visible.contains(source) { columnElems[source] = nil }
+        return visible.enumerated().map { display, source in
+            let element = columnElems[source] ?? {
+                let made = GridAXColumn(column: display, sourceColumn: source, coordinator: coordinator)
+                columnElems[source] = made
+                return made
+            }()
+            element.column = display
+            return element
         }
     }
 
@@ -122,6 +150,7 @@ final class GridAXTree {
         cells.removeAll()
         rows.removeAll()
         headers.removeAll()
+        columnElems.removeAll()
         revision = nil
     }
 
@@ -142,6 +171,12 @@ final class GridAXTree {
         revision = coordinator.currentRevision
         cells.removeAll()
         rows.removeAll()
+        // Blueprint §11.2: elements are thrown away when the result, the columns or the visible
+        // columns change. Cells and rows are keyed by revision; the column elements go for the same
+        // reason — a client that held one must not be left holding an element for a column that is
+        // no longer there, and re-indexing on the next question reuses whatever still is.
+        headers.removeAll()
+        columnElems.removeAll()
     }
 }
 
@@ -207,8 +242,14 @@ final class GridAXCell: NSAccessibilityElement {
 }
 
 /// One row, whose children are its visible cells.
+///
+/// `NSAccessibilityRow` rather than just an element: `accessibilityRows` is typed to return rows,
+/// and AppKit's own row protocol is what carries `accessibilityIndex` — the row's place in the
+/// **result**, in the same coordinates the cells report (§5.4).
+/// `@preconcurrency` because the AppKit row protocol is nonisolated and this class is not: AppKit
+/// only ever reaches it from the main thread, which is where the rest of this file already runs.
 @MainActor
-final class GridAXRow: NSAccessibilityElement {
+final class GridAXRow: NSAccessibilityElement, @preconcurrency NSAccessibilityRow {
     let row: Int
     private unowned let coordinator: ResultGridTable.Coordinator
 
@@ -218,6 +259,15 @@ final class GridAXRow: NSAccessibilityElement {
         super.init()
         setAccessibilityRole(.row)
     }
+
+    /// The result row index, one place VoiceOver uses to say "row 12 of 40 000".
+    override func accessibilityIndex() -> Int { row }
+
+    /// `NSAccessibilityElementProtocol` requires a non-optional identifier, where the class this
+    /// inherits from answers an optional one through `NSAccessibility`'s nullable property. Both
+    /// are spelled the same in Swift, so the row spells its own: a stable one for a row that
+    /// otherwise has no identity of its own to hang focus on.
+    override func accessibilityIdentifier() -> String { "grid.row.\(row)" }
 
     override func accessibilityChildren() -> [Any]? {
         (0..<coordinator.visibleSources.count).compactMap {
@@ -285,6 +335,43 @@ final class GridAXHeader: NSAccessibilityElement {
 
     override func accessibilityFrameInParentSpace() -> NSRect {
         coordinator.frame(ofHeader: column)
+    }
+
+    override func accessibilityParent() -> Any? { coordinator.axParentElement() }
+}
+
+/// One drawn column, as a `.column`.
+///
+/// Lightweight on purpose (blueprint §11.2): it groups, it does not describe. The name, the type
+/// and the sort state all belong to the header button that sits above it, and duplicating them here
+/// would give VoiceOver two things to read for one column. What it needs is where the column is and
+/// which one it is — the **source** index, the identity a moved or hidden column keeps, which is
+/// what the cells inside it report too.
+@MainActor
+final class GridAXColumn: NSAccessibilityElement {
+    var column: Int
+    let sourceColumn: Int
+    private unowned let coordinator: ResultGridTable.Coordinator
+
+    init(column: Int, sourceColumn: Int, coordinator: ResultGridTable.Coordinator) {
+        self.column = column
+        self.sourceColumn = sourceColumn
+        self.coordinator = coordinator
+        super.init()
+        setAccessibilityRole(.column)
+    }
+
+    override func accessibilityLabel() -> String? { coordinator.columnName(at: sourceColumn) }
+
+    override func accessibilityValue() -> Any? { coordinator.columnType(at: sourceColumn) }
+
+    override func accessibilityColumnIndexRange() -> NSRange {
+        NSRange(location: sourceColumn, length: 1)
+    }
+
+    /// The column's own extent over the rows on screen, computed when asked: a scroll moves it.
+    override func accessibilityFrameInParentSpace() -> NSRect {
+        coordinator.frame(ofColumn: column)
     }
 
     override func accessibilityParent() -> Any? { coordinator.axParentElement() }

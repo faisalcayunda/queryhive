@@ -275,7 +275,7 @@ enum GridRowPainter {
                  into: cg)
         } else if !shown.isEmpty {
             let clipped = lines.line(shown, font: context.cellFont, color: context.palette.inkStrong,
-                                     width: content.width, truncated: flags.contains(.truncated))
+                                     width: content.width)
             let lineWidth = CGFloat(CTLineGetTypographicBounds(clipped, nil, nil, nil))
             let x = numeric ? content.maxX - lineWidth : content.minX
             draw(line: clipped, at: CGPoint(x: x, y: baseline(forHeight: context, in: box, font: context.cellFont)),
@@ -341,7 +341,6 @@ final class GridLineCache {
         let color: String
         let italic: Bool
         let width: CGFloat
-        let truncated: Bool
     }
 
     private var current: [Key: CTLine] = [:]
@@ -358,16 +357,23 @@ final class GridLineCache {
     /// result through.
     private let byteLimit = 8 * 1_024 * 1_024
 
+    /// One line, cut to `width` when a width is given.
+    ///
+    /// The cut is unconditional and does not take a switch, because a cell that is *not* cut is a
+    /// cell that draws across its neighbours: the SwiftUI cell it replaces was `lineLimit(1)` with
+    /// `.truncationMode(.tail)` — always a tail ellipsis at the frame — and gating the cut on a
+    /// "this value was long" flag let a 130-character name run over the four columns after it. A
+    /// line that already fits is returned by `CTLineCreateTruncatedLine` untouched, so clipping is
+    /// not a change for the 99% of cells that fit; it is the 1% that stop leaking.
     func line(_ text: String, font: NSFont, color: CGColor, italic: Bool = false,
-              width: CGFloat = .greatestFiniteMagnitude, truncated: Bool = false) -> CTLine {
+              width: CGFloat = .greatestFiniteMagnitude) -> CTLine {
         let key = Key(text: text,
                       font: "\(font.fontName)@\(font.pointSize)|\(font.fontDescriptor.symbolicTraits.rawValue)",
                       color: String(describing: color.components ?? []) + "\(color.alpha)",
-                      italic: italic, width: width, truncated: truncated)
+                      italic: italic, width: width)
         if let hit = current[key] { return hit }
         if let hit = previous[key] { current[key] = hit; return hit }
-        let made = build(text, font: font, color: color, italic: italic,
-                         width: width, truncated: truncated)
+        let made = build(text, font: font, color: color, italic: italic, width: width)
         current[key] = made
         approximateBytes += 48 + text.utf8.count * 2
         if current.count > limit || approximateBytes > byteLimit { rotate() }
@@ -375,7 +381,7 @@ final class GridLineCache {
     }
 
     private func build(_ text: String, font: NSFont, color: CGColor, italic: Bool,
-                       width: CGFloat, truncated: Bool) -> CTLine {
+                       width: CGFloat) -> CTLine {
         var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor(cgColor: color) ?? .labelColor,
@@ -389,7 +395,7 @@ final class GridLineCache {
         }
         let attributed = NSAttributedString(string: text, attributes: attributes)
         let line = CTLineCreateWithAttributedString(attributed)
-        guard truncated, width < .greatestFiniteMagnitude else { return line }
+        guard width < .greatestFiniteMagnitude else { return line }
         let token = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: attributes))
         return CTLineCreateTruncatedLine(line, Double(width), .end, token) ?? line
     }
@@ -476,10 +482,10 @@ enum GridPaintDiff {
             let union = Set((old?.selection?.allPositions ?? []) + (new.selection?.allPositions ?? []))
             for row in union.map({ $0.row }) { result.insert(row) }
         }
-        let oldStaged = Set(old?.edits.stagedPositions ?? [])
-        let newStaged = Set(new.edits.stagedPositions)
+        let oldStaged = Set(old?.edits.stagedKeys ?? [])
+        let newStaged = Set(new.edits.stagedKeys)
         if oldStaged != newStaged {
-            for row in oldStaged.union(newStaged).map({ $0.row }) { result.insert(row) }
+            for key in oldStaged.union(newStaged) { result.insert(key.row) }
         }
         if old?.layout != new.layout || old?.style != new.style {
             result.insert(integersIn: 0..<newRowCount)
@@ -496,9 +502,13 @@ enum GridPaintDiff {
             let all = (old?.selection?.allPositions ?? []) + (new.selection?.allPositions ?? [])
             for position in all { columns.insert(position.column) }
         }
-        let oldStaged = Set(old?.edits.stagedPositions ?? [])
-        let newStaged = Set(new.edits.stagedPositions)
-        for position in oldStaged.union(newStaged) { columns.insert(position.column) }
+        // Source to display, here and nowhere else: `stagedKeys` names sources, `allPositions`
+        // names display columns, and `edges(of:)` below takes the second. A staged edit in a
+        // source the display does not show has no rectangle to repaint at all, so it drops.
+        let visible = new.layout.visibleSources
+        for key in (old?.edits.stagedKeys ?? []) + new.edits.stagedKeys {
+            if let display = visible.firstIndex(of: key.column) { columns.insert(display) }
+        }
         guard let low = columns.min(), let high = columns.max() else { return nil }
         return low...high
     }

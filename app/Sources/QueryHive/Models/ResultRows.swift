@@ -62,9 +62,14 @@ final class ArrayRows: ResultRows, @unchecked Sendable {
     }
 
     func cell(row: Int, column: Int, format: ColumnFormat) -> CellText {
-        guard let value = valueAt(row: row, column: column) else {
-            return CellText(text: "", flags: [.empty])
-        }
+        // Three answers that must not look alike: a NULL is italic `nullDisplay`, an empty string
+        // is `∅`, and a cell a short row does not carry is nothing at all. `valueAt` folds the
+        // first and the third into one `nil`, which is how every NULL in the result came to be
+        // drawn as an empty string (§8.2; parity item 15, "NULL miring").
+        guard displayedRows.indices.contains(row) else { return CellText(text: "", flags: []) }
+        let displayedRow = displayedRows[row]
+        guard column < displayedRow.count else { return CellText(text: "", flags: []) }
+        guard let value = displayedRow[column] else { return CellText(text: "", flags: [.null]) }
         return buildCellText(value: value, format: format, columnIndex: column)
     }
     
@@ -115,9 +120,9 @@ final class ArrayRows: ResultRows, @unchecked Sendable {
     }
 
     private func valueAt(row: Int, column: Int) -> String? {
-        guard displayedRows.indices.contains(row),
-              let displayedRow = displayedRows[row] as? [String?],
-              column < displayedRow.count else { return nil }
+        guard displayedRows.indices.contains(row) else { return nil }
+        let displayedRow = displayedRows[row]
+        guard column < displayedRow.count else { return nil }
         return displayedRow[column]
     }
 

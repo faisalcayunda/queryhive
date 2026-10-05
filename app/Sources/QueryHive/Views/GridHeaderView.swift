@@ -26,6 +26,9 @@ final class GridHeaderView: NSTableHeaderView {
         var sortDirection: GridSort.Direction?
         var isRenamed: Bool
         var isFiltered: Bool
+        /// The filter's own label — "3 values", "contains abc" — for the funnel's tooltip, which
+        /// names what is applied rather than which column it is on.
+        var filterLabel: String?
         /// Whether the column is drawn flush right, in the body and in the header alike.
         var isNumeric: Bool
     }
@@ -77,6 +80,9 @@ final class GridHeaderView: NSTableHeaderView {
     /// The line cache the table also draws into, so a header label and a cell value that happen to
     /// be the same string cost one line between them.
     weak var lineCache: GridLineCache?
+
+    /// The registered tooltip region in window coordinates, for `GridToolTip.local`.
+    private var tooltipWindowRect: NSRect?
 
     override var isFlipped: Bool { true }
 
@@ -136,7 +142,7 @@ final class GridHeaderView: NSTableHeaderView {
         if column.sortDirection != nil { marks += 8 + GridMetrics.headerSpacing }
         let labelWidth = max(0, content.width - marks)
         let label = lines?.line(column.title, font: paint.headerFont, color: palette.inkLabel,
-                                width: labelWidth, truncated: true)
+                                width: labelWidth)
             ?? CTLineCreateWithAttributedString(NSAttributedString(string: column.title))
         let labelLineWidth = CGFloat(CTLineGetTypographicBounds(label, nil, nil, nil))
         let top = GridMetrics.headerVerticalPadding
@@ -306,6 +312,48 @@ final class GridHeaderView: NSTableHeaderView {
         let point = convert(event.locationInWindow, from: nil)
         guard let display = display(at: point) else { return nil }
         return columnMenu?(columns[display].source, display, resultTruncated)
+    }
+
+    // MARK: Tooltips
+
+    /// The band's tooltip region, rebuilt on the table's schedule rather than its own (§8.5 wants
+    /// one controller for the header and the body, rebuilt 100 ms after the pointer stops moving).
+    ///
+    /// One rectangle over the whole band instead of one per column: which column the pointer is
+    /// over is known when the string is asked for, so per-column registration would be work done
+    /// ahead of hovers that may never come — and the band scrolls horizontally, which would make
+    /// every one of those rectangles stale.
+    func scheduleTooltips() {
+        removeAllToolTips()
+        tooltipWindowRect = nil
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        addToolTip(bounds, owner: self, userData: nil)
+        tooltipWindowRect = convert(bounds, to: nil)
+    }
+
+    /// "Sort by …" over a column, "Filter this column" / "Filtered by …" over its funnel — the two
+    /// strings the SwiftUI header had, which is what §13 item 25 asks the test to lock.
+    ///
+    /// The sort wording is the old one and not the blueprint's §12.4 phrasing, deliberately: a
+    /// header click routes **server-first** and only falls back to the rows in hand
+    /// (`AppModel.setSort`), so "over the rows already fetched, not the whole result" would
+    /// describe only the fallback path and deny the common one.
+    ///
+    /// `override` because `NSView` already carries the owner method through
+    /// `NSObject(NSToolTipOwner)`, and so no explicit `NSViewToolTipOwner` conformance either.
+    override func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                       userData: UnsafeMutableRawPointer?) -> String {
+        let local = GridToolTip.local(point: point, in: self, registered: tooltipWindowRect)
+        guard bounds.contains(local), let display = display(at: local),
+              columns.indices.contains(display)
+        else { return "" }
+        let column = columns[display]
+        let content = CGRect(x: geometry.edges(of: display).left + GridMetrics.cellPadding, y: 0,
+                             width: column.width - 2 * GridMetrics.cellPadding, height: bounds.height)
+        if Self.funnelBounds(content: content).contains(local) {
+            return column.isFiltered ? "Filtered by \(column.filterLabel ?? "")" : "Filter this column"
+        }
+        return "Sort by \(column.title) — on the server when possible, over the rows fetched otherwise"
     }
 
     /// The header's height for a set of columns: the label line, the chip block, and the padding.

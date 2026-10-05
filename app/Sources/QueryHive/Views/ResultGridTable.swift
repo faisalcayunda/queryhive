@@ -167,7 +167,8 @@ struct ResultGridTable: NSViewRepresentable {
     /// Main-actor throughout — the table draws on the main thread, and `ResultRows.cell` is
     /// documented as main-thread only.
     @MainActor
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate,
+        NSViewToolTipOwner {
         var tab: QueryTab
         var model: AppModel
         var commands: GridCommands
@@ -206,7 +207,11 @@ struct ResultGridTable: NSViewRepresentable {
         private weak var table: GridTableView?
         private weak var scroll: NSScrollView?
         private var formatObserver: NSObjectProtocol?
+        private var scrollObserver: NSObjectProtocol?
         private var tooltipRebuild: DispatchWorkItem?
+        /// The registered tooltip region in window coordinates, which is what lets
+        /// `GridToolTip.local` say which coordinate system AppKit's point is in.
+        private var tooltipWindowRect: NSRect?
 
         init(tab: QueryTab, model: AppModel, commands: GridCommands, handle: GridTableHandle) {
             self.tab = tab
@@ -236,10 +241,21 @@ struct ResultGridTable: NSViewRepresentable {
                 forName: ColumnFormatStore.didChange, object: nil, queue: .main) { [weak self] note in
                     MainActor.assumeIsolated { self?.formatChanged(note) }
                 }
+            // The tooltip region is registered in window coordinates, so scrolling the content out
+            // from under it leaves the pointer outside every region (§8.5: rebuilt 100 ms after the
+            // scroll stops, coalesced — never per frame).
+            scroll.contentView.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleTooltips() }
+            }
         }
 
         deinit {
             if let formatObserver { NotificationCenter.default.removeObserver(formatObserver) }
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+            tooltipRebuild?.cancel()
         }
 
         /// Row index in the rows the grid draws, for a row index in the table.
@@ -265,6 +281,10 @@ struct ResultGridTable: NSViewRepresentable {
                 textCache.removeAll()
                 table?.noteNumberOfRowsChanged()
                 table?.needsDisplay = true
+                // Only if a client is watching: forcing the lazy tree here would allocate it on
+                // every result for nobody, which is the thing D-10 forbids.
+                if axClientAttached { axTree.invalidate() }
+                noteResultChangedForAX()
             } else if let old {
                 let rows = GridPaintDiff.invalidatedRows(old: old, new: inputs,
                                                          oldRowCount: rowCount(old), newRowCount: rows.count)
@@ -275,7 +295,6 @@ struct ResultGridTable: NSViewRepresentable {
             applyHeader(inputs)
             syncEditor(inputs, old: old)
             syncPopovers(inputs, old: old)
-            table?.toolTip = nil
             scheduleTooltips()
         }
 
@@ -352,6 +371,10 @@ struct ResultGridTable: NSViewRepresentable {
             table?.header.paint = paint
             table?.applyDocumentWidth(next.totalWidth)
             table?.needsDisplay = true
+            // The registered regions are in window coordinates, and a refit moves both the columns
+            // inside them and the document they sit on. Debounced, so a resize drag is one rebuild
+            // 100 ms after it stops rather than one per frame of it.
+            scheduleTooltips()
             // The header's own copy of each width is what it wraps a chip against and what its
             // funnel hit-test reads, so it has to move with the geometry; it draws by
             // `geometry.edges` and would otherwise be right while its measured height was not.
@@ -420,6 +443,7 @@ struct ResultGridTable: NSViewRepresentable {
                     sortDirection: sort?.direction,
                     isRenamed: tab.columnLayout.isRenamed(source),
                     isFiltered: inputs.filtered.contains(source),
+                    filterLabel: tab.columnFilters[source]?.label,
                     isNumeric: GridMetrics.isNumeric(type: column?.type ?? "")
                 )
             }
@@ -429,10 +453,12 @@ struct ResultGridTable: NSViewRepresentable {
 
         /// The text for one row, from the cache or built from the rows.
         ///
-        /// Staged cells are built here too rather than cached: their text depends on the queue, and
-        /// the queue changes on every keystroke of an editing session.
+        /// A row with a staged edit is **built, never cached**: its text depends on the queue, and
+        /// the queue changes on every keystroke of an editing session, while the cache is only
+        /// thrown away by a revision, a style or a palette change. Caching it meant a commit kept
+        /// drawing the old value under its new wash, and a discard kept drawing the typed one.
         func rowText(_ row: Int) -> GridRowText {
-            textCache.text(at: row) { [self] in
+            let build: () -> GridRowText = { [self] in
                 var cells: [String] = []
                 var flags: [CellFlags] = []
                 cells.reserveCapacity(geometry.widths.count)
@@ -459,6 +485,8 @@ struct ResultGridTable: NSViewRepresentable {
                 }
                 return GridRowText(cells: cells, flags: flags)
             }
+            guard !tab.cellEdits.hasStagedEdit(row: row) else { return build() }
+            return textCache.text(at: row, build: build)
         }
 
         private func type(ofSource source: Int) -> String {
@@ -531,6 +559,7 @@ struct ResultGridTable: NSViewRepresentable {
             dragAnchor = nil
             table?.selection = tab.cellSelection
             commands.settleSelection()
+            announceSelectionForAX()
             prebuildIfWorthIt()
         }
 
@@ -771,30 +800,50 @@ struct ResultGridTable: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
         }
 
+        /// One region over everything the pointer can reach, registered after that 100 ms.
+        ///
+        /// Not one region per cell: §8.5's alternative (P-6) is a single rectangle and a string
+        /// resolved from the point, so 40 × 20 cells cost one registration instead of 800 and a
+        /// fling costs nothing at all — the pointer cannot move during the 100 ms because there is
+        /// nothing per frame to keep up with.
         private func rebuildTooltips() {
-            guard let table = table, let scroll = scroll else { return }
-            table.toolTip = nil
-            let visible = table.rows(in: table.visibleRect)
-            guard visible.length > 0 else { return }
-            for row in visible.location..<(visible.location + visible.length) {
-                guard row < rows.count else { break }
-                for (display, source) in (applied?.layout.visibleSources ?? []).enumerated() {
-                    let format = formats.indices.contains(source) ? formats[source] : .raw
-                    let key = CellKey(row: row, column: source)
-                    let value = tab.cellEdits.value(at: key).map { format.render($0, type: type(ofSource: source)) }
-                        ?? rows.fullValue(row: row, column: source, format: format)
-                    // A NULL and an empty string have no tooltip, exactly as the `.help` on the old
-                    // cell was only on the non-empty branch.
-                    guard let value, !value.isEmpty else { continue }
-                    let edges = geometry.edges(of: display)
-                    let rowRect = table.rect(ofRow: row)
-                    let rect = table.convert(CGRect(x: edges.left, y: rowRect.minY,
-                                                    width: edges.right - edges.left,
-                                                    height: rowRect.height), to: nil)
-                    _ = rect
-                    _ = scroll
-                }
-            }
+            guard let table else { return }
+            table.removeAllToolTips()
+            tooltipWindowRect = nil
+            table.header.scheduleTooltips()
+            let region = table.visibleRect
+            guard region.width > 1, region.height > 1 else { return }
+            table.addToolTip(region, owner: self, userData: nil)
+            tooltipWindowRect = table.convert(region, to: nil)
+        }
+
+        /// The tooltip for the cell under the pointer — the whole value in the column's display
+        /// format (§8.5), which is what the reader and an export see.
+        ///
+        /// Empty means *no tooltip*: a NULL and an empty string had no `.help` on the old cell, and
+        /// with one region over the whole body the absence has to be expressed by the answer
+        /// rather than by not registering the cell.
+        func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                  userData: UnsafeMutableRawPointer?) -> String {
+            guard let table, let inputs = applied, rows.count > 0, !geometry.widths.isEmpty
+            else { return "" }
+            let sources = inputs.layout.visibleSources
+            guard !sources.isEmpty else { return "" }
+            let local = GridToolTip.local(point: point, in: table, registered: tooltipWindowRect)
+            // The pointer over the row-number gutter belongs to no column, and `clampedColumn`
+            // would silently hand it the first one instead of nothing.
+            guard table.bounds.contains(local), local.x >= geometry.gutter else { return "" }
+            let display = geometry.clampedColumn(atX: local.x, last: geometry.widths.count - 1)
+            guard sources.indices.contains(display) else { return "" }
+            let source = sources[display]
+            let row = geometry.row(atY: local.y, rowHeight: paint.rowHeight, count: rows.count)
+            guard row >= 0, row < rows.count else { return "" }
+            let format = formats.indices.contains(source) ? formats[source] : .raw
+            let key = CellKey(row: row, column: source)
+            let value = tab.cellEdits.value(at: key).map { format.render($0, type: type(ofSource: source)) }
+                ?? rows.fullValue(row: row, column: source, format: format)
+            guard let value, !value.isEmpty else { return "" }
+            return GridToolTip.cap(value)
         }
 
         // MARK: Rows grew
@@ -830,6 +879,10 @@ struct ResultGridTable: NSViewRepresentable {
         /// The revision the rows under every row index belong to.
         var currentRevision: Int { applied?.revision ?? 0 }
 
+        /// Every row there is, for `accessibilityRowCount` — the count must not follow the viewport
+        /// that `accessibilityRows` is limited to.
+        var rowCountForAX: Int { rows.count }
+
         /// The rows on screen, in **result** coordinates, as a half-open range.
         ///
         /// Empty when the table has never been laid out, which is what `accessibilityRows` answers
@@ -858,6 +911,61 @@ struct ResultGridTable: NSViewRepresentable {
         func axParentElement() -> Any? { table }
 
         var ax: GridAXTree { axTree }
+
+        // MARK: AX notifications
+
+        /// Whether an accessibility client has ever asked for the tree.
+        ///
+        /// Every notification below is gated on it (blueprint §11.2, D-10): before the first
+        /// `accessibilityChildren` there is nothing allocated and nobody listening, so posting then
+        /// would be work done for no one — which is the whole property D-10 exists to keep.
+        private(set) var axClientAttached = false
+
+        /// Called from the table's first `accessibilityChildren`. Idempotent.
+        func noteAXClientAttached() {
+            axClientAttached = true
+            axTree.trim()
+        }
+
+        /// The last selection announcement `release()` made.
+        ///
+        /// Kept so a test can read it: the real one is posted to the application element, which is
+        /// where `NSAccessibilityAnnouncementKey` is documented to go, and nothing in a test process
+        /// can observe that.
+        private(set) var lastAXAnnouncement: String?
+
+        /// "3 × 2 cells selected" (FR-GRID-07), posted on release and never per drag step: an
+        /// announcement on every mouse-moved pixel would make VoiceOver talk over itself.
+        func announceSelectionForAX() {
+            guard axClientAttached, let table else { return }
+            let selection = tab.cellSelection
+            let height = selection.map { max(1, $0.bottom - $0.top + 1) } ?? 0
+            let width = selection.map { max(1, $0.right - $0.left + 1) } ?? 0
+            lastAXAnnouncement = "\(height) × \(width) cells selected"
+            NSAccessibility.post(element: NSApp as Any, notification: .selectedCellsChanged)
+            NSAccessibility.post(element: table, notification: .selectedCellsChanged)
+            NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: lastAXAnnouncement as Any])
+        }
+
+        /// `.layoutChanged` when a new result takes over the rows, again only for a live client.
+        func noteResultChangedForAX() {
+            guard axClientAttached, let table else { return }
+            NSAccessibility.post(element: table, notification: .layoutChanged)
+        }
+
+        /// One column's frame across the rows on screen — the `.column` element's own extent, not
+        /// the header's. Computed when asked, so a scroll that moves the rows moves it too.
+        func frame(ofColumn display: Int) -> NSRect {
+            guard let table else { return .zero }
+            let edges = geometry.edges(of: display)
+            let range = visibleRowRange()
+            guard range.lowerBound < range.upperBound else { return .zero }
+            let top = table.rect(ofRow: range.lowerBound).minY
+            let bottom = table.rect(ofRow: range.upperBound - 1).maxY
+            return NSRect(x: edges.left, y: top, width: edges.right - edges.left,
+                          height: max(0, bottom - top))
+        }
 
         /// The staged text for a cell, or `nil` when it has none.
         func stagedValue(at key: CellKey) -> String? { tab.cellEdits.value(at: key) }

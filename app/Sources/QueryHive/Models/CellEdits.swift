@@ -49,14 +49,20 @@ struct CellEdits: Equatable {
     /// The staged text for a cell, or `nil` when the cell is untouched.
     func value(at key: CellKey) -> String? { values[key] }
 
-    /// The cells that carry a staged edit, in the same display coordinates `CellKey` already uses.
+    /// The cells that carry a staged edit, as `CellKey`s: row and **source** column, which are the
+    /// coordinates the queue is keyed on (`rowText` builds a `CellKey` from the source index it is
+    /// iterating).
     ///
-    /// The grid's row cache diffs the queue between two inputs and repaints only the rows this
-    /// reports, so the queue has to be able to name its own cells; without it every keystroke would
-    /// invalidate every row.
-    var stagedPositions: [CellPos] {
-        values.keys.map { CellPos(row: $0.row, column: $0.column) }
-    }
+    /// Not display positions. The grid's `CellPos`s are display coordinates — the pointer hands
+    /// `clampedColumn(atX:)`'s result straight to `selectCells` — so handing these to a diff that
+    /// mixes them with a selection would invalidate the wrong rectangle, and a column that is
+    /// hidden or dragged out of order would invalidate one that does not exist. Translating to
+    /// display is the diff's job: only it can see `visibleSources`.
+    var stagedKeys: [CellKey] { Array(values.keys) }
+
+    /// Whether a row carries any staged edit, which is what tells the grid to build its text
+    /// instead of taking it from the row cache.
+    func hasStagedEdit(row: Int) -> Bool { values.keys.contains { $0.row == row } }
 
     /// Stage one cell's new text.
     ///

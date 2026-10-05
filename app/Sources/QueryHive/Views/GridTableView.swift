@@ -76,6 +76,11 @@ final class GridTableView: NSTableView {
         // out and a header to hang, and the header draws itself too.
         headerView = header
 
+        // Blueprint §11.2. The role is the one AppKit would report anyway; the label is not, and
+        // "Result grid" is what VoiceOver says before it starts reading cells.
+        setAccessibilityRole(.table)
+        setAccessibilityLabel("Result grid")
+
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("grid"))
         column.minWidth = 1
         // The default 1000 would clamp a 500-column document at 1000 pt and silently stop the
@@ -125,6 +130,74 @@ final class GridTableView: NSTableView {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
+
+    // MARK: Pointer
+
+    /// A press, a drag and a release, converted once and handed to the coordinator (§12.3).
+    ///
+    /// `super` is not called on any of the three, and that is deliberate: AppKit's own press would
+    /// run the delegate's selection, which the coordinator suppresses because the selection here is
+    /// a block of *cells*, not a set of table rows, and it would start an edit in the cell-mode
+    /// cell this table never draws. The header does the same for the same reason.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        coordinator?.press(at: convert(event.locationInWindow, from: nil),
+                           clickCount: event.clickCount)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        coordinator?.drag(to: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        coordinator?.release()
+    }
+
+    // MARK: Accessibility
+
+    /// The table's own AX attributes, answered from the tree rather than from AppKit's.
+    ///
+    /// The overrides exist because the table is cell-based with **one** `NSTableColumn`: AppKit's
+    /// default tree honestly describes that column and would tell VoiceOver a 500-column result has
+    /// one (blueprint §11.2). Every attribute below is one VoiceOver actually reads, so leaving any
+    /// of them to `super` would keep a single lie in an otherwise correct tree.
+    ///
+    /// Nothing here builds anything until it is called, and the first `accessibilityChildren` is
+    /// what arms the notifications (D-10).
+    override func accessibilityChildren() -> [Any]? {
+        coordinator?.noteAXClientAttached()
+        return coordinator?.ax.visibleChildren ?? []
+    }
+
+    override func accessibilityRows() -> [any NSAccessibilityRow]? { coordinator?.ax.visibleRows ?? [] }
+
+    override func accessibilityColumns() -> [Any]? { coordinator?.ax.columns ?? [] }
+
+    override func accessibilityVisibleRows() -> [any NSAccessibilityRow]? {
+        coordinator?.ax.visibleRows ?? []
+    }
+
+    override func accessibilityVisibleCells() -> [Any]? { coordinator?.ax.visibleCells ?? [] }
+
+    override func accessibilityColumnHeaderUIElements() -> [Any]? {
+        coordinator?.ax.columnHeaders ?? []
+    }
+
+    /// For any position, on screen or not: VoiceOver's table navigation asks for a cell and *then*
+    /// scrolls it into view, so refusing one outside the viewport would strand it on page one.
+    override func accessibilityCell(forColumn column: Int, row: Int) -> Any? {
+        coordinator?.ax.cell(row: row, column: column)
+    }
+
+    override func accessibilitySelectedCells() -> [Any]? { coordinator?.ax.selectedCells ?? [] }
+
+    override var accessibilityFocusedUIElement: Any? { coordinator?.ax.focusedCell ?? self }
+    /// The **real** row count, not the visible one: `accessibilityRows` deliberately answers only
+    /// with the viewport, and a table that claims 40 rows because 40 are on screen would make
+    /// VoiceOver announce "row 40 of 40" for a million-row result.
+    override func accessibilityRowCount() -> Int { coordinator?.rowCountForAX ?? 0 }
+
+    override func accessibilityColumnCount() -> Int { coordinator?.visibleSources.count ?? 0 }
 
     // MARK: Drawing
 

@@ -313,10 +313,16 @@ struct ResultGrid: View {
             review: { reviewingChanges = true },
             copy: { withHeaders in copySelection(withHeaders: withHeaders) },
             viewValue: { viewSelectedValue() },
-            // The editor lives in the table, so these three are the table's own paths, not this
-            // view's; the menu items that reach them go through `handle`.
-            beginEdit: { key in handle.beginEdit(at: key) },
-            commitEdit: { key, text in handle.commitEdit(at: key, text: text) },
+            // The editor lives in the table, so these three run over there: every menu action is
+            // an `NSMenu` selector on the coordinator (`menu(for:)`, `editCell`), and `handle`
+            // is not on that path at all. What these closures carry is the table's notification
+            // *upward* — `Coordinator.beginEdit` fires `commands.beginEdit` after `tab` has
+            // taken the session — and the host adds nothing to it. Routing it back would be
+            // routing it to `handle.beginEdit`, which *is* `coordinator.beginEdit`, so the
+            // coordinator would call itself until the stack ran out; the first draft did that,
+            // and it was invisible because nothing else could open the editor yet.
+            beginEdit: { _ in },
+            commitEdit: { _, _ in },
             cancelEdit: {},
             settleSelection: { inspectedRange = tab.cellSelection },
             paste: { pasteIntoSelection() },
