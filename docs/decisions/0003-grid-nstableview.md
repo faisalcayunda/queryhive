@@ -1,5 +1,10 @@
 # 0003 — Grid hasil memakai NSTableView, bukan SwiftUI Table atau grid kustom
 
+> **Catatan 2026-10-06:** pilihan `NSTableView` di bawah bertahan, tetapi cara memakainya diamandemen oleh
+> ADR-0032: satu `NSTableView` mode sel dengan satu `NSTableColumn` yang menggambar isinya sendiri di `draw(_:)`
+> (bukan view per sel), dengan data lewat seam `ResultRows`. Syarat revisi di bawah (grid kustom bila 60 fps gagal)
+> belum terpicu; bench W5-T3 yang memutuskan. Badan di bawah sengaja tidak ditulis ulang.
+
 - **Status:** Diterima (wajib diukur ulang pada Fase 3; bila prototipe gagal, ADR ini direvisi)
 - **Tanggal:** sesi Fase 0
 - **Konteks instruksi:** §6 (scroll 60/120 fps), §7.7 (aksesibilitas), §5 poin 2 (UI dipertahankan)
