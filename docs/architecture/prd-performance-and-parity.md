@@ -282,7 +282,7 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 
 - **Tiga lapis** (`performance-plan.md` §4.8): geometri identik secara numerik; warna identik di titik sampel; teks dalam toleransi (≤ 0,1% piksel dengan delta kanal > 16/255 per scene). Atribut editor harus identik per rentang, kecuali perubahan V-12 (warna editor dari tree-sitter).
 - Baseline PNG di-commit di `app/Tests/QueryHiveTests/__Baselines__/`, direkam dari commit P.
-- Fase performa tidak boleh mengubah piksel, kecuali V-1 dan V-12 di bawah.
+- Fase performa tidak boleh mengubah piksel, kecuali V-1, V-12, dan V-13 di bawah.
 - **Perubahan yang disengaja** hanya yang terdaftar di bawah. Scene lain harus lulus tanpa perubahan.
 
 | Kode | Perubahan | Tugas |
@@ -299,6 +299,7 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 | V-10 | Garis bawah diagnostik, kurung, gutter terang | W10-T6, W10-T7 |
 | V-11 | Permukaan baru tanpa baseline lama: record, pohon plan, aktivitas, audit, footer paginasi, tab hasil skrip, bagian SSH, tab DDL | W10–W13 |
 | V-12 | Warna sintaks dan lipatan editor dari tree-sitter, dengan warna sebagai atribut sementara (butir 1–11 di blueprint 4B §5.3, termasuk kontras Nord yang diperbaiki) | W4-T2 commit B |
+| V-13 | Grid digambar `NSTableView` + `draw(_:)`, bukan `LazyVStack` SwiftUI. Tiga sebab terukur, ketiganya di luar kendali dari dalam `draw(_:)`: tepi kolom fraksional membulat ke piksel yang berbeda dari layout `HStack` yang menerus (56 assertion layout, 1 pt); teks SwiftUI ber-antialias subpiksel dan `CTLineDraw` ke bitmap `cacheDisplay` ber-antialias grayscale, dan delapan kombinasi `shouldSmoothFonts`/`shouldSubpixelPositionFonts`/`shouldSubpixelQuantizeFonts`/`setShouldAntialias`/baseline fraksional/x bulat/alpha tinta penuh tidak satu pun turun di bawah 4,998% dari anggaran 0,1% (30 assertion piksel); chevron sort 10×6 px sementara `Image(systemName:)` dengan `.font(.system(size:8,weight:.bold))` menghasilkan 6×4 (14 assertion marker). Geometri kolom dan tinggi header sudah direproduksi (lihat §14 blueprint 5B). Bukan V-9: V-9 milik W10 dan hanya menyentuh kursor, kontras, staged, funnel. | W5-T1 commit 5b |
 
 - Setiap rekam ulang punya commit sendiri. Baseline lama tetap bisa diambil dari riwayat git. Pemilik meninjau pasangan berdampingan di laporan akhir (keputusan O-10, P-01).
 

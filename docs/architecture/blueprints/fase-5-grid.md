@@ -614,6 +614,10 @@ W5 hanya membutuhkan dua hal dari W4-T1: (a) `tab.activeSort` yang menyediakan `
 
 `VisualParityTests`, tes komparator, dan baseline tidak diedit. V-9 dicadangkan untuk W10, jadi tidak ada perubahan visual yang boleh masuk di Fase 5.
 
+**Koreksi setelah implementasi (V-13).** Klaim "tidak ada perubahan visual" di atas **tidak tercapai**, dan sebabnya bukan implementasi yang belum selesai: tiga lapis gate punya batas yang tidak bisa dilewati dari dalam `draw(_:)`. Tepi kolom fraksional membulat ke piksel yang berbeda dari layout `HStack` yang menerus (56 assertion layout, 1 pt). Teks SwiftUI ber-antialias subpiksel dan `CTLineDraw` ke bitmap `cacheDisplay` ber-antialias grayscale; delapan kombinasi langkah §14.2 (0–3 flag konteks, baseline fraksional, x bulat, alpha tinta penuh, dan seluruh pasangannya) semuanya mengukur ≥ 4,998% piksel berbeda dari anggaran 0,1%. Chevron sort 10×6 px sementara `.font(.system(size: 8, weight: .bold))` pada `Image(systemName:)` menghasilkan 6×4 (14 assertion marker); `SymbolConfiguration` tidak punya `init(font:)`.
+
+Langkah §14.2 dijalankan sampai habis dan berhenti pada "berhenti dan lapor". Karena V-9 milik W10 dan hanya menyentuh kursor, kontras, staged, dan funnel — bukan penggantian renderer — keputusan pemilik adalah mendaftarkan **V-13** di PRD §6.5 untuk migrasi renderer ini, lalu merekam ulang 30 scene grid **di commitnya sendiri** (`W5-T1` commit 5b, terpisah dari commit kode). Geometri kolom, tinggi header, dan fitur kolom sudah direproduksi persis; yang direkam ulang adalah rasterisasi teks dan pembulatan tepi. Gate tetap hidup: rekam ulang berikutnya butuh kode V baru.
+
 ### 14.2 Tangga bila teks di luar toleransi
 
 Teks adalah satu-satunya lapis yang tidak bisa dijamin dari kode. Urutan, berhenti di langkah pertama yang lulus:
