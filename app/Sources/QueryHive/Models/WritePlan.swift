@@ -118,7 +118,7 @@ struct WritePlan: Equatable {
     /// A row whose every column is excluded from the predicate yields no statement
     /// and a warning, never a bare `DELETE`/`UPDATE` that would match the table.
     /// Added rows are grouped and bounded by `WriteBatchBudget`.
-    static func build(edits: CellEdits, rows: [[String?]], columns: [Event.Column],
+    static func build(edits: CellEdits, rows: some RowReading, columns: [Event.Column],
                       table: String?, kind: ConnectionKind,
                       budget: WriteBatchBudget? = nil) -> WritePlan {
         guard let table, !columns.isEmpty else {
@@ -130,10 +130,10 @@ struct WritePlan: Equatable {
         var warnings: [String] = []
 
         for row in edits.deletedRows.sorted() {
-            guard rows.indices.contains(row) else { continue }
+            guard let rowData = rows.row(at: row) else { continue }
             var bound = BoundSQL(style: style)
             bound.text("DELETE FROM \(table) WHERE ")
-            let match = UpdateStatements.appendMatch(for: rows[row], columns: columns, kind: kind,
+            let match = UpdateStatements.appendMatch(for: rowData, columns: columns, kind: kind,
                                                      into: &bound)
             guard match.clauses > 0 else {
                 warnings.append(refusal(action: "deleted", row: row, excluded: match.excluded))

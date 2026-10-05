@@ -49,6 +49,15 @@ struct CellEdits: Equatable {
     /// The staged text for a cell, or `nil` when the cell is untouched.
     func value(at key: CellKey) -> String? { values[key] }
 
+    /// The cells that carry a staged edit, in the same display coordinates `CellKey` already uses.
+    ///
+    /// The grid's row cache diffs the queue between two inputs and repaints only the rows this
+    /// reports, so the queue has to be able to name its own cells; without it every keystroke would
+    /// invalidate every row.
+    var stagedPositions: [CellPos] {
+        values.keys.map { CellPos(row: $0.row, column: $0.column) }
+    }
+
     /// Stage one cell's new text.
     ///
     /// Staging the text the cell already holds *unstages* it: a user who types a value and then
@@ -64,7 +73,7 @@ struct CellEdits: Equatable {
     /// cell is keyed by; the grid passes its visible columns, so a block dragged over a reordered
     /// grid still edits the cells the user pointed at. Omitting it means the two are the same, which
     /// is the shape the tests use.
-    mutating func fill(_ text: String, over range: CellRange, rows: [[String?]],
+    mutating func fill(_ text: String, over range: CellRange, rows: some RowReading,
                        columns: [Int]? = nil) {
         for row in range.top...range.bottom {
             for position in range.left...range.right {
@@ -81,14 +90,14 @@ struct CellEdits: Equatable {
     /// and reappeared on the next row would put values in cells the user never pointed at. As with
     /// `fill`, `origin`'s column and `columnCount` are display positions and `columns` maps them to
     /// the source indices the cells are keyed by.
-    mutating func paste(_ text: String, at origin: CellKey, rows: [[String?]], columnCount: Int,
+    mutating func paste(_ text: String, at origin: CellKey, rows: some RowReading, columnCount: Int,
                         columns: [Int]? = nil) {
         for (down, line) in Self.parse(text).enumerated() {
             for (across, field) in line.enumerated() {
                 let position = origin.column + across
                 guard position < columnCount else { continue }
                 let key = CellKey(row: origin.row + down, column: Self.source(position, in: columns))
-                guard key.row < rows.count else { continue }
+                guard rows.row(at: key.row) != nil else { continue }
                 stage(field, at: key, original: Self.value(in: rows, at: key))
             }
         }
@@ -148,9 +157,8 @@ struct CellEdits: Equatable {
         if text == original { values[key] = nil } else { values[key] = text }
     }
 
-    private static func value(in rows: [[String?]], at key: CellKey) -> String? {
-        guard rows.indices.contains(key.row) else { return nil }
-        let row = rows[key.row]
+    private static func value(in rows: some RowReading, at key: CellKey) -> String? {
+        guard let row = rows.row(at: key.row) else { return nil }
         return row.indices.contains(key.column) ? row[key.column] : nil
     }
 

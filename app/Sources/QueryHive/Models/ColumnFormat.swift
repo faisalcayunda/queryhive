@@ -114,6 +114,15 @@ enum ColumnFormatStore {
         return "\(connection.uuidString)|\(table)|\(column)"
     }
 
+    /// Posted after a format changes, with the identity as the object.
+    ///
+    /// A column's format is not part of the grid's observable state — it is a dictionary in
+    /// `UserDefaults` — so without this a reader that set a format would write to the file and the
+    /// grid would keep drawing yesterday's characters until something else happened to move. The
+    /// grid reads its formats once per result and again on this notification, which is what keeps
+    /// `UserDefaults` out of the draw path (blueprint D-5).
+    static let didChange = Notification.Name("ColumnFormatStoreDidChange")
+
     static func format(_ identity: String, in defaults: UserDefaults = .standard) -> ColumnFormat {
         let stored = defaults.dictionary(forKey: defaultsKey) as? [String: String]
         return stored?[identity].flatMap(ColumnFormat.init(rawValue:)) ?? .raw
@@ -131,5 +140,6 @@ enum ColumnFormatStore {
         } else {
             defaults.set(stored, forKey: defaultsKey)
         }
+        NotificationCenter.default.post(name: didChange, object: identity)
     }
 }

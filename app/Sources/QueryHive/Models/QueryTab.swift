@@ -309,6 +309,9 @@ struct PreviewResult {
             ? "First \(rows.count.formatted()) rows · limit reached"
             : pluralized(rows.count, "row")
     }
+
+    /// Non-grid readers (snapshots, benches) use this instead of `.rows.count`.
+    var rowCount: Int { rows.count }
 }
 
 /// The "off" rule before the result store lands: a base result is kept only
@@ -782,14 +785,14 @@ final class QueryTab: Identifiable {
     /// Stage the editor's text over a whole selected block as one undo step.
     func fillCellEdits(_ text: String, over selection: CellRange) {
         let before = cellEdits
-        cellEdits.fill(text, over: selection, rows: displayedRows, columns: visibleColumnSources)
+        cellEdits.fill(text, over: selection, rows: result, columns: visibleColumnSources)
         registerGridEdit(before)
     }
 
     /// Stage a pasted block as one undo step.
     func pasteCellEdits(_ text: String, at origin: CellKey, columnCount: Int) {
         let before = cellEdits
-        cellEdits.paste(text, at: origin, rows: displayedRows, columnCount: columnCount,
+        cellEdits.paste(text, at: origin, rows: result, columnCount: columnCount,
                         columns: visibleColumnSources)
         registerGridEdit(before)
     }
@@ -799,6 +802,12 @@ final class QueryTab: Identifiable {
         let before = cellEdits
         cellEdits.discard()
         registerGridEdit(before)
+    }
+
+    /// Set the selection and cursor from the coordinator.
+    func selectCells(anchor: CellPos, focus: CellPos) {
+        cellSelection = CellRange(from: (anchor.row, anchor.column), to: (focus.row, focus.column))
+        cellCursor = GridCursor(anchor: anchor, focus: focus)
     }
 
     func undoCellEdit() { editUndoManager.undo() }
@@ -814,9 +823,7 @@ final class QueryTab: Identifiable {
 
     /// The value the server sent for a cell, before any staged edit.
     func fetchedValue(at key: CellKey) -> String? {
-        guard displayedRows.indices.contains(key.row) else { return nil }
-        let row = displayedRows[key.row]
-        return row.indices.contains(key.column) ? row[key.column] : nil
+        result.fullValue(row: key.row, column: key.column, format: .raw)
     }
 
     /// Throw the queued-edit history away, with the queue it describes.
@@ -884,12 +891,45 @@ final class QueryTab: Identifiable {
         return rows
     }
 
+    /// What the grid draws; rebuilt only when `gridRevision` changes.
+    ///
+    /// An `ArrayRows` over `displayedRows` for display; an empty one without a preview.
+    @ObservationIgnored private var resultCache: (any ResultRows)?
+    @ObservationIgnored private var resultCacheRevision = -1
+
+    var result: any ResultRows {
+        if resultCacheRevision == gridRevision, let resultCache { return resultCache }
+        if let preview {
+            let displayed = displayedRows
+            let sizing = preview.rows
+            let columns = preview.columns
+            resultCache = ArrayRows(rows: displayed, sizing: sizing, columns: columns)
+        } else {
+            resultCache = ArrayRows(rows: [], sizing: [], columns: [])
+        }
+        resultCacheRevision = gridRevision
+        return resultCache!
+    }
+
     /// The block of cells the pointer has dragged out in the grid, if any. Rows are positions in the
     /// rows the grid is drawing (the filtered ones) and columns are positions among the **drawn**
     /// columns; both are what the pointer pointed at. Cleared whenever new rows arrive, for the same
     /// reason the filters are: the numbers describe rows that no longer exist. A queued edit, by
     /// contrast, is keyed by the source column, because it has to survive a column being moved.
-    var cellSelection: CellRange?
+    var cellSelection: CellRange? {
+        didSet {
+            guard let selection = cellSelection else { cellCursor = nil; return }
+            // Keep the cursor inside the selection.
+            if let cursor = cellCursor, !selection.contains(row: cursor.focus.row, column: cursor.focus.column) {
+                cellCursor = GridCursor(anchor: CellPos(row: selection.top, column: selection.left), focus: CellPos(row: selection.top, column: selection.left))
+            } else if cellCursor == nil {
+                cellCursor = GridCursor(anchor: CellPos(row: selection.top, column: selection.left), focus: CellPos(row: selection.top, column: selection.left))
+            }
+        }
+    }
+    
+    /// The cell cursor (P-24). W10-T1 makes this authoritative and draws the ring.
+    var cellCursor: GridCursor?
 
     /// The cells the user has changed but not yet written.
     ///

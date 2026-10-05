@@ -41,12 +41,12 @@ enum UpdateStatements {
     /// it, and the update changes both. That is why the statements are meant to be shown before they
     /// run: a predicate matching more than the row it was built from is visible there, and silent
     /// everywhere else. `MatchPolicy` decides which columns may take part.
-    static func generate(edits: CellEdits, rows: [[String?]], columns: [Event.Column],
+    static func generate(edits: CellEdits, rows: some RowReading, columns: [Event.Column],
                          table: String, kind: ConnectionKind) -> [Update] {
         let style = ParameterStyle.forKind(kind)
         let byRow = Dictionary(grouping: edits.values.keys, by: \.row)
         return byRow.keys.sorted().compactMap { row -> Update? in
-            guard rows.indices.contains(row) else { return nil }
+            guard let rowData = rows.row(at: row) else { return nil }
             // Each assignment is (identifier, value to bind, literal to show). A `DEFAULT` sentinel
             // has no value to bind: it is a keyword, and a keyword is never a parameter.
             let assignments = (byRow[row] ?? [])
@@ -75,7 +75,7 @@ enum UpdateStatements {
                 }
             }
             bound.text(" WHERE ")
-            let match = appendMatch(for: rows[row], columns: columns, kind: kind, into: &bound)
+            let match = appendMatch(for: rowData, columns: columns, kind: kind, into: &bound)
             guard match.clauses > 0 else {
                 return Update(row: row, bound: nil, excluded: match.excluded)
             }

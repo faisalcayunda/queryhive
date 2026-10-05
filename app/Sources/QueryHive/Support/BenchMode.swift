@@ -762,11 +762,11 @@ enum BenchMode {
                 continue
             }
             var metrics: [String: Double] = ["duration_ms": (done - started) * 1000,
-                                             "rows_count": Double(tab.preview?.rows.count ?? 0),
+                                             "rows_count": Double(tab.preview?.rowCount ?? 0),
                                              "footprint_delta_bytes": Double(Int64(settled) - Int64(baseline)),
                                              "peak_footprint_delta_bytes": Double(Int64(peak) - Int64(baseline))]
             if let painted = PerfSignposts.time(of: "firstPaint") { metrics["ttfr_ms"] = (painted - started) * 1000 }
-            metrics["rows_per_s"] = Double(tab.preview?.rows.count ?? 0) / max(done - started, 0.001)
+            metrics["rows_per_s"] = Double(tab.preview?.rowCount ?? 0) / max(done - started, 0.001)
             emit(scenario, metrics, extra: ["display_hz": hz, "row_limit_cap": AppModel.rowLimitCeiling])
         }
     }

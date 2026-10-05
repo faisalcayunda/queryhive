@@ -162,64 +162,53 @@ final class CellSelectionTests: XCTestCase {
     // MARK: Where the pointer lands
 
     /// The three numbers the grid draws with, in the values it actually uses.
-    private let geometry = GridGeometry(gutterWidth: 60, cellPadding: 8, rowHeight: 25)
-    /// Three columns as the grid measures them, so drawn widths are 116, 216 and 66, with edges at
-    /// 60, 176 and 392.
-    private let widths: [CGFloat] = [100, 200, 50]
+    private let geometry = GridColumnGeometry(gutter: 60, widths: [116, 216, 66])
 
     func testTheGutterIsTheFirstColumnRatherThanNothing() {
         // A drag that reaches left into the row-number gutter is asking to extend the selection to
         // the first column, not to drop the selection.
-        XCTAssertEqual(geometry.column(at: 0, widths: widths, last: 2), 0)
-        XCTAssertEqual(geometry.column(at: 59, widths: widths, last: 2), 0)
-        XCTAssertEqual(geometry.column(at: 60, widths: widths, last: 2), 0)
+        XCTAssertEqual(geometry.clampedColumn(atX: 0, last: 2), 0)
+        XCTAssertEqual(geometry.clampedColumn(atX: 59, last: 2), 0)
+        XCTAssertEqual(geometry.clampedColumn(atX: 60, last: 2), 0)
     }
 
     func testEachColumnStartsWhereTheLastOneEnds() {
         // The cell's own padding is part of the column's drawn width, so the boundary is the
         // measured width plus both paddings — the off-by-a-padding this test exists to catch.
-        XCTAssertEqual(geometry.column(at: 175, widths: widths, last: 2), 0)
-        XCTAssertEqual(geometry.column(at: 176, widths: widths, last: 2), 1)
-        XCTAssertEqual(geometry.column(at: 391, widths: widths, last: 2), 1)
-        XCTAssertEqual(geometry.column(at: 392, widths: widths, last: 2), 2)
+        XCTAssertEqual(geometry.clampedColumn(atX: 175, last: 2), 0)
+        XCTAssertEqual(geometry.clampedColumn(atX: 176, last: 2), 1)
+        XCTAssertEqual(geometry.clampedColumn(atX: 391, last: 2), 1)
+        XCTAssertEqual(geometry.clampedColumn(atX: 392, last: 2), 2)
     }
 
     func testPastTheLastColumnIsTheLastColumn() {
         // The space to the right of a short result is still the rightmost column: the pointer has
         // nowhere else to be, and a drag out there means "to the edge".
-        XCTAssertEqual(geometry.column(at: 10_000, widths: widths, last: 2), 2)
+        XCTAssertEqual(geometry.clampedColumn(atX: 10_000, last: 2), 2)
     }
 
-    func testTheRowIsTheStartingRowPlusHowFarThePointerTravelled() {
-        // The gesture keeps reporting in the starting row's own space, so the row under the pointer
-        // is a division, not a lookup.
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: 0), inRow: 3, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 3)
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: 24.9), inRow: 3, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 3)
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: 25), inRow: 3, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 4)
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: 74), inRow: 3, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 5)
+    func testTheRowIsComputedFromYCoordinate() {
+        // The row is floor(y / rowHeight), clamped to valid range.
+        XCTAssertEqual(geometry.row(atY: 0, rowHeight: 25, count: 12), 0)
+        XCTAssertEqual(geometry.row(atY: 24.9, rowHeight: 25, count: 12), 0)
+        XCTAssertEqual(geometry.row(atY: 25, rowHeight: 25, count: 12), 1)
+        XCTAssertEqual(geometry.row(atY: 74, rowHeight: 25, count: 12), 2)
     }
 
     func testADragThatLeavesTheGridKeepsSelectingItsEdge() {
         // Up past the first row and down past the last both clamp. Without this a drag off the top
         // would build a range with a negative index, and the highlight and the copy would disagree
         // about which rows they meant.
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: -1), inRow: 3, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 2)
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: -100), inRow: 0, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 0)
-        XCTAssertEqual(geometry.cell(at: CGPoint(x: 0, y: 1_000), inRow: 11, widths: widths,
-                                     lastRow: 11, lastColumn: 2).row, 11)
+        XCTAssertEqual(geometry.row(atY: -1, rowHeight: 25, count: 12), 0)
+        XCTAssertEqual(geometry.row(atY: -100, rowHeight: 25, count: 12), 0)
+        XCTAssertEqual(geometry.row(atY: 1_000, rowHeight: 25, count: 12), 11)
     }
 
     func testTheCellCarriesBothAxesAtOnce() {
-        let cell = geometry.cell(at: CGPoint(x: 400, y: 50), inRow: 0, widths: widths,
-                                 lastRow: 11, lastColumn: 2)
+        let col = geometry.clampedColumn(atX: 400, last: 2)
+        let row = geometry.row(atY: 50, rowHeight: 25, count: 12)
 
-        XCTAssertEqual(cell.row, 2, "two row-heights down")
-        XCTAssertEqual(cell.column, 2, "past the second column's edge at 392")
+        XCTAssertEqual(row, 2, "two row-heights down")
+        XCTAssertEqual(col, 2, "past the second column's edge at 392")
     }
 }

@@ -142,6 +142,17 @@ extension Color {
     }
 }
 
+extension NSColor {
+    /// The same literals `Color(hex:)` takes, for the AppKit drawing: the grid's palette is built
+    /// from fixed hex values and `NSColor` has no hex initialiser of its own.
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255,
+                  green: CGFloat(hex >> 8 & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255,
+                  alpha: 1)
+    }
+}
+
 extension Font {
     // Routed through the seam like every other text run, so a chosen family reaches the hero
     // titles and the monospaced values too. `heroTitle`/`cardTitle` keep their rounded cut while
