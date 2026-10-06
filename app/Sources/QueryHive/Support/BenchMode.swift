@@ -684,10 +684,15 @@ enum BenchMode {
         }
     }
 
-    /// The process's open file descriptors, from `proc_pidinfo(PROC_PIDLISTFDS)`.
+    /// The process's open file descriptors, from `proc_pidinfo(PROC_PIDLISTFDS)`. The size-only call
+    /// (nil buffer) reports the fd table's capacity, which grows and never shrinks, so it cannot see
+    /// a descriptor close; list into a buffer and count what comes back.
     private static func openFileDescriptors() -> Int {
-        let bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
-        return bytes > 0 ? Int(bytes) / MemoryLayout<proc_fdinfo>.stride : 0
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        let capacity = Int(proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)) / stride + 64
+        var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+        let bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, &fds, Int32(capacity * stride))
+        return bytes > 0 ? Int(bytes) / stride : 0
     }
 
     /// R-19 (§17.6, §19): 100 tabs open at once, each holding a store that has spilled, so each holds
