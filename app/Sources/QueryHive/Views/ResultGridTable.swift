@@ -403,12 +403,7 @@ struct ResultGridTable: NSViewRepresentable {
             header.columns = columns
             let height = GridHeaderView.measuredHeight(columns: columns,
                                                        labelSize: CGFloat(inputs.style.fontSize))
-            if abs(header.frame.height - height) > 0.01 {
-                header.frame.size.height = height
-            }
-            if abs(table?.headerHeight ?? 0 - height) > 0.01 {
-                table?.headerHeight = height
-            }
+            table?.headerHeight = height
             header.showRowNumbers = inputs.style.showRowNumbers
             header.resultTruncated = tab.preview?.truncated ?? false
             if header.commands == nil { header.commands = commands }

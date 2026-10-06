@@ -107,6 +107,9 @@ final class GridTableView: NSTableView {
         // Nothing of AppKit's: the one column below exists only so the table has a column to lay
         // out and a header to hang, and the header draws itself too.
         headerView = header
+        // AppKit gives a new header its own default height; start at the grid's so the first
+        // `applyHeader` is usually not a change at all.
+        header.setFrameSize(NSSize(width: header.frame.width, height: GridMetrics.headerHeight()))
 
         // Blueprint §11.2. The role is the one AppKit would report anyway; the label is not, and
         // "Result grid" is what VoiceOver says before it starts reading cells.
@@ -127,9 +130,27 @@ final class GridTableView: NSTableView {
     override var isFlipped: Bool { true }
 
     /// The height of the header, which is the columns' own measured height.
+    ///
+    /// Every caller goes through here. The scroll view is what sits the clip view under the header
+    /// (its `contentInsets.top` is the header's height), so a header that grows has to retile the
+    /// scroll view and not only the table, or the first rows are drawn under the band. The clip
+    /// view keeps its place unless it was at the top, in which case it stays at the top.
     var headerHeight: CGFloat {
         get { header.frame.height }
-        set { header.frame.size.height = newValue; tile() }
+        set {
+            // A layout pass applies the header, so a no-op must stay a no-op.
+            guard abs(header.frame.height - newValue) > 0.01 else { return }
+            let clip = enclosingScrollView?.contentView
+            let wasAtTop = clip.map { abs($0.bounds.origin.y + $0.contentInsets.top) < 0.5 } ?? false
+            header.setFrameSize(NSSize(width: header.frame.width, height: newValue))
+            tile()
+            guard let scroll = enclosingScrollView, let clip else { return }
+            scroll.tile()
+            if wasAtTop {
+                clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: -clip.contentInsets.top))
+                scroll.reflectScrolledClipView(clip)
+            }
+        }
     }
 
     /// Set the row height without letting AppKit's own resizing do anything else.
