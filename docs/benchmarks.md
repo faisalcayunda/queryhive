@@ -86,8 +86,8 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 68.6 ms (n=10); ttfr_ms p95 74.3 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 68.6 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 74.3 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
-| `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 79.8 ms (n=10); ttfr_ms p95 85.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 79.8 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 85.7 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 61.9 ms (n=10); ttfr_ms p95 78.6 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 61.9 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 78.6 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 73.9 ms (n=10); ttfr_ms p95 85.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 73.9 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 85.7 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
 | `ttfr-s2-500k` — S2 cap 500.000 | p95 ≤ 50 ms (progresif); vs TablePro ≤ 0,1× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 | `ttfr-s3-rtt30` — S3 RTT 30 ms (toxiproxy) | hangat ≤ 1 RTT + 20 ms (50 ms); vs TablePro ≤ 1,0× | ttfr_ms median 283.0 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 283.0 ms di atas batas ≤ 50.0 ms; vs TablePro tanpa pembanding |
 | `ttfr-s4-first-run` — S4 Run pertama setelah app dibuka | vs TablePro ≤ 1,0× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
@@ -96,22 +96,22 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | rows_per_s median 77,562 baris/s (n=3) | tidak diukur (izin OS) | Belum memenuhi — rows_per_s median 77,562 baris/s di bawah batas ≥ 575,000 baris/s; vs TablePro tanpa pembanding |
+| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | rows_per_s median 73,557 baris/s (n=5) | tidak diukur (izin OS) | Belum memenuhi — rows_per_s median 73,557 baris/s di bawah batas ≥ 575,000 baris/s; vs TablePro tanpa pembanding |
 | `rows-lineitem-1m` — Trino `tpch.sf1.lineitem`, cap 1M | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 3: Memori puncak
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | footprint_delta_bytes median 21.6 MB (n=5) | tidak diukur (izin OS) | Terukur — anggaran store belum dicatat (`budget_bytes`); vs TablePro tanpa pembanding |
+| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | footprint_delta_bytes median 4.8 MB (n=5) | tidak diukur (izin OS) | Terukur — anggaran store belum dicatat (`budget_bytes`); vs TablePro tanpa pembanding |
 | `mem-5m` — 5M baris | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 4: Frame saat scroll
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 0.00 ms/s (n=10); frame_p99_ms median 16.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — frame_p99_ms median 16.7 ms di atas batas ≤ 8.3 ms; vs TablePro tanpa pembanding |
-| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 679.60 ms/s (n=10); frame_p99_ms median 68.2 ms (n=10); render_ms median 94.4 ms (n=1) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 679.60 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 68.2 ms di atas batas ≤ 8.3 ms; render_ms median 94.4 ms di atas batas ≤ 30.0 ms; vs TablePro tanpa pembanding |
+| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 0.04 ms/s (n=10); frame_p99_ms median 16.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — frame_p99_ms median 16.7 ms di atas batas ≤ 8.3 ms; vs TablePro tanpa pembanding |
+| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 0.04 ms/s (n=10); frame_p99_ms median 16.7 ms (n=10); render_ms median 44.2 ms (n=1) | tidak diukur (izin OS) | Belum memenuhi — frame_p99_ms median 16.7 ms di atas batas ≤ 8.3 ms; render_ms median 44.2 ms di atas batas ≤ 30.0 ms; vs TablePro tanpa pembanding |
 
 ## Sumbu 5: Latensi ketikan
 
