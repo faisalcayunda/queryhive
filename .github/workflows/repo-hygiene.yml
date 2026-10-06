@@ -68,6 +68,17 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           actionlint -color
 
+  release-guards:
+    name: release guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # release.sh is run against stubbed gh, git push and curl in a throwaway repo, so this
+      # cannot tag, push or publish anything. It covers the guards and the --rollback mode.
+      - name: Test the release.sh guards and --rollback
+        run: tools/release/test_release_guards.sh
+
   attribution:
     name: attribution
     runs-on: ubuntu-latest

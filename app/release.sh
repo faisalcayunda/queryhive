@@ -5,6 +5,7 @@
 #   ./release.sh --dry-run      package only; print the publishing steps and stop
 #   ./release.sh --yes          publish without the prompt (for an unattended run)
 #   ./release.sh --notarize     pass through to build-dmg.sh (needs a Developer ID certificate)
+#   ./release.sh --rollback <tag>   mark an older release as `latest` again (see below)
 #
 # What it does, in order:
 #
@@ -30,20 +31,141 @@
 # Notes come from `docs/releases/v<version>.md` when that file exists, so what a release says about
 # itself is committed beside the code it describes rather than typed into a prompt. `RELEASE_NOTES`
 # overrides it, and with neither there are `gh`'s generated notes.
+#
+# --rollback <tag> is the emergency exit, and it publishes, so it has no default: the tag must be
+# given, must be a published vX.Y.Z release older than the current `latest` and carrying both
+# assets, and its appcast must be readable. It runs `gh release edit <tag> --latest`, which moves
+# the feed the app reads to that release. It does not downgrade anybody: Sparkle only offers a
+# build newer than the installed one, so clients that already took the bad build see nothing. To
+# reach them, release a fix with a higher build. Typed-tag confirmation unless --yes; --dry-run
+# validates and prints the command. v0.0.1 has no appcast, so today there is no valid target.
+# tools/release/test_release_guards.sh runs all of this against stubbed gh, git and curl.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DRY_RUN=false
 ASSUME_YES=false
+ROLLBACK=false
+ROLLBACK_TAG=""
 DMG_ARGS=()
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=true ;;
     --yes|-y) ASSUME_YES=true ;;
-    --notarize|--developer-id) DMG_ARGS+=("$arg") ;;
-    *) echo "unknown option: $arg" >&2; exit 2 ;;
+    --notarize|--developer-id) DMG_ARGS+=("$1") ;;
+    --rollback)
+      ROLLBACK=true
+      # A rollback has no default target: guessing one here would publish the guess.
+      if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+        echo "--rollback needs an explicit tag, for example: --rollback v0.1.0" >&2
+        exit 2
+      fi
+      ROLLBACK_TAG="$2"
+      shift
+      ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
+if $ROLLBACK && [ "${#DMG_ARGS[@]}" -gt 0 ]; then
+  echo "--rollback publishes nothing new; ${DMG_ARGS[*]} does not apply" >&2
+  exit 2
+fi
+
+# Overridable so tests can run on a machine (or a CI runner) without macOS tooling.
+PLISTBUDDY="${PLISTBUDDY:-/usr/libexec/PlistBuddy}"
+
+# Owner and repo come from the remote, so the feed URL and the download prefix cannot drift from
+# where the release actually goes.
+origin_slug() {
+  local remote slug
+  remote="$(git remote get-url origin)"
+  slug="$(printf '%s' "$remote" | sed -n 's#.*github\.com[/:]##; s#\.git$##; p')"
+  if [ -z "$slug" ]; then
+    echo "cannot read owner/repo from origin ($remote)" >&2
+    exit 1
+  fi
+  printf '%s' "$slug"
+}
+
+served_build() {
+  curl -fsSL "$1" 2>/dev/null \
+    | sed -n 's#.*<sparkle:version>\(.*\)</sparkle:version>.*#\1#p' | sed -n 1p || true
+}
+
+# Asking once is not enough, see the verify section. 0 once $1 serves build $2.
+wait_for_feed() {
+  local served="" attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    served="$(served_build "$1")"
+    if [ "$served" = "$2" ]; then return 0; fi
+    echo "    feed attempt $attempt/10: served '${served:-nothing}', waiting for $2"
+    sleep 6
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- rollback
+if $ROLLBACK; then
+  TAG="$ROLLBACK_TAG"
+  if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "rollback target '$TAG' is not a stable vX.Y.Z tag" >&2
+    exit 2
+  fi
+  SLUG="$(origin_slug)"
+  command -v gh >/dev/null || { echo "gh is not installed" >&2; exit 1; }
+
+  CURRENT="$(gh release view --repo "$SLUG" --json tagName --jq .tagName)"
+  [ -n "$CURRENT" ] || { echo "cannot read the current latest release of $SLUG" >&2; exit 1; }
+  ROW="$(gh release view "$TAG" --repo "$SLUG" --json isDraft,isPrerelease,publishedAt,assets \
+    --jq '[.isDraft,.isPrerelease,(.publishedAt // "none"),([.assets[].name]|join(","))]|@tsv')" \
+    || { echo "$TAG is not a release of $SLUG" >&2; exit 1; }
+  IFS=$'\t' read -r IS_DRAFT IS_PRE PUBLISHED ASSETS <<<"$ROW"
+
+  if [ "$IS_DRAFT" != false ] || [ "$IS_PRE" != false ] || [ "$PUBLISHED" = none ]; then
+    echo "$TAG must be a published stable release (draft=$IS_DRAFT prerelease=$IS_PRE)" >&2
+    exit 1
+  fi
+  if [ "$TAG" = "$CURRENT" ] || [ "$(printf '%s\n%s\n' "$TAG" "$CURRENT" | sort -V | sed -n 1p)" != "$TAG" ]; then
+    echo "$TAG is not older than the current latest release $CURRENT" >&2
+    exit 1
+  fi
+  # No appcast, no feed: moving `latest` to a release without one would break updates for everyone.
+  for asset in appcast.xml "QueryHive-${TAG#v}-arm64.dmg"; do
+    case ",$ASSETS," in
+      *",$asset,"*) ;;
+      *) echo "$TAG has no $asset asset (has: ${ASSETS:-none}); it cannot serve as latest" >&2; exit 1 ;;
+    esac
+  done
+  WANT="$(served_build "https://github.com/$SLUG/releases/download/$TAG/appcast.xml")"
+  case "$WANT" in
+    ''|*[!0-9]*) echo "the appcast of $TAG does not carry a numeric build number ('${WANT:-nothing}')" >&2; exit 1 ;;
+  esac
+
+  echo "current latest   $CURRENT"
+  echo "rollback target  $TAG (build $WANT)"
+  echo "this moves the update feed to $TAG; clients already on a newer build are not downgraded"
+  echo "would run: gh release edit $TAG --repo $SLUG --latest"
+  if $DRY_RUN; then
+    echo "dry run: nothing changed."
+    exit 0
+  fi
+
+  if ! $ASSUME_YES; then
+    [ -t 0 ] || { echo "refusing to roll back without a terminal; re-run with --yes if this is intended" >&2; exit 1; }
+    printf 'type %s to confirm the rollback: ' "$TAG"
+    read -r answer
+    [ "$answer" = "$TAG" ] || { echo "stopped; nothing changed"; exit 0; }
+  fi
+  gh auth status >/dev/null 2>&1 || { echo "gh is not authenticated" >&2; exit 1; }
+  gh release edit "$TAG" --repo "$SLUG" --latest
+  if ! wait_for_feed "https://github.com/$SLUG/releases/latest/download/appcast.xml" "$WANT"; then
+    echo "$TAG is latest, but the feed does not serve build $WANT yet (CDN cache?); check by hand" >&2
+    exit 1
+  fi
+  echo "rolled back: latest is $TAG and the feed serves build $WANT"
+  exit 0
+fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo.toml)"
 VERSION="${VERSION:-0.1.0}"
@@ -101,21 +223,14 @@ if ! $DRY_RUN && ! $ASSUME_YES; then
   gh auth status >/dev/null 2>&1 || { echo "gh is not authenticated" >&2; exit 1; }
 fi
 
-# Owner and repo come from the remote, so the feed URL and the download prefix cannot drift from
-# where the release actually goes.
-REMOTE="$(git remote get-url origin)"
-SLUG="$(printf '%s' "$REMOTE" | sed -n 's#.*github\.com[/:]##; s#\.git$##; p')"
-if [ -z "$SLUG" ]; then
-  echo "cannot read owner/repo from origin ($REMOTE)" >&2
-  exit 1
-fi
+SLUG="$(origin_slug)"
 FEED_URL="https://github.com/$SLUG/releases/latest/download/appcast.xml"
 DOWNLOAD_PREFIX="https://github.com/$SLUG/releases/latest/download/"
 
 # ---------------------------------------------------------------- package
 echo "==> packaging $VERSION"
 ./build-dmg.sh "${DMG_ARGS[@]+"${DMG_ARGS[@]}"}"
-BUILD="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" dist/QueryHive.app/Contents/Info.plist)"
+BUILD="$("$PLISTBUDDY" -c "Print :CFBundleVersion" dist/QueryHive.app/Contents/Info.plist)"
 DMG="dist/QueryHive-$VERSION-arm64.dmg"
 [ -f "$DMG" ] || { echo "build-dmg.sh did not produce $DMG" >&2; exit 1; }
 
@@ -133,7 +248,13 @@ ASSET="$RELEASE_DIR/$(basename "$DMG")"
 # The build number is what Sparkle compares. One that is not greater than what the live feed
 # already offers is a release nobody is told about, which is worth catching here rather than
 # wondering about later.
-LIVE="$(curl -fsSL "$FEED_URL" 2>/dev/null | sed -n 's#.*<sparkle:version>\(.*\)</sparkle:version>.*#\1#p' | head -1 || true)"
+LIVE="$(served_build "$FEED_URL")"
+# A value that is not a number cannot be compared, and `[ -le ]` on one fails quietly inside an
+# `&&` list, which would skip this guard. Refuse instead of guessing.
+case "$BUILD" in ''|*[!0-9]*) echo "the packaged build number '$BUILD' is not numeric" >&2; exit 1 ;; esac
+case "$LIVE" in
+  *[!0-9]*) echo "the live feed's build number '$LIVE' is not numeric, so it cannot be compared; check $FEED_URL" >&2; exit 1 ;;
+esac
 if [ -n "$LIVE" ] && [ "$BUILD" -le "$LIVE" ]; then
   echo "build $BUILD is not newer than the live feed's $LIVE — the app would ignore this release" >&2
   exit 1
@@ -200,19 +321,8 @@ RELEASE_URL="$(gh release create "$TAG" "$ASSET" "$RELEASE_DIR/appcast.xml" \
 # latest. So it is retried, with the app's own URL first because that is the one that has to work;
 # only if every attempt fails does it try the same URL with a query string, which is what tells a
 # stale cache entry apart from a release that is genuinely missing its appcast.
-PACKAGED="$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" dist/QueryHive.app/Contents/Info.plist)"
-served_build() {
-  curl -fsSL "$1" 2>/dev/null \
-    | sed -n 's#.*<sparkle:version>\(.*\)</sparkle:version>.*#\1#p' | head -1 || true
-}
-
-SERVED=""
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  SERVED="$(served_build "$PACKAGED")"
-  if [ "$SERVED" = "$BUILD" ]; then break; fi
-  echo "    feed attempt $attempt/10: served '${SERVED:-nothing}', waiting for $BUILD"
-  sleep 6
-done
+PACKAGED="$("$PLISTBUDDY" -c "Print :SUFeedURL" dist/QueryHive.app/Contents/Info.plist)"
+if wait_for_feed "$PACKAGED" "$BUILD"; then SERVED="$BUILD"; else SERVED="$(served_build "$PACKAGED")"; fi
 
 if [ "$SERVED" != "$BUILD" ]; then
   if [ "$(served_build "$PACKAGED?cachebust=$BUILD")" = "$BUILD" ]; then
