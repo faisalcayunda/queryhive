@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod classify;
+mod comment;
 mod format;
 mod ident;
 mod lex;
@@ -31,6 +32,7 @@ pub use classify::{
     statements_with_lines_dialect, Decision, FloorSource, SafeMode, SafeModeError, SafeModeFloor,
     ScriptStatement, StatementDecision, StatementKind, SAFE_MODES,
 };
+pub use comment::{toggle_line_comment, CommentError, LineEdit};
 pub use format::{format_sql, FormatError, FormatOptions, Formatted, Indent, FORMAT_MAX_BYTES};
 pub use ident::{quote_ident, IdentStyle};
 pub use lex::{lex, Token, TokenKind};
