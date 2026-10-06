@@ -1417,7 +1417,9 @@ public protocol ResultHandleProtocol: AnyObject, Sendable {
     func cellText(viewId: UInt64, row: UInt32, column: UInt32, format: CellFormat) throws  -> String?
     
     /**
-     * The width statistics for the columns, in UTF-16 units of the head of the result.
+     * The widest cell of each column among the first 200 rows, in extended grapheme clusters and
+     * at most 256. A NULL counts as empty (0), where `ArrayRows` counts it as the 4 characters of
+     * "NULL"; the column width formula floors at 84 for every count up to 8, so it never shows.
      */
     func columnWidths() throws  -> [UInt32]
     
@@ -1530,7 +1532,9 @@ open func cellText(viewId: UInt64, row: UInt32, column: UInt32, format: CellForm
 }
     
     /**
-     * The width statistics for the columns, in UTF-16 units of the head of the result.
+     * The widest cell of each column among the first 200 rows, in extended grapheme clusters and
+     * at most 256. A NULL counts as empty (0), where `ArrayRows` counts it as the 4 characters of
+     * "NULL"; the column width formula floors at 84 for every count up to 8, so it never shows.
      */
 open func columnWidths()throws  -> [UInt32]  {
     return try  FfiConverterSequenceUInt32.lift(try rustCallWithError(FfiConverterTypeStoreFfiError_lift) {
@@ -4306,7 +4310,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_method_resulthandle_cell_text() != 33816) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_qh_ffi_checksum_method_resulthandle_column_widths() != 41598) {
+    if (uniffi_qh_ffi_checksum_method_resulthandle_column_widths() != 44821) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_resulthandle_columns() != 48729) {
