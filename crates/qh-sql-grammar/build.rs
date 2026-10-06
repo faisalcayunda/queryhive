@@ -4,14 +4,20 @@
 //! objects link at the app's 14.0 floor like the bundled SQLite does.
 
 fn main() {
-    let mut build = cc::Build::new();
-    build.std("c11").include("vendor");
-    // `parser.c` is generated and carries a few thousand lines of table data; its own
-    // warnings are not ours to fix.
-    build.warnings(false);
-    for file in ["vendor/parser.c", "vendor/scanner.c"] {
-        build.file(file);
+    // Two archives so that only the generated table can be silenced. `parser.c` carries a few
+    // thousand lines of generated data; its warnings are not ours to fix. `scanner.c` is
+    // hand-written C that we patch, so it builds with the `cc` default (`-Wall -Wextra`) and
+    // a warning there is ours.
+    for (file, lib, warnings) in [
+        ("vendor/parser.c", "tree-sitter-sql", false),
+        ("vendor/scanner.c", "tree-sitter-sql-scanner", true),
+    ] {
+        cc::Build::new()
+            .std("c11")
+            .include("vendor")
+            .warnings(warnings)
+            .file(file)
+            .compile(lib);
         println!("cargo:rerun-if-changed={file}");
     }
-    build.compile("tree-sitter-sql");
 }

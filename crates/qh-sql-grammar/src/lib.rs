@@ -4,7 +4,8 @@
 //! tag on every re-parse of a statement holding a `$body$ … $body$` (about 74 bytes per edit),
 //! which an editor that re-parses on each keystroke turns into a steady leak. The fix is
 //! upstream (PR #361, merged after the last release), so this crate carries it as
-//! `vendor/scanner.patch`. `PROVENANCE.md` records where every file came from.
+//! `vendor/scanner.patch`, together with a few local scanner fixes (allocation failures,
+//! non-ASCII tags). `PROVENANCE.md` records where every file came from.
 //!
 //! The only `unsafe` here is the declaration of the C entry point and the one call that wraps
 //! it, and both are the shape `tree-sitter-language` documents for a generated grammar.
@@ -55,6 +56,29 @@ mod tests {
             parse("CREATE FUNCTION f() RETURNS int AS $body$ SELECT 1; $body$ LANGUAGE sql;");
         assert!(!tree.root_node().has_error());
         assert!(tree.root_node().to_sexp().contains("dollar_quote"));
+    }
+
+    #[test]
+    fn a_non_ascii_dollar_quote_tag_is_not_narrowed_onto_an_ascii_one() {
+        // The scanner used to store each tag character as one byte: U+0141 became 0x41, so
+        // `$Ł$` read as `$A$` and the literal ended at the inner `$A$`. Only `Ł` fails on the
+        // old scanner; `€` and `😀` cover the 3- and 4-byte encodings.
+        for tag in ["Ł", "€", "😀"] {
+            let tree = parse(&format!("SELECT ${tag}$ a $A$ b ${tag}$;"));
+            assert!(
+                !tree.root_node().has_error(),
+                "{tag}: {}",
+                tree.root_node().to_sexp()
+            );
+        }
+    }
+
+    #[test]
+    fn a_dollar_quote_tag_longer_than_the_scanner_buffer_still_matches() {
+        // 5,000 two-byte characters: the tag buffer starts at 1,024 bytes and doubles twice.
+        let tag = "é".repeat(5_000);
+        let tree = parse(&format!("SELECT ${tag}$ a ${tag}$;"));
+        assert!(!tree.root_node().has_error());
     }
 
     #[test]

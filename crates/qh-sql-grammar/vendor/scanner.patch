@@ -1,6 +1,156 @@
 --- a/src/scanner.c
 +++ b/src/scanner.c
-@@ -125,6 +125,7 @@
+@@ -15,14 +15,20 @@
+   char* start_tag;
+ } LexerState;
+ 
+-void *tree_sitter_sql_external_scanner_create() {
++void *tree_sitter_sql_external_scanner_create(void) {
+   LexerState *state = malloc(sizeof(LexerState));
++  if (state == NULL) {
++    return NULL;
++  }
+   state->start_tag = NULL;
+   return state;
+ }
+ 
+ void tree_sitter_sql_external_scanner_destroy(void *payload) {
+   LexerState *state = (LexerState*)payload;
++  if (state == NULL) {
++    return;
++  }
+   if (state->start_tag != NULL) {
+     free(state->start_tag);
+     state->start_tag = NULL;
+@@ -30,58 +36,103 @@
+   free(payload);
+ }
+ 
+-static char* add_char(char* text, size_t* text_size, char c, int index) {
++// Appends the UTF-8 encoding of code point `c` to the NUL-terminated `text`, which holds
++// `*length` bytes in a buffer of `*text_size`. Returns the (possibly moved) buffer, or NULL
++// after freeing it when out of memory. `lookahead` is a code point, not a byte: narrowing it
++// to `char` made `$Ł$` (U+0141) equal `$A$`. A negative value is tree-sitter's decode error;
++// like surrogates and values past U+10FFFF it is stored as U+FFFD.
++static char* add_char(char* text, size_t* text_size, size_t* length, int32_t c) {
++  char bytes[4];
++  size_t n;
++  if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
++    c = 0xFFFD;
++  }
++  if (c < 0x80) {
++    bytes[0] = (char)c;
++    n = 1;
++  } else if (c < 0x800) {
++    bytes[0] = (char)(0xC0 | (c >> 6));
++    bytes[1] = (char)(0x80 | (c & 0x3F));
++    n = 2;
++  } else if (c < 0x10000) {
++    bytes[0] = (char)(0xE0 | (c >> 12));
++    bytes[1] = (char)(0x80 | ((c >> 6) & 0x3F));
++    bytes[2] = (char)(0x80 | (c & 0x3F));
++    n = 3;
++  } else {
++    bytes[0] = (char)(0xF0 | (c >> 18));
++    bytes[1] = (char)(0x80 | ((c >> 12) & 0x3F));
++    bytes[2] = (char)(0x80 | ((c >> 6) & 0x3F));
++    bytes[3] = (char)(0x80 | (c & 0x3F));
++    n = 4;
++  }
++
+   if (text == NULL) {
+-    text = malloc(sizeof(char) * MALLOC_STRING_SIZE);
++    text = malloc(MALLOC_STRING_SIZE);
++    if (text == NULL) {
++      return NULL;
++    }
+     *text_size = MALLOC_STRING_SIZE;
++    *length = 0;
+   }
+ 
+-  // will break when indexes advances more than MALLOC_STRING_SIZE
+-  if (index + 1 >= *text_size) {
+-    *text_size += MALLOC_STRING_SIZE;
+-    char* tmp = malloc(*text_size * sizeof(char));
+-    strncpy(tmp, text, *text_size);
+-    free(text);
++  // + 1 for the '\0'. One doubling always fits: n <= 4 and the buffer starts at 1024.
++  if (*length + n + 1 > *text_size) {
++    char* tmp = realloc(text, *text_size * 2);
++    if (tmp == NULL) {
++      free(text);
++      return NULL;
++    }
+     text = tmp;
++    *text_size *= 2;
+   }
+ 
+-  text[index] = c;
+-  text[index + 1] = '\0';
++  memcpy(text + *length, bytes, n);
++  *length += n;
++  text[*length] = '\0';
+   return text;
+ }
+ 
+ static char* scan_dollar_string_tag(TSLexer *lexer) {
+-  char* tag = NULL;
+-  int index = 0;
+-  size_t* text_size = malloc(sizeof(size_t));
+-  *text_size = 0;
+-  if (lexer->lookahead == '$') {
+-    tag = add_char(tag, text_size, '$', index);
+-    lexer->advance(lexer, false);
+-  } else {
+-    free(text_size);
++  if (lexer->lookahead != '$') {
+     return NULL;
+   }
+ 
+-  while (lexer->lookahead != '$' && !iswspace(lexer->lookahead) && !lexer->eof(lexer)) {
+-    tag = add_char(tag, text_size, lexer->lookahead, ++index);
++  size_t text_size = 0;
++  size_t length = 0;
++  char* tag = add_char(NULL, &text_size, &length, '$');
++  if (tag == NULL) {
++    return NULL;
++  }
++  lexer->advance(lexer, false);
++
++  // A NUL ends the tag as a non-tag: it cannot live in a C string.
++  while (lexer->lookahead != '$' && lexer->lookahead != 0 && !iswspace(lexer->lookahead) && !lexer->eof(lexer)) {
++    tag = add_char(tag, &text_size, &length, lexer->lookahead);
++    if (tag == NULL) {
++      return NULL;
++    }
+     lexer->advance(lexer, false);
+   }
+ 
+   if (lexer->lookahead == '$') {
+-    tag = add_char(tag, text_size, lexer->lookahead, ++index);
++    tag = add_char(tag, &text_size, &length, lexer->lookahead);
++    if (tag == NULL) {
++      return NULL;
++    }
+     lexer->advance(lexer, false);
+-    free(text_size);
+     return tag;
+   } else {
+     free(tag);
+-    free(text_size);
+     return NULL;
+   }
+ }
+ 
+ bool tree_sitter_sql_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
+   LexerState *state = (LexerState*)payload;
++  if (state == NULL) {
++    return false;
++  }
+   if (valid_symbols[DOLLAR_QUOTED_STRING_START_TAG] && state->start_tag == NULL) {
+     while (iswspace(lexer->lookahead)) lexer->advance(lexer, true);
+ 
+@@ -125,6 +176,7 @@
      }
  
      if (state->start_tag != NULL && strcmp(state->start_tag, start_tag) == 0) {
@@ -8,7 +158,14 @@
        return false;
      }
  
-@@ -170,19 +171,21 @@
+@@ -164,25 +216,30 @@
+     return 0;
+   }
+   // + 1 for the '\0'
+-  int tag_length = strlen(state->start_tag) + 1;
++  size_t tag_length = strlen(state->start_tag) + 1;
+   if (tag_length >= TREE_SITTER_SERIALIZATION_BUFFER_SIZE) {
+     return 0;
    }
  
    memcpy(buffer, state->start_tag, tag_length);
@@ -16,12 +173,16 @@
 -    free(state->start_tag);
 -    state->start_tag = NULL;
 -  }
-   return tag_length;
+-  return tag_length;
++  return (unsigned)tag_length;
  }
  
  void tree_sitter_sql_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
    LexerState *state = (LexerState *)payload;
 -  state->start_tag = NULL;
++  if (state == NULL) {
++    return;
++  }
 +  if (state->start_tag != NULL) {
 +    free(state->start_tag);
 +    state->start_tag = NULL;

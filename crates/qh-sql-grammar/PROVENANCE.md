@@ -20,7 +20,7 @@ Copied byte for byte from the 0.3.11 crate unless the last column says otherwise
 | Here | In the crate | sha256 (this file) |
 |---|---|---|
 | `vendor/parser.c` | `src/parser.c` | `852e088fb8470952cdb2a1b78c1c58626c7d91562b26baa4672d51f9754bf580` |
-| `vendor/scanner.c` | `src/scanner.c`, **patched** (below) | `1174d99ba8dbc884216fd8f401981ad8baec5e9778c2d93f4845644d09d7d1e3` |
+| `vendor/scanner.c` | `src/scanner.c`, **patched** (below) | `db5ac8fcb43b9902c7fd23c08163313921571406929eaa70bc975c0609b47c6e` |
 | `vendor/tree_sitter/alloc.h` | `src/tree_sitter/alloc.h` | `b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea` |
 | `vendor/tree_sitter/array.h` | `src/tree_sitter/array.h` | `5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94` |
 | `vendor/tree_sitter/parser.h` | `src/tree_sitter/parser.h` | `a1f6ef161fbaf48a0e10fca90ef5290a062462b307b3898aa562993853b9f80a` |
@@ -30,14 +30,14 @@ Copied byte for byte from the 0.3.11 crate unless the last column says otherwise
 
 The unpatched `src/scanner.c` of the crate has sha256
 `de17b5cffc3c86f56cf6630abb969330c3c839a81ece0b901bdac0ecee93c403`, and `vendor/scanner.patch`
-(sha256 `7981ed2143c873e83d8d2835cb38c79cd4b82409fe11e9da4b2a6767c38ca2e0`) turns it into
+(sha256 `2b1db3b89f8c5f332606adeaf1fa56646c6a7ac3b6efc93500762cd1c73940e7`) turns it into
 `vendor/scanner.c`. `grammar.js` is here only as the source to regenerate from and for
 reading; the build uses `vendor/parser.c` and does not run `grammar.js`.
 
 `parser.c` was generated with tree-sitter ABI 14, which the `tree-sitter` runtime pinned in
 the workspace (0.26.13, ABI 13 to 15) loads.
 
-## The patch: upstream PR #361 plus one local fix
+## The patch: upstream PR #361 plus local fixes
 
 `vendor/scanner.patch` is the `src/scanner.c` part of
 https://github.com/DerekStride/tree-sitter-sql/pull/361 ("fix(scanner): don't leak start_tag
@@ -52,9 +52,23 @@ Three changes, in `serialize` and `deserialize`:
    of a statement holding a `$body$ … $body$` leaked one tag (about 74 bytes per edit).
 3. `deserialize` returns when `malloc` fails, instead of copying into a null pointer.
 
-A fourth hunk is local, **not upstream**: in the `DOLLAR_QUOTED_STRING` branch of `scan`, the
-early `return false` taken when the new tag equals the live `state->start_tag` did not free the
-1024-byte `start_tag` buffer. `free(start_tag);` now precedes it. Found by a security review.
+The rest of the patch is local, **not upstream**:
+
+4. In the `DOLLAR_QUOTED_STRING` branch of `scan`, the early `return false` taken when the new
+   tag equals the live `state->start_tag` did not free the 1024-byte `start_tag` buffer.
+   `free(start_tag);` now precedes it. Found by a security review.
+5. Every `malloc` in the scanner is checked (backlog B-19). `create` returns NULL and the
+   other entry points accept a NULL payload; `add_char` frees and returns NULL, so an
+   out-of-memory scan finds no tag. The `size_t` counter in `scan_dollar_string_tag` moved
+   from the heap to the stack, and `add_char` grows with `realloc` by doubling.
+6. `add_char` took a `char`, so a tag character was cut to its low byte: `$Ł$` (U+0141) read
+   as `$A$`, and U+0100 wrote a NUL that ended the tag. It now stores the UTF-8 encoding of
+   the code point (tree-sitter's decode error, surrogates and values past U+10FFFF become
+   U+FFFD), and a NUL in a tag makes it a non-tag. Guarded by
+   `a_non_ascii_dollar_quote_tag_is_not_narrowed_onto_an_ascii_one` in `src/lib.rs`.
+7. Compiler warnings only: `create(void)`, `size_t tag_length`. `build.rs` now builds
+   `scanner.c` with `-Wall -Wextra` in its own archive (backlog B-20); only the generated
+   `parser.c` stays silenced. Upstream already tripped `-Wsign-compare` in `add_char`.
 
 `tests/scanner_leak.rs` (G6) is the guard: 10,000 incremental edits inside a `$body$` function
 must not grow the heap by more than 128 KiB. It also re-parses `CREATE FUNCTION f() RETURNS text AS $body$ SELECT 1 WHERE a = $body$ LANGUAGE sql;` and `DO $x$ SELECT $x$ $x$` (the local fix's inputs) 1,000 times each. Run against the unpatched scanner the same test
