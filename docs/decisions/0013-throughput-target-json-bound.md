@@ -9,8 +9,8 @@
 > bertahan**. Angka itu hanya `(elapsed − TTFR)/elapsed`, jadi memuat seluruh kerja setelah batch
 > pertama, bukan hanya JSON. Hasil profil (samply, `preview` `wide_500k`): JSON **11%** di CLI dan
 > **20%** di FFI; penulisan stdout **36%** di CLI; decode driver **25 sampai 38%**. Batasnya CPU satu
-> thread engine, bukan protokol. ADR-0030 (akan datang) menggantikan ADR ini. Badan di bawah sengaja
-> tidak ditulis ulang.
+> thread engine, bukan protokol. ADR-0030 menggantikan ADR ini (lihat catatan 2026-10-06 di atas).
+> Badan di bawah sengaja tidak ditulis ulang.
 
 - **Status:** Diterima
 - **Tanggal:** 2026-09-23

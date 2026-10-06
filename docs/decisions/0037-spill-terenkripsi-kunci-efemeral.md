@@ -8,9 +8,9 @@
 - **Konteks instruksi:** `docs/architecture/development-plan.md` §4 (jadwal ADR, baris 0037) dan W4-T3;
   `docs/architecture/blueprints/fase-6-data-plane.md` D-5, §10, §14.8, dan tabel ADR di §23;
   PRD `docs/architecture/prd-performance-and-parity.md` NFR-S3, NFR-S5, O-15, O-18.
-- **Berhubungan dengan:** ADR-0008 (store kolumnar kustom, spill ke `~/Library/Caches/<app>/spill/`), yang akan digantikan
-  ADR-0030 di W6-D; ADR-0045 (helper analitik, W13-D) yang memakai aturan kunci di sini untuk prosesnya sendiri.
-  ADR ini tidak menunggu keduanya: aturan kunci dan format rekaman berdiri sendiri.
+- **Berhubungan dengan:** ADR-0030 (data plane app dengan store Arrow, digantikan ADR-0008); ADR-0045 (helper analitik,
+  W13-D) yang memakai aturan kunci di sini untuk prosesnya sendiri. ADR ini tidak menunggu ADR-0045: aturan kunci dan
+  format rekaman berdiri sendiri.
 
 ## Konteks
 
@@ -21,7 +21,7 @@ disk selain ekspor, spill terenkripsi, dan file promise yang diminta pengguna.
 
 Tiga keadaan membuat ini lebih dari sekadar "enkripsi di atas berkas":
 
-1. **Format store berubah.** Store menjadi `RecordBatch` Arrow per chunk (O-15; ADR-0030 nanti), jadi isi rekaman spill
+1. **Format store berubah.** Store menjadi `RecordBatch` Arrow per chunk (O-15; ADR-0030), jadi isi rekaman spill
    menjadi stream IPC Arrow, bukan layout buatan sendiri (`QHC1`) yang disegel pada rancangan W2-A3.
 2. **Akan ada proses kedua yang menulis spill.** O-18 menetapkan DataFusion sebagai helper terpisah (`queryhive-analytics`,
    W13-T8). DataFusion punya spill operator sendiri, dan modenya yang bawaan, `OsTmpDirectory`, menulis IPC teks biasa ke

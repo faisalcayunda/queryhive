@@ -98,7 +98,7 @@ Rincian yang mengikat. Bagian "Sudah dibangun" diperiksa terhadap kode di `465a0
 7. **Handle dibuat pemanggil sebelum run (D-12)**, dan metode `ResultHandle` semuanya throwing (amandemen D-1 Fase 2):
    `row_count`, `window`, `rows_text`, `cell_text`, `set_view`, `distinct_values`, `column_widths`, `release`
    (`store_api.rs`). Tambahan yang dibutuhkan fitur yang ada (D-13): `distinct_values`, `rows_text`, `store_from_rows`,
-   `store_stats`; `store_synthetic` hanya konstruktor Rust.
+   `store_stats` (metode `EngineHost` di `crates/qh-ffi/src/host.rs`); `store_synthetic` hanya konstruktor Rust.
 8. **Tidak ada perintah engine baru (D-14).** Empat daftar invariant #11 tidak tersentuh.
 
 ### Direncanakan (W6-T1, belum ada di repo)
@@ -113,7 +113,7 @@ Rincian yang mengikat. Bagian "Sudah dibangun" diperiksa terhadap kode di `465a0
     store. Hari ini hanya `process?.terminate()` (`AppModel.swift:710`), padahal `preview` dan `explain` disimpan di
     `previewProcess` (TM-4); itu cacat yang ditutup W6-T1.
 12. **Startup.** `ensureStoresConfigured(spillDir:budgetBytes:)` dipanggil sekali, sinkron, sebelum `QueryHiveApp.main()`,
-    dengan `~/Library/Caches/QueryHive/spill` dan anggaran 256 MiB; `signal(SIGPIPE, SIG_IGN)` untuk helper kelak.
+    dengan `~/Library/Caches/QueryHive/spill` dan anggaran 256 MiB.
 13. **Tiga commit** untuk W6-T1 (6a refaktor kolom terlihat dan kontrak `distinctValues`, 6b store masuk, 6c plafon),
     pelaksana sonnet (O-20), tinjau satu putaran oleh model terkuat ditambah reviewer database.
 
@@ -261,6 +261,7 @@ celah di atas), §7, dan §11 butir 7 cocok dengan blueprint §26.
 - ADR-0004 (diamandemen), ADR-0008 dan ADR-0013 (digantikan), ADR-0032, ADR-0034, ADR-0037, ADR-0009 (panic unwind
   lintas FFI), ADR-0010 (QoS).
 - `docs/architecture/blueprints/fase-6-data-plane.md` §3, §11, §12, §17 sampai §20, §23, §25, §26.
-- `docs/architecture/prd-performance-and-parity.md` O-12, O-15, O-18, O-20.
+- `docs/architecture/prd-performance-and-parity.md` O-12, O-15, O-18.
+- `docs/architecture/development-plan.md` §6 (W6-T1 implementer per O-20).
 - Tugas penerus: W6-T1 (Swift), W6-T2 (bench eksklusif, G-LEAK), W7-T1 (driver menulis array Arrow), W13-T8a sampai c dan
   ADR-0045 (helper DataFusion).

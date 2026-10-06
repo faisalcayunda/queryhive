@@ -558,7 +558,7 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
   - `Views/GridTableView.swift`, `Views/GridRowView.swift` (rentang kolom yang tergambar dan display link), `Models/ResultRows.swift`, `Models/CellSelection.swift`;
   - `Support/Snapshot.swift`, `Support/BenchMode.swift` (skenario memakai `store_from_rows` di luar interval ukur; `tabs-100-held` dan hitungan fd);
   - `App.swift` (sapuan spill saat startup, `RLIMIT_NOFILE`);
-  - tes di `app/Tests/QueryHiveTests/`: `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), `TestStores.swift` (baru), `ArrayRowsReference.swift` dan `SwiftGridReference.swift` (baru, pindahan), `ResultGridTests.swift`, `GridColumnsTests.swift`, `Batch7Tests.swift`, `TabCloseTests.swift`, `MockEngine.swift`, `RowLimitSettingTests.swift`, `VisualParityTests.swift`, `ResultRowsTests.swift`, `SortFixtureExport.swift`, `GridTestSupport.swift`, `StoppedRunTests.swift`, `CellEditUndoTests.swift`, `FilterPresetTests.swift`, `PanelDefaultTests.swift`, `EngineContract.swift`.
+  - tes di `app/Tests/QueryHiveTests/`: `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), `TestStores.swift` (baru), `ArrayRowsReference.swift` dan `SwiftGridReference.swift` (baru, pindahan), `ResultGridTests.swift`, `GridColumnsTests.swift`, `GridColumnRangeTests.swift`, `Batch7Tests.swift`, `TabCloseTests.swift`, `MockEngine.swift`, `RowLimitSettingTests.swift`, `VisualParityTests.swift`, `ResultRowsTests.swift`, `SortFixtureExport.swift`, `GridTestSupport.swift`, `StoppedRunTests.swift`, `CellEditUndoTests.swift`, `FilterPresetTests.swift`, `PanelDefaultTests.swift`, `EngineContract.swift`.
 - Dihapus: penumpukan baris, `previewPaintInterval`, `displayedCache`, dan `GridSort.order` di jalur panas.
 - Clamp naik ke 5.000.000.
 - Gate: SR, SF, AR, CR, PO. Tinjau: model terkuat, satu putaran (O-20), ditambah reviewer database untuk penjaga edit dan jalur `WritePlan` (D-27, blueprint Fase 6 §17.4).
@@ -744,7 +744,7 @@ Lihat §9.
 
 | Peran | Agen | Model | Dipakai di |
 |---|---|---|---|
-| Implementasi Rust, Swift, dan Python | general-purpose | sonnet secara default. **opus** hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b (O-17; alasannya di masing-masing tugas) | semua `Tx` implementasi |
+| Implementasi Rust, Swift, dan Python | general-purpose | sonnet secara default. **opus** hanya untuk W3-T0, W3-T1, W5-T1, W13-T8a, dan W13-T8b (O-17; alasannya di masing-masing tugas) | semua `Tx` implementasi |
 | Tes lebih dulu | tdd-guide | sonnet | W2-T1, W3-T0, W3-T1 |
 | Rangkaian tes dan fixture | test-engineer | sonnet | W0-T3, W1-T3, W1-T5, W4-T4, W14-T3 |
 | Harness dan sesi bench | performance-engineer | sonnet. **opus** untuk W1-T8 (interpretasi profil) | W1, `Wx` bench |
@@ -781,7 +781,7 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 | Rendah | Dokumen, ADR, tooling, hanya tes, hanya pemindahan kode, dan pembersihan (`Wx-C`) | satu reviewer sonnet, atau cukup gate | 1 |
 
 - Hanya temuan yang **memblokir** memicu satu putaran. Saran dan nit dicatat di laporan tugas, bukan putaran.
-- Implementer sonnet secara default. Opus hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b.
+- Implementer sonnet secara default. Opus hanya untuk W3-T0, W3-T1, W5-T1, W13-T8a, dan W13-T8b.
 - **O-20 (kebijakan sesi berjalan):** semua pekerjaan mahal (implementasi, blueprint, dokumen, bench) berjalan di sonnet atau haiku. Reviewer boleh opus tetapi hanya satu putaran. Setelah temuan yang memblokir, sonnet memperbaiki, orkestrator memverifikasi dengan tes dan gate, meng-commit, lalu mencatat "pending review" di ledger. Ini mengesampingkan tabel model dan batas putaran di atas selama sesi ini.
 - Verdict tetap "approved" dengan daftar berkas (§8). Yang berubah adalah jumlah reviewer dan putarannya, bukan bukti verifikasinya.
 
