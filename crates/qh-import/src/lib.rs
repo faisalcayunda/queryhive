@@ -34,9 +34,11 @@ use std::path::Path;
 use thiserror::Error;
 
 mod csv_source;
+mod json_source;
 mod xlsx_source;
 
 pub use csv_source::CsvSource;
+pub use json_source::{JsonRow, JsonSource};
 pub use xlsx_source::XlsxSource;
 
 /// The source formats this crate reads.
@@ -99,6 +101,14 @@ pub enum ImportError {
         path: String,
         #[source]
         source: csv::Error,
+    },
+
+    #[error("{path} is not readable as JSON (line {line}, byte offset {offset}): {message}")]
+    Json {
+        path: String,
+        line: usize,
+        offset: usize,
+        message: String,
     },
 
     #[error("{path} is not readable as a workbook: {source}")]

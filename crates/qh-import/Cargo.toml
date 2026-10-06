@@ -19,6 +19,9 @@ csv = { version = "1", default-features = false }
 # XLSX is read whole, and the module says so: the format interleaves a sheet with
 # a shared-string table, so a streaming read still has to hold that table.
 calamine = { version = "0.30", default-features = false, features = ["dates", "chrono"] }
+# The JSON reader: raw values, so a number is not squeezed through f64.
+serde = "1"
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 
 [lints.rust]
