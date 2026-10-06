@@ -789,9 +789,12 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 
 **Aturan dasar.** Satu berkas bersama hanya boleh dimiliki satu tugas yang sedang berjalan. Urutan di tabel ini mengikat.
 
+**Status per 2026-10-06.** Mata rantai W9 dan W10 di tabel disalin dari blueprint (`w9-shell-and-a11y.md` §16.2 dan `w10-grid-editor-design.md` §12.4), lalu disesuaikan dengan berkas yang benar-benar disentuh commit W9 (`git log --stat work/perf-parity`). Tanda "(selesai)" berarti tugasnya sudah mendarat di `work/perf-parity`: W9-T0 `e708830`, W9-T1 dan W9-T6 satu commit `03e1495`, W9-T2 `2cf315c`, W9-T3 `7cf63f4`, W9-T4 `9890bd7`, W9-T5 `a6f866b`, W9-T7 `efdddab`. Dari W9 masih tersisa T8 dan T9. W9-T0b (`ChromeParityTests` dan baseline `chrome-*`, blueprint W9 §15.1) belum dibangun: ia harus mendarat sebelum W9-T8, atau dicoret secara eksplisit. Dari W10 baru inti Rust W10-T7a (`crates/qh-editor/src/brackets.rs`, `2515a8b`) yang mendarat. Sisanya menunggu, dan lane W10 dijadwalkan dari rantai di bawah.
+
 | Berkas atau kelompok | Pemilik, berurutan |
 |---|---|
-| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W2-T1 (bila berubah) → W3-T1 → W4-T2 → W5-T2 → W6-T1 → W10-T7 → W11-T1 → W11-T6 → W12-T1 → W12-T3 → W13-T4 → W13-T8b |
+| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W2-T1 (bila berubah) → W3-T1 → W4-T2 → W5-T2 → W6-T1 → W10-T6 (menyentuh `uniffi_api.rs`, `lib.rs`, dan `main.rs`; tidak meregenerasi `app/Generated/`, W10 R-8) → W10-T7 → W11-T1 → W11-T6 → W12-T1 → W12-T3 → W13-T4 → W13-T8b |
+| `crates/qh-core/src/error.rs` | W10-T6 |
 | `crates/qh-ffi/src/editor.rs` | W4-T2 → W10-T7 → W11-T6 → W12-T1 |
 | `crates/qh-ffi/Cargo.toml` | W4-T2 → W5-T2 → W13-T8b |
 | `crates/qh-ffi/src/commands.rs` | W2-T1 → W3-T1 → W5-T2 → W7-T1 → W11-T1 → W13-T2 |
@@ -809,29 +812,38 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 | `helpers/analytics/**`, `crates/qh-analytics-proto/**` | W13-T8a (baru) |
 | `crates/qh-ffi/examples/bench_ffi.rs` | W1-T2 → W3-T1 → W5-T2 |
 | `tests/golden/`, `crates/qh-ffi/tests/golden.rs` | W2-T1 → W11-T1 → W12-T3 |
-| `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0. Sesudahnya, satu pemilik per extension. |
-| `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W11-T4 → W12-T2 → W12-T4 → W13-T1 |
-| `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T5 → W10-T3 → W12-T4 → W13-T1 → W13-T3 |
-| `Views/ResultGridTable.swift`, `Views/GridTableView.swift`, `GridRowView`, `GridHeaderView`, `Views/GridAccessibility.swift`, dan `VisualParityTests.swift` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
-| `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W10-T6 → W10-T7 → W12-T2 |
-| `Views/Workspace.swift` | W2-T3 → W9-T1 → W9-T4 → W9-T8 → W12-T2 |
-| `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 → W13-T8b |
-| `Views/SettingsView.swift` | W2-T2 → W6-T1 → W9-T7 → W13-T8c → W13-T7 |
+| `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0 (selesai) → W9-T2 (selesai; satu baris, `var navigation`). Sesudahnya, satu pemilik per extension. |
+| `Models/AppModel+Focus.swift` | W9-T0 (selesai; berkas dibuat) → W9-T2 (selesai) → W9-T6 (selesai; tidak menyentuhnya, `QuickScope` ada di `Models/QuickSearch.swift`) → W10-T7 (`adjustFontSize` bersama `currentRegion`, W10 §9.2) → W12-T2 → W12-T4 (satu baris di `closeTab`, w12 §10) |
+| `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W10-T3 → W10-T5 → W10-T6 → W11-T4 → W12-T2 → W12-T4 → W13-T1. Tidak ada tugas W9 yang menyentuhnya. |
+| `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T2 (selesai; satu baris `Announcer` di banner galat) → W9-T5 (selesai) → W9-T7 (selesai) → W10-T3 → W10-T4 → W10-T5 → W12-T4 → W13-T1 → W13-T3 |
+| `Models/CellSelection.swift` | W5-T1 → W6-T1 → W10-T1 (`GridCursorMath`) → W10-T3 (`GridClipboard.text` memilah blok, W10 §5.1) → W10-T4 (`GridClipboard`) |
+| `Views/ResultGridTable.swift`, `Views/GridTableView.swift`, `GridRowView`, `GridHeaderView`, `Models/GridMetrics.swift`, `Views/GridAccessibility.swift`, dan `VisualParityTests.swift` | W5-T1 → W6-T1 → W9-T1 (selesai; hanya `VisualParityTests.swift`) → W9-T7 (selesai; semua berkas kelompok ini kecuali `GridAccessibility.swift`) → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
+| `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W9-T7 (selesai) → W10-T6 → W10-T7 → W12-T2 |
+| `Views/Workspace.swift` | W2-T3 → W9-T1 (selesai) → W9-T4 (selesai) → W9-T8 → W10-T6 → W10-T7 → W12-T2 |
+| `Views/RootView.swift` | W9-T2 (selesai) → W9-T4 (selesai) → W9-T8 |
+| `App.swift` | W1-T4 → W6-T1 → W9-T2 (selesai) → W9-T8 → W10-T3 → W10-T6 → W12-T2 → W13-T8b |
+| `Models/AppMenu.swift`, `Models/Shortcuts.swift` | W9-T2 (selesai; `AppMenu.swift` dibuat) → W10-T1 → W10-T3 → W10-T5 → W10-T7. `Shortcuts.swift` lanjut ke W12-T2 (w12 §10). |
+| `Views/SettingsView.swift` | W2-T2 → W6-T1 → W9-T7 (selesai) → W13-T8c → W13-T7 |
 | `app/build.sh` | W13-T8b → W13-T7 → W14-T5 |
 | `app/release.sh`, `app/build-dmg.sh` | W13-T8b |
 | `THIRD-PARTY-NOTICES.md` | W4-T2 (commit A) → W14-T5 |
 | `AGENTS.md`, `CLAUDE.md` | W14-T7 (baru) |
-| `Support/Theme.swift` | W9-T1 → W9-T7 → W10-T2 |
-| `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W9-T4 → W11-T3 |
-| `Support/Snapshot.swift` | W1-T3 → W5-T1 → W6-T1 → W9-T8 |
+| `Support/Theme.swift` | W9-T1 dan W9-T6 (selesai; satu commit `03e1495`, jadi urutan T1 → T6 tidak berlaku lagi) → W9-T7 (selesai) → W10-T2 |
+| `Support/ThemeStore.swift` | W9-T1 (selesai) |
+| `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W9-T4 (selesai) → W11-T3 |
+| `Support/Snapshot.swift` | W1-T3 → W5-T1 → W6-T1 → W9-T1 (selesai; hanya menyematkan `store.pin(reduceMotion: false, ...)`, bendera `--reduce-motion`, `--reduce-transparency`, dan `--increase-contrast` tidak ditambahkan) → W9-T4 (selesai; scene `badges`) → W9-T8. W9-T7 tidak menyentuhnya, jadi `--grid-font` (P-7b) tidak ada. |
 | `Support/EditorAnalysis.swift` | W4-T2 → W10-T6 → W10-T7 |
+| `Support/EditorPreferences.swift` | W9-T7 (selesai) → W10-T7 |
+| `Models/RunConfirmation.swift`, `Views/RunConfirmationSheet.swift` | W9-T5 (selesai) |
 | `Support/PerfSignposts.swift` | W1-T4 → W4-T2 |
 | `Support/BenchMode.swift` | W1-T4 → W4-T2 → W6-T1 |
 | `__Baselines__/` | hanya lewat langkah merge orkestrator (§0.5) |
 
 **Freeze** (`performance-plan.md` §0). Selama Fase 4 dan 5 tidak ada fitur yang menyentuh `SQLEditor.swift` atau `ResultGrid.swift`. Urutan gelombang di atas sudah memenuhinya: fitur baru dimulai di W9.
 
-**Worktree dipakai** di W2 (T1, T2, T3), W4 (T1, T2, T3), W5 (T1, T2), dan W7 (T2, T4). Di W9–W13, worktree dipakai setiap kali dua lane berjalan bersamaan. Tugas serial dikerjakan di checkout utama.
+**Worktree dipakai** di W2 (T1, T2, T3), W4 (T1, T2, T3), W5 (T1, T2), dan W7 (T2, T4). Di W9 sampai W13, worktree dipakai setiap kali dua lane berjalan bersamaan. Tugas serial dikerjakan di checkout utama.
+
+**Verifikasi ronde 2 (2026-10-06): 1 blocking, dikoreksi; pending review (O-20).** Temuannya: rantai kepemilikan W9 dan W10 hanya ada di blueprint (W9 §16.2, W10 §12.4), belum di plan. Tabel di atas sekarang memuat rantai itu, disesuaikan dengan apa yang benar-benar disentuh commit W9. Klaim kode diperiksa terhadap `work/perf-parity` (`4ec7480`): `var navigation` ada di `AppModel.swift:125`, `closeTab` ada di `AppModel+Focus.swift:154`, `adjustFontSize` belum ada, dan `Snapshot.swift` hanya memuat `store.pin(...)` dari W9-T1 (tanpa `--reduce-*` dan `--grid-font`). Daftar berkas per tugas W9 diambil dari `git show --name-status` tiap commit. Sisi §5 dari temuan yang sama (daftar berkas W9-T1, T2, T5, T7 dan W10-T1 sampai T7) tidak dikerjakan di sini. Penyimpangan W9 yang tidak punya baris sendiri karena tak ada pemilik berikutnya: `Support/Accessibility.swift` dibuat W9-T2 (bukan W9-T1), dan W9-T7 menyentuh `Views/SQLSyntax.swift`.
 
 ## 8. Gate dan penanganan kegagalan
 
