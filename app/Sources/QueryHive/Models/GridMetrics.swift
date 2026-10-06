@@ -74,6 +74,46 @@ enum GridMetrics {
         return natural.map { $0 + slack * ($0 / total) }
     }
 
+    /// The narrowest and the widest a column can be made by hand or by Fit. The floor keeps the
+    /// funnel's 20 pt strip, the cell padding and a character or two on screen; the ceiling keeps a
+    /// 20 000-character cell from asking for a document wider than the scroller can address.
+    static let minColumnWidth: CGFloat = 56
+    static let maxColumnWidth: CGFloat = 1_200
+
+    static func clampedColumnWidth(_ width: CGFloat) -> CGFloat {
+        min(max(width, minColumnWidth), maxColumnWidth)
+    }
+
+    /// The widths the grid draws: the formula's, fitted to the panel, with the columns the user has
+    /// sized by hand held at exactly what they set (DBX-64).
+    ///
+    /// `overrides` are **drawn** widths, padding included, one per column and `nil` for a column
+    /// nobody has touched. With none set this is the old path unchanged: the slack is shared out
+    /// over the natural widths and each column gains its 16 pt of padding. With some set, the
+    /// pinned columns come out of the panel first and the rest share what is left, so a window that
+    /// grows still fills itself without moving the columns the user placed.
+    static func drawnWidths(natural: [CGFloat], overrides: [CGFloat?], available: CGFloat,
+                            gutter: CGFloat) -> [CGFloat] {
+        guard overrides.count == natural.count, overrides.contains(where: { $0 != nil }) else {
+            return fitted(natural, available: available, gutter: gutter).map { $0 + 2 * cellPadding }
+        }
+        // Overrides are used as stored: the caller clamps what it stores, and a pinned width may
+        // legitimately exceed the ceiling (slack-filling can draw a lone column wider than it).
+        // Only the floor is applied here, and before the sum, so `pinned` and the drawn widths agree.
+        let overrides = overrides.map { $0.map { max($0, minColumnWidth) } }
+        let pinned = overrides.compactMap { $0 }.reduce(0, +)
+        let free = zip(natural, overrides).compactMap { $1 == nil ? $0 : nil }
+        var shared = fitted(free, available: available - pinned, gutter: gutter)
+            .map { $0 + 2 * cellPadding }.makeIterator()
+        return overrides.map { $0 ?? shared.next() ?? 0 }
+    }
+
+    /// The width that shows a column whole: the widest of its header and its sampled cells, plus
+    /// the padding. `headerNeed` already holds the label, its marks and the funnel's clearance.
+    static func fitWidth(headerNeed: CGFloat, cellNeed: CGFloat) -> CGFloat {
+        clampedColumnWidth((max(headerNeed, cellNeed) + 2 * cellPadding).rounded(.up))
+    }
+
     /// Whether a column's type reads as a number, and so is drawn flush right and tinted mint.
     ///
     /// A `contains` over a list, quirks included: `point`, `interval` and `hstore` all match `int`
@@ -200,6 +240,23 @@ struct GridColumnGeometry: Equatable {
         column(atX: x) ?? (x < gutter ? 0 : last)
     }
 
+    /// How far a resize grip reaches either side of a column's right edge: two points inside the
+    /// column and three outside it, so the grip is a 5 pt strip over the separator.
+    static let gripInside: CGFloat = 2
+    static let gripOutside: CGFloat = 3
+
+    /// The column whose right edge a position is within the grip of, or `nil`. The gutter has no
+    /// grip: its width is not the user's to set.
+    func resizeColumn(atX x: CGFloat) -> Int? {
+        var edge = gutter
+        for (index, width) in widths.enumerated() {
+            edge += width
+            if x < edge - Self.gripInside { return nil }
+            if x < edge + Self.gripOutside { return index }
+        }
+        return nil
+    }
+
     /// The drawn columns that overlap a horizontal range. Used by `draw(_:)` to skip the columns a
     /// dirty rectangle cannot see.
     func columns(in range: ClosedRange<CGFloat>) -> Range<Int> {
@@ -214,4 +271,25 @@ struct GridColumnGeometry: Equatable {
         guard count > 0, rowHeight > 0 else { return 0 }
         return max(0, min(Int(floor(y / rowHeight)), count - 1))
     }
+}
+
+/// How far the clip view moves, per tick, while a drag is held outside the rows.
+///
+/// Pure, so the speed curve is checked without a timer or a window (DBX-63). The pointer is in the
+/// table's coordinates and `visible` is the part of the clip view the rows can be seen in, with the
+/// header's inset already taken off the top. Speed grows with the overshoot and is capped, so a
+/// pointer that just crosses the edge crawls and one thrown far past it still stays controllable.
+enum GridAutoscroll {
+    static func delta(pointer: CGPoint, visible: CGRect) -> CGSize {
+        CGSize(width: axis(pointer.x, visible.minX, visible.maxX),
+               height: axis(pointer.y, visible.minY, visible.maxY))
+    }
+
+    private static func axis(_ value: CGFloat, _ low: CGFloat, _ high: CGFloat) -> CGFloat {
+        if value < low { return -step(low - value) }
+        if value > high { return step(value - high) }
+        return 0
+    }
+
+    private static func step(_ overshoot: CGFloat) -> CGFloat { min(2 + overshoot * 0.25, 30) }
 }

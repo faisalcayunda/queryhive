@@ -450,18 +450,36 @@ final class QueryTab: Identifiable {
         didSet {
             if activeSort?.origin == .memory { activeSort = nil }
             // A layout describes the column set it was built from: hiding "nama" in one result must
-            // not hide whatever column 1 is in the next one. Only a change in the number of columns
-            // resets it, so a repaint of the same result — a streaming run paints several times —
-            // keeps the user's hidden columns and renames.
-            if columnLayout.sourceCount != (preview?.columns.count ?? 0) {
-                columnLayout = GridColumnLayout(count: preview?.columns.count ?? 0)
+            // not hide whatever column 1 is in the next one. A change in the number of columns
+            // resets it, and so does a change in any column's name or type (PF-11): two four-column
+            // results are not the same columns. A repaint of the same result — a streaming run paints
+            // several times — keeps the user's hidden columns and renames.
+            let columns = preview?.columns ?? []
+            let signature = columns.map { "\($0.name)\u{1F}\($0.type)" }
+            let sameColumns = signature == columnSignature
+            if columnLayout.sourceCount != columns.count || (!columns.isEmpty && !sameColumns) {
+                columnLayout = GridColumnLayout(count: columns.count)
                 cellSelection = nil
+            }
+            // The widths follow the column set, not the run: a sort re-run passes through `nil` and
+            // back with the same columns, and the user's widths ride across it.
+            if !columns.isEmpty {
+                if !sameColumns { columnWidthOverrides = [:] }
+                columnSignature = signature
             }
             clearEditUndo()
             gridRevision += 1
         }
     }
     var previewError: String?
+
+    /// Column widths the user has set by hand or by Fit, keyed by source column, in drawn points
+    /// (DBX-64). Session only: it lives with the tab and is never written to the session file.
+    /// Dropped when the column set changes, by `preview`'s `didSet`, and by Reset Column Layout.
+    @ObservationIgnored var columnWidthOverrides: [Int: CGFloat] = [:]
+    /// Name and type of every column of the last result that had any, which is what tells a new
+    /// column set from a repaint of the old one.
+    @ObservationIgnored private var columnSignature: [String] = []
 
     /// The plan Explain last fetched, and whether the grid is showing it instead of rows.
     ///
@@ -651,6 +669,7 @@ final class QueryTab: Identifiable {
 
     func resetColumnLayout() {
         columnLayout.reset()
+        columnWidthOverrides = [:]
         cellSelection = nil
         reconcileColumns()
         gridRevision += 1

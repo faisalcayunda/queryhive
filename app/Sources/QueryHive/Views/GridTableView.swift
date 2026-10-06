@@ -75,6 +75,7 @@ final class GridTableView: NSTableView {
         keyObservers.forEach(NotificationCenter.default.removeObserver)
         keyObservers = []
         guard let window else {
+            stopAutoscroll()
             // Out of a window (a tab switched away, a tab closed): a peek has nothing to sit under.
             coordinator?.closePeek()
             return
@@ -225,15 +226,82 @@ final class GridTableView: NSTableView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         coordinator?.press(at: convert(event.locationInWindow, from: nil),
-                           clickCount: event.clickCount)
+                           clickCount: event.clickCount,
+                           extend: event.modifierFlags.contains(.shift))
     }
 
     override func mouseDragged(with event: NSEvent) {
-        coordinator?.drag(to: convert(event.locationInWindow, from: nil))
+        let location = event.locationInWindow
+        dragWindowPoint = location
+        coordinator?.drag(to: convert(location, from: nil))
+        updateAutoscroll(windowPoint: location)
     }
 
     override func mouseUp(with event: NSEvent) {
+        stopAutoscroll()
         coordinator?.release()
+    }
+
+    // MARK: Autoscroll (DBX-63)
+
+    /// Where the pointer is, in window coordinates, which is what stays put while the content moves
+    /// under it. The timer re-derives the table coordinates from it on every tick.
+    private var dragWindowPoint = CGPoint.zero
+    private var autoscrollTimer: Timer?
+
+    /// The part of the clip view a row can be seen in: its bounds, less the header band the scroll
+    /// view sits the content under.
+    private var scrollableArea: CGRect? {
+        guard let clip = enclosingScrollView?.contentView else { return nil }
+        var area = clip.bounds
+        area.origin.y += clip.contentInsets.top
+        area.size.height -= clip.contentInsets.top + clip.contentInsets.bottom
+        return area
+    }
+
+    /// Scroll one step towards a pointer held outside the rows, then carry the drag to the cell now
+    /// under it. `false` when the pointer is inside, or the content cannot move any further.
+    ///
+    /// Public to the module so a test can take one step without a timer.
+    @discardableResult
+    func autoscrollOnce(windowPoint: CGPoint) -> Bool {
+        guard let scroll = enclosingScrollView, let area = scrollableArea else { return false }
+        let delta = GridAutoscroll.delta(pointer: convert(windowPoint, from: nil), visible: area)
+        guard delta != .zero else { return false }
+        let clip = scroll.contentView
+        var bounds = clip.bounds
+        bounds.origin.x += delta.width
+        bounds.origin.y += delta.height
+        let target = clip.constrainBoundsRect(bounds).origin
+        guard target != clip.bounds.origin else { return false }
+        clip.scroll(to: target)
+        scroll.reflectScrolledClipView(clip)
+        // The pointer has not moved but the cell under it has.
+        coordinator?.drag(to: convert(windowPoint, from: nil))
+        return true
+    }
+
+    /// Start the timer when the pointer is outside, and let it go when the pointer comes back in. A
+    /// pointer held still outside sends no drag events, which is why a timer rather than the drag.
+    private func updateAutoscroll(windowPoint: CGPoint) {
+        guard let area = scrollableArea,
+              GridAutoscroll.delta(pointer: convert(windowPoint, from: nil), visible: area) != .zero
+        else { stopAutoscroll(); return }
+        guard autoscrollTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if !self.autoscrollOnce(windowPoint: self.dragWindowPoint) { self.stopAutoscroll() }
+            }
+        }
+        // `.common`, so it keeps firing while the run loop is tracking the mouse.
+        RunLoop.main.add(timer, forMode: .common)
+        autoscrollTimer = timer
+    }
+
+    private func stopAutoscroll() {
+        autoscrollTimer?.invalidate()
+        autoscrollTimer = nil
     }
 
     // MARK: Accessibility

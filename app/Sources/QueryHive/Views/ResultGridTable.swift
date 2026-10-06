@@ -222,6 +222,8 @@ struct ResultGridTable: NSViewRepresentable {
             // The header draws its labels and chips through the same cache the body does: without
             // this it would fall back to an unattributed `CTLine`, which is black.
             table.header.lineCache = lineCache
+            table.header.columnResize = { [weak self] display, phase in self?.columnResize(display, phase) }
+            table.header.columnMenu = { [weak self] _, _, _ in self?.widthsMenu() }
             tab.pollHook = { [weak self] in MainActor.assumeIsolated { self?.pollRows() } }
         }
 
@@ -244,6 +246,9 @@ struct ResultGridTable: NSViewRepresentable {
                 MainActor.assumeIsolated {
                     self?.scheduleTooltips()
                     self?.followPeek()
+                    // The resize cursor's rectangles are in the header's own coordinates and are
+                    // only worth having for the part of the band that is on screen.
+                    if let header = self?.table?.header { header.window?.invalidateCursorRects(for: header) }
                 }
             }
         }
@@ -360,15 +365,19 @@ struct ResultGridTable: NSViewRepresentable {
         /// moment ago — and when there is none, it is a no-op that leaves the widths alone.
         func refitGeometry() {
             let gutter = GridMetrics.gutterWidth(showRowNumbers: showRowNumbers)
+            let visibleSources = applied?.layout.visibleSources ?? tab.visibleColumnSources
             // The old grid fitted the **un-padded** widths against the panel and then drew each with
             // 8 pt of padding on both sides, so the drawn row is 16 pt per column wider than the
             // number the slack was shared out over. Reproduced rather than corrected: it is what the
             // baselines record, and a result whose columns come to less than the panel still has to
             // fill it.
-            let fitted = GridMetrics.fitted(naturalWidths,
-                                            available: viewportWidth,
-                                            gutter: gutter)
-            let drawn = fitted.map { $0 + 2 * GridMetrics.cellPadding }
+            // Columns the user sized by hand keep exactly that width (DBX-64); with none set this is
+            // the path above, unchanged.
+            let drawn = GridMetrics.drawnWidths(
+                natural: naturalWidths,
+                overrides: visibleSources.map { tab.columnWidthOverrides[$0] },
+                available: viewportWidth,
+                gutter: gutter)
             let next = GridColumnGeometry(gutter: gutter, widths: drawn)
             guard next != geometry else { return }
             geometry = next
@@ -553,25 +562,134 @@ struct ResultGridTable: NSViewRepresentable {
             textCache.keep(around: range, page: page)
         }
 
+        // MARK: Column widths (DBX-64)
+
+        /// What the header's grip asked for: a drag step, or a double-click.
+        func columnResize(_ display: Int, _ phase: GridHeaderView.ResizePhase) {
+            switch phase {
+            case .move(let width): setColumnWidth(display: display, to: width)
+            case .fit: fitColumn(display: display)
+            }
+        }
+
+        /// Hold every column at the width it is drawn at, so that sizing one does not move the others
+        /// (the slack they would otherwise share out is what a wider column eats). Only the first
+        /// resize pins; after it the columns are the user's, and Reset Column Widths gives the
+        /// formula back.
+        func pinColumnWidths() {
+            guard tab.columnWidthOverrides.isEmpty else { return }
+            for (display, source) in (applied?.layout.visibleSources ?? tab.visibleColumnSources).enumerated()
+            where geometry.widths.indices.contains(display) {
+                tab.columnWidthOverrides[source] = geometry.widths[display]
+            }
+        }
+
+        func setColumnWidth(display: Int, to width: CGFloat) {
+            guard let source = sourceColumn(at: display) else { return }
+            // Pinned on the first step of a drag, not on the press: a click on the grip that goes
+            // nowhere must not freeze the layout.
+            pinColumnWidths()
+            // A hand drag may go as wide as the panel: pinning keeps the widths the formula drew, and
+            // slack-filling draws a lone column up to about the panel's width, past the 1200 pt
+            // ceiling that Fit keeps. The bound is fixed for the drag, not the column's current width.
+            let ceiling = max(GridMetrics.maxColumnWidth, viewportWidth)
+            tab.columnWidthOverrides[source] = min(max(width, GridMetrics.minColumnWidth), ceiling)
+            widthsChanged()
+        }
+
+        /// Size one column to show its header and the cells of the rows fetched so far.
+        func fitColumn(display: Int) {
+            guard let source = sourceColumn(at: display) else { return }
+            pinColumnWidths()
+            tab.columnWidthOverrides[source] = fitWidth(ofSource: source)
+            widthsChanged()
+        }
+
+        func fitAllColumns() {
+            pinColumnWidths()
+            for source in applied?.layout.visibleSources ?? tab.visibleColumnSources {
+                tab.columnWidthOverrides[source] = fitWidth(ofSource: source)
+            }
+            widthsChanged()
+        }
+
+        /// Back to the formula's widths, shared out over the panel.
+        func resetColumnWidths() {
+            guard !tab.columnWidthOverrides.isEmpty else { return }
+            tab.columnWidthOverrides = [:]
+            widthsChanged()
+        }
+
+        /// The rows a fit reads. The natural width's own sample is 200 rows, and so is this one: a
+        /// fit that scanned a million rows would stall the main thread to find one outlier.
+        static let fitSampleRows = 200
+
+        private func fitWidth(ofSource source: Int) -> CGFloat {
+            let format = formats.indices.contains(source) ? formats[source] : .raw
+            let attributes: [NSAttributedString.Key: Any] = [.font: paint.cellFont]
+            var cellNeed: CGFloat = 0
+            for row in 0..<min(rows.count, Self.fitSampleRows) {
+                let text = rows.cell(row: row, column: source, format: format).text
+                cellNeed = max(cellNeed, (text as NSString).size(withAttributes: attributes).width)
+            }
+            // The label, the two marks that can follow it, and the funnel's 10 pt glyph with a gap.
+            var headerNeed = (columnName(at: source) as NSString)
+                .size(withAttributes: [.font: paint.headerFont]).width + 14
+            if tab.columnLayout.isRenamed(source) { headerNeed += 4 + GridMetrics.headerSpacing }
+            if applied?.sort?.column == source { headerNeed += 8 + GridMetrics.headerSpacing }
+            return GridMetrics.fitWidth(headerNeed: headerNeed, cellNeed: cellNeed)
+        }
+
+        /// A width moved: refit, and move what is drawn on top of the columns with them.
+        private func widthsChanged() {
+            refitGeometry()
+            if let inputs = applied { syncEditor(inputs, old: inputs) }
+            if let header = table?.header { header.window?.invalidateCursorRects(for: header) }
+        }
+
+        /// The header's right-click menu: the three width commands, which are all the header menu
+        /// has until its sort and column items are wired.
+        func widthsMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.addItem(withTitle: "Fit All Columns", action: #selector(fitAll), keyEquivalent: "")
+            menu.addItem(withTitle: "Reset Column Widths", action: #selector(resetWidths), keyEquivalent: "")
+            for item in menu.items { item.target = self }
+            return menu
+        }
+
+        @objc private func fitAll() { fitAllColumns() }
+        @objc private func resetWidths() { resetColumnWidths() }
+
         // MARK: Pointer
 
         /// A press: select the cell under the pointer, and on the second click act on it.
-        func press(at point: CGPoint, clickCount: Int) {
+        ///
+        /// `extend` is Shift (DBX-63): the block grows from the cursor's anchor to the cell pressed
+        /// instead of collapsing onto it, and a drag that follows keeps that anchor. With no cursor
+        /// yet there is nothing to extend from, so it is a plain press. A Shift double-click does not
+        /// open the editor: the second click of an extension is still an extension.
+        func press(at point: CGPoint, clickCount: Int, extend: Bool = false) {
             guard rows.count > 0, !geometry.widths.isEmpty else { return }
             // A click in the grid is the end of a peek (blueprint 3.3).
             closePeek()
             let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: rows.count)
             let column = geometry.clampedColumn(atX: point.x, last: geometry.widths.count - 1)
             let position = CellPos(row: row, column: column)
-            dragAnchor = position
+            var anchor = position
+            if extend, let held = tab.cellCursor?.anchor {
+                // The rows or columns may have shrunk since the cursor was placed.
+                anchor = CellPos(row: min(max(held.row, 0), rows.count - 1),
+                                 column: min(max(held.column, 0), geometry.widths.count - 1))
+            }
+            dragAnchor = anchor
             // What is on screen, not what SwiftUI last applied: a key may have moved the selection
             // since, and repainting the older block would leave the newer one painted.
             let previousSelection = tab.cellSelection
             let previousCursor = tab.cellCursor?.focus
-            tab.selectCells(anchor: position, focus: position)
+            tab.selectCells(anchor: anchor, focus: position)
             commands.selectionChanged()
             syncTable(previousSelection: previousSelection, previousCursor: previousCursor)
-            if clickCount == 2 { doubleClick(at: position) }
+            if clickCount == 2, !extend { doubleClick(at: position) }
         }
 
         /// A drag: extend the block to the cell under the pointer, without waiting for a SwiftUI
@@ -1444,6 +1562,9 @@ struct ResultGridTable: NSViewRepresentable {
             menu.addItem(.separator())
             menu.addItem(withTitle: "Undo Edit", action: #selector(undoEdit), keyEquivalent: "")
             menu.addItem(withTitle: "Redo Edit", action: #selector(redoEdit), keyEquivalent: "")
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Fit All Columns", action: #selector(fitAll), keyEquivalent: "")
+            menu.addItem(withTitle: "Reset Column Widths", action: #selector(resetWidths), keyEquivalent: "")
             let hasSelection = tab.cellSelection != nil
             for item in menu.items {
                 switch item.action {
@@ -1464,6 +1585,12 @@ struct ResultGridTable: NSViewRepresentable {
                 case #selector(redoEdit):
                     item.target = self
                     item.isEnabled = tab.canRedoCellEdit
+                case #selector(fitAll):
+                    item.target = self
+                    item.isEnabled = !geometry.widths.isEmpty
+                case #selector(resetWidths):
+                    item.target = self
+                    item.isEnabled = !tab.columnWidthOverrides.isEmpty
                 default: break
                 }
             }

@@ -50,8 +50,25 @@ final class GridHeaderView: NSTableHeaderView {
 
     /// The one geometry the header and the body share.
     var geometry = GridColumnGeometry(gutter: 0, widths: []) {
-        didSet { if geometry != oldValue { needsDisplay = true } }
+        didSet {
+            if geometry != oldValue {
+                needsDisplay = true
+                window?.invalidateCursorRects(for: self)
+            }
+        }
     }
+
+    /// What a column's resize grip asks for, with the column's drawn position.
+    enum ResizePhase: Equatable {
+        /// A drag step: the width the column should now have, from where the press began.
+        case move(width: CGFloat)
+        /// A double-click: size the column to its content.
+        case fit
+    }
+    /// Told when the grip is dragged or double-clicked. The coordinator owns the widths.
+    var columnResize: ((_ display: Int, _ phase: ResizePhase) -> Void)?
+    /// The column being resized by the current press, with the pointer and width it began at.
+    private var resizing: (display: Int, startX: CGFloat, startWidth: CGFloat)?
 
     /// The header draws with the coordinator's palette rather than one of its own, so a draw it
     /// makes on its own — before the table has been through an update — is still the right colours.
@@ -295,10 +312,36 @@ final class GridHeaderView: NSTableHeaderView {
         CGRect(x: columnRight - funnelHitWidth, y: 0, width: funnelHitWidth, height: height)
     }
 
+    /// The resize grip is a strip over each column's right separator (`GridColumnGeometry.grip*`).
+    /// It wins over the funnel's strip where the two overlap, which is the last two points of the
+    /// funnel's 20: the glyph itself ends eight points short of the edge, so nothing a person aims
+    /// at is lost (FR-GRID-14 keeps its 20 pt rectangle, `funnelHitArea`, as it was).
+    override func resetCursorRects() {
+        let visible = self.visibleRect
+        guard visible.width > 0 else { return }
+        var edge = geometry.gutter
+        for width in geometry.widths {
+            edge += width
+            let grip = CGRect(x: edge - GridColumnGeometry.gripInside, y: 0,
+                              width: GridColumnGeometry.gripInside + GridColumnGeometry.gripOutside,
+                              height: bounds.height)
+            if grip.intersects(visible) { addCursorRect(grip.intersection(visible), cursor: .resizeLeftRight) }
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        // A press on a grip resizes and never sorts; a double-click on it fits the column.
+        if let grip = geometry.resizeColumn(atX: point.x) {
+            if event.clickCount >= 2 {
+                columnResize?(grip, .fit)
+            } else {
+                resizing = (grip, point.x, geometry.widths[grip])
+            }
+            return
+        }
         // A click on the funnel strip opens the filter; anywhere else on the header runs the sort
         // cycle. No waiting for mouse-up: a header click has always sorted on press.
-        let point = convert(event.locationInWindow, from: nil)
         guard let display = display(at: point) else { return }
         let column = columns[display]
         let edges = geometry.edges(of: display)
@@ -311,6 +354,16 @@ final class GridHeaderView: NSTableHeaderView {
             return
         }
         commands?.sortClick(column.source)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let resizing else { return }
+        let x = convert(event.locationInWindow, from: nil).x
+        columnResize?(resizing.display, .move(width: resizing.startWidth + x - resizing.startX))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        resizing = nil
     }
 
     /// The drawn column a point falls in, or `nil` in the gutter or past the last column.
