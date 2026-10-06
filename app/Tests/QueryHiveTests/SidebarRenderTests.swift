@@ -138,6 +138,7 @@ final class SidebarRenderTests: XCTestCase {
     /// limit of the technique.
     @MainActor
     func testTheLibraryPanelsAndTheDataTabRender() throws {
+        isolateConnectionStore()
         let model = AppModel()
 
         // The connection column resolves the name from the model's own list, so a row is seeded with

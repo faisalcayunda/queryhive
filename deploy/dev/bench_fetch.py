@@ -123,6 +123,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -179,6 +180,10 @@ ENGINE_KEYS = (
     "NULL_TEXT", "JSONL", "SQL_TABLE", "SHEET", "DBF_CHAR_WIDTH", "DBF_ENCODING",
     "TARGET_CATALOG", "TARGET_SCHEMA", "TARGET_TABLE", "WRITE_MODE",
 )
+
+# The engine logs every Safe Mode decision to `DB_PATH`, or to the owner's own database when
+# none is named. A measurement is never an owner decision, so it gets a throwaway one.
+_SCRATCH = tempfile.TemporaryDirectory(prefix="qh-bench-db-")
 
 COLUMN_COUNT = 30
 WIDE_ROWS = 500_000
@@ -241,6 +246,7 @@ def measure(kind: str, sql: str, limit: int, label: str,
     # No retries: a baseline that silently retried would report a number no user
     # would ever see, and a real failure should fail the measurement.
     env["RETRIES"] = "0"
+    env["DB_PATH"] = str(pathlib.Path(_SCRATCH.name) / "queryhive.sqlite3")
 
     profile, path = resolve_rust_binary(binary)
     command = [TIME_BIN, "-l", str(path), "preview"]

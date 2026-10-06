@@ -878,11 +878,12 @@ fn add_surface(digest: &mut Digest, sql: &str) {
 /// in so a renamed mode does not slip through as an unrelated change.
 ///
 /// `FILES` includes `tools/golden/live_cases.py`, so the digest has to be taken again whenever
-/// that file changes: it was, on 6 Oct 2026 (W11-T1, nine metadata cases). Nothing the scanner
-/// or the classifier does moved with it: the payloads, the seeds and the random inputs are the
+/// that file changes: it was, on 6 Oct 2026 (W11-T1, nine metadata cases) and again the same day
+/// (the harness gets a throwaway `DB_PATH`, six lines of Python and no SQL). Nothing the scanner
+/// or the classifier does moved with either: the payloads, the seeds and the random inputs are the
 /// same, `payloads_and_repository_sql_scan_identically` reads the new text of that file under
 /// every lexer and finds the frozen scanner agreeing, and `qh-sql`'s sources are untouched.
-const SURFACE_DIGEST: u64 = 0x289d_df56_5295_2503;
+const SURFACE_DIGEST: u64 = 0x6e16_c1bd_0d82_fdfb;
 
 #[test]
 fn the_safe_mode_surface_is_unchanged() {

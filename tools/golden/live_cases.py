@@ -92,6 +92,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # `target/debug/queryhive-engine`, so a lane that must check *its* binary copies it
 # aside and points here.
 ENGINE = Path(os.environ.get("QH_ENGINE") or ROOT / "target" / "debug" / "queryhive-engine")
+# The execution log every case writes to, for the life of this run (see `run_case`).
+_SCRATCH = tempfile.TemporaryDirectory(prefix="qh-golden-db-")
 GOLDEN_DIR = ROOT / "tests" / "golden"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -561,6 +563,10 @@ def run_case(case: LiveCase) -> tuple[int, str, str]:
         if key in os.environ
     }
     env.update(case.env_map())
+    # The engine logs every Safe Mode decision to `DB_PATH`, or to the owner's own database
+    # when none is named. A harness run is never an owner decision, so it always gets a
+    # throwaway one (set after the case's settings: no case may point it elsewhere).
+    env["DB_PATH"] = str(Path(_SCRATCH.name) / "queryhive.sqlite3")
     completed = subprocess.run(
         [str(ENGINE), case.command],
         cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
