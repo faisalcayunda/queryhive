@@ -100,6 +100,12 @@ enum SQLSyntax {
     /// Every character carries the default paragraph style explicitly, so a typed character inherits
     /// it through the typing attributes and folding never has to touch attributes.
     static let base = colour(0xE8EAF2, 0x1C1F26).merging([.paragraphStyle: NSParagraphStyle.default]) { _, new in new }
+
+    /// The colour of text no token claims — identifiers, dotted names. The editor keeps it in the
+    /// storage and the typing attributes, because a character with no `.foregroundColor` at all is
+    /// drawn black by AppKit, which is unreadable on a dark canvas. Dynamic, so it follows the
+    /// window's appearance without being rebuilt.
+    static var baseColour: NSColor { base[.foregroundColor] as? NSColor ?? .labelColor }
     static let keyword = colour(0x9A8DFF, 0x5B3FD6)
     static let function = colour(0x4FD8FF, 0x0B6E8F)
     static let string = colour(0x3EE6A8, 0x0A7A52)

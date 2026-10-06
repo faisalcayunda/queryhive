@@ -90,7 +90,8 @@ struct SQLEditor: NSViewRepresentable {
         // Adaptive, not pinned white: this NSTextView draws on `Tone.canvas`, which is near-black
         // in a dark appearance and off-white in a light one. AppKit resolves both of these per
         // appearance, so the caret and the default text colour follow the canvas with no observer.
-        textView.textColor = .labelColor
+        // The text colour is the one `baseAttributes` keeps in the storage.
+        textView.textColor = SQLSyntax.baseColour
         textView.insertionPointColor = .labelColor
         textView.drawsBackground = false
         textView.backgroundColor = .clear
@@ -789,10 +790,13 @@ struct SQLEditor: NSViewRepresentable {
             scheduleIdle()
         }
 
-        /// Storage carries base attributes only: the code font and the paragraph style. Colours
-        /// are temporary attributes, and comment italics arrive through the paint's fonts.
+        /// Storage carries base attributes only: the code font, the paragraph style and the colour of
+        /// plain text. Token colours are temporary attributes on top of it, and comment italics
+        /// arrive through the paint's fonts. The base colour has to be here: text with no
+        /// `.foregroundColor` is drawn black, and the paint only ever colours tokens.
         private static func baseAttributes(textView: NSTextView) -> [NSAttributedString.Key: Any] {
             [.font: SQLSyntax.font(italic: false),
+             .foregroundColor: SQLSyntax.baseColour,
              .paragraphStyle: textView.defaultParagraphStyle ?? NSParagraphStyle.default]
         }
 
