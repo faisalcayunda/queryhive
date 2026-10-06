@@ -385,6 +385,7 @@ extension AppModel {
             case "error":
                 message = event.message
             case "columns":
+                PerfSignposts.stamp(.columns, onlyFirst: true)
                 columns = event.columns ?? []
                 store.setColumns(columns)
                 // Paint the header as soon as it is known rather than after the first batch.

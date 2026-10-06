@@ -79,6 +79,7 @@ final class GridTableView: NSTableView {
             coordinator?.closePeek()
             return
         }
+        PerfSignposts.stamp(.gridAttached, onlyFirst: true)
         // Whether the window is key is part of how strongly the ring is drawn, and losing it
         // closes the peek (blueprint W10 §3.3).
         keyObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
@@ -306,6 +307,7 @@ final class GridTableView: NSTableView {
 
         let rowCount = coordinator.rows.count
         guard rowCount > 0 else { cg.restoreGState(); return }
+        PerfSignposts.stamp(.firstDraw, onlyFirst: true)
 
         // The rows the dirty rectangle covers, plus the neighbours a Compact cell overflows onto.
         let overflow = overflowRows(context)

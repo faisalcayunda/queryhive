@@ -224,7 +224,9 @@ final class StoreRows: ResultRows, @unchecked Sendable {
     // MARK: State
 
     var columns: [Event.Column] { locked { _columns } }
-    var count: Int { locked { _count } }
+    /// Zero once released: a table that still holds this store (the tab's next result has not been
+    /// applied to it yet) has no row left to ask for, so it draws none of them.
+    var count: Int { locked { released ? 0 : _count } }
     var fetched: Int { locked { _fetched } }
     var phase: StorePhase { locked { _phase } }
     var viewID: UInt64 { locked { _viewID } }

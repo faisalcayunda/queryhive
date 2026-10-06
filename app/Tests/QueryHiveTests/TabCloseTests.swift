@@ -164,3 +164,65 @@ final class StartupSettingTests: XCTestCase {
                        "a fresh model did not pick the setting up")
     }
 }
+
+/// A tab that closes while its grid is on screen.
+///
+/// The grid lives through the Runs of a tab (W8-F1), so it can be holding a store at the moment the
+/// tab lets go of it. Whatever it does next must not be drawing rows out of a released store.
+@MainActor
+final class TabCloseGridTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        isolateConnectionStore()
+    }
+
+    override func tearDown() {
+        PerfSignposts.recording = false
+        PerfSignposts.clearStages()
+        super.tearDown()
+    }
+
+    func testClosingATabLetsGoOfItsStoreAndTheTableDrawsNothingMore() throws {
+        let grid = HostedGrid()
+        defer { grid.close() }
+        grid.run()
+        let table = try XCTUnwrap(grid.table)
+        let store = try XCTUnwrap(grid.tab.activeResult)
+        XCTAssertEqual(table.numberOfRows, 50)
+
+        PerfSignposts.recording = true
+        PerfSignposts.clearStages()
+        grid.model.closeTab(grid.tab.id)
+        // The table is still in the window for a moment, as it is while SwiftUI catches up.
+        table.noteNumberOfRowsChanged()
+        table.needsDisplay = true
+        table.displayIfNeeded()
+        grid.spin(0.05)
+
+        XCTAssertTrue(store.isReleased)
+        XCTAssertNil(grid.tab.activeResult)
+        XCTAssertEqual(table.numberOfRows, 0)
+        XCTAssertNil(PerfSignposts.time(of: .firstDraw), "a row was drawn after its store was let go")
+    }
+
+    func testClosingATabInTheMiddleOfARunLeavesNoStoreBehind() throws {
+        var script = StreamingEngine.Script()
+        script.delay = 0.3
+        let engine = StreamingEngine()
+        engine.script = script
+        let grid = HostedGrid(engine: engine)
+        defer { grid.close() }
+        grid.model.preview(grid.tab)
+        grid.spin(0.1)
+        XCTAssertNotNil(grid.table, "the table is up while the engine works")
+        let store = try XCTUnwrap(engine.stores.first)
+
+        grid.model.closeTab(grid.tab.id)
+        // The engine's late events find a tab whose token has gone and are dropped.
+        grid.spin(0.5)
+
+        XCTAssertTrue(store.isReleased)
+        XCTAssertEqual(store.count, 0)
+        XCTAssertNil(grid.tab.activeResult)
+    }
+}

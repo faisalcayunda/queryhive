@@ -101,14 +101,30 @@ struct ResultGrid: View {
                                   loading: loadingLabel)
     }
 
+    /// The sentence over the panel while a run is in flight and its columns are not known yet.
+    private var awaitingColumns: String? {
+        tab.preview == nil ? loadingLabel : nil
+    }
+
+    /// What the table is handed until the columns arrive: no columns, no rows.
+    private static let noColumnsYet = PreviewResult(columns: [], rowCount: 0, truncated: false,
+                                                    queryID: nil, elapsedMS: 0)
+
     @ViewBuilder private var content: some View {
-        if let label = loadingLabel, tab.preview == nil {
-            // Nothing to draw yet. The columns arrive with the engine's first event and the header
-            // arrives with them, so until then there is no table to stand a spinner inside of and
-            // the spinner is the whole panel.
-            status(label, symbol: nil)
-        } else if let preview = tab.preview, !preview.columns.isEmpty {
-            grid(preview)
+        if awaitingColumns != nil || tab.preview?.columns.isEmpty == false {
+            // One call site for the table, from the moment a run starts to the moment its result is
+            // replaced (W8-F1). The columns arrive with the engine's first event, and until then the
+            // table stands built and empty (it draws nothing without columns) under the spinner:
+            // building it here is work the main thread does while the engine is busy, instead of
+            // work the first rows wait for. A run that follows one (Run again, a server sort or
+            // search) finds the table of the run before it and reuses it. Nothing may wrap or
+            // un-wrap the table between those states, or SwiftUI moves it out of its window and
+            // back (`.opacity` does exactly that), so the spinner is an overlay and the rest of the
+            // panel simply is not there.
+            let covered = awaitingColumns != nil
+            grid(tab.preview ?? Self.noColumnsYet, covered: covered)
+                .accessibilityHidden(covered)
+                .overlay { if let label = awaitingColumns { status(label, symbol: nil) } }
         } else if tab.preview?.stopped == true {
             // Stop landed before the first page: no columns, so no grid, and it is not "Press Run".
             status("Stopped before any rows arrived.", symbol: "stop.circle")
@@ -205,26 +221,38 @@ struct ResultGrid: View {
     /// reachable while the placeholder sits across the panel instead of across the header's width.
     /// The banner stays SwiftUI, above the table (blueprint D-13): drawing a sentence and a button
     /// into an `NSView` buys nothing, and at scroll offset zero the pixels are the same.
-    private func grid(_ preview: PreviewResult) -> some View {
+    private func grid(_ preview: PreviewResult, covered: Bool) -> some View {
         let inputs = gridInputs(preview)
+        let whenEmpty = covered ? nil : placeholder(preview)
+        let header = GridMetrics.headerHeight(fontSize: DataPreferences.shared.gridFontSize)
         return VStack(spacing: 0) {
+            // Built behind the spinner too: the toolbar does not depend on the columns, and
+            // building it when they arrive was a third of what the first rows waited for. Its views
+            // are SwiftUI's own, so veiling them moves nothing that matters (the table is the one
+            // view that must not be wrapped).
             gridToolbar(preview)
-            if let note = failureNote { failureBanner(note) }
-            if let sort = tab.activeSort, sort.origin == .memory, preview.truncated {
-                // The only banner left: an in-memory order over a cut-short result is partial, and
-                // one thin row says so. A full memory order and a server order need no banner — the
-                // chevron is the whole story.
-                PartialOrderNote(fetched: tab.result.fetched)
+                .opacity(covered ? 0 : 1)
+                .allowsHitTesting(!covered)
+                .accessibilityHidden(covered)
+                .disabled(covered)
+            if !covered {
+                if let note = failureNote { failureBanner(note) }
+                if let sort = tab.activeSort, sort.origin == .memory, preview.truncated {
+                    // The only banner left: an in-memory order over a cut-short result is partial,
+                    // and one thin row says so. A full memory order and a server order need no
+                    // banner — the chevron is the whole story.
+                    PartialOrderNote(fetched: tab.result.fetched)
+                }
             }
-            if let placeholder = placeholder(preview) {
-                ResultGridTable(tab: tab, model: model, inputs: inputs,
-                                commands: gridCommands(preview))
-                    .frame(height: GridMetrics.headerHeight(fontSize: DataPreferences.shared.gridFontSize))
-                placeholderBody(placeholder)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ResultGridTable(tab: tab, model: model, inputs: inputs,
-                                commands: gridCommands(preview))
+            // The same table with and without a placeholder, so only its height changes when the
+            // first rows land. Two call sites, one in each branch of an `if`, were two views to
+            // SwiftUI: the first rows threw the table away and built another (W8-F1).
+            ResultGridTable(tab: tab, model: model, inputs: inputs, commands: gridCommands(preview))
+                .frame(maxWidth: .infinity,
+                       minHeight: whenEmpty == nil ? nil : header,
+                       maxHeight: whenEmpty == nil ? .infinity : header)
+            if let whenEmpty {
+                placeholderBody(whenEmpty)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

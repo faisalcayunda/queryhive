@@ -137,3 +137,47 @@ final class StopDeliveryTests: XCTestCase {
         XCTAssertEqual(engine.calls.first { $0.command == "history_add" }?.env["OUTCOME"], "cancelled")
     }
 }
+
+/// What a stopped Run leaves in the grid, now that the grid is built before the Run's columns.
+@MainActor
+final class StoppedRunGridTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        isolateConnectionStore()
+    }
+
+    private func stopped(_ configure: (inout StreamingEngine.Script) -> Void) -> HostedGrid {
+        var script = StreamingEngine.Script()
+        script.cancelled = true
+        configure(&script)
+        let engine = StreamingEngine()
+        engine.script = script
+        return HostedGrid(engine: engine)
+    }
+
+    func testAStopAfterSomeRowsKeepsTheTableAndThePartialRows() throws {
+        let grid = stopped { $0.rows = (0..<12).map { ["row \($0)"] } }
+        defer { grid.close() }
+        grid.model.preview(grid.tab)
+        grid.spin(0.01)
+        let built = try XCTUnwrap(grid.table, "the table is up before the stop")
+        grid.wait { !grid.tab.previewing && grid.tab.preview != nil }
+        grid.spin(0.05)
+
+        XCTAssertEqual(grid.tab.preview?.stopped, true)
+        XCTAssertTrue(grid.table === built)
+        XCTAssertEqual(built.numberOfRows, 12)
+    }
+
+    func testAStopBeforeAnyColumnsLeavesTheSentenceAndNoTable() {
+        let grid = stopped {
+            $0.columns = []
+            $0.rows = []
+        }
+        defer { grid.close() }
+        grid.run()
+
+        XCTAssertEqual(grid.tab.preview?.stopped, true)
+        XCTAssertNil(grid.table, "a table with no columns stood over \"Stopped before any rows arrived\"")
+    }
+}

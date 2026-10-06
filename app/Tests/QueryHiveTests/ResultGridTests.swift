@@ -301,6 +301,37 @@ final class ResultGridTests: XCTestCase {
         )
     }
 
+    // MARK: A Run over a Run
+
+    /// The table outlives the Run that filled it (W8-F1), and with it everything it holds that
+    /// belongs to the rows: the scroll position, the selection and the cursor. A table that is not
+    /// rebuilt has to be told, and these two are what would go wrong first.
+    @MainActor
+    func testARunAgainStartsAtTheTopWithNothingSelected() throws {
+        var script = StreamingEngine.Script()
+        script.rows = (0..<400).map { ["row \($0)"] }
+        let grid = HostedGrid(engine: { let e = StreamingEngine(); e.script = script; return e }())
+        defer { grid.close() }
+        grid.run()
+        let table = try XCTUnwrap(grid.table)
+        let scroll = try XCTUnwrap(table.enclosingScrollView)
+        grid.tab.selectCells(anchor: CellPos(row: 3, column: 0), focus: CellPos(row: 4, column: 0))
+        table.scrollRowToVisible(300)
+        grid.spin(0.05)
+        XCTAssertGreaterThan(scroll.contentView.bounds.origin.y, 1_000, "the fixture did not scroll")
+        XCTAssertNotNil(grid.tab.cellSelection)
+
+        script.rows = (0..<400).map { ["again \($0)"] }
+        grid.engine.script = script
+        grid.run()
+
+        XCTAssertTrue(grid.table === table)
+        XCTAssertNil(grid.tab.cellSelection, "the first result's selection followed the table into the second")
+        XCTAssertNil(table.selection)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, -scroll.contentView.contentInsets.top, accuracy: 1,
+                       "the second result opened where the first one was scrolled to")
+    }
+
     @MainActor
     private func render(_ content: some View, named name: String, size: CGSize) throws {
         let host = NSHostingView(rootView: content)

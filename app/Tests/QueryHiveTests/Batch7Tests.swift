@@ -208,3 +208,58 @@ final class Batch7Tests: XCTestCase {
             .contains("queryhive_search") == true)
     }
 }
+
+/// A sort or a search that goes to the server is a Run, and a Run reuses the grid (W8-F1).
+@MainActor
+final class Batch7GridTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        isolateConnectionStore()
+    }
+
+    func testAServerSortRunReusesTheTableAndKeepsTheBase() throws {
+        let grid = HostedGrid()
+        defer { grid.close() }
+        grid.run()
+        let table = try XCTUnwrap(grid.table)
+        let base = try XCTUnwrap(grid.tab.activeResult)
+        let column = try XCTUnwrap(grid.tab.preview?.columns.first)
+
+        grid.model.sortOnServer(grid.tab, column: column, source: 0, direction: .ascending)
+        grid.wait { !grid.tab.previewing && grid.tab.activeSort != nil }
+        grid.spin(0.05)
+
+        XCTAssertEqual(grid.engine.previews, 2, "the sort did not run on the server")
+        XCTAssertEqual(grid.tab.activeSort?.origin, .server)
+        XCTAssertTrue(grid.table === table, "the sort run built a new table")
+        let sorted = try XCTUnwrap(grid.tab.activeResult)
+        XCTAssertFalse(sorted === base)
+        XCTAssertFalse(base.isReleased, "the base must outlive the sort: off returns to it")
+        XCTAssertTrue(grid.tab.baseResult?.rows === base)
+        XCTAssertTrue(table.coordinator?.rows === sorted, "the table is not drawing the sorted rows")
+        XCTAssertEqual(table.numberOfRows, 50)
+    }
+
+    func testClearingTheServerSortReturnsTheSameTableToTheBase() throws {
+        let grid = HostedGrid()
+        defer { grid.close() }
+        grid.run()
+        let table = try XCTUnwrap(grid.table)
+        let base = try XCTUnwrap(grid.tab.activeResult)
+        let column = try XCTUnwrap(grid.tab.preview?.columns.first)
+        grid.model.sortOnServer(grid.tab, column: column, source: 0, direction: .descending)
+        grid.wait { !grid.tab.previewing && grid.tab.activeSort != nil }
+        grid.spin(0.05)
+        let sorted = try XCTUnwrap(grid.tab.activeResult)
+
+        grid.model.clearSort(grid.tab)
+        grid.spin(0.1)
+
+        XCTAssertTrue(grid.tab.activeResult === base)
+        XCTAssertTrue(sorted.isReleased)
+        XCTAssertTrue(grid.table === table)
+        XCTAssertTrue(table.coordinator?.rows === base)
+        XCTAssertEqual(grid.engine.previews, 2, "off must not query: the base is held")
+        XCTAssertEqual(table.numberOfRows, 50)
+    }
+}
