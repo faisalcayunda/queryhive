@@ -86,7 +86,7 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 59.4 ms (n=10); ttfr_ms p95 75.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 59.4 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 75.7 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
+| `ttfr-s1-1k` — S1 hangat, cap 1.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 61.7 ms (n=20); ttfr_ms p95 82.0 ms (n=20) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 61.7 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 82.0 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
 | `ttfr-s1-10k` — S1 hangat, cap 10.000 | p50 ≤ 25 ms, p95 ≤ 40 ms; vs TablePro ≤ 0,5× | ttfr_ms median 73.7 ms (n=10); ttfr_ms p95 86.3 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 73.7 ms di atas batas ≤ 25.0 ms; ttfr_ms p95 86.3 ms di atas batas ≤ 40.0 ms; vs TablePro tanpa pembanding |
 | `ttfr-s2-500k` — S2 cap 500.000 | p95 ≤ 50 ms (progresif); vs TablePro ≤ 0,1× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 | `ttfr-s3-rtt30` — S3 RTT 30 ms (toxiproxy) | hangat ≤ 1 RTT + 20 ms (50 ms); vs TablePro ≤ 1,0× | ttfr_ms median 283.0 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — ttfr_ms median 283.0 ms di atas batas ≤ 50.0 ms; vs TablePro tanpa pembanding |
@@ -96,14 +96,14 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | rows_per_s median 77,171 baris/s (n=5) | tidak diukur (izin OS) | Belum memenuhi — rows_per_s median 77,171 baris/s di bawah batas ≥ 575,000 baris/s; vs TablePro tanpa pembanding |
+| `rows-wide-500k` — `wide_500k` tanpa cap | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | rows_per_s median 78,963 baris/s (n=6) | tidak diukur (izin OS) | Belum memenuhi — rows_per_s median 78,963 baris/s di bawah batas ≥ 575,000 baris/s; vs TablePro tanpa pembanding |
 | `rows-lineitem-1m` — Trino `tpch.sf1.lineitem`, cap 1M | ≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah; vs TablePro ≥ 1,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 3: Memori puncak
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | footprint_delta_bytes median 11.2 MB (n=5) | tidak diukur (izin OS) | Terukur — anggaran store belum dicatat (`budget_bytes`); vs TablePro tanpa pembanding |
+| `mem-500k` — 500k × 30 | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | footprint_delta_bytes median 18.3 MB (n=6) | tidak diukur (izin OS) | Memenuhi target absolut; vs TablePro tanpa pembanding |
 | `mem-5m` — 5M baris | ≤ anggaran store + 64 MB; vs TablePro ≤ 0,5× | tidak mendukung | tidak diukur (izin OS) | [belum diukur] |
 
 ## Sumbu 4: Frame saat scroll
