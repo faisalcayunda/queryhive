@@ -438,6 +438,12 @@ extension AppModel {
                 // Re-read, so a History panel that is already on screen counts this run without
                 // the user having to switch panels. `onAppear` only fires once per appearance.
                 self.loadHistory(search: self.historySearch)
+                // A sort or search run follows a Run the person already saw; only a Run announces.
+                if baseRun {
+                    self.reportLongRun(.query, tab.cancelled ? .cancelled : .failed, tab: tab,
+                                       elapsed: Date().timeIntervalSince(startedAt),
+                                       failure: tab.previewError)
+                }
                 return
             }
             Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
@@ -445,6 +451,11 @@ extension AppModel {
                                rowCount: tab.preview?.rowCount ?? fetched, error: nil,
                                recording: self.recordsHistory, engine: self.engine)
             self.loadHistory(search: self.historySearch)
+            if baseRun {
+                self.reportLongRun(.query, stopped ? .cancelled : .done, tab: tab,
+                                   elapsed: Date().timeIntervalSince(startedAt),
+                                   rows: tab.preview?.rowCount ?? fetched)
+            }
         })
     }
 

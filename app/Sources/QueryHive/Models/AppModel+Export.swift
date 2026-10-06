@@ -233,21 +233,34 @@ extension AppModel {
         let run = UUID()
         tab.runToken = run
         var message: String?
+        // Finder and the Dock follow the run (FR-RUN-05). Events and exit arrive on the main queue.
+        let kind: LongRunKind = tab.destination == .table ? .toTable : .export
+        let progress = MainActor.assumeIsolated {
+            FileProgress(finderTarget: FileProgress.finderTarget(for: tab),
+                         total: FileProgress.knownTotal(for: tab, sql: sql))
+        }
         tab.process = Engine.current.run(command, env: env, onEvent: { [weak self] event in
             guard let self, tab.runToken == run else { return }
             if event.event == "error" { message = event.message }
+            if event.event == "progress", let rows = event.rows {
+                MainActor.assumeIsolated { progress.update(rows: rows) }
+            }
             self.handle(event, in: tab)
-        }, onExit: { status, log in
+        }, onExit: { [weak self] status, log in
+            // Before the token check: whichever run this was, its Finder and Dock progress ends.
+            MainActor.assumeIsolated { progress.finish() }
             guard tab.runToken == run else { return }
             PerfSignposts.cancelEnd()
             tab.process = nil
             tab.stopping = false
+            let elapsed = Date.now.timeIntervalSince(tab.startedAt)
             if tab.cancelled {
                 tab.cancelled = false
                 tab.stage = .idle
                 tab.note(.warning, tab.destination == .table
                          ? "Stopped. The coordinator decides what happens to a partly written table."
                          : "Stopped. Partial files, if any, stay in \(directory?.path ?? "the output folder").")
+                self?.reportLongRun(kind, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
                 return
             }
             guard status == 0 else {
@@ -256,6 +269,7 @@ extension AppModel {
                 tab.failureDetail = log
                 tab.note(.error, tab.failure ?? "")
                 tab.panel = .log
+                self?.reportLongRun(kind, .failed, tab: tab, elapsed: elapsed, failure: tab.failure)
                 return
             }
             // A table run reports the table it wrote, not a file list, so that is what proves it
@@ -268,13 +282,35 @@ extension AppModel {
                 tab.failureDetail = log
                 tab.note(.error, tab.failure ?? "")
                 tab.panel = .log
+                self?.reportLongRun(kind, .failed, tab: tab, elapsed: elapsed, failure: tab.failure)
                 return
             }
             tab.finishedAt = .now
             tab.step = "finish"
             tab.stage = .done
             tab.panel = tab.destination == .table ? .files : (tab.files.isEmpty ? .log : .files)
+            self?.reportLongRun(kind, .done, tab: tab, elapsed: elapsed, rows: tab.rows)
         })
+    }
+
+    /// The notifier the app uses. A test replaces it with one built on fakes.
+    @MainActor static var longRunNotifier = LongRunNotifier.system()
+
+    /// Announces the end of a run and, for a long one that finished in the background, notifies.
+    /// Permission is asked inside `finished`, at the first notification, never at launch.
+    func reportLongRun(_ kind: LongRunKind, _ outcome: LongRunOutcome, tab: QueryTab,
+                       elapsed: TimeInterval, rows: Int? = nil, failure: String? = nil) {
+        let report = LongRunReport(kind: kind, outcome: outcome, elapsed: elapsed, rows: rows,
+                                   failure: failure)
+        let id = tab.id
+        Task { @MainActor [weak self, weak tab] in
+            let notifier = Self.longRunNotifier
+            notifier.onSelectTab = { [weak self] id in self?.selectedTabID = id }
+            if await notifier.finished(report, tab: id) == .attention {
+                tab?.note(.info, "Notifications are off for QueryHive, so the Dock icon bounced instead. "
+                          + "Turn them on in System Settings > Notifications.")
+            }
+        }
     }
 
     private func handle(_ event: Event, in tab: QueryTab) {
