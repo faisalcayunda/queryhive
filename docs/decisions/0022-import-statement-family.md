@@ -109,3 +109,72 @@ Rincian yang mengikat:
 - **Masih belum dibangun.** Lembar mapping impor app; MySQL tidak diuji hidup untuk ini (tidak ada
   container MySQL di sesi ini), jadi ejaan `FOREIGN_KEY_CHECKS`-nya hanya dipatok tes unit dan
   pembacaan kode. Penolakan Trino adalah tes unit; ia tidak butuh server.
+
+## Addendum 7 Okt 2026 (W12-T7b, langkah 1): badan rutin, direktif klien, dekode byte
+
+Addendum ini mengubah butir 2 dan 3 di atas hanya sejauh yang dibutuhkan satu pemecah yang jujur
+untuk berkas hasil dump. Langkah 2 (menghormati `DELIMITER`, mengosongkan baris kontrol psql di
+tempat) tetap menunggu keputusan pemilik dan tidak dikerjakan di sini.
+
+### Keputusan
+
+1. **Badan program tersimpan MySQL adalah satu statement.** `CREATE PROCEDURE p() BEGIN DELETE FROM
+   a; DELETE FROM b; END` dibaca seperti grammar server (`sp_proc_stmt`): `;` di dalam badan adalah
+   isi, bukan pemisah. Sebelumnya `DELETE FROM b` bisa berjalan sendirian di bawah `ON_ERROR=skip`
+   atau `SCRIPT_POLICY=continue` begitu potongan pertama gagal. Pemecahnya
+   `qh_sql::statements_with_lines_dialect` (dan `statements_dialect`, `statements_agreeing`,
+   keputusan guard), jadi guard dan pengiriman melihat statement yang sama. `walk` dan
+   `scan_dialect` tidak berubah: `Scan.separators` tetap posisi `;` mentah, karena daftar statement
+   editor dibangun dari `walk` per jendela dan tidak bisa membawa status badan lintas jendela.
+2. **Yang dikenali sebagai badan.** Setelah header `CREATE [DEFINER = …] {PROCEDURE | FUNCTION |
+   TRIGGER | EVENT}` (dan `ALTER EVENT … DO`), bila statement pertamanya sebuah blok: `BEGIN`, `IF`,
+   `CASE`, `LOOP`, `WHILE`, `REPEAT`, boleh diawali `label:`. Badan sederhana (`… RETURN 1;`)
+   berakhir di `;` pertamanya seperti biasa. `BEGIN NOT ATOMIC` (MariaDB) juga dikenali. Di dalam
+   badan, blok hanya dibuka dan ditutup di awal statement; awal statement mengikuti `;`, `BEGIN`,
+   `LOOP`, `REPEAT`, `THEN`, `ELSE`, `WHILE … DO`, dan daftar kondisi `DECLARE … HANDLER FOR`. `CASE`
+   di tengah statement adalah ekspresi, jadi `END`-nya bukan penutup blok. `BEGIN` sendirian tetap
+   transaksi.
+3. **Arah gagalnya.** Keraguan selalu jatuh ke pembacaan lama: header yang tidak dikenali dipecah di
+   setiap `;` seperti sebelumnya, dan badan yang tidak pernah tertutup menelan sisa berkas menjadi
+   satu statement, yang ditolak server sebagai galat sintaks tanpa menjalankan satu pun potongannya.
+   Statement yang membuka badan selalu diawali `CREATE`, `ALTER` atau `BEGIN`, yang ditolak setiap
+   mode di bawah `full`, jadi sisa yang tertelan tidak lolos dari Safe Mode.
+4. **Direktif klien ditolak dengan namanya sebelum connect** (`qh_sql::client_directive`, dipanggil
+   `import_statements` sebelum guard): baris yang diawali `DELIMITER` (MySQL), dicari per baris dan bukan per statement karena klien mysql
+   membacanya juga setelah `USE db` atau `\G` yang tidak memakai `;`, sehingga tidak ada statement yang
+   diawali dengannya; kolom bernama `delimiter` di awal baris ikut ditolak (gagal tertutup, backtick
+   menghindarinya); baris backslash
+   psql di luar string, komentar dan nama berkutip, termasuk `\restrict` dan `\unrestrict` milik
+   pg_dump (PostgreSQL); dan `COPY … FROM STDIN`, yang barisnya adalah baris berikutnya di berkas.
+   Pesannya menyebut nomor baris dan nama direktifnya. `\restrict` tidak lagi menempel ke statement
+   pertama.
+5. **Dekode byte** (DBX-56 bagian a, pola `json_source.rs`): BOM UTF-8 dibuang, UTF-16 dengan BOM (LE
+   dan BE) didekode. Berkas lain harus UTF-8 sah; galatnya menyebut offset dan baris byte pertama
+   yang buruk, dan menyarankan `--hex-blob` untuk kolom biner. Fallback GBK tidak diadopsi.
+
+### Ditolak dengan alasan tertulis
+
+- **B-14a, `/*!40101 SET … */;` ditolak classifier di bawah mode non-`full`.** Tetap ditolak. `SET`
+  bisa mengubah `sql_mode` atau character set, dan keduanya menggeser cara byte berikutnya dibaca,
+  yaitu justru yang dijaga scanner. Classifier tidak mengklaim tahu, jadi `Unknown`. Restore yang
+  butuh baris itu berjalan di bawah `full`. Yang menjadi kewajiban pemecah hanyalah tiap baris
+  menjadi statement sendiri, dan itu dipatok tes. `classify.rs` tidak berubah.
+- **B-13a, `DELIMITER`.** Berkas mysqldump dengan rutin selalu memakai `DELIMITER ;;`, jadi di
+  langkah 1 berkas semacam itu ditolak dengan nama (butir 4), bukan dipecah di tengah badan. Yang
+  berjalan sekarang adalah rutin tanpa `DELIMITER` (skrip tulisan tangan, keluaran alat lain).
+  Menghormati `DELIMITER` adalah langkah 2.
+- **DBX-56 bagian b, literal `_binary '…'` mysqldump.** Belum. Byte mentah di dalam literal bukan
+  UTF-8 dan butuh pemecah berbasis byte; berkasnya kini ditolak dengan offset dan baris (butir 5).
+  Bergantung pada keputusan langkah 2.
+
+### Konsekuensi
+
+- Permukaan FFI tidak berubah (`./app/build-ffi.sh` tidak perlu). `qh-sql` bertambah
+  `client_directive` dan `ScriptRefusal`.
+- Daftar statement editor (`qh-editor`, dari `walk`) masih memecah di setiap `;`. Run di bawah kursor
+  pada badan rutin masih mengirim potongan; menyatukannya butuh status badan di analyzer inkremental
+  editor dan dicatat sebagai tindak lanjut.
+- PostgreSQL 14+ `BEGIN ATOMIC … END` (badan SQL-standard, dipakai pg_dump) belum dikenali dan masih
+  dipecah di setiap `;`. Ditolak sebagai lingkup W12-T7b, dicatat sebagai tindak lanjut.
+- `statements_with_lines_dialect` menghitung nomor baris secara inkremental; sebelumnya setiap
+  statement memindai ulang berkas dari awal.

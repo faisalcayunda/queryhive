@@ -74,6 +74,7 @@ use crate::scan::{
     executable_comment_opener, first_significant, has_significant_text_dialect, scan_dialect, walk,
     Dialect, Lexer, OpaqueKind, Visitor,
 };
+use crate::script::separators;
 
 /// What one statement does, as far as reading its text can say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1150,6 +1151,11 @@ pub struct ScriptStatement<'a> {
 /// or a dollar-quoted body is content and not a statement boundary. A piece that is only
 /// whitespace and comments is not a statement and does not get a line — which is why this
 /// is the list a refusal counts, and not [`crate::statement_count`].
+///
+/// Under MySQL's lexers the body of a stored program is content too: `CREATE PROCEDURE p()
+/// BEGIN DELETE FROM a; DELETE FROM b; END` is one statement, as the server reads it
+/// (see [`crate::client_directive`] for the lines this splitter cannot read at all). The
+/// raw `;` positions of [`crate::scan`] are not this list's; this one is the script's.
 pub fn statements_with_lines(sql: &str) -> Vec<ScriptStatement<'_>> {
     statements_with_lines_dialect(sql, Dialect::Generic)
 }
@@ -1164,14 +1170,14 @@ pub fn statements_with_lines_dialect(
     if !has_significant_text_dialect(sql, dialect) {
         return Vec::new();
     }
-    let scan = scan_dialect(sql, dialect);
     let mut found = Vec::new();
+    let mut lines = LineCounter::new(sql);
     let mut start = 0;
-    for &separator in &scan.separators {
-        push_with_line(&mut found, sql, start, separator, dialect);
+    for separator in separators(sql, dialect) {
+        push_with_line(&mut found, &mut lines, start, separator, dialect);
         start = separator + 1;
     }
-    push_with_line(&mut found, sql, start, sql.len(), dialect);
+    push_with_line(&mut found, &mut lines, start, sql.len(), dialect);
     found
 }
 
@@ -1193,11 +1199,12 @@ pub fn statements_dialect(sql: &str, dialect: impl Into<Lexer>) -> Vec<&str> {
 
 fn push_with_line<'a>(
     found: &mut Vec<ScriptStatement<'a>>,
-    sql: &'a str,
+    lines: &mut LineCounter<'a>,
     start: usize,
     end: usize,
     dialect: Lexer,
 ) {
+    let sql = lines.sql;
     let piece = &sql[start..end];
     // The line of the first significant byte, so a piece that opens with a header
     // comment is still reported on the line its statement really starts on.
@@ -1205,13 +1212,41 @@ fn push_with_line<'a>(
         return;
     };
     found.push(ScriptStatement {
-        line: line_at(sql, start + leading),
+        line: lines.at(start + leading),
         text: piece.trim(),
     });
 }
 
+/// Line numbers for offsets that only grow, counting each byte once: a script of a million
+/// statements must not rescan its own head for every one of them.
+struct LineCounter<'a> {
+    sql: &'a str,
+    offset: usize,
+    line: usize,
+}
+
+impl<'a> LineCounter<'a> {
+    fn new(sql: &'a str) -> Self {
+        LineCounter {
+            sql,
+            offset: 0,
+            line: 1,
+        }
+    }
+
+    fn at(&mut self, offset: usize) -> usize {
+        debug_assert!(offset >= self.offset, "offsets must not go back");
+        self.line += self.sql.as_bytes()[self.offset..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count();
+        self.offset = offset;
+        self.line
+    }
+}
+
 /// The 1-based line `offset` sits on.
-fn line_at(sql: &str, offset: usize) -> usize {
+pub(crate) fn line_at(sql: &str, offset: usize) -> usize {
     sql.as_bytes()[..offset]
         .iter()
         .filter(|&&byte| byte == b'\n')

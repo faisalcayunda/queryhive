@@ -34,6 +34,14 @@
 //! guarded against the connection's Safe Mode, and the statement's own line is
 //! in every error message.
 //!
+//! Under MySQL the body of a stored program is one statement
+//! (`CREATE PROCEDURE p() BEGIN DELETE FROM a; DELETE FROM b; END`), so a failure
+//! never leaves its second `DELETE` to run alone. A line for the program that reads
+//! the file rather than for the server (`DELIMITER`, a psql backslash command such as
+//! pg_dump's `\restrict`, `COPY … FROM STDIN`) is refused by name before connecting
+//! ([`qh_sql::client_directive`], ADR-0022 addendum). A UTF-8 or UTF-16 byte-order
+//! mark is read past.
+//!
 //! There is deliberately no `GO` batch separator. `GO` is a client command in
 //! SQL Server, not a statement in any driver this build has (PostgreSQL, MySQL,
 //! Trino), and honouring it would mean a second scanner with its own rules. A
@@ -710,6 +718,46 @@ async fn import_rows_file(
     Ok(())
 }
 
+/// The text of a `.sql` file: UTF-8 without a byte-order mark, or UTF-16 with one.
+///
+/// A UTF-8 mark is dropped (left in, it is part of the first statement and the classifier
+/// reads that statement as unclassified). A UTF-16 file, which is what Windows tools write,
+/// is decoded. Anything else must be valid UTF-8, and the error says where it stops: the
+/// usual cause is a `mysqldump` of a binary column written as a raw `_binary '…'` literal,
+/// which no text splitter can carry, and `--hex-blob` writes it as hex instead.
+fn decode_sql(bytes: Vec<u8>) -> Result<String, String> {
+    let utf16 = |rest: &[u8], big_endian: bool| {
+        if rest.len() % 2 != 0 {
+            return Err("is UTF-16 but ends in the middle of a character".to_owned());
+        }
+        let units = rest.chunks_exact(2).map(|pair| {
+            if big_endian {
+                u16::from_be_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_le_bytes([pair[0], pair[1]])
+            }
+        });
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|_| "is UTF-16 with an unpaired surrogate".to_owned())
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest, false);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(rest, true);
+    }
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    String::from_utf8(body.to_vec()).map_err(|error| {
+        let at = error.utf8_error().valid_up_to();
+        let line = body[..at].iter().filter(|&&byte| byte == b'\n').count() + 1;
+        format!(
+            "is not valid UTF-8 (first bad byte at offset {at}, line {line}); a mysqldump of a \
+             binary column needs --hex-blob, and a legacy-encoded file needs converting first"
+        )
+    })
+}
+
 /// `import_data` for a `.sql` file: the statements it holds, one at a time.
 ///
 /// No target table and no column map: the file says what it does. The text is read
@@ -751,11 +799,22 @@ async fn import_statements(
             path.display()
         )));
     }
-    let text = std::fs::read_to_string(&path).map_err(unreadable)?;
+    let bytes = std::fs::read(&path).map_err(unreadable)?;
+    let text = decode_sql(bytes)
+        .map_err(|reason| CliError::Usage(format!("IMPORT_PATH '{}' {reason}", path.display())))?;
     let statements = qh_sql::statements_with_lines_dialect(&text, dialect);
     if statements.is_empty() {
         return Err(CliError::Usage(format!(
             "IMPORT_PATH '{}' has no SQL statements",
+            path.display()
+        )));
+    }
+    // A line meant for the program that reads the file (`DELIMITER`, a psql backslash command,
+    // `COPY … FROM STDIN`) is named before anything connects: no server can run it, and the
+    // statements around it were split without knowing it was there.
+    if let Some(refusal) = qh_sql::client_directive(&text, dialect) {
+        return Err(CliError::Usage(format!(
+            "IMPORT_PATH '{}', {refusal}",
             path.display()
         )));
     }

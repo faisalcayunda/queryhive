@@ -174,6 +174,11 @@ impl Lexer {
         self.postgres
     }
 
+    /// Whether this is one of MySQL's lexers.
+    pub(crate) const fn is_mysql(self) -> bool {
+        self.mysql_syntax
+    }
+
     /// Whether `#` opens a line comment.
     const fn hash_comment(self) -> bool {
         self.mysql_syntax

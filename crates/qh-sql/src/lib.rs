@@ -23,6 +23,7 @@ mod format;
 mod ident;
 mod lex;
 mod scan;
+mod script;
 mod wrap;
 
 pub use classify::{
@@ -40,6 +41,7 @@ pub use scan::{
     first_significant, has_significant_text, scan, scan_dialect, statement_count,
     statement_count_dialect, walk, Dialect, EndState, Lexer, OpaqueKind, Scan, Visitor,
 };
+pub use script::{client_directive, ScriptRefusal};
 pub use wrap::{
     count_statement, count_statement_dialect, strip_terminator, strip_terminator_dialect, SqlError,
 };
