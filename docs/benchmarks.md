@@ -76,7 +76,7 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 | Throughput fetch | ≥ 5× baseline Python | 138,405 [136,087–139,445] baris/s | 221,335 baris/s (median) | Belum memenuhi — 1.60× baseline Python |
 | Time-to-first-row | < 200 ms sejak server mulai mengirim hasil | 624 ms [602 ms–632 ms] | 7 ms | Memenuhi — 7 ms |
 | Memori proses (500k × 30) | < 800 MB | 545 MB [545 MB–545 MB] | 11 MB | Memenuhi — 11 MB |
-| Scroll grid 60 fps | p99 frame ≤ 16,7 ms (60 fps) | — | 262.7 ms | Belum memenuhi — 262.7 ms |
+| Scroll grid 60 fps | p99 frame ≤ 16,7 ms (60 fps) | — | 16.7 ms | Memenuhi — 16.7 ms |
 | Cold start < 1 dtk | — | — | — | [belum diukur] |
 | Introspeksi 5.000 tabel < 1 dtk | < 1 dtk | — | 14.6 ms | Memenuhi — 14.6 ms |
 | Pembatalan < 500 ms | p95 < 500 ms | — | 27.9 ms | Memenuhi — 27.9 ms |
@@ -110,8 +110,8 @@ Setiap sel adalah **median [min–max]** dari n repeat; satu angka saja berarti 
 
 | Skenario | Target | QueryHive | TablePro | Verdict |
 |---|---|---|---|---|
-| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 910.37 ms/s (n=5); frame_p99_ms median 262.7 ms (n=5) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 910.37 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 262.7 ms di atas batas ≤ 8.3 ms; vs TablePro tanpa pembanding |
-| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 2,952.93 ms/s (n=5); frame_p99_ms median 8,468.1 ms (n=5); render_ms median 2,017.4 ms (n=1) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 2,952.93 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 8,468.1 ms di atas batas ≤ 8.3 ms; render_ms median 2,017.4 ms di atas batas ≤ 30.0 ms; vs TablePro tanpa pembanding |
+| `scroll-30x1m` — 30 kolom × 1M baris, fling vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 0.00 ms/s (n=10); frame_p99_ms median 16.7 ms (n=10) | tidak diukur (izin OS) | Belum memenuhi — frame_p99_ms median 16.7 ms di atas batas ≤ 8.3 ms; vs TablePro tanpa pembanding |
+| `scroll-500x10k` — 500 kolom × 10k baris, horizontal + vertikal | hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms; vs TablePro hitch ≤ 1,0× | hitch_ms_per_s median 679.60 ms/s (n=10); frame_p99_ms median 68.2 ms (n=10); render_ms median 94.4 ms (n=1) | tidak diukur (izin OS) | Belum memenuhi — hitch_ms_per_s median 679.60 ms/s di atas batas ≤ 1.00 ms/s; frame_p99_ms median 68.2 ms di atas batas ≤ 8.3 ms; render_ms median 94.4 ms di atas batas ≤ 30.0 ms; vs TablePro tanpa pembanding |
 
 ## Sumbu 5: Latensi ketikan
 
