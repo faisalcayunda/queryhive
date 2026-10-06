@@ -504,6 +504,17 @@ RustBuffer uniffi_qh_ffi_fn_func_engine_version(RustCallStatus *_Nonnull out_sta
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SSH_CONFIG_HOSTS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SSH_CONFIG_HOSTS
+RustBuffer uniffi_qh_ffi_fn_func_ssh_config_hosts(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SSH_CONFIG_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SSH_CONFIG_RESOLVE
+RustBuffer uniffi_qh_ffi_fn_func_ssh_config_resolve(RustBuffer alias, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_QH_FFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_QH_FFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_qh_ffi_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -797,6 +808,18 @@ uint16_t uniffi_qh_ffi_checksum_func_command_names(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_ENGINE_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_ENGINE_VERSION
 uint16_t uniffi_qh_ffi_checksum_func_engine_version(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_HOSTS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_HOSTS
+uint16_t uniffi_qh_ffi_checksum_func_ssh_config_hosts(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_RESOLVE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_RESOLVE
+uint16_t uniffi_qh_ffi_checksum_func_ssh_config_resolve(void
     
 );
 #endif

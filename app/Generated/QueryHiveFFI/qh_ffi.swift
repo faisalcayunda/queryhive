@@ -487,6 +487,22 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -2703,6 +2719,83 @@ public func FfiConverterTypeSortSpec_lower(_ value: SortSpec) -> RustBuffer {
 
 
 /**
+ * What an alias in the ssh config resolves to, for the connection form's preview.
+ */
+public struct SshResolution: Equatable, Hashable {
+    /**
+     * The name that is contacted, and the name `known_hosts` records.
+     */
+    public var hostName: String
+    public var user: String?
+    public var port: UInt16?
+    /**
+     * In file order. A connect tries the first that exists on disk.
+     */
+    public var identityFiles: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The name that is contacted, and the name `known_hosts` records.
+         */hostName: String, user: String?, port: UInt16?, 
+        /**
+         * In file order. A connect tries the first that exists on disk.
+         */identityFiles: [String]) {
+        self.hostName = hostName
+        self.user = user
+        self.port = port
+        self.identityFiles = identityFiles
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SshResolution: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSshResolution: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SshResolution {
+        return
+            try SshResolution(
+                hostName: FfiConverterString.read(from: &buf), 
+                user: FfiConverterOptionString.read(from: &buf), 
+                port: FfiConverterOptionUInt16.read(from: &buf), 
+                identityFiles: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SshResolution, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.hostName, into: &buf)
+        FfiConverterOptionString.write(value.user, into: &buf)
+        FfiConverterOptionUInt16.write(value.port, into: &buf)
+        FfiConverterSequenceString.write(value.identityFiles, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSshResolution_lift(_ buf: RustBuffer) throws -> SshResolution {
+    return try FfiConverterTypeSshResolution.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSshResolution_lower(_ value: SshResolution) -> RustBuffer {
+    return FfiConverterTypeSshResolution.lower(value)
+}
+
+
+/**
  * The registry's diagnostics.
  */
 public struct StoreStats: Equatable, Hashable {
@@ -4078,6 +4171,85 @@ public func FfiConverterTypeKeywordCaseWire_lower(_ value: KeywordCaseWire) -> R
 
 
 /**
+ * Why an alias cannot be used. The message is the one a connect would fail with: it names the
+ * file, the line and the directive, never a value.
+ */
+public 
+enum SshConfigFfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case Failed(message: String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension SshConfigFfiError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSshConfigFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = SshConfigFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SshConfigFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Failed(
+            message: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SshConfigFfiError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .Failed(message):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSshConfigFfiError_lift(_ buf: RustBuffer) throws -> SshConfigFfiError {
+    return try FfiConverterTypeSshConfigFfiError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSshConfigFfiError_lower(_ value: SshConfigFfiError) -> RustBuffer {
+    return FfiConverterTypeSshConfigFfiError.lower(value)
+}
+
+
+/**
  * What a store call can throw.
  */
 public 
@@ -4333,6 +4505,30 @@ public func FfiConverterTypeStorePhase_lower(_ value: StorePhase) -> RustBuffer 
     return FfiConverterTypeStorePhase.lower(value)
 }
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -4712,6 +4908,29 @@ public func engineVersion() -> String  {
     )
 })
 }
+/**
+ * The aliases a person can pick from `~/.ssh/config`: every `Host` name with no wildcard or
+ * negation, once each, in file order. Never fails; a config that cannot be read has none.
+ */
+public func sshConfigHosts() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_ssh_config_hosts(uniffiCallStatus
+    )
+})
+}
+/**
+ * What `alias` resolves to in `~/.ssh/config`, through the same code a connect with
+ * `SSH_USE_CONFIG=1` uses, so the preview cannot differ from the result.
+ */
+public func sshConfigResolve(alias: String)throws  -> SshResolution  {
+    return try  FfiConverterTypeSshResolution_lift(try rustCallWithError(FfiConverterTypeSshConfigFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_ssh_config_resolve(
+        FfiConverterString.lower(alias),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -4744,6 +4963,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_func_engine_version() != 54811) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_func_ssh_config_hosts() != 12935) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_func_ssh_config_resolve() != 45473) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_editordocument_converge() != 62221) {
