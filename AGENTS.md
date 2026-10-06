@@ -4,13 +4,13 @@ QueryHive is a macOS database client: a SwiftUI app (`app/`) over a Rust engine 
 
 ## Current work: the perf-parity run
 
-Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-09-30 in the middle of W3. Committed: W0-W2, W3-T0, W3-T0b, W3-T1, W3-A1, W3-D, W3-T2 commit 1 (`c96c6d6`). Several of these are marked pending review in the ledger.
+Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-10-06 in the middle of W7/W9. Everything through `2ee80c5` is on `main` and `work/perf-parity`: W0-W5, W6 (except 6c, which waits on the owner-run P-1), W9-T0/T1/T5/T6, the W9-W13 blueprints, and the Rust or Swift cores W10-T7a, W11-T2a, W11-T6a, W12-T1a, W12-T5a and W13-T3a. W7-T1 was dropped by its A/B.
 
-Resume in this order, one task at a time:
+Resume in this order:
 
-1. Read `docs/architecture/development-plan.md` (task IDs such as `W3-T2`, files each task owns, gates, review tier) and `PROGRESS.md`. Read `target/run/ledger.md`: it holds task status, backlog `B-*`, incidents `I-*`, the owner's decisions O-14 to O-20, and "PAUSE POINT 2" (the latest).
-2. **W3-T2 commit 2** (`crates/qh-editor`, plus its member in `Cargo.toml` and `Cargo.lock`) is implemented but **uncommitted and unreviewed**. Its gates were green at pause (970 tests). Re-run the gates and the bench (`cargo run --release -p qh-editor --example editor_bench`), give it one review, then commit. The ledger row lists two missed bench targets and the open decision about a resumable `walk` in `qh-sql`.
-3. Then **W3-T3** (exclusive Fase 2 bench), **W3-C** (cleanup, backlog), the W3 heavy gate, and **W4** onward per `development-plan.md` §5, using the blueprints in `docs/architecture/blueprints/`.
+1. Read `docs/architecture/development-plan.md` (task IDs, files each task owns, gates, review tier) and `target/run/ledger.md`: task status, backlog `B-*`, incidents `I-*`, owner decisions O-14 to O-23, the lane plan O-22, and "PAUSE POINT 3" (the latest).
+2. Six lane branches (`lane/w7-t7`, `lane/w7-t5`, `lane/w9-t2`, `lane/w9-t3`, `lane/w9-t4`, `lane/w7-t2`) are committed but not integrated; PAUSE POINT 3 lists which are reviewed, which are WIP, and the order to finish, integrate, gate and A/B them.
+3. Then W7-C and W7-T6, W8, the rest of W9, and W10 to W14 per `development-plan.md` §5, in parallel lanes where §7 file ownership allows.
 
 Review policy in force (owner decision O-20): implementation, docs, bench and cleanup run on cheaper models; only review uses the strongest model, for **one** round. After a blocking finding, fix it, verify with the gates, commit, and record "pending review" in the ledger.
 
@@ -47,7 +47,7 @@ Every tier gets at most 2 review rounds. Only a blocking finding earns round 2; 
 
 ## Working rules
 
-- **Git**: commit locally on `work/perf-parity`, one commit per task that passed its gates, Conventional Commits in English, author Faisal Nugraha Cayunda with no co-author trailer. Push, pull requests and merging to `main` wait for the owner.
+- **Git**: commit locally on `work/perf-parity`, one commit per task that passed its gates, Conventional Commits in English, author Faisal Nugraha Cayunda with no co-author trailer. Since owner decision O-21 (2026-10-06), each gate-green task commit is pushed to both `work/perf-parity` and `main` (fast-forward); no pull requests. Lane worktrees are removed after their commit and a clean `git status`, never with `--force`.
 - **TablePro** (`/Users/isal/Workspaces/Lab/Experiments/TablePro`, AGPL-3.0) is study material for ideas and numbers; QueryHive (MIT) contains only its own code, assets and strings.
 - **Language**: code, comments, logs and commit messages in English; documents under `docs/` and ADRs in Indonesian, matching the files already there.
 - **Measure through the dev build only**: run `app/dist/QueryHive.app/Contents/MacOS/QueryHive --bench <scenario>` by path with isolated data. The installed `/Applications/QueryHive.app` and `/Applications/TablePro.app` belong to the owner and share the dev build's bundle id, so address apps by path, never by bundle id or name. `tools/bench/qhbench` drives apps and is for the owner to run.
