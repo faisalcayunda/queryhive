@@ -79,7 +79,7 @@ struct ParameterSheet: View {
                 .frame(width: 128, alignment: .leading)
             Picker("", selection: Binding(
                 get: { entry.kind },
-                set: { entries[name] = ParameterEntry(kind: $0, text: entry.text) }
+                set: { var next = entry; next.kind = $0; entries[name] = next }
             )) {
                 ForEach(ParameterKind.allCases) { kind in
                     Text(kind.title).tag(kind)
@@ -87,9 +87,23 @@ struct ParameterSheet: View {
             }
             .labelsHidden()
             .frame(width: 124)
-            TextField("", text: Binding(
+            if entry.kind == .list {
+                // What each element is; a list is values written the same way as a single one.
+                Picker("", selection: Binding(
+                    get: { entry.element },
+                    set: { var next = entry; next.element = $0; entries[name] = next }
+                )) {
+                    ForEach(ParameterKind.elements) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 104)
+                .help("The type of each element")
+            }
+            TextField(entry.kind == .list ? "Inside the IN (…) brackets: 1, 2, 3 or 'a, b', 'c'" : "", text: Binding(
                 get: { entry.text },
-                set: { entries[name] = ParameterEntry(kind: entry.kind, text: $0) }
+                set: { var next = entry; next.text = $0; entries[name] = next }
             ))
             .textFieldStyle(.plain)
             .font(.code(12))

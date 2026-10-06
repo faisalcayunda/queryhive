@@ -68,7 +68,7 @@ pub fn classify(text: &str, tree: Option<&Tree>, dialect: Dialect) -> Vec<Tok> {
     let regions = opaque_regions(bytes, lexer);
     let mut out = Vec::new();
     from_tree(tree, bytes, dialect, lexer, &regions, &mut out);
-    overlay_parameters(bytes, &regions, &mut out);
+    overlay_parameters(bytes, &regions, dialect, &mut out);
     coalesce(&mut out);
     out
 }
@@ -87,7 +87,7 @@ pub fn lex_statement(bytes: &[u8], dialect: Dialect) -> Vec<Tok> {
         &mut out,
         &mut |region| regions.push(region),
     );
-    overlay_parameters(bytes, &regions, &mut out);
+    overlay_parameters(bytes, &regions, dialect, &mut out);
     coalesce(&mut out);
     out
 }
@@ -351,15 +351,29 @@ fn literal(node: Node, bytes: &[u8], dialect: Dialect) -> Leaf {
 }
 
 /// The byte ranges of the `:name` parameters of a statement, by `SQLScanner`'s rule: a colon in
-/// code (not in a string, quoted identifier, comment or dollar quote), outside `[…]`, not
-/// after another colon, followed by a letter or `_`.
-fn parameter_spans(bytes: &[u8], regions: &[(OpaqueKind, usize, usize)]) -> Vec<(usize, usize)> {
+/// code (not in a string, quoted identifier, comment or dollar quote), not after another colon,
+/// followed by a letter or `_`.
+///
+/// Brackets only matter where a colon can be a slice, which is PostgreSQL (and `Generic`, which
+/// reads like it): there a `[` that opens a subscript makes a colon at its own paren depth a
+/// slice bound (`arr[lo:hi]`, `arr[:n]`), while a `[` that opens an array constructor
+/// (`ARRAY[...]`, or a `[` nested straight in one) stays parameter-aware, as does anything deeper
+/// in parentheses (`arr[f(:i):3]`). MySQL and Trino have no slice, so a bracket changes nothing
+/// there. The same rule, with the same case table, is in `SQLScanner.swift`.
+fn parameter_spans(
+    bytes: &[u8],
+    regions: &[(OpaqueKind, usize, usize)],
+    dialect: Dialect,
+) -> Vec<(usize, usize)> {
     if !bytes.contains(&b':') {
         return Vec::new();
     }
+    let slices = !matches!(dialect, Dialect::Mysql | Dialect::Trino);
     let name_start = |byte: u8| byte.is_ascii_alphabetic() || byte == b'_';
     let mut spans = Vec::new();
-    let (mut at, mut region, mut depth) = (0, 0, 0usize);
+    let (mut at, mut region, mut parens) = (0, 0, 0usize);
+    // Open brackets, nearest last: `(is a constructor, paren depth it opened at)`.
+    let mut brackets: Vec<(bool, usize)> = Vec::new();
     while at < bytes.len() {
         while region < regions.len() && regions[region].2 <= at {
             region += 1;
@@ -369,9 +383,22 @@ fn parameter_spans(bytes: &[u8], regions: &[(OpaqueKind, usize, usize)]) -> Vec<
             continue;
         }
         match bytes[at] {
-            b'[' => depth += 1,
-            b']' => depth = depth.saturating_sub(1),
-            b':' if depth == 0
+            b'(' if slices => parens += 1,
+            b')' if slices => parens = parens.saturating_sub(1),
+            b'[' if slices => {
+                let before = bytes[..at].trim_ascii_end();
+                let word = before
+                    .iter()
+                    .rposition(|&b| !(name_start(b) || b.is_ascii_digit()))
+                    .map_or(before, |i| &before[i + 1..]);
+                let nested = matches!(before.last(), Some(b'[' | b','))
+                    && brackets.last().is_some_and(|b| b.0);
+                brackets.push((word.eq_ignore_ascii_case(b"array") || nested, parens));
+            }
+            b']' if slices => {
+                brackets.pop();
+            }
+            b':' if !(slices && brackets.last().is_some_and(|b| !b.0 && b.1 == parens))
                 && bytes.get(at + 1).copied().is_some_and(name_start)
                 && !(at > 0 && bytes[at - 1] == b':') =>
             {
@@ -391,8 +418,13 @@ fn parameter_spans(bytes: &[u8], regions: &[(OpaqueKind, usize, usize)]) -> Vec<
 }
 
 /// Replace whatever `tokens` say about the parameter spans with one `Parameter` token each.
-fn overlay_parameters(bytes: &[u8], regions: &[(OpaqueKind, usize, usize)], tokens: &mut Vec<Tok>) {
-    let spans = parameter_spans(bytes, regions);
+fn overlay_parameters(
+    bytes: &[u8],
+    regions: &[(OpaqueKind, usize, usize)],
+    dialect: Dialect,
+    tokens: &mut Vec<Tok>,
+) {
+    let spans = parameter_spans(bytes, regions, dialect);
     if spans.is_empty() {
         return;
     }
