@@ -91,7 +91,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal"
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "time"] }
 # The local commands are pointed at a throwaway database and a throwaway
 # `connections.json` through `DB_PATH` / `LEGACY_PATH`, so a test never reads or writes
 # the files the app owns.

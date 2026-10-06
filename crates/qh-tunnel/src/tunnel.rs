@@ -398,7 +398,7 @@ where
 {
     let connecting = client::connect(ssh_config, (config.host.as_str(), config.port), handler);
     let mut handle = match tokio::time::timeout(config.connect_timeout, connecting).await {
-        Ok(connected) => connected?,
+        Ok(connected) => connected.map_err(|error| no_common_algorithm(config, error))?,
         Err(_) => {
             // `russh` runs the session on a task of its own, and dropping this future
             // does not stop a handshake that is half done. Tell the handler the caller
@@ -418,6 +418,22 @@ where
     require_verified(verified)?;
     authenticate(&mut handle, config).await?;
     Ok(handle)
+}
+
+/// `russh`'s "no common algorithm" as the named error, anything else as it came.
+///
+/// The bare one reads "No common Kex algorithm - ours: [...], theirs: [...]" and says nothing
+/// about what to do. Only the server's list is kept: ours is the same for every connection.
+fn no_common_algorithm(config: &BastionConfig, error: Error) -> Error {
+    match error {
+        Error::Ssh(russh::Error::NoCommonAlgo { kind, theirs, .. }) => Error::NoCommonAlgorithm {
+            host: config.host.clone(),
+            port: config.port,
+            kind: format!("{kind:?}").to_lowercase(),
+            offered: theirs,
+        },
+        other => other,
+    }
 }
 
 /// `SHA256:` and the 43 base64 characters of an unpadded SHA-256.
@@ -1066,6 +1082,24 @@ mod tests {
             Auth::Agent,
             "/nonexistent/known_hosts",
         )
+    }
+
+    #[test]
+    fn no_common_algorithm_is_named_with_what_the_server_offers() {
+        let bare = Error::Ssh(russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Kex,
+            ours: vec!["curve25519-sha256".to_owned()],
+            theirs: vec!["diffie-hellman-group1-sha1".to_owned()],
+        });
+        let named = no_common_algorithm(&bastion(), bare);
+        let text = named.to_string();
+        assert!(matches!(named, Error::NoCommonAlgorithm { .. }), "{text}");
+        assert!(text.contains("offers no kex algorithm"), "{text}");
+        assert!(text.contains("diffie-hellman-group1-sha1"), "{text}");
+        assert!(text.contains("legacy algorithms"), "{text}");
+        // Anything else passes through untouched.
+        let other = no_common_algorithm(&bastion(), Error::HostKeyNotVerified);
+        assert!(matches!(other, Error::HostKeyNotVerified));
     }
 
     #[tokio::test]

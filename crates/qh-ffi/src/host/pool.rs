@@ -44,8 +44,10 @@ pub const RESET_BUDGET: Duration = Duration::from_secs(2);
 pub const EVICT_TICK: Duration = Duration::from_secs(30);
 /// How long a session may sit idle.
 pub const IDLE_TTL: Duration = Duration::from_secs(300);
-/// How long opening a tunnel may take. `qh-tunnel` has no connect timeout of its own, and a
-/// bastion that hangs would otherwise hold every Run of its key until the user pressed Stop.
+/// How long opening a tunnel may take, as a whole: the bastion's own handshake is bounded by
+/// `qh-tunnel`'s `DEFAULT_CONNECT_TIMEOUT`, and this ceiling also covers what that bound leaves
+/// out (authentication, which may wait on an agent or a person, and the forward). Without it a
+/// bastion that hangs would hold every Run of its key until the user pressed Stop.
 pub const TUNNEL_OPEN: Duration = Duration::from_secs(30);
 
 /// Which class of work a session was borrowed for.

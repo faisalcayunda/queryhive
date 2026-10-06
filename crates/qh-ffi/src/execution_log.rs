@@ -229,3 +229,55 @@ pub(crate) fn record(entry: &DecisionEntry<'_>) -> Result<(), StorageError> {
     })?;
     Ok(())
 }
+
+/// The `decision` a row carries when a Stop could not be confirmed, so it is not one of the four
+/// [`LogDecision`]s: no statement was judged, the server just did not say the statement ended.
+pub const STOP_UNCONFIRMED_DECISION: &str = "stop_unconfirmed";
+
+/// Write a failed stop to the installed log. `false` when there is no sink (a library caller, a
+/// test, a database that would not open) or the write failed, and the caller says it elsewhere.
+///
+/// A stop that a capped result started in the background has no `done` left to carry its
+/// warning, and in the app stderr goes nowhere, so this row is where it can still be found.
+/// `reason` must be one of the fixed sentences the engine writes: like every column here it is
+/// never an error's own text, which can carry a host.
+pub(crate) fn record_stop_unconfirmed(reason: &str) -> bool {
+    let mut guard = sink();
+    guard
+        .storage
+        .as_mut()
+        .is_some_and(|storage| append_stop_unconfirmed(storage, reason).is_ok())
+}
+
+fn append_stop_unconfirmed(storage: &mut Storage, reason: &str) -> Result<(), StorageError> {
+    storage.append_execution(NewExecution {
+        // Not a Safe Mode outcome, so no mode and no statement: the hash is of the empty text.
+        safe_mode: "none",
+        decision: STOP_UNCONFIRMED_DECISION,
+        statement_kind: "unknown",
+        statement_index: 0,
+        statement: "",
+        reason: Some(reason),
+        at: qh_storage::now_millis(),
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_stop_is_a_chained_row_with_no_statement() {
+        let mut storage = Storage::in_memory().expect("in-memory database");
+        storage.migrate_at(1_000).expect("migrations");
+        append_stop_unconfirmed(&mut storage, "the cancel failed").expect("first");
+        append_stop_unconfirmed(&mut storage, "no answer to the cancel").expect("second");
+
+        let rows = storage.execution_log(10).expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].decision, STOP_UNCONFIRMED_DECISION);
+        assert_eq!(rows[0].reason.as_deref(), Some("no answer to the cancel"));
+        assert_eq!(storage.verify_execution_log().expect("chain holds"), 2);
+    }
+}

@@ -104,7 +104,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
+use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value, CONNECT_TIMEOUT};
 use qh_driver::{
     AnalyzeFence, BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind,
     ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath,
@@ -115,6 +115,13 @@ use rustls::client::danger::ServerCertVerifier;
 use tokio_postgres::types::private::BytesMut;
 use tokio_postgres::types::{Format, IsNull, ToSql, Type};
 use tokio_postgres::{Client, NoTls, SimpleQueryStream, Statement};
+
+/// How long a socket idles before the first keepalive probe.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+/// The gap between unanswered probes.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Unanswered probes before the connection is declared dead.
+const KEEPALIVE_RETRIES: u32 = 3;
 
 /// PostgreSQL.
 pub struct PostgresDriver;
@@ -201,6 +208,18 @@ impl Driver for PostgresDriver {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+        self.connect_within(config, CONNECT_TIMEOUT).await
+    }
+}
+
+impl PostgresDriver {
+    /// [`Driver::connect`] with the connect bound named by the caller; `connect` passes
+    /// [`CONNECT_TIMEOUT`]. A parameter so a test can prove the bound in milliseconds.
+    pub async fn connect_within(
+        &self,
+        config: &ConnectionConfig,
+        limit: Duration,
+    ) -> Result<Box<dyn Session>, EngineError> {
         // A real connection verifies against the platform's own root store, which
         // is the Keychain on macOS — that is what makes a corporate CA the user
         // installed work. A connection that names its own CA file trusts that bundle
@@ -210,11 +229,9 @@ impl Driver for PostgresDriver {
             Some(ca) => tls::verifier_with_roots(tls::roots_from(ca)?)?,
             None => tls::platform_verifier()?,
         };
-        self.connect_with_verifier(config, verifier).await
+        self.connect_bounded(config, verifier, limit).await
     }
-}
 
-impl PostgresDriver {
     /// [`Driver::connect`], with the certificate verifier named by the caller.
     ///
     /// Production passes [`tls::platform_verifier`]. The parameter exists so the
@@ -230,6 +247,16 @@ impl PostgresDriver {
         &self,
         config: &ConnectionConfig,
         verifier: Arc<dyn ServerCertVerifier>,
+    ) -> Result<Box<dyn Session>, EngineError> {
+        self.connect_bounded(config, verifier, CONNECT_TIMEOUT)
+            .await
+    }
+
+    async fn connect_bounded(
+        &self,
+        config: &ConnectionConfig,
+        verifier: Arc<dyn ServerCertVerifier>,
+        limit: Duration,
     ) -> Result<Box<dyn Session>, EngineError> {
         let mut pg = tokio_postgres::Config::new();
         match &config.tls_server_name {
@@ -254,8 +281,13 @@ impl PostgresDriver {
             .user(&config.user)
             .application_name("QueryHive")
             // A pooled session can idle behind a NAT that forgets it; a probe every minute keeps
-            // the mapping alive and lets a dead socket show up as one.
-            .keepalives_idle(Duration::from_secs(60))
+            // the mapping alive and lets a dead socket show up as one. Without an interval and a
+            // retry count the operating system's own defaults decide how long a dead peer goes
+            // unnoticed (hours, on most systems), so both are set: a peer that answers
+            // none of three probes ten seconds apart is gone after about 90 s.
+            .keepalives_idle(KEEPALIVE_IDLE)
+            .keepalives_interval(KEEPALIVE_INTERVAL)
+            .keepalives_retries(KEEPALIVE_RETRIES)
             // Spelled out per mode rather than left at `tokio-postgres`'s
             // default, so which mode is on the wire is decided here.
             .ssl_mode(tls::ssl_mode(config.tls));
@@ -270,9 +302,16 @@ impl PostgresDriver {
         // that spoke less than the session did would put the backend's pid and secret key on
         // the wire in clear.
         match connector_for(config.tls, verifier)? {
-            None => open(&pg, config, NoTls, CancelTls::Plain).await,
+            None => open(&pg, config, NoTls, CancelTls::Plain, limit).await,
             Some(connector) => {
-                open(&pg, config, connector.clone(), CancelTls::Tls(connector)).await
+                open(
+                    &pg,
+                    config,
+                    connector.clone(),
+                    CancelTls::Tls(connector),
+                    limit,
+                )
+                .await
             }
         }
     }
@@ -313,6 +352,7 @@ async fn open<T>(
     config: &ConnectionConfig,
     tls: T,
     cancel_tls: CancelTls,
+    limit: Duration,
 ) -> Result<Box<dyn Session>, EngineError>
 where
     T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
@@ -321,9 +361,18 @@ where
     <<T as tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>>::TlsConnect as tokio_postgres::tls::TlsConnect<tokio_postgres::Socket>>::Future:
         Send + 'static,
 {
-    let (client, connection) = pg
-        .connect(tls)
+    // `tokio-postgres` bounds only the TCP connect, so a server that accepts the socket and goes
+    // quiet, or a TLS exchange that never finishes, would wait here for ever. The three stages
+    // share one future, so the message names all three.
+    let (client, connection) = tokio::time::timeout(limit, pg.connect(tls))
         .await
+        .map_err(|_| {
+            EngineError::connect_timeout(
+                &config.redacted(),
+                "opening the connection (socket, TLS handshake and login)",
+                limit,
+            )
+        })?
         .map_err(|error| EngineError::Connect {
             message: connect_message(config, &error),
             kind: classify_connect_error(&error),
@@ -623,9 +672,7 @@ impl Session for PostgresSession {
                         // as what it is: the timeout is not on, and the caller must not be
                         // told it is.
                         .await
-                        .map_err(|error| {
-                            map_query_error(error, statement, options.statement_timeout)
-                        }),
+                        .map_err(|error| infra_error(error, statement, options.statement_timeout)),
                     None => Ok(()),
                 }
             },
@@ -800,7 +847,7 @@ impl Session for PostgresSession {
             client.simple_query("SELECT name FROM pg_prepared_statements WHERE from_sql"),
         )
         .await
-        .map_err(|error| map_query_error(error, "reset", None))?;
+        .map_err(|error| infra_error(error, "reset", None))?;
 
         let deallocate: String = prepared
             .iter()
@@ -814,7 +861,7 @@ impl Session for PostgresSession {
             client
                 .batch_execute(&deallocate)
                 .await
-                .map_err(|error| map_query_error(error, "reset", None))?;
+                .map_err(|error| infra_error(error, "reset", None))?;
         }
         // `RESET ALL` put `statement_timeout` back to the role's default, which is what a new
         // connection has, and the tracker must say the same or the next run skips its `SET`.
@@ -1178,6 +1225,30 @@ fn map_query_error(
     }
 }
 
+/// [`map_query_error`] for a statement the driver sent on its own behalf (`SET statement_timeout`,
+/// the reset): the same message and code, never a position. An offset into the driver's text is
+/// not an offset into the user's SQL, and the editor would underline whatever sits there.
+fn infra_error(
+    error: tokio_postgres::Error,
+    statement: &str,
+    timeout: Option<Duration>,
+) -> EngineError {
+    match map_query_error(error, statement, timeout) {
+        EngineError::Query {
+            message,
+            code,
+            kind,
+            ..
+        } => EngineError::Query {
+            message,
+            code,
+            position: None,
+            kind,
+        },
+        other => other,
+    }
+}
+
 /// The 1-based offset into the statement the server was handed, when it reports one.
 ///
 /// PostgreSQL counts characters, not bytes, so on a UTF-8 server this is already the
@@ -1212,7 +1283,7 @@ async fn apply_statement_timeout(
         .await
         // The bound is in force from here, so a failure setting it is reported as what
         // it is: the timeout is not on, and the caller must not be told it is.
-        .map_err(|error| map_query_error(error, &statement, wanted))
+        .map_err(|error| infra_error(error, &statement, wanted))
 }
 
 /// The `SET` that takes the server from `current` to `wanted`, or `None` when they agree.

@@ -19,6 +19,15 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+/// How long a driver may take to open a connection: the socket, the TLS handshake and the
+/// login together.
+///
+/// One value for every driver, and deliberately not the statement timeout: that one is the
+/// user's bound on a query (`0` means none), while a peer that accepts the socket and then says
+/// nothing, or a TLS exchange that never finishes, would otherwise hold a Run until the user
+/// pressed Stop. `tokio-postgres` bounds only the socket and `mysql_async` bounds nothing.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Whether an operation may be tried again.
 ///
 /// Deliberately explicit rather than inferred from the error type: the same
@@ -262,6 +271,21 @@ impl EngineError {
         }
     }
 
+    /// The error a driver reports when opening a connection took longer than `limit`.
+    ///
+    /// Transient, because a peer that was slow once may answer next time, and it names the
+    /// stage so a user can tell a firewall that swallows packets from a server that answers the
+    /// socket and then goes quiet. `target` is the redacted connection description.
+    pub fn connect_timeout(target: &str, stage: &str, limit: Duration) -> Self {
+        EngineError::Connect {
+            message: format!(
+                "{target}: no answer within {} s while {stage}",
+                limit.as_secs_f64()
+            ),
+            kind: FailureKind::Transient,
+        }
+    }
+
     /// The error a driver reports when the server stopped a statement for
     /// running past `limit`.
     ///
@@ -332,6 +356,20 @@ fn line_span(sql: &str, line: u32) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connect_that_timed_out_is_transient_and_names_its_stage() {
+        let error = EngineError::connect_timeout(
+            "qh@db:5432/qh",
+            "opening the connection",
+            Duration::from_millis(1500),
+        );
+        assert_eq!(error.failure_kind(), FailureKind::Transient);
+        assert_eq!(
+            error.message(),
+            "qh@db:5432/qh: no answer within 1.5 s while opening the connection"
+        );
+    }
 
     #[test]
     fn a_syntax_error_is_never_retried() {

@@ -1555,6 +1555,45 @@ fn stop_grace(config: &ConnectionConfig) -> Duration {
 const STOP_UNCONFIRMED: &str =
     "the server did not confirm the stop; the statement may still be running";
 
+/// What the execution log says when the background stop of a capped result failed.
+const CAPPED_STOP_FAILED: &str =
+    "the server did not accept the stop of a capped result; the statement may still be running";
+
+/// The execution log's sentence for each way a waited-for stop goes unconfirmed. Fixed and
+/// host-free, because the log never carries an error's own text; the cause is still told apart.
+const STOP_CANCEL_FAILED: &str = "the server did not confirm the stop: the cancel failed";
+const STOP_TASK_ENDED: &str =
+    "the server did not confirm the stop: the cancel task ended without an answer";
+const STOP_NO_ANSWER: &str =
+    "the server did not confirm the stop: no answer to the cancel within the stop budget";
+
+/// Say a failed stop on both channels: the fixed `log_reason` in the execution log, and the full
+/// `detail` on stderr, the process's own diagnostic channel (in the app it goes nowhere, so the
+/// error text, which can carry a host, does not leak). The line is unconditional: the CLI and
+/// MCP install the log too, and the cause must not be lost there.
+fn report_stop_failure(log_reason: &str, detail: &str) {
+    execution_log::record_stop_unconfirmed(log_reason);
+    eprintln!("queryhive-engine: {STOP_UNCONFIRMED} ({detail})");
+}
+
+/// Classify the answer to a waited-for stop: `None` when confirmed, else the fixed log sentence
+/// and the detail for stderr. `answer` is `None` when the budget ran out, and `Err(())` when the
+/// cancel task dropped its sender.
+fn stop_cause(answer: Option<Result<Result<(), String>, ()>>) -> Option<(&'static str, String)> {
+    match answer {
+        Some(Ok(Ok(()))) => None,
+        Some(Ok(Err(error))) => Some((STOP_CANCEL_FAILED, format!("the cancel failed: {error}"))),
+        Some(Err(())) => Some((
+            STOP_TASK_ENDED,
+            "the cancel task ended without an answer".to_owned(),
+        )),
+        None => Some((
+            STOP_NO_ANSWER,
+            format!("no answer within {} ms", STOP_BUDGET.as_millis()),
+        )),
+    }
+}
+
 /// How long the detached cancel and close may take before they are abandoned.
 pub(crate) const STOP_CEILING: Duration = Duration::from_secs(10);
 
@@ -1598,13 +1637,12 @@ async fn stop_session(
     cursor: Option<Box<dyn Cursor>>,
 ) -> Option<String> {
     let confirmed = spawn_stop(session, cursor, false);
-    let reason = match tokio::time::timeout(STOP_BUDGET, confirmed).await {
-        Ok(Ok(Ok(()))) => return None,
-        Ok(Ok(Err(error))) => format!("the cancel failed: {error}"),
-        Ok(Err(_)) => "the cancel task ended without an answer".to_owned(),
-        Err(_) => format!("no answer within {} ms", STOP_BUDGET.as_millis()),
+    let answer = match tokio::time::timeout(STOP_BUDGET, confirmed).await {
+        Ok(answer) => Some(answer.map_err(|_| ())),
+        Err(_) => None,
     };
-    eprintln!("queryhive-engine: {STOP_UNCONFIRMED} ({reason})");
+    let (log_reason, detail) = stop_cause(answer)?;
+    report_stop_failure(log_reason, &detail);
     Some(STOP_UNCONFIRMED.to_owned())
 }
 
@@ -1628,7 +1666,8 @@ fn spawn_stop(
             .await
             .map_err(|error| error.to_string());
         if let (true, Err(reason)) = (log_failure, &cancelled) {
-            eprintln!("queryhive-engine: stopping a capped result failed ({reason})");
+            execution_log::record_stop_unconfirmed(CAPPED_STOP_FAILED);
+            eprintln!("queryhive-engine: {CAPPED_STOP_FAILED} ({reason})");
         }
         let _ = answer.send(cancelled);
         // Only now: MySQL's producer ends when its cursor is dropped, and a cancel sent after
@@ -2548,5 +2587,39 @@ fn count_value(row: &[Value]) -> Result<i64, CliError> {
             "count query returned {}, not an integer",
             qh_core::render::to_text(other).unwrap_or_else(|| "NULL".to_owned())
         ))),
+    }
+}
+
+#[cfg(test)]
+mod stop_cause_tests {
+    use super::*;
+
+    #[test]
+    fn a_confirmed_stop_has_no_cause() {
+        assert!(stop_cause(Some(Ok(Ok(())))).is_none());
+    }
+
+    #[test]
+    fn each_unconfirmed_stop_keeps_its_cause_and_the_log_sentence_stays_host_free() {
+        let host = "db.internal.example:5432";
+        let failed = stop_cause(Some(Ok(Err(format!("connect to {host} refused"))))).unwrap();
+        let ended = stop_cause(Some(Err(()))).unwrap();
+        let silent = stop_cause(None).unwrap();
+
+        assert_eq!(failed.0, STOP_CANCEL_FAILED);
+        assert!(failed.1.contains(host), "stderr keeps the error text");
+        assert_eq!(ended.0, STOP_TASK_ENDED);
+        assert_eq!(silent.0, STOP_NO_ANSWER);
+        assert!(silent.1.contains("250 ms"));
+        // Three causes, three distinct log sentences, none carrying error text.
+        let sentences = [failed.0, ended.0, silent.0];
+        assert_eq!(
+            sentences
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        assert!(sentences.iter().all(|s| !s.contains(host)));
     }
 }

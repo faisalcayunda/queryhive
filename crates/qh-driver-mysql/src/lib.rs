@@ -94,7 +94,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
-use qh_core::{offset_of_line, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
+use qh_core::{
+    offset_of_line, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value, CONNECT_TIMEOUT,
+};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath, ObjectsPage, Parameter,
@@ -150,6 +152,27 @@ const RESET_WAIT: Duration = Duration::from_secs(2);
 
 /// TCP keepalive interval for every connection, in milliseconds (`OptsBuilder::tcp_keepalive`).
 const TCP_KEEPALIVE_MS: u32 = 60_000;
+
+/// `Conn::new` under `limit`, with a timeout reported as the engine's own connect error.
+///
+/// `mysql_async` has no connect timeout: a peer that accepts the socket and says nothing, or a
+/// TLS upgrade that never finishes, would wait for ever. The outer `Result` is the bound, the
+/// inner one is what the server or the socket said in time.
+async fn open_connection(
+    opts: &Opts,
+    target: &str,
+    limit: Duration,
+) -> Result<Result<Conn, mysql_async::Error>, EngineError> {
+    tokio::time::timeout(limit, Conn::new(opts.clone()))
+        .await
+        .map_err(|_| {
+            EngineError::connect_timeout(
+                target,
+                "opening the connection (socket, TLS handshake and login)",
+                limit,
+            )
+        })
+}
 
 /// What a statement does to the session's transaction, read from its first words.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -314,6 +337,18 @@ impl Driver for MysqlDriver {
     }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+        self.connect_within(config, CONNECT_TIMEOUT).await
+    }
+}
+
+impl MysqlDriver {
+    /// [`Driver::connect`] with the connect bound named by the caller; `connect` passes
+    /// [`CONNECT_TIMEOUT`]. A parameter so a test can prove the bound in milliseconds.
+    pub async fn connect_within(
+        &self,
+        config: &ConnectionConfig,
+        limit: Duration,
+    ) -> Result<Box<dyn Session>, EngineError> {
         // Connect once here rather than lazily, so a bad host or password is
         // reported by `connect` — where the UI shows it — instead of surfacing
         // later as a query that mysteriously returns nothing.
@@ -323,7 +358,8 @@ impl Driver for MysqlDriver {
         // not re-attempt TLS against a server that has already said it cannot do
         // it.
         let mut opts = build_opts(config, tls::ssl_opts(config.tls));
-        let conn = match Conn::new(opts.clone()).await {
+        let target = config.redacted();
+        let conn = match open_connection(&opts, &target, limit).await? {
             Ok(conn) => conn,
             Err(error) => {
                 if !tls::may_fall_back(config.tls, &error) {
@@ -334,14 +370,16 @@ impl Driver for MysqlDriver {
                 // for here, and it is the server's own capability flags that
                 // decided it — not a handshake that failed.
                 opts = build_opts(config, None);
-                Conn::new(opts.clone())
-                    .await
+                open_connection(&opts, &target, limit)
+                    .await?
                     .map_err(|error| connect_failure(config, &error))?
             }
         };
         let connection_id = Arc::new(AtomicU32::new(conn.id()));
         Ok(Box::new(MysqlSession {
             opts,
+            target,
+            connect_timeout: limit,
             connection_id,
             idle: Some(conn),
             flight: None,
@@ -399,6 +437,10 @@ fn build_opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
 /// A MySQL session.
 struct MysqlSession {
     opts: Opts,
+    /// The redacted description of the connection, for the messages of a bounded connect.
+    target: String,
+    /// How long opening another connection for this session may take.
+    connect_timeout: Duration,
     /// The id `KILL QUERY` needs, published when the session connects and again by whichever
     /// connection runs a statement. It is never cleared when a statement ends: a cursor
     /// dropped mid-stream ends the producer before a Stop can reach the server, and a cancel
@@ -469,8 +511,8 @@ impl MysqlSession {
             self.transaction_lost = true;
             return Err(transaction_lost());
         }
-        let conn = Conn::new(self.opts.clone())
-            .await
+        let conn = open_connection(&self.opts, &self.target, self.connect_timeout)
+            .await?
             .map_err(|error| EngineError::Connect {
                 message: error.to_string(),
                 kind: classify_connect_error(&error),
@@ -499,7 +541,7 @@ impl MysqlSession {
         );
         conn.query_drop(&statement)
             .await
-            .map_err(|error| map_query_error(error, &statement, None))?;
+            .map_err(|error| infra_error(error, &statement, None))?;
         self.current_db = Some(wanted.clone());
         self.opts = OptsBuilder::from_opts(self.opts.clone())
             .db_name(Some(wanted))
@@ -864,7 +906,7 @@ impl Session for MysqlSession {
         let outcome = killer
             .query_drop(&statement)
             .await
-            .map_err(|error| map_query_error(error, &statement, None));
+            .map_err(|error| infra_error(error, &statement, None));
         let _ = killer.disconnect().await;
         match outcome {
             // 1094 is `ER_NO_SUCH_THREAD`: the connection is already gone, so the
@@ -917,11 +959,11 @@ impl Session for MysqlSession {
             let reset = conn
                 .reset()
                 .await
-                .map_err(|error| map_query_error(error, "COM_RESET_CONNECTION", None))?;
+                .map_err(|error| infra_error(error, "COM_RESET_CONNECTION", None))?;
             if !reset {
                 conn.change_user(mysql_async::ChangeUserOpts::default())
                     .await
-                    .map_err(|error| map_query_error(error, "COM_CHANGE_USER", None))?;
+                    .map_err(|error| infra_error(error, "COM_CHANGE_USER", None))?;
             }
             // The reset drops the connection's charset and collation back to the server's
             // globals; mysql_async only states them in the handshake. Restated here exactly as
@@ -934,10 +976,10 @@ impl Session for MysqlSession {
             };
             conn.query_drop(names)
                 .await
-                .map_err(|error| map_query_error(error, names, None))?;
+                .map_err(|error| infra_error(error, names, None))?;
             conn.query_first::<Option<String>, _>("SELECT DATABASE()")
                 .await
-                .map_err(|error| map_query_error(error, "SELECT DATABASE()", None))
+                .map_err(|error| infra_error(error, "SELECT DATABASE()", None))
         }
         .await;
         let current = match reset {
@@ -1507,12 +1549,32 @@ fn connect_failure(config: &ConnectionConfig, error: &mysql_async::Error) -> Eng
              in clear",
             config.redacted()
         ),
+        None if packets_out_of_sync(error) => {
+            format!("{}: {error}. {OUT_OF_SYNC_HINT}", config.redacted())
+        }
         None => format!("{}: {error}", config.redacted()),
     };
     EngineError::Connect {
         message,
         kind: classify_connect_error(error),
     }
+}
+
+/// What to tell a user whose connection died on a packet the client could not place.
+///
+/// `mysql_async` raises it as a bare "packet out of order" I/O error. Behind a proxy or a
+/// MySQL-compatible server that answers in an older wire dialect (the legacy EOF packet instead
+/// of `OK`), it is the only symptom, and it reads like a bug in this app. `prefer_socket(false)`
+/// stays: a unix socket would ignore the host and port the connection names.
+const OUT_OF_SYNC_HINT: &str = "the server (or a proxy in front of it) sent packets this client \
+     could not follow (\"packets out of sync\"); a proxy that rewrites the MySQL protocol, or a \
+     MySQL-compatible server with an older wire dialect, causes this. Connect to the database \
+     directly to confirm, and check the proxy's MySQL protocol support";
+
+/// Whether `error` is `mysql_async`'s packet-sequence failure, however it was wrapped.
+fn packets_out_of_sync(error: &mysql_async::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("out of order") || text.contains("out of sync")
 }
 
 fn classify_connect_error(error: &mysql_async::Error) -> FailureKind {
@@ -1524,7 +1586,33 @@ fn classify_connect_error(error: &mysql_async::Error) -> FailureKind {
         // by trying again: the trust store or the mode has to change. Reported
         // as permanent so a caller does not burn retries on it.
         error if tls::certificate_rejection(error).is_some() => FailureKind::Permanent,
+        // The same bytes arrive in the same order on the next try.
+        error if packets_out_of_sync(error) => FailureKind::Permanent,
         _ => FailureKind::Transient,
+    }
+}
+
+/// [`map_query_error`] for a statement the driver sent on its own behalf (`USE`, the session
+/// `SET`, the reset, `KILL QUERY`): the same message and code, never a position. A line in the
+/// driver's text is not a line in the user's SQL, and the editor would mark whatever sits there.
+fn infra_error(
+    error: mysql_async::Error,
+    statement: &str,
+    timeout: Option<Duration>,
+) -> EngineError {
+    match map_query_error(error, statement, timeout) {
+        EngineError::Query {
+            message,
+            code,
+            kind,
+            ..
+        } => EngineError::Query {
+            message,
+            code,
+            position: None,
+            kind,
+        },
+        other => other,
     }
 }
 
@@ -1553,6 +1641,12 @@ fn map_query_error(error: mysql_async::Error, sql: &str, timeout: Option<Duratio
                 kind: FailureKind::Permanent,
             }
         }
+        mysql_async::Error::Io(_) if packets_out_of_sync(&error) => EngineError::Connect {
+            message: format!(
+                "the connection failed while the query ran: {error}. {OUT_OF_SYNC_HINT}"
+            ),
+            kind: FailureKind::Transient,
+        },
         mysql_async::Error::Io(_) => EngineError::Connect {
             message: format!("the connection failed while the query ran: {error}"),
             kind: FailureKind::Transient,
@@ -1667,7 +1761,7 @@ async fn apply_session_settings(
     };
     conn.query_drop(&statement)
         .await
-        .map_err(|error| map_query_error(error, &statement, wanted.0))
+        .map_err(|error| infra_error(error, &statement, wanted.0))
 }
 
 fn snippet(sql: &str) -> String {
@@ -1806,6 +1900,48 @@ mod tests {
             mysql_value(&Parameter::Text("O'Brien".to_owned())),
             mysql_async::Value::Bytes(b"O'Brien".to_vec())
         );
+    }
+
+    #[test]
+    fn an_infra_statement_never_points_into_the_users_sql() {
+        let parse = || {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1064,
+                message: "You have an error in your SQL syntax near 'x' at line 1".to_owned(),
+                state: "42000".to_owned(),
+            })
+        };
+        // The same server answer: a statement of the user's is pointed at, the driver's is not.
+        assert!(matches!(
+            map_query_error(parse(), "SELEC 1", None),
+            EngineError::Query {
+                position: Some(1),
+                ..
+            }
+        ));
+        match infra_error(parse(), "SET SESSION max_execution_time = 5", None) {
+            EngineError::Query { position, code, .. } => {
+                assert_eq!(position, None);
+                assert_eq!(code.as_deref(), Some("1064"));
+            }
+            other => panic!("expected a query error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn packets_out_of_sync_is_named_and_not_retried() {
+        let error = mysql_async::Error::from(std::io::Error::other("packet out of order"));
+        assert!(packets_out_of_sync(&error));
+        assert_eq!(classify_connect_error(&error), FailureKind::Permanent);
+        let config = ConnectionConfig::new(DriverKind::Mysql, "db.internal", 3306, "qh");
+        let message = connect_failure(&config, &error).message().to_owned();
+        assert!(message.contains("packets out of sync"), "{message}");
+        assert!(message.contains("proxy"), "{message}");
+        // An ordinary dropped socket is none of that.
+        let reset =
+            mysql_async::Error::from(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(!packets_out_of_sync(&reset));
+        assert_eq!(classify_connect_error(&reset), FailureKind::Transient);
     }
 
     #[test]

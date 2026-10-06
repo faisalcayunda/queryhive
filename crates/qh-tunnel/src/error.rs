@@ -122,6 +122,19 @@ pub enum Error {
         after: Duration,
     },
 
+    /// The bastion and this client share no algorithm of one kind, so the key exchange could not
+    /// start. Almost always an old `sshd` that only offers algorithms this build does not enable
+    /// (SHA-1 key exchange, CBC ciphers); retrying cannot change it. `kind` is the part of the
+    /// handshake that failed (`Kex`, `Key`, `Cipher`, `Mac`, `Compression`), `offered` is what the
+    /// server listed, and nothing secret is in either.
+    #[error("the bastion {host}:{port} offers no {kind} algorithm this client supports; it offers {}, and this client does not enable legacy algorithms. Upgrade the bastion's SSH server, or add a modern {kind} algorithm to its sshd configuration", offered.join(", "))]
+    NoCommonAlgorithm {
+        host: String,
+        port: u16,
+        kind: String,
+        offered: Vec<String>,
+    },
+
     /// The caller's request cannot be honoured, found before any network use.
     #[error("{0}")]
     Usage(&'static str),
