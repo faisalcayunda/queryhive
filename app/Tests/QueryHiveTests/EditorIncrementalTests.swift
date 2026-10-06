@@ -294,4 +294,100 @@ final class EditorIncrementalTests: XCTestCase {
         let elapsed = CFAbsoluteTimeGetCurrent() - started
         XCTAssertLessThan(elapsed, 0.75, "typing an unbalanced quote took \(elapsed) s")
     }
+
+    // MARK: What a keystroke's paint is allowed to touch (W8-F3)
+
+    /// A paint carries a font entry for every range an edit touched. Writing the font the text
+    /// already has is still an attribute edit to the layout manager, which lays the range out again
+    /// and redisplays the whole visible rect: that was most of what a keystroke cost.
+    func testAPaintDoesNotRewriteAFontTheTextAlreadyHas() throws {
+        let rig = rig("SELECT 1;\nselect 2 from t;\nSELECT 3;")
+        try rig.coordinator.syncAnalysisForTesting()
+        rig.textView.setSelectedRange(NSRange(location: 21, length: 0))
+        type(" ", into: rig)
+        var edits = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification, object: rig.textView.textStorage, queue: nil
+        ) { _ in edits += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+        waitApplied(rig)
+        XCTAssertEqual(edits, 0, "the paint wrote attributes the storage already had")
+    }
+
+    func testAPaintStillWritesTheItalicOfAComment() throws {
+        let rig = rig("SELECT 1;\nSELECT 2;")
+        try rig.coordinator.syncAnalysisForTesting()
+        rig.textView.setSelectedRange(NSRange(location: 9, length: 0))
+        // A block comment: this text view substitutes the dashes of `--` for a dash, as a person's would.
+        type(" /* note */", into: rig)
+        waitApplied(rig)
+        let storage = try XCTUnwrap(rig.textView.textStorage)
+        let comment = (storage.string as NSString).range(of: "/* note */").location
+        XCTAssertEqual(storage.attribute(.font, at: comment, effectiveRange: nil) as? NSFont, SQLSyntax.font(italic: true))
+        XCTAssertEqual(storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont, SQLSyntax.font(italic: false))
+    }
+
+    /// Dirty text outside the window used to make every paint ask for another one: the next request
+    /// covers the same window and finds nothing, so the loop never ended while anything off screen
+    /// was dirty.
+    func testDirtyTextOffScreenDoesNotKeepRequestingPaints() {
+        let line = "SELECT id, name FROM public.table_1 WHERE id = 1 AND status = 'open' ORDER BY id;\n"
+        let rig = rig(String(repeating: line, count: 3_700))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        let settled = rig.coordinator.paintsAppliedForTesting
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertLessThan(rig.coordinator.paintsAppliedForTesting - settled, 5,
+                          "paints kept arriving for a document nobody is typing in")
+    }
+
+    /// With wrapping the gutter is redrawn for an edit only when the paragraph it landed in changed
+    /// height (a fragment wrapped), not on every key.
+    /// A gutter in the scroll view, where it is drawn; counted through the bench's own `rulerDraw`
+    /// part, because the window displays inside `insertText` and `needsDisplay` is clear by the time
+    /// a test can look.
+    private func gutterDraws(of rig: Rig, whileTyping action: () -> Void) -> Int {
+        PerfSignposts.recording = true
+        defer {
+            PerfSignposts.recording = false
+            PerfSignposts.partsReset()
+        }
+        PerfSignposts.partsReset()
+        action()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        return PerfSignposts.partsSnapshot()["rulerDraw"]?.count ?? 0
+    }
+
+    private func attachGutter(to rig: Rig) {
+        let scroll = rig.textView.enclosingScrollView
+        scroll?.verticalRulerView = rig.ruler
+        scroll?.hasVerticalRuler = true
+        scroll?.rulersVisible = true
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    func testTypingRedrawsTheGutterOnlyWhenTheParagraphChangesHeight() {
+        let rig = rig("SELECT 1;\nSELECT 2 FROM t;\nSELECT 3;")
+        attachGutter(to: rig)
+        rig.textView.setSelectedRange(NSRange(location: 22, length: 0))
+        type("a", into: rig)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(gutterDraws(of: rig) { self.type("b", into: rig) }, 0,
+                       "a key that moved nothing redrew the gutter")
+        XCTAssertGreaterThan(gutterDraws(of: rig) { self.type(String(repeating: "x", count: 80), into: rig) }, 0,
+                             "the paragraph wrapped and the gutter was left as it was")
+        XCTAssertEqual(gutterDraws(of: rig) { self.type("c", into: rig) }, 0)
+        XCTAssertGreaterThan(gutterDraws(of: rig) { self.type("\n", into: rig) }, 0,
+                             "a new line moves everything under it")
+    }
+
+    func testDeletingBackAcrossAWrapRedrawsTheGutter() {
+        let rig = rig("SELECT 1;\nSELECT 2 FROM t;\nSELECT 3;")
+        attachGutter(to: rig)
+        rig.textView.setSelectedRange(NSRange(location: 22, length: 0))
+        type(String(repeating: "x", count: 80), into: rig)
+        type("y", into: rig)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        let draws = gutterDraws(of: rig) { for _ in 0..<60 { rig.textView.deleteBackward(nil) } }
+        XCTAssertGreaterThan(draws, 0, "the paragraph unwrapped and the gutter did not follow")
+    }
 }

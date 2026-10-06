@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Colours the SQL editor by what each token *is*.
 ///
@@ -89,12 +88,30 @@ enum SQLSyntax {
     private static func colour(_ dark: UInt32, _ light: UInt32) -> [NSAttributedString.Key: Any] {
         // Both halves resolved once. The provider runs every time AppKit draws or fixes a run, and
         // building a colour through SwiftUI each time was a measurable part of a keystroke.
-        let darkColour = NSColor(Color(hex: dark))
-        let lightColour = NSColor(Color(hex: light))
+        let darkColour = plain(dark)
+        let lightColour = plain(light)
         let adaptive = NSColor(name: nil) { appearance in
-            appearance.isDark ? darkColour : lightColour
+            // Asked for every coloured run of every line a draw touches, which on a full redraw is
+            // hundreds of times: the two plain appearances answer by name, and only the vibrancy
+            // and high-contrast variants pay for `isDark`'s `bestMatch`.
+            switch appearance.name {
+            case .darkAqua: return darkColour
+            case .aqua: return lightColour
+            default: return appearance.isDark ? darkColour : lightColour
+            }
         }
         return [.foregroundColor: adaptive]
+    }
+
+    /// A plain sRGB colour with the values `Color(hex:)` gives. Not `NSColor(Color(hex:))`: that one
+    /// is extended sRGB, and the display list a draw records files every glyph run's colour by
+    /// comparing it with the colours it has already seen, which for extended-range colours is slow
+    /// enough to be most of a full redraw (116 of 160 glyph-drawing samples in a profile of the
+    /// coloured scenario, 19 once the colours were plain). Same pixels: the editor scenes render
+    /// byte for byte as they did.
+    private static func plain(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
     }
 
     /// Every character carries the default paragraph style explicitly, so a typed character inherits

@@ -299,6 +299,9 @@ struct SQLEditor: NSViewRepresentable {
         private var outlineRevision: UInt64 = 0
         /// The paint revision last applied to the layout manager. Tests poll this.
         private(set) var appliedRevision: UInt64 = 0
+        /// How many paints have reached `applyPaint`, stale ones included. A test that watches a
+        /// quiet editor for this to stop moving is how a paint loop that never ends is noticed.
+        private(set) var paintsAppliedForTesting = 0
         /// The revision keystrokes have reached; tests wait for `appliedRevision` to catch up.
         var pendingRevisionForTesting: UInt64 { analysis?.revision ?? appliedRevision }
         /// The edit's range, for the neighbour-colour inheritance in `textDidChange`.
@@ -474,20 +477,22 @@ struct SQLEditor: NSViewRepresentable {
             guard editedMask.contains(.editedCharacters) else { return }
             revision += 1
             guard !isReplacingText else { return }
-            let edit = TextEdit(location: editedRange.location,
-                                oldLength: editedRange.length - delta, newLength: editedRange.length)
-            let linesBefore = ruler?.knownLineCount
-            ruler?.textEdited(range: editedRange, delta: delta)
-            edit.apply(to: &statementBounds)
-            moveFolds(through: edit)
-            lastEditRange = NSRange(location: editedRange.location, length: editedRange.length)
-            forward(edit: edit, in: storage)
-            publishLineCount()
-            if let linesBefore, linesBefore != ruler?.lineCount {
-                // A line was added or removed: everything drawn against a line number below this
-                // point moved, and the analysis that would say so is a debounce away.
-                updateRunMarks()
-                updateFoldMarks()
+            PerfSignposts.part(PerfSignposts.Part.replaceAndRuler) {
+                let edit = TextEdit(location: editedRange.location,
+                                    oldLength: editedRange.length - delta, newLength: editedRange.length)
+                let linesBefore = ruler?.knownLineCount
+                ruler?.textEdited(range: editedRange, delta: delta)
+                edit.apply(to: &statementBounds)
+                moveFolds(through: edit)
+                lastEditRange = NSRange(location: editedRange.location, length: editedRange.length)
+                forward(edit: edit, in: storage)
+                publishLineCount()
+                if let linesBefore, linesBefore != ruler?.lineCount {
+                    // A line was added or removed: everything drawn against a line number below this
+                    // point moved, and the analysis that would say so is a debounce away.
+                    updateRunMarks()
+                    updateFoldMarks()
+                }
             }
         }
 
@@ -536,8 +541,10 @@ struct SQLEditor: NSViewRepresentable {
                     NSRange(location: edit.location, length: edit.newLength), in: text)
                 let oldLength = max(0, widened.length - edit.delta)
                 let replacement = widened.length > 0 ? text.substring(with: widened) : ""
-                try analysis.replace(
-                    range: NSRange(location: widened.location, length: oldLength), with: replacement)
+                try PerfSignposts.part("ffiReplace") {
+                    try analysis.replace(
+                        range: NSRange(location: widened.location, length: oldLength), with: replacement)
+                }
             } catch {
                 rebuildAnalysis()
             }
@@ -727,6 +734,7 @@ struct SQLEditor: NSViewRepresentable {
             let started = PerfSignposts.didChangeBegin()
             defer { PerfSignposts.didChangeEnd(started: started) }
             guard let textView = notification.object as? NSTextView else { return }
+            (textView as? SQLTextView)?.applyTurnOpen = false
             // Before anything reads the text: this rewrites the word just finished, and the fold,
             // colour and completion passes should see the text that will actually be sent.
             if parent.layout.autoUppercaseKeywords, uppercaseFinishedKeyword(textView) {
@@ -742,7 +750,7 @@ struct SQLEditor: NSViewRepresentable {
             scheduleIdle()
             // The gutter changes with a line added or removed, which `textEdited` already redraws for,
             // and with wrapping, where a typed character can push a line onto another fragment.
-            if parent.layout.wordWrap { ruler?.needsDisplay = true }
+            if parent.layout.wordWrap, editMovedTheLinesBelow() { ruler?.needsDisplay = true }
             if findVisible { findQueryChanged(findBar?.query ?? "") }
             if suppressAutoTrigger {
                 // The change we just made was accepting a suggestion; re-opening the list over
@@ -755,6 +763,43 @@ struct SQLEditor: NSViewRepresentable {
             let work = DispatchWorkItem { [weak self] in self?.refresh(manual: false) }
             debounce = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        }
+
+        /// The paragraph the last key edited, as `(start, height)`, for `editMovedTheLinesBelow`.
+        private var editedParagraph: (start: Int, height: CGFloat)?
+        /// Past these the gutter is redrawn without looking: laying out a paragraph to measure it is
+        /// only cheap while the paragraph and the edit are short.
+        private static let measuredParagraphLimit = 4_096
+        private static let measuredEditLimit = 256
+
+        /// Whether the edit that just happened can have moved the lines under it, which with wrapping
+        /// is what the gutter has to be redrawn for (a line added or removed is `textEdited`'s: it
+        /// redraws for that itself). Typing inside one paragraph moves what is below it only when the
+        /// paragraph's height changes: a fragment wrapped or unwrapped, or a character from a taller
+        /// fallback font. The gutter used to be redrawn on every key, and in a profile of the
+        /// coloured scenario that redraw cost more than the text view's own.
+        ///
+        /// Yes without looking for anything that is not one short edit in one short paragraph, and for
+        /// the first key in a paragraph, whose previous height is not known.
+        private func editMovedTheLinesBelow() -> Bool {
+            let previous = editedParagraph
+            editedParagraph = nil
+            guard let layoutManager = textView?.layoutManager else { return true }
+            let text = nsText
+            let edit = lastEditRange
+            guard edit.length <= Self.measuredEditLimit, NSMaxRange(edit) <= text.length,
+                  text.rangeOfCharacter(from: .newlines, options: [], range: edit).location == NSNotFound
+            else { return true }
+            let paragraph = text.paragraphRange(for: NSRange(location: edit.location, length: 0))
+            guard paragraph.length > 0, paragraph.length <= Self.measuredParagraphLimit else { return true }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: paragraph, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { return true }
+            let first = layoutManager.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let last = layoutManager.lineFragmentRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+            let height = last.maxY - first.minY
+            editedParagraph = (paragraph.location, height)
+            guard let previous, previous.start == paragraph.location else { return true }
+            return abs(previous.height - height) > 0.01
         }
 
         /// Everything derived from the text, rebuilt from scratch: for text that arrived from outside
@@ -848,6 +893,11 @@ struct SQLEditor: NSViewRepresentable {
         /// Lay a paint onto the layout manager. Ranges with nothing to change are left alone —
         /// each write invalidates its range, and redrawing one coloured line costs milliseconds.
         private func applyPaint(_ paint: EditorPaintData) {
+            PerfSignposts.part("applyPaint") { applyPaintBody(paint) }
+            paintsAppliedForTesting += 1
+        }
+
+        private func applyPaintBody(_ paint: EditorPaintData) {
             guard let textView, let storage = textView.textStorage,
                   let layoutManager = textView.layoutManager, let analysis = analysis,
                   analysis.revision == paint.revision, !textView.hasMarkedText(),
@@ -860,6 +910,7 @@ struct SQLEditor: NSViewRepresentable {
                 return
             }
             PerfSignposts.applyBegin()
+            textView.applyTurnOpen = true
             let length = storage.length
             if paint.inactive {
                 let window = NSIntersectionRange(paint.window, NSRange(location: 0, length: length))
@@ -873,29 +924,45 @@ struct SQLEditor: NSViewRepresentable {
                 guard clipped.length > 0 else { continue }
                 let runs = paint.runs.filter { NSIntersectionRange($0.range, clipped).length > 0 }
                 guard rangeNeedsPaint(clipped, runs: runs, in: layoutManager, length: length) else { continue }
-                layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: clipped)
+                PerfSignposts.part(PerfSignposts.Part.tempAttrRemove) {
+                    layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: clipped)
+                }
                 for run in runs {
                     let at = NSIntersectionRange(run.range, clipped)
                     if let color = Self.paintColors[run.colorClass], at.length > 0 {
-                        layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: at)
+                        PerfSignposts.part(PerfSignposts.Part.tempAttrAdd) {
+                            layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: at)
+                        }
                     }
                 }
             }
             // Apply the paint's fonts to storage: comment italics live here, because a
-            // temporary attribute cannot carry a font.
+            // temporary attribute cannot carry a font. Only where the font differs: a paint carries
+            // a font entry for every edited range, and writing the font the text already has still
+            // reaches the layout manager as an attribute edit, which lays the range out again and
+            // redisplays the whole visible rect. That was most of what a keystroke cost.
             let fonts = paint.fonts.filter { NSMaxRange($0.range) <= length }
             if !fonts.isEmpty {
                 let upright = SQLSyntax.font(italic: false)
                 let italic = SQLSyntax.font(italic: true)
-                storage.beginEditing()
-                for font in fonts {
-                    storage.addAttribute(.font, value: font.italic ? italic : upright, range: font.range)
+                let changes = fonts.flatMap { entry -> [(range: NSRange, font: NSFont)] in
+                    let wanted = entry.italic ? italic : upright
+                    return Self.ranges(of: storage, within: entry.range, notUsing: wanted).map { ($0, wanted) }
                 }
-                storage.endEditing()
+                if !changes.isEmpty {
+                    storage.beginEditing()
+                    for change in changes { storage.addAttribute(.font, value: change.font, range: change.range) }
+                    storage.endEditing()
+                }
             }
             try? analysis.markApplied(paint)
             appliedRevision = paint.revision
-            if paint.moreInWindow || paint.dirtyElsewhere { requestVisible() }
+            // The window's own leftovers go round again. What is dirty *outside* the window does
+            // not: the next request would ask for the same window and get nothing back, so the
+            // loop never ended while anything off screen was dirty, and every key then paid for
+            // dozens of empty paints. A scroll paints the new window (`observe`) and the idle
+            // pass paints the rest.
+            if paint.moreInWindow { requestVisible() }
         }
 
         /// Whether `range` needs touching: a run whose colour differs, or a gap between runs
@@ -917,6 +984,20 @@ struct SQLEditor: NSViewRepresentable {
                 cursor = max(cursor, NSMaxRange(run.range))
             }
             return cursor < NSMaxRange(range) && staleColor(at: cursor, in: layoutManager, length: length)
+        }
+
+        /// The runs of `range` whose font is not `font`.
+        private static func ranges(of storage: NSTextStorage, within range: NSRange, notUsing font: NSFont) -> [NSRange] {
+            var stale: [NSRange] = []
+            storage.enumerateAttribute(.font, in: range, options: []) { value, run, _ in
+                guard (value as? NSFont) != font else { return }
+                if let last = stale.last, NSMaxRange(last) == run.location {
+                    stale[stale.count - 1] = NSUnionRange(last, run)
+                } else {
+                    stale.append(run)
+                }
+            }
+            return stale
         }
 
         /// The one colour instance per class: identity (`===`) is how a paint decides a run is
@@ -951,6 +1032,10 @@ struct SQLEditor: NSViewRepresentable {
         /// comment or a word does not flash uncoloured for the turn the analysis takes. Anything
         /// wrong here lasts one analysis turn: the paint corrects it.
         private func inheritNeighborColor() {
+            PerfSignposts.part(PerfSignposts.Part.inherit) { inheritNeighborColorBody() }
+        }
+
+        private func inheritNeighborColorBody() {
             guard let layoutManager = textView?.layoutManager else { return }
             let inserted = lastEditRange
             guard inserted.length > 0, inserted.location > 0 else { return }
@@ -962,11 +1047,15 @@ struct SQLEditor: NSViewRepresentable {
                 in: NSRange(location: 0, length: text.length)) as? NSColor,
                   let cls = Self.classOf(color) else { return }
             if cls == .string || cls == .comment {
-                layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
+                PerfSignposts.part(PerfSignposts.Part.tempAttrAdd) {
+                    layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
+                }
             } else if let previous = UnicodeScalar(text.character(at: inserted.location - 1)),
                       !CharacterSet.whitespacesAndNewlines.contains(previous),
                       text.substring(with: inserted).rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
-                layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
+                PerfSignposts.part(PerfSignposts.Part.tempAttrAdd) {
+                    layoutManager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: inserted)
+                }
             }
         }
 
@@ -1026,6 +1115,10 @@ struct SQLEditor: NSViewRepresentable {
         /// Wear an outline: statements for the band, the run marks and the rotor; folds for the
         /// gutter. Folds the user closed stay closed while their header is still a region's header.
         private func updateOutline(_ outline: EditorOutlineData) {
+            PerfSignposts.part(PerfSignposts.Part.outlineApply) { updateOutlineBody(outline) }
+        }
+
+        private func updateOutlineBody(_ outline: EditorOutlineData) {
             guard let textView else { return }
             // A result for text that has since changed is worth nothing: the edit that changed it
             // scheduled its own idle pass.
@@ -1864,6 +1957,30 @@ final class SQLTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    /// True from the moment a paint is laid onto the layout manager until the next edit, so a
+    /// `--bench` run can tell the draw an analysis repaint caused from the one a key caused.
+    var applyTurnOpen = false
+
+    /// Under `--bench` only: the time `layout` and `draw` took, split by the turn that asked for
+    /// them, and how much of the view was dirty. Layout is forced first so `draw` is the drawing
+    /// alone; the layout manager would have done the same work inside `super`.
+    override func draw(_ dirtyRect: NSRect) {
+        guard PerfSignposts.recording else { return super.draw(dirtyRect) }
+        let prefix = applyTurnOpen ? "apply." : ""
+        if let layoutManager, let textContainer {
+            let origin = textContainerOrigin
+            PerfSignposts.part(prefix + PerfSignposts.Part.layout) {
+                layoutManager.ensureLayout(forBoundingRect: dirtyRect.offsetBy(dx: -origin.x, dy: -origin.y), in: textContainer)
+            }
+        }
+        var rects: UnsafePointer<NSRect>?
+        var count = 0
+        getRectsBeingDrawn(&rects, count: &count)
+        PerfSignposts.count(prefix + "dirtyRects", by: count)
+        PerfSignposts.count(prefix + "dirtyPoints", by: Int(dirtyRect.height.rounded()))
+        PerfSignposts.part(prefix + PerfSignposts.Part.draw) { super.draw(dirtyRect) }
+    }
+
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         guard !highlightRanges.isEmpty else { return }
@@ -2240,6 +2357,10 @@ final class LineNumberRulerView: NSRulerView {
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        PerfSignposts.part("rulerDraw") { drawLabels(in: rect) }
+    }
+
+    private func drawLabels(in rect: NSRect) {
         guard let textView, let scrollView else { return }
         // The text view's origin in the ruler's own coordinates. `convert` accounts for one being
         // flipped and the other not, which is the whole reason this is not arithmetic on offsets.
