@@ -89,10 +89,6 @@ uniffi = { version = "0.32", features = ["cli"] }
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "signal", "sync", "time"] }
 async-trait = "0.1"
-# The global allocator (W7-T5): the X3 profile put malloc/free at ~37% of the MySQL pump.
-# Default features off: no `secure` hardening, no `override` (which would also replace the
-# C `malloc` the rest of the process uses).
-mimalloc = { version = "0.1.52", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal", "time"] }

@@ -88,15 +88,6 @@
 //! Nothing in a command reaches for `std::env` or stdout directly, which is also what
 //! makes the FFI surface a wrapper rather than a rewrite.
 
-/// mimalloc for every Rust allocation in the process (W7-T5). Declared here, not in a
-/// binary, so the app's `staticlib`, the `cdylib` and the three binaries (which link this
-/// lib) all get it. It only replaces Rust's `alloc`/`dealloc`: Swift and Objective-C keep
-/// the system `malloc`, because the `override` feature stays off. Safe across the FFI
-/// because memory never crosses the boundary by pointer: UniFFI copies values into a
-/// `RustBuffer`, which is allocated and freed by this crate's own functions.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 pub mod apply;
 pub mod commands;
 pub mod config;
