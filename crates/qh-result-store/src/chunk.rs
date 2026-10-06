@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, RecordBatch, StringArray};
 use arrow_buffer::BooleanBuffer;
 use qh_core::{ColumnMeta, Value};
 
@@ -180,24 +180,55 @@ pub fn seal_store_chunk(
             .map(|meta| meta.type_name.as_ref())
             .unwrap_or("");
         let by_type = openable_by_type(type_name);
-        let mut open_bits = Vec::new();
-        let mut num_bits = Vec::new();
         let want_open =
             !by_type && matches!(enc, Encoding::Text | Encoding::Json | Encoding::Tagged);
         let want_num = matches!(
             enc,
             Encoding::Text | Encoding::Json | Encoding::Tagged | Encoding::Bytes
         );
-        for row in 0..rows {
-            let value = value_at(array, *enc, row).map_err(store_corrupt)?;
-            stats[column].observe(&value);
-            if want_open {
-                open_bits.push(cell_openable(&value));
+        let mut open_bits = Vec::with_capacity(if want_open { rows } else { 0 });
+        let mut num_bits = Vec::with_capacity(if want_num { rows } else { 0 });
+        // Text and JSON cells are the bulk of every wire result: read them as
+        // borrowed `&str` instead of building a `Value` and a rendered
+        // `String` per cell. Anything else takes the generic path.
+        let text_array = match enc {
+            Encoding::Text | Encoding::Json => array.as_any().downcast_ref::<StringArray>(),
+            _ => None,
+        };
+        if let Some(strings) = text_array {
+            let kind = if *enc == Encoding::Text {
+                V_TEXT
+            } else {
+                V_JSON
+            };
+            let column_stats = &mut stats[column];
+            for row in 0..rows {
+                column_stats.rows += 1;
+                if strings.is_null(row) {
+                    if want_open {
+                        open_bits.push(false);
+                    }
+                    num_bits.push(false);
+                    continue;
+                }
+                column_stats.variants |= kind;
+                let text = strings.value(row);
+                if want_open {
+                    open_bits.push(cell_openable_text(text));
+                }
+                num_bits.push(crate::collate::is_swift_plain_number(text));
             }
-            if want_num {
-                let text = cell_text(&value);
-                num_bits
-                    .push(!value.is_null() && crate::collate::swift_plain_number(&text).is_some());
+        } else {
+            for row in 0..rows {
+                let value = value_at(array, *enc, row).map_err(store_corrupt)?;
+                stats[column].observe(&value);
+                if want_open {
+                    open_bits.push(cell_openable(&value));
+                }
+                if want_num {
+                    let text = cell_text(&value);
+                    num_bits.push(!value.is_null() && crate::collate::is_swift_plain_number(&text));
+                }
             }
         }
         if want_open && open_bits.iter().any(|bit| *bit) {

@@ -903,6 +903,12 @@ impl StoreShared {
                 Ok(spill) => spill,
                 Err(_) => return Ok(None),
             };
+            // `release` marks the phase before it takes this lock to drop the
+            // file, so a store released while we encrypted must not get a new
+            // spill file (it would live until the process exits).
+            if self.phase() == Phase::Released {
+                return Ok(None);
+            }
             if spill.is_none() {
                 let dir = match registry.config.spill_dir.as_ref() {
                     Some(dir) => dir,
@@ -1053,5 +1059,46 @@ fn merge_stats(accumulated: &mut Vec<ColumnStats>, deltas: &[ColumnStats]) {
             (Some(first), _) => Some(first),
         };
         into.rows += delta.rows;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{StoreConfig, StoreRegistry};
+    use qh_core::{ColumnBatch, ColumnMeta, Value};
+
+    #[test]
+    fn spill_one_does_not_create_a_file_for_a_released_store() {
+        let dir = std::env::temp_dir().join(format!("qh-spill-released-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = StoreRegistry::for_test(StoreConfig {
+            spill_dir: Some(dir.clone()),
+            ..StoreConfig::default()
+        });
+        let handle = registry.create();
+        let writer = handle.writer();
+        writer.begin(vec![ColumnMeta::new("t", "text")]).unwrap();
+        let column: Vec<Value> = (0..10)
+            .map(|i| Value::Text(format!("v{i}").into()))
+            .collect();
+        writer
+            .push(&ColumnBatch::new(vec![column]).unwrap())
+            .unwrap();
+        writer
+            .finish(crate::Outcome::Complete { truncated: false })
+            .unwrap();
+        let shared = handle.shared();
+        // The interleaving: phase flips to Released after spill_one took its
+        // chunk, before it reaches the spill lock.
+        shared
+            .phase
+            .store(Phase::Released.as_u8(), Ordering::Release);
+        assert_eq!(shared.spill_one(0, &registry).unwrap(), None);
+        assert!(shared.spill.lock().unwrap().is_none());
+        let files = std::fs::read_dir(&dir).unwrap().count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(files, 0, "no spill file for a released store");
     }
 }

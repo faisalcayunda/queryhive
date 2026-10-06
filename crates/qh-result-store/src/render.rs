@@ -355,7 +355,7 @@ fn render_cell_into(
     if matches!(
         enc,
         Encoding::Text | Encoding::Json | Encoding::Tagged | Encoding::Bytes | Encoding::F64
-    ) && collate::swift_plain_number(&text).is_some()
+    ) && collate::is_swift_plain_number(&text)
     {
         cell.flags |= CELL_NUMERIC;
     }

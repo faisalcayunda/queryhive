@@ -137,6 +137,54 @@ pub fn swift_plain_number(text: &str) -> Option<NumKey> {
     })
 }
 
+/// `swift_plain_number(text).is_some()` without building the key: the same
+/// grammar and range checks, no allocation. Seal and render only need the bit.
+pub fn is_swift_plain_number(text: &str) -> bool {
+    let body = trim_zs_tab(text);
+    // Fast reject: a plain number starts with a digit, sign or dot.
+    match body.as_bytes().first() {
+        Some(b) if b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.') => {}
+        _ => return false,
+    }
+    let rest = body.strip_prefix(['-', '+']).unwrap_or(body);
+    let (mantissa, exp_given) = match rest.find(['e', 'E']) {
+        Some(index) => {
+            let exp = &rest[index + 1..];
+            let digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            match exp.parse::<i64>() {
+                Ok(value) => (&rest[..index], value),
+                Err(_) => return false,
+            }
+        }
+        None => (rest, 0),
+    };
+    let mut parts = mantissa.split('.');
+    let int = parts.next().unwrap_or("");
+    let frac = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || !int.bytes().all(|b| b.is_ascii_digit())
+        || !frac.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    let total = int.len() + frac.len();
+    if total == 0 || total > 38 {
+        return false;
+    }
+    let digits = || int.bytes().chain(frac.bytes());
+    // All-zero mantissa has no digits left after stripping, so trailing is 0
+    // and the exponent range check still applies.
+    let trailing = if digits().all(|b| b == b'0') {
+        0
+    } else {
+        digits().rev().take_while(|&b| b == b'0').count()
+    };
+    (-166..=128).contains(&(exp_given - frac.len() as i64 + trailing as i64))
+}
+
 /// Trim only Zs (space separator) and TAB. Newlines are *not* trimmed —
 /// `GridSort.number` does not strip them.
 ///
@@ -436,6 +484,67 @@ pub fn natural_key_prefix(s: &str) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_swift_plain_number_agrees_with_the_key_parser() {
+        let cases = [
+            "",
+            " ",
+            "0",
+            "-0",
+            "+0",
+            "00.00",
+            "0e999",
+            "0e-200",
+            "0.0e129",
+            "1",
+            "-1",
+            "+1.5",
+            "1.",
+            ".5",
+            ".",
+            "-",
+            "+",
+            "1e3",
+            "1E-3",
+            "1e",
+            "1e+",
+            "1e+5x",
+            "1.2.3",
+            "abc",
+            "1a",
+            " 42\t",
+            "\u{a0}7\u{3000}",
+            "4\n",
+            "1e128",
+            "1e129",
+            "1e-166",
+            "1e-167",
+            "100e-168",
+            "12345678901234567890123456789012345678",
+            "123456789012345678901234567890123456789",
+            "0.000000000000000000000000000000000000001e-120",
+            "1e99999999999999999999",
+            "1e-99999999999999999999",
+            "٣",
+            "1_000",
+            "NaN",
+            "inf",
+            "0x10",
+            "-.5e2",
+            "5.e2",
+            "1e0001",
+            "0.0e5",
+            "-0.0",
+        ];
+        for text in cases {
+            assert_eq!(
+                is_swift_plain_number(text),
+                swift_plain_number(text).is_some(),
+                "{text:?}"
+            );
+        }
+    }
 
     #[test]
     fn swift_plain_number_accepts_integers() {
