@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod brackets;
 pub mod classify;
 pub mod folds;
 pub mod issues;
