@@ -61,35 +61,53 @@ several queries are open at once. What the two share is the palette, the glass a
 
 ### Shell
 
+W9-T8 brought a native `NavigationSplitView` (AppKit's own split view, not SwiftUI's single-column
+wrapper), with the object tree on the left and the tabbed query workspace on the right. The
+window's own system toolbar holds the connection breadcrumb and the Run / Save group. The title
+comes from the active tab; nothing fills the title bar itself.
+
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
-│ (traffic lights)  ⬡ QUERYHIVE                connection chip          │ 46  TitleStrip
-├──────────────────┬────────────────────────────────────────────────────┤
-│ OBJECTS      + ⟳ │ [Query 1][Query 2][+]                              │ 36  TabStrip
-│ [ filter…      ] ├────────────────────────────────────────────────────┤
-│ ▾ ⬡ conn        │ [▶ Run] │ conn ▾ │ CSV ▾ │ folder │      name       │ 46  QueryToolbar
-│   ▾ cylinder cat ├────────────────────────────────────────────────────┤
-│     ▾ folder sch │ SQL editor                                         │    EditorPane
-│       ▤ table    │                                                    │
-│       ▤ table    ╞═══════════════ draggable seam ════════════════════╡  7  PanelResizer
-│   ▸ ⬡ conn2      │ [Log 12][Columns 8][Files 2]                    ⌄  │ 30  BottomPanel
-│                  │  the panel's content                               │
-├──────────────────┴────────────────────────────────────────────────────┤
-│ ● conn · host:port/catalog   Query OK · 12,345 rows · 1 file · 0:42   │ 26  StatusBar
+│ (traffic lights) Query 1                                              │ System toolbar
+├────────────────┬────────────────────────────────────────────────────┤ (macOS)
+│ OBJECTS    + ⟳ │ [▶ Run] [conn ▾] [File|Table] [CSV ▾] [📁] [name]  │
+│ [ filter…    ] ├────────────────────────────────────────────────────┤ QueryToolbarContent
+│ ▾ ⬡ conn       │ [Query 1][Query 2][+]                              │ 36 TabStrip
+│   ▾ catalog    ├────────────────────────────────────────────────────┤
+│   ▸ database   │ SQL editor                                         │
+│                ╞═════════ draggable seam ════════════════════════╡   │ EditorPane
+│   ▾ ⬡ conn2    │ [Log 12][Columns 8][Files 2]                 ⌄    │
+│                │  the panel's content                               │ BottomPanel
+├────────────────┴────────────────────────────────────────────────────┤
+│ ● conn · host:port/catalog   Query OK · 12,345 rows · 1 file · 0:42  │ StatusBar (26pt)
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-- The title strip carries **nothing at all**, and that is the point. A mark placed just after the
-  window controls sat closer to them than to its own wordmark, so the two read as one object and
-  the lights looked crowded; the app's identity lives in the sidebar header instead, which is a
-  panel and can give it room. The connection chip that used to sit on the right is gone too: it
-  restated the connection the toolbar's breadcrumb already names, on every tab, in the one strip
-  with no other job — so the row read as a toolbar holding a single control. Nothing became
-  unreachable, because the editor it opened is on the connection picker's menu and on the tree's
-  context menu (`Edit Connection…`). What is left is a drag area at the height the traffic lights
-  need.
-- The tree and the panel both resize by dragging their seam; the cursor changes over each.
-- The toolbar has **two shapes**, switched by the `File | Table` segmented control:
+**Navigation and layout:**
+
+- The left sidebar holds the object tree with all three levels (connection, catalog/database/schema,
+  table). It resizes by dragging the vertical divider; the cursor changes over the seam. The
+  sidebar hides and shows from the View menu and from a toggle in the system toolbar.
+- The right side is a vertical stack of: the query toolbar, the tab strip, the query editor (or
+  full-height panel if it is expanded), and the status bar.
+- The system toolbar comes from `NavigationSplitView` itself — the traffic lights, the window
+  title and subtitle, and the sidebar toggle are all standard. `QueryToolbarContent` sits inside
+  it and carries the connection breadcrumb, the Run / Save group, the format and destination
+  controls, and the File | Table mode switch. The window title is the active tab's name.
+- Nothing sits in the title bar itself. The app's visual identity is the sidebar header mark, not
+  a wordmark in the top left.
+
+**Tab strip (W9-T0…T8):**
+
+- The tab strip is a horizontal scroll view with one tab chip per query, inside the workspace
+  below the system toolbar. Each chip shows the query's name and a stage badge (running, finished,
+  or failed).
+- **Owner request, 2026-10-06:** The tab strip should sit in the top row with no grey title band,
+  and be consistent across all 7 themes (Midnight, Graphite, Nord, Ink, Daylight, Cloud, Paper).
+  This is being implemented and will move the tabs into the system toolbar row or above the editor,
+  with a style that does not depend on theme-specific colors.
+
+**The toolbar has two shapes**, switched by the File | Table segmented control:
 
   ```
   File   [▶ Run]  │ [conn ▾] │ [File|Table] │ [CSV ▾] │ [📁 folder] │ [name]
@@ -101,8 +119,8 @@ several queries are open at once. What the two share is the palette, the glass a
 - The **format button opens a popover**, not a menu: nine writers want a tile grid, and each
   one's own options belong next to the choice, the way Navicat's export wizard puts them.
 - The **target button opens a popover** for the same reason, measured rather than assumed: four
-  target fields inline needed ~923pt, and at the window's 1120pt minimum that truncated both the
-  connection name and the table name. The one value that must never be truncated is the table
+  target fields inline needed ~923pt, and at the window's 1400pt minimum (W9-T8 P-8c) that
+  truncates without the popover. The one value that must never be truncated is the table
   about to be dropped, so the toolbar shows `catalog.schema.table` with middle truncation and the
   popover holds full-width fields plus the three write modes spelled out.
 
@@ -318,7 +336,14 @@ connection.
 
 None of the three changed what is drawn, only what is re-drawn.
 
-### Shortcut schemes
+### Shortcuts
+
+W9-T2 added a **View** menu to reach focus moves and sidebar toggles, a **Shortcuts** conflict test
+that prevents two actions binding the same key, and keyboard navigation for tabs (⌃Tab and ⌃⇧Tab
+cycle through tabs, ⌘W closes, and ⌘T opens a new query). The conflict test runs at build time and
+rejects any duplicate key, so two actions can never fight over the same binding.
+
+**Shortcut schemes:**
 
 Two schemes ship, switched in **Settings** (⌘,): **DBeaver** by default and **QueryHive**, which is
 what the app bound before schemes existed. The switch is not cosmetic — every binding in the app is
@@ -339,23 +364,24 @@ The scheme is saved under `shortcutScheme`, so the choice survives a relaunch.
 
 ### Appearance: mode and theme
 
-**Settings ▸ Appearance** chooses a **mode**, a canvas, an accent, a **tone**, and how hard the
-backdrop glows. Saved under `appearanceMode`, `appTheme`, `lightTheme`, `accentChoice`,
-`surfaceTone` and `glowIntensity`.
+W9-T1 established the a11y floor and theme foundation; W9-T7 added font size controls; W9-T9 will
+establish that nothing a person must read is smaller than 11pt. **Settings ▸ Appearance** chooses
+a **mode**, a canvas, an accent, a **tone**, and how hard the backdrop glows. Saved under
+`appearanceMode`, `appTheme`, `lightTheme`, `accentChoice`, `surfaceTone` and `glowIntensity`.
 
 **Mode** is System, Light or Dark, and it is separate from the theme. The mode decides light vs
 dark; the theme decides *which* light or dark. System hands `preferredColorScheme(nil)`, which is
 what makes SwiftUI inherit macOS's appearance — and keep inheriting it live, so flipping the system
 appearance repaints the app with no observer of ours. Light and Dark pin one instead.
 
-Seven canvases, in pairs: Midnight (`#0A0B1E`, the original), Graphite (`#151517`, neutral —
+**Seven canvases (W9-T1 themes)**, in pairs: Midnight (`#0A0B1E`, the original), Graphite (`#151517`, neutral —
 measured off a reference screenshot, not invented), Nord (`#2E3440`), Ink (`#060709`), and the
 lights Daylight (`#F4F6FB`, cool), Cloud (`#F5F5F7`, neutral) and Paper (`#FAF8F4`, warm). None of
 the lights is `#FFFFFF`: a pure-white canvas makes every 1pt hairline invisible and turns the
 frosted panels into grey rectangles, so the chrome has nowhere to be. Five accents, applied as the
 glow → deep pair `Hue.exporter` is built from.
 
-**The chrome is adaptive, and that is what made a light canvas possible at all.** The chrome layer
+**The chrome is adaptive (W9-T1), and that is what made a light canvas possible at all.** The chrome layer
 is ~120 literal `white`/`black` low-opacity values across ten view files — `.white.opacity(0.07)`
 hairlines, `.white.opacity(0.9)` body text, `Color.black.opacity(0.30)` recessed fields. Those were
 correct on any near-black and unusable on off-white, and rewriting each value per appearance would

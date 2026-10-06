@@ -69,6 +69,14 @@
 > (`3ba01ae..93c864b`, 16 commit lokal, belum di-push). Ringkasan dan backlog di §"Run perf-parity"
 > di akhir dokumen. Berikutnya W3.
 
+> **Status 6 Oct 2026 (W9 persiapan dokumentasi):** W9-T0…T8 menyelesaikan fondasi desain: split
+> view asli dengan sidebar pohon objek, toolbar sistem macOS, tab dalam workspace, tema penuh (7
+> kanvas), menu View, safe mode terlihat, dan a11y lantai 11pt sudah dijalankan (W9-T9 masih
+> menunggu). Branch `work/perf-parity` sekarang pada `90fcd30` (W9-T8 final commit untuk shell native).
+> Permintaan pemilik pada 6 Oct: tab strip duduk di baris atas tanpa latar abu-abu dan konsisten di 7
+> tema (sedang diimplementasikan). `app/DESIGN.md` §Shell diperbarui untuk W9 (NavigationSplitView,
+> toolbar sistem, diagram baru, catatan pemilik).
+
 > Dokumen kerja berjalan (§4.2). Diperbarui setiap selesai satu tugas.
 > **Baca ini lebih dulu di awal sesi, lalu lanjutkan dari titik terakhir.**
 
