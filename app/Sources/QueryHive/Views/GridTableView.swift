@@ -326,6 +326,7 @@ final class GridTableView: NSTableView {
                                  context: context,
                                  text: text,
                                  staged: coordinator.stagedColumns(row),
+                                 rowState: coordinator.rowState(row),
                                  selection: selection,
                                  cursorColumn: ring?.row == row ? ring?.column : nil,
                                  cursorStrength: strength,

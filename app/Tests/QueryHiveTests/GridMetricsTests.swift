@@ -56,12 +56,42 @@ final class GridMetricsTests: XCTestCase {
 
     // MARK: The boxes the baselines measured
 
-    /// 23 for a data cell, 25 for a gutter cell, 50 for the header band — built from SwiftUI's own
-    /// line measurement rather than written as constants (risk R-10 says this test goes first).
+    /// 23 for a data cell, 25 for a gutter cell, 50 for the header band. The data box and the header
+    /// are built from SwiftUI's own line measurement rather than written as constants (risk R-10 says
+    /// this test goes first); the gutter box is the one constant, because its number is 11 pt now and
+    /// the 25 the separators were measured against must not follow the font (W10-T2, D-17).
     func testTheBoxesAreTheSizeTheBaselinesMeasured() {
         XCTAssertEqual(GridMetrics.dataBoxHeight(), 23, accuracy: 0.001)
-        XCTAssertEqual(GridMetrics.gutterBoxHeight(), 25, accuracy: 0.001)
+        XCTAssertEqual(GridMetrics.gutterBoxHeight, 25)
         XCTAssertEqual(GridMetrics.headerHeight(), 50, accuracy: 0.001)
+    }
+
+    /// The row number is at the 11 pt floor, and the 25 pt box it is centred in holds its line with
+    /// room to spare at every code family and cell size the grid offers: the box is not rebuilt from
+    /// the line height any more, so a font whose line outgrew it would draw outside it.
+    func testTheGutterNumberIsElevenPointsAndFitsItsLockedBox() {
+        XCTAssertEqual(GridMetrics.gutterFontSize, 11)
+        let context = GridPaintContext.resolve(style: .placeholder, appearance: .currentDrawing())
+        XCTAssertEqual(context.gutterFont.pointSize, 11)
+        XCTAssertEqual(context.markFont.pointSize, 11)
+        XCTAssertEqual(context.gutterBoxHeight, 25)
+        XCTAssertLessThanOrEqual(GridMetrics.lineHeight(of: context.gutterFont), context.gutterBoxHeight - 8)
+        // It does not follow the cell font: a larger cell size leaves the gutter's own alone.
+        var style = GridInputs.GridStyle.placeholder
+        style.fontSize = 16
+        XCTAssertEqual(GridPaintContext.resolve(style: style, appearance: .currentDrawing()).gutterBoxHeight, 25)
+    }
+
+    /// The gutter's separator ends where it did against the baselines: the box is centred in the row
+    /// whatever the font, so the 10.5 → 11 pt change moves no line (probe P-2a, §4.3).
+    func testTheGutterBoxSitsWhereItDidInEveryRowHeight() {
+        for (row, expectedTop, expectedHeight) in [(CGFloat(25), CGFloat(0), CGFloat(25)),
+                                                    (30, 3, 25), (21, -2, 25)] {
+            let box = GridMetrics.box(inRow: CGRect(x: 0, y: 0, width: 60, height: row),
+                                      contentHeight: GridMetrics.gutterBoxHeight, verticalPadding: 0)
+            XCTAssertEqual(box.minY, expectedTop, "row \(row)")
+            XCTAssertEqual(box.height, expectedHeight, "row \(row)")
+        }
     }
 
     /// The boxes follow the cell font. At the standard size they are the measured ones, and a larger
@@ -102,7 +132,7 @@ final class GridMetricsTests: XCTestCase {
         let larger = GridPaintContext.resolve(style: style, appearance: .currentDrawing())
         XCTAssertEqual(larger.cellFont.pointSize, 15)
         XCTAssertEqual(larger.headerFont.pointSize, 15)
-        XCTAssertEqual(larger.gutterFont.pointSize, 10.5)
+        XCTAssertEqual(larger.gutterFont.pointSize, 11)
         XCTAssertEqual(larger.chipFont.pointSize, 11)
         XCTAssertGreaterThan(larger.dataBoxHeight, standard.dataBoxHeight)
         XCTAssertGreaterThan(larger.headerLabelLine, standard.headerLabelLine)

@@ -68,9 +68,6 @@ final class GridHeaderView: NSTableHeaderView {
     /// Whether the result is cut short by the row limit, for the menu's server items.
     var resultTruncated = false
 
-    /// Left and right mouse, so a funnel click opens the filter without moving the selection.
-    var onFilterClick: ((Int, CGRect) -> Void)?
-
     /// The header's height, top-down. Re-measured whenever the columns change.
     private(set) var height: CGFloat = GridMetrics.headerHeight()
 
@@ -124,9 +121,9 @@ final class GridHeaderView: NSTableHeaderView {
                          width: geometry.gutter, height: paint.gutterBoxHeight)
         let line = line("#", font: paint.gutterFont, color: palette.inkDim)
         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        // The same centring the row numbers below use, so the "#" sits on their baseline.
         cg.textPosition = CGPoint(x: box.maxX - GridMetrics.cellPadding - width,
-                                  y: box.minY + GridMetrics.gutterVerticalPadding
-                                      + CTFontGetAscent(paint.gutterFont as CTFont))
+                                  y: GridRowPainter.baseline(for: paint.gutterFont, box: box))
         CTLineDraw(line, cg)
         cg.textPosition = .zero
         cg.setFillColor(palette.inkFaint)
@@ -181,14 +178,14 @@ final class GridHeaderView: NSTableHeaderView {
                  alignedRight: column.isNumeric,
                  into: cg)
 
-        // The funnel, at the box's top-right corner with 6 in from the right and 4 from the top —
-        // its hit area is the glyph's own bounds, as it has always been.
-        let glyph = Self.funnelBounds(content: content)
+        // The funnel, at the box's top-right corner with 6 in from the right and 4 from the top.
+        // Its hit area is the strip down the column's right edge (`funnelHitArea`), not the glyph.
+        let glyph = Self.funnelGlyph(content: content)
         draw(symbol: column.isFiltered ? "line.3.horizontal.decrease.circle.fill"
                                        : "line.3.horizontal.decrease.circle",
              pointSize: 10, weight: .regular,
              in: glyph,
-             tint: column.isFiltered ? palette.accent : palette.inkNull, into: cg)
+             tint: column.isFiltered ? palette.accent : palette.funnel, into: cg)
 
         cg.setFillColor(palette.inkFaint)
         cg.fill(CGRect(x: box.maxX - 1, y: 0, width: 1, height: bounds.height))
@@ -282,25 +279,35 @@ final class GridHeaderView: NSTableHeaderView {
 
     // MARK: Hit testing
 
-    /// The funnel's own bounds, which are also its hit area — 10 pt of glyph with a point of slack,
-    /// the same target the SwiftUI button had. W10-T2 is what widens it.
-    private static func funnelBounds(content: CGRect) -> CGRect {
+    /// Where the funnel glyph is drawn: 10 pt at the content's top-right corner.
+    private static func funnelGlyph(content: CGRect) -> CGRect {
         CGRect(x: content.maxX - 10, y: 4, width: 10, height: 10)
     }
 
+    /// The funnel's width as a target, and it is the whole header's height: a 10 pt glyph is a
+    /// target a trackpad misses (W10-T2, FR-GRID-14).
+    static let funnelHitWidth: CGFloat = 20
+
+    /// The strip that opens the filter: the header's full height by 20 pt at the column's right
+    /// edge. It wins over the sort click and over the type chip beneath it, which is why the
+    /// glyph's own corner is no longer the only place a click on the funnel can land.
+    static func funnelHitArea(columnRight: CGFloat, height: CGFloat) -> CGRect {
+        CGRect(x: columnRight - funnelHitWidth, y: 0, width: funnelHitWidth, height: height)
+    }
+
     override func mouseDown(with event: NSEvent) {
-        // A click on the funnel opens the filter; anywhere else on the header runs the sort cycle.
-        // No waiting for mouse-up: a header click has always sorted on press.
+        // A click on the funnel strip opens the filter; anywhere else on the header runs the sort
+        // cycle. No waiting for mouse-up: a header click has always sorted on press.
         let point = convert(event.locationInWindow, from: nil)
         guard let display = display(at: point) else { return }
         let column = columns[display]
-        let content = CGRect(x: geometry.edges(of: display).left + GridMetrics.cellPadding, y: 0,
-                             width: column.width - 2 * GridMetrics.cellPadding, height: bounds.height)
-        if Self.funnelBounds(content: content).contains(point) {
-            let edges = geometry.edges(of: display)
-            onFilterClick?(column.source,
-                           CGRect(x: edges.left + content.width - 10, y: bounds.height - 4 - 10,
-                                  width: 10, height: 10))
+        let edges = geometry.edges(of: display)
+        if Self.funnelHitArea(columnRight: edges.right, height: bounds.height).contains(point) {
+            // Through `commands`, like the sort: this used to go to an `onFilterClick` closure
+            // nothing ever set, so a click on the funnel did nothing at all.
+            let content = CGRect(x: edges.left + GridMetrics.cellPadding, y: 0,
+                                 width: column.width - 2 * GridMetrics.cellPadding, height: bounds.height)
+            commands?.openFilter(column.source, Self.funnelGlyph(content: content))
             return
         }
         commands?.sortClick(column.source)
@@ -351,9 +358,8 @@ final class GridHeaderView: NSTableHeaderView {
               columns.indices.contains(display)
         else { return "" }
         let column = columns[display]
-        let content = CGRect(x: geometry.edges(of: display).left + GridMetrics.cellPadding, y: 0,
-                             width: column.width - 2 * GridMetrics.cellPadding, height: bounds.height)
-        if Self.funnelBounds(content: content).contains(local) {
+        if Self.funnelHitArea(columnRight: geometry.edges(of: display).right, height: bounds.height)
+            .contains(local) {
             return column.isFiltered ? "Filtered by \(column.filterLabel ?? "")" : "Filter this column"
         }
         return "Sort by \(column.title) — on the server when possible, over the rows fetched otherwise"

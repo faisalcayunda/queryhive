@@ -43,12 +43,17 @@ struct GridInputs: Equatable {
         /// Whether a header click sorts at all. Always true today; the switch keeps the footer's
         /// own readout of the first direction from being the only thing that knows.
         var sortEnabled: Bool
+        /// Whether Increase Contrast or Reduce Transparency is on (`SurfacePolicy.enhanced`): the
+        /// separators and the header rule reach 3:1 only then (O-26), and the cursor ring is
+        /// wider. Read from the store when the style is built, inside `ResultGrid.body`, so
+        /// flipping the system switch is a change of the inputs and the palette is rebuilt.
+        var contrast = ThemeStore.shared.surface.enhanced
 
         /// The style with nothing set, for a context that has not been given one yet.
         static let placeholder = GridStyle(rowHeight: 25, alternateRows: true, showRowNumbers: true,
                                            nullDisplay: "null", codeFontFamily: "", accent: "ice",
                                            isDark: false,
-                                           sortEnabled: true)
+                                           sortEnabled: true, contrast: false)
     }
 
     /// The revision of `tab.result`: when this changes, the rows under every row index have changed.
@@ -518,6 +523,13 @@ struct ResultGridTable: NSViewRepresentable {
             let head = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
                 .first.map(String.init) ?? text
             return head.count > CellText.prefixLimit ? String(head.prefix(CellText.prefixLimit)) : head
+        }
+
+        /// The row's own state, for the painter: added and deleted rows are washed across, with a
+        /// sign, and a deleted row's text is struck. Cheap when nothing is staged, which is nearly
+        /// always, so the draw path pays one `isEmpty` for it.
+        func rowState(_ row: Int) -> CellEdits.CellState {
+            tab.cellEdits.isEmpty ? .unchanged : tab.cellEdits.rowState(resultRow(forTableRow: row))
         }
 
         /// Which drawn columns carry a staged edit on this row, for the painter's wash and dot.

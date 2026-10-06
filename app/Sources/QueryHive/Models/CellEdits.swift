@@ -155,6 +155,30 @@ struct CellEdits: Equatable {
 
     func isDeleted(_ row: Int) -> Bool { deletedRows.contains(row) }
 
+    /// What the grid says about a cell or a row, so the painter, the accessibility label and a
+    /// test read one answer (blueprint w10 §4.2, FR-GRID-09).
+    enum CellState: Equatable {
+        case unchanged, modified, inserted, deleted
+    }
+
+    /// One cell's state. A cell of a row marked for deletion is deleted whatever it held; a cell of
+    /// an added row is inserted (its row id is negative); otherwise it is modified when it carries a
+    /// staged value. Read only: the gestures that add and remove rows arrive with W10-T3.
+    func state(of key: CellKey) -> CellState {
+        let row = rowState(key.row)
+        if row == .deleted || row == .inserted { return row }
+        return values[key] != nil ? .modified : .unchanged
+    }
+
+    /// One row's state: `deleted` for a fetched row marked for deletion, `inserted` for an added
+    /// row (a negative id that is in the queue), `modified` when any of its cells is staged, and
+    /// `unchanged` otherwise.
+    func rowState(_ row: Int) -> CellState {
+        if row < 0 { return inserted.contains { $0.id == row } ? .inserted : .unchanged }
+        if isDeleted(row) { return .deleted }
+        return hasStagedEdit(row: row) ? .modified : .unchanged
+    }
+
     func insertedValue(row id: Int, column: Int) -> String? {
         inserted.first { $0.id == id }?.values[column]
     }

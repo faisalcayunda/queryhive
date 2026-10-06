@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // Design language modelled on CleanMyMac: a near-black canvas lit by two glowing module
@@ -114,18 +115,43 @@ enum Tone {
 
     /// Tab-stage tints that stay readable on a light canvas. The dark values are the categorical
     /// colours; the light ones clear 3:1 on all three light canvases.
-    static var markMint: Color { stageTint(dark: 0x3EE6A8, light: 0x0B7D5E) }
-    static var markCoral: Color { stageTint(dark: 0xFF5E6C, light: 0xD6283A) }
-    static var markAmber: Color { stageTint(dark: 0xFFB547, light: 0x9A5B00) }
+    static var markMint: Color { Color(nsColor: markMintNS) }
+    static var markCoral: Color { Color(nsColor: markCoralNS) }
+    static var markAmber: Color { Color(nsColor: markAmberNS) }
 
     static func stageTint(dark: UInt32, light: UInt32) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
+        Color(nsColor: stageTintNS(dark: dark, light: light))
+    }
+
+    /// The same tints for AppKit, still dynamic: the grid paints its staged washes and marks with
+    /// these, so a changed, added or deleted row reads the same in the grid as in a tab's badge.
+    static func stageTintNS(dark: UInt32, light: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
             let hex = appearance.isDark ? dark : light
             return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
                            green: CGFloat((hex >> 8) & 0xFF) / 255,
                            blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
-        })
+        }
     }
+
+    static var markMintNS: NSColor { stageTintNS(dark: 0x3EE6A8, light: 0x0B7D5E) }
+    static var markCoralNS: NSColor { stageTintNS(dark: 0xFF5E6C, light: 0xD6283A) }
+    static var markAmberNS: NSColor { stageTintNS(dark: 0xFFB547, light: 0x9A5B00) }
+
+    // MARK: The focus ring
+
+    /// The ring that marks where the keyboard is: the grid's cell cursor, and the outline's row.
+    ///
+    /// Not `accent`: four of the five accents are under 3:1 on a light canvas, and a ring that cannot
+    /// be seen is no cursor. This is the one of the accent's two halves that stands out from the
+    /// canvas (3:1 is the floor for a mark that is not text), else the ink. It reads the store, so it
+    /// follows the theme and the accent, and the ink fallback stays dynamic.
+    static var focusRingNS: NSColor {
+        GridContrast.ringColour(candidates: [NSColor(accent), NSColor(accentDeep)],
+                                canvas: NSColor(canvas), fallback: inkNS(1))
+    }
+
+    static var focusRing: Color { Color(nsColor: focusRingNS) }
 
     /// The quiet readouts: the editor's line numbers and the line count in its corner.
     ///
@@ -157,6 +183,66 @@ enum Tone {
 
     /// Written once and read by both, so the two readouts cannot drift apart again.
     private static var readoutOpacity: CGFloat { ThemeStore.shared.surface.enhanced ? 0.75 : 0.55 }
+}
+
+/// The grid's ink, as alphas of `Tone.ink` (blueprint w10 §4.1).
+///
+/// Two sets and one switch: Increase Contrast (and Reduce Transparency) pick `enhanced`.
+/// The row numbers and NULL clear 4.5:1 and the idle funnel 3:1 on all seven canvases in both sets
+/// (`GridPaletteContrastTests` holds them there). The separators stay hairlines in the calm set,
+/// because lifting every one of them to 3:1 turns the grid into a heavy lattice; only under
+/// Increase Contrast, where the person asked for it, do they reach 3:1 (owner decision O-26).
+struct GridInk: Equatable {
+    var rowNumber: CGFloat
+    var null: CGFloat
+    var funnel: CGFloat
+    var label: CGFloat
+    var text: CGFloat
+    var separator: CGFloat
+    var rule: CGFloat
+    var stripe: CGFloat
+
+    static let calm = GridInk(rowNumber: 0.60, null: 0.60, funnel: 0.50, label: 0.92, text: 0.90,
+                              separator: 0.05, rule: 0.12, stripe: 0.03)
+    static let enhanced = GridInk(rowNumber: 0.80, null: 0.80, funnel: 0.70, label: 1.0, text: 1.0,
+                                  separator: 0.45, rule: 0.50, stripe: 0.06)
+
+    static func levels(enhanced: Bool) -> GridInk { enhanced ? .enhanced : .calm }
+
+    /// The staged washes, over the row or the cell, and the ink the quieter staged text takes: a
+    /// deleted row's values and an added row's `DEFAULT`. 0.75, not the 0.60 the blueprint first
+    /// gave `DEFAULT`: at 0.60 it is 4.33:1 on Nord under the mint wash.
+    static let changedWash: CGFloat = 0.20
+    static let insertedWash: CGFloat = 0.16
+    static let deletedWash: CGFloat = 0.14
+    static let secondaryText: CGFloat = 0.75
+}
+
+/// WCAG 2.x contrast, for the one colour the grid has to choose rather than inherit.
+enum GridContrast {
+    /// The contrast ratio of two colours, 1 to 21, with alpha ignored.
+    static func ratio(_ a: NSColor, _ b: NSColor) -> Double {
+        let (high, low) = (max(luminance(a), luminance(b)), min(luminance(a), luminance(b)))
+        return (high + 0.05) / (low + 0.05)
+    }
+
+    /// The candidate that stands out most from the canvas, if any is at 3:1 or better (the floor
+    /// for a non-text mark), else `fallback`.
+    static func ringColour(candidates: [NSColor], canvas: NSColor, fallback: NSColor) -> NSColor {
+        let best = candidates.max { ratio($0, canvas) < ratio($1, canvas) }
+        guard let best, ratio(best, canvas) >= 3 else { return fallback }
+        return best
+    }
+
+    private static func luminance(_ colour: NSColor) -> Double {
+        let rgb = colour.usingColorSpace(.sRGB) ?? colour
+        func linear(_ value: CGFloat) -> Double {
+            let v = Double(value)
+            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent)
+            + 0.0722 * linear(rgb.blueComponent)
+    }
 }
 
 extension NSAppearance {

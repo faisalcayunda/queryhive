@@ -701,3 +701,333 @@ final class GridParityTests: XCTestCase {
         XCTAssertEqual(text, "kode\tcatatan\nK-3\tcatatan 3\nK-4\tcatatan 4")
     }
 }
+
+// MARK: - The staged grammar, the contrast setting and the funnel (W10-T2)
+
+/// A row painted into a bitmap by the painter alone, no table and no window: what an added, a
+/// deleted and a changed row look like, in the grid's own pixels (blueprint w10 §4.2, §4.4).
+private struct PaintedRow: Equatable {
+    let width: Int
+    let height: Int
+    let bytes: [UInt8]
+
+    func pixel(_ x: Int, _ y: Int) -> (r: Int, g: Int, b: Int) {
+        let i = (y * width + x) * 4
+        return (Int(bytes[i]), Int(bytes[i + 1]), Int(bytes[i + 2]))
+    }
+
+    /// Pixels in a rectangle whose channels spread by `by` or more: a mint, coral or amber mark, and
+    /// never grey ink, a wash or the canvas.
+    func saturated(_ rect: CGRect, by spread: Int = 100) -> Int {
+        count(rect) { max($0.r, $0.g, $0.b) - min($0.r, $0.g, $0.b) >= spread }
+    }
+
+    /// Pixels in a rectangle that are light grey: ink on a dark row.
+    func lightInk(_ rect: CGRect) -> Int {
+        count(rect) { min($0.r, $0.g, $0.b) > 120 && max($0.r, $0.g, $0.b) - min($0.r, $0.g, $0.b) < 70 }
+    }
+
+    func count(_ rect: CGRect, where test: ((r: Int, g: Int, b: Int)) -> Bool) -> Int {
+        var n = 0
+        for y in max(0, Int(rect.minY))..<min(height, Int(rect.maxY)) {
+            for x in max(0, Int(rect.minX))..<min(width, Int(rect.maxX)) where test(pixel(x, y)) { n += 1 }
+        }
+        return n
+    }
+
+    /// The longest run of light ink along one pixel row of a rectangle, over all its rows: a strike
+    /// is one long run, and a word of letters with no horizontal stroke has none.
+    func longestLightRun(_ rect: CGRect) -> Int {
+        var best = 0
+        for y in max(0, Int(rect.minY))..<min(height, Int(rect.maxY)) {
+            var run = 0
+            for x in max(0, Int(rect.minX))..<min(width, Int(rect.maxX)) {
+                let p = pixel(x, y)
+                if min(p.r, p.g, p.b) > 150 { run += 1; best = max(best, run) } else { run = 0 }
+            }
+        }
+        return best
+    }
+
+    /// The leftmost light-ink pixel in a rectangle, or `nil`.
+    func leftmostLight(_ rect: CGRect) -> Int? {
+        for x in max(0, Int(rect.minX))..<min(width, Int(rect.maxX)) {
+            for y in max(0, Int(rect.minY))..<min(height, Int(rect.maxY)) {
+                let p = pixel(x, y)
+                if min(p.r, p.g, p.b) > 120, max(p.r, p.g, p.b) - min(p.r, p.g, p.b) < 70 { return x }
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor
+extension GridParityTests {
+    private static let rowHeight = 25
+
+    /// Row 0 painted on the theme's canvas. Two 120 pt columns after the gutter, no stripes.
+    private func paintRow(_ state: CellEdits.CellState = .unchanged,
+                          staged: Set<Int> = [],
+                          cells: [String] = ["vvvvvvvv", "x"],
+                          flags: [CellFlags] = [],
+                          dark: Bool = true,
+                          showRowNumbers: Bool = true,
+                          contrast: Bool = false,
+                          selection: CellRange? = nil) throws -> PaintedRow {
+        var style = GridInputs.GridStyle.placeholder
+        style.alternateRows = false
+        style.showRowNumbers = showRowNumbers
+        style.isDark = dark
+        style.contrast = contrast
+        var context = GridPaintContext.resolve(style: style, appearance: NSAppearance(named: dark ? .darkAqua : .aqua)!)
+        context.geometry = GridColumnGeometry(gutter: GridMetrics.gutterWidth(showRowNumbers: showRowNumbers),
+                                              widths: [120, 120])
+        context.numeric = [false, false]
+        let width = Int(context.geometry.totalWidth.rounded(.up)), height = Self.rowHeight
+        let cg = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                         bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        // The theme's own canvas, then y flipped to run down like the table's.
+        let canvas = dark ? AppTheme.midnight.canvas : AppTheme.daylight.canvas
+        var fill = NSColor.black
+        NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+            fill = NSColor(canvas).usingColorSpace(.sRGB)!
+        }
+        cg.setFillColor(fill.cgColor)
+        cg.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        cg.translateBy(x: 0, y: CGFloat(height))
+        cg.scaleBy(x: 1, y: -1)
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        GridRowPainter.paint(row: 0, columns: 0..<2, context: context,
+                             text: GridRowText(first: 0, cells: cells, flags: flags),
+                             staged: staged, rowState: state, selection: selection,
+                             lines: GridLineCache(), width: CGFloat(width), into: cg)
+        let data = try XCTUnwrap(cg.data)
+        return PaintedRow(width: width, height: height,
+                          bytes: Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self),
+                                                           count: width * height * 4)))
+    }
+
+    private var gutterSign: CGRect { CGRect(x: 0, y: 0, width: 12, height: 25) }
+
+    // MARK: The staged grammar
+
+    /// An added row is washed mint across the whole row, the gutter and every cell, and carries a
+    /// `+` in the gutter that no other state has (D-4).
+    func testAnAddedRowIsWashedMintAcrossTheRowAndSignedPlus() throws {
+        let plain = try paintRow(.unchanged)
+        let added = try paintRow(.inserted)
+        let canvas = plain.pixel(20, 3)
+        for x in [20, 100, 230] {
+            let p = added.pixel(x, 3)
+            XCTAssertGreaterThan(p.g - canvas.g, 20, "mint wash at x \(x)")
+            XCTAssertGreaterThan(p.g - canvas.g, 2 * (p.r - canvas.r), "…and it is green, not a grey lift")
+        }
+        XCTAssertEqual(plain.saturated(gutterSign), 0)
+        XCTAssertGreaterThan(added.saturated(gutterSign), 6, "the + is drawn in mint")
+        XCTAssertEqual(try paintRow(.modified, staged: []).saturated(gutterSign), 0, "a changed row has no sign")
+    }
+
+    func testADeletedRowIsWashedCoralAcrossTheRowAndSignedMinus() throws {
+        let plain = try paintRow(.unchanged)
+        let deleted = try paintRow(.deleted)
+        let canvas = plain.pixel(20, 3)
+        for x in [20, 100, 230] {
+            let p = deleted.pixel(x, 3)
+            XCTAssertGreaterThan(p.r - canvas.r, 20, "coral wash at x \(x)")
+            XCTAssertGreaterThan(p.r - canvas.r, (p.g - canvas.g) + 15)
+        }
+        XCTAssertGreaterThan(deleted.saturated(gutterSign), 4, "the − is drawn in coral")
+    }
+
+    /// Shapes, not colours alone (FR-GRID-09): the sign and the strike survive a colour-blind view,
+    /// and the signs are there in the light themes, where the marks are the darker variants.
+    func testTheSignsAreThereInTheLightThemeToo() throws {
+        XCTAssertGreaterThan(try paintRow(.inserted, dark: false).saturated(gutterSign), 4)
+        XCTAssertGreaterThan(try paintRow(.deleted, dark: false).saturated(gutterSign), 4)
+        XCTAssertEqual(try paintRow(.unchanged, dark: false).saturated(gutterSign), 0)
+    }
+
+    /// A deleted row's values are struck through, 1 pt across the text; the same row unmarked has no
+    /// long horizontal run in its text, which is what makes the run the strike.
+    func testADeletedRowStrikesItsTextThroughAndAnUnmarkedRowDoesNot() throws {
+        let cell = CGRect(x: 60 + 8, y: 0, width: 104, height: 25)
+        let deleted = try paintRow(.deleted)
+        let plain = try paintRow(.unchanged)
+        XCTAssertGreaterThan(deleted.longestLightRun(cell), 40, "a strike across eight characters")
+        XCTAssertLessThan(plain.longestLightRun(cell), 12)
+        XCTAssertLessThan(try paintRow(.inserted).longestLightRun(cell), 12, "an added row is not struck")
+    }
+
+    /// An added row's empty cell says `DEFAULT`, which is what the INSERT leaves to the server; the
+    /// same empty cell on any other row says nothing.
+    func testAnAddedRowsEmptyCellSaysDefault() throws {
+        let cell = CGRect(x: 60 + 120 + 8, y: 0, width: 100, height: 25)
+        XCTAssertGreaterThan(try paintRow(.inserted, cells: ["", ""]).lightInk(cell), 10)
+        XCTAssertEqual(try paintRow(.unchanged, cells: ["", ""]).lightInk(cell), 0)
+        XCTAssertEqual(try paintRow(.deleted, cells: ["", ""]).lightInk(cell), 0, "a deleted row has no DEFAULT")
+    }
+
+    /// With no gutter the sign sits inside the first cell, and that row's text moves 12 pt to make
+    /// room for it; other rows keep their text where it was (D-4).
+    func testWithoutAGutterTheSignIsInTheFirstCellAndTheTextMovesTwelve() throws {
+        let text = CGRect(x: 0, y: 0, width: 120, height: 25)
+        let plain = try paintRow(.unchanged, showRowNumbers: false)
+        let added = try paintRow(.inserted, showRowNumbers: false)
+        let deleted = try paintRow(.deleted, showRowNumbers: false)
+        XCTAssertEqual(plain.saturated(CGRect(x: 0, y: 0, width: 14, height: 25)), 0)
+        XCTAssertGreaterThan(added.saturated(CGRect(x: 0, y: 0, width: 14, height: 25)), 6)
+        XCTAssertGreaterThan(deleted.saturated(CGRect(x: 0, y: 0, width: 14, height: 25)), 4)
+        // The sign's own pixels are saturated, not light grey, so the first light pixel is the text.
+        let still = try XCTUnwrap(plain.leftmostLight(text))
+        let moved = try XCTUnwrap(added.leftmostLight(text))
+        XCTAssertEqual(moved - still, 12, accuracy: 1)
+    }
+
+    /// A staged wash wins over the selection wash, and an added or deleted row's wash does too:
+    /// the selection adds nothing to those rows (the ring still shows, which is T1's).
+    func testTheSelectionWashDoesNotTintAnAddedOrADeletedRow() throws {
+        let selection = CellRange(from: (0, 0), to: (0, 0))
+        XCTAssertEqual(try paintRow(.inserted), try paintRow(.inserted, selection: selection))
+        XCTAssertEqual(try paintRow(.deleted), try paintRow(.deleted, selection: selection))
+        XCTAssertNotEqual(try paintRow(.unchanged), try paintRow(.unchanged, selection: selection),
+                          "the control: a plain row does take the wash")
+    }
+
+    /// A changed cell keeps its wash and its dot, which is the one grammar that did not change.
+    func testAChangedCellKeepsItsWashAndItsDot() throws {
+        let plain = try paintRow(.unchanged)
+        let changed = try paintRow(.modified, staged: [0])
+        XCTAssertGreaterThan(changed.pixel(100, 3).r - plain.pixel(100, 3).r, 15, "amber wash")
+        let dot = CGRect(x: 60 + 120 - 3 - 4 - 1, y: 1 + 3 - 1, width: 6, height: 6)
+        XCTAssertGreaterThan(changed.saturated(dot), 8)
+        XCTAssertEqual(plain.saturated(dot), 0)
+    }
+
+    // MARK: Increase Contrast
+
+    /// O-26: the gutter's separator is a hairline calm and a 45% line under Increase Contrast.
+    func testTheSeparatorsReachThreeToOneOnlyUnderIncreaseContrast() throws {
+        let calm = try paintRow(.unchanged)
+        let enhanced = try paintRow(.unchanged, contrast: true)
+        let canvas = calm.pixel(20, 3).r
+        let separator = (x: 59, y: 12)
+        XCTAssertLessThan(calm.pixel(separator.x, separator.y).r - canvas, 30, "a calm separator is a hairline")
+        XCTAssertGreaterThan(enhanced.pixel(separator.x, separator.y).r - canvas, 90, "…and a line under Increase Contrast")
+    }
+
+    /// The switch reaches the grid through the style: building one while the system asks for more
+    /// contrast gives a style that differs, so the coordinator rebuilds the palette and throws away
+    /// the cached lines that baked the old colours in.
+    func testIncreaseContrastIsPartOfTheStyleAndRebuildsThePalette() throws {
+        let store = ThemeStore.shared
+        defer { store.unpinSurface() }
+        store.pin(reduceMotion: false, reduceTransparency: false, increaseContrast: false)
+        let calmStyle = GridInputs.GridStyle(rowHeight: 25, alternateRows: true, showRowNumbers: true,
+                                             nullDisplay: "null", codeFontFamily: "", accent: "ice",
+                                             isDark: true, sortEnabled: true)
+        XCTAssertFalse(calmStyle.contrast)
+        store.pin(increaseContrast: true)
+        let enhancedStyle = GridInputs.GridStyle(rowHeight: 25, alternateRows: true, showRowNumbers: true,
+                                                 nullDisplay: "null", codeFontFamily: "", accent: "ice",
+                                                 isDark: true, sortEnabled: true)
+        XCTAssertTrue(enhancedStyle.contrast)
+        XCTAssertNotEqual(calmStyle, enhancedStyle)
+
+        let fixture = GridFixture(columns: [Event.Column(name: "kode", type: "text")],
+                                  rows: [["a"], ["b"]], style: calmStyle)
+        fixture.apply()
+        let calm = fixture.coordinator.paint.palette
+        fixture.apply(GridInputs(revision: 1, layout: fixture.inputs().layout, selection: nil,
+                                 edits: fixture.tab.cellEdits, sort: nil, filtered: [],
+                                 style: enhancedStyle, filterPopover: nil, viewing: nil), force: false)
+        XCTAssertNotEqual(fixture.coordinator.paint.palette, calm)
+        XCTAssertTrue(fixture.coordinator.paint.contrast)
+    }
+
+    // MARK: Through the table
+
+    /// The row's state reaches the painter from the tab's own queue, a deleted row repaints across
+    /// every column when it is marked, and repainting it twice gives the same pixels.
+    func testAMarkedRowIsPaintedThroughTheTableAndRepaintsIdempotently() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        let row = fixture.table.rect(ofRow: 5).intersection(fixture.table.visibleRect).integral
+        let before = try raster(row, in: fixture.table)
+
+        fixture.tab.cellEdits.deleteRow(5)
+        fixture.apply(fixture.inputs(), force: false)
+        XCTAssertEqual(fixture.coordinator.rowState(5), .deleted)
+        XCTAssertEqual(fixture.coordinator.rowState(6), .unchanged)
+
+        let after = try raster(row, in: fixture.table)
+        XCTAssertNotEqual(before, after, "marking the row changed what is on screen")
+        XCTAssertEqual(after, try raster(row, in: fixture.table), "and painting it again changes nothing")
+    }
+
+    func testMarkingARowForDeletionRepaintsItsWholeWidthAndOnlyThatRow() {
+        func inputs(_ edits: CellEdits) -> GridInputs {
+            GridInputs(revision: 1,
+                       layout: GridInputs.GridColumnLayout(columnWidths: [100, 100], visibleSources: [0, 1]),
+                       selection: nil, edits: edits, sort: nil, filtered: [], style: .placeholder,
+                       filterPopover: nil, viewing: nil)
+        }
+        var edits = CellEdits()
+        edits.deleteRow(4)
+        XCTAssertEqual(GridPaintDiff.invalidatedRows(old: inputs(CellEdits()), new: inputs(edits),
+                                                     oldRowCount: 40, newRowCount: 40), IndexSet([4]))
+        XCTAssertNil(GridPaintDiff.invalidatedColumns(old: inputs(CellEdits()), new: inputs(edits)),
+                     "a deleted row is a row-wide wash: every column repaints")
+        XCTAssertEqual(GridPaintDiff.invalidatedRows(old: inputs(edits), new: inputs(CellEdits()),
+                                                     oldRowCount: 40, newRowCount: 40), IndexSet([4]),
+                       "and letting it go repaints it too")
+    }
+
+    // MARK: The funnel
+
+    /// The funnel's target is the header's whole height by 20 pt at the column's right edge
+    /// (FR-GRID-14), not the 10 pt glyph: the top, the middle and the bottom of the strip, under the
+    /// type chip, all say "Filter this column", and 5 pt left of the strip says "Sort".
+    func testTheFunnelHitAreaIsTheWholeHeaderHeightAt20pt() throws {
+        XCTAssertEqual(GridHeaderView.funnelHitArea(columnRight: 200, height: 50),
+                       CGRect(x: 180, y: 0, width: 20, height: 50))
+
+        let fixture = makeGrid()
+        fixture.apply()
+        let header = fixture.table.header
+        header.scheduleTooltips()
+        let tag = header.addToolTip(header.bounds, owner: header, userData: nil)
+        let right = fixture.coordinator.geometry.edges(of: 0).right
+        func tip(_ x: CGFloat, _ y: CGFloat) -> String {
+            header.view(header, stringForToolTip: tag, point: header.convert(CGPoint(x: x, y: y), to: nil),
+                        userData: nil)
+        }
+        for y in [CGFloat(1), header.bounds.midY, header.bounds.height - 2] {
+            XCTAssertEqual(tip(right - 10, y), "Filter this column", "y \(y)")
+            XCTAssertEqual(tip(right - 19, y), "Filter this column", "the strip is 20 wide, y \(y)")
+        }
+        XCTAssertTrue(tip(right - 24, header.bounds.midY).hasPrefix("Sort by"))
+    }
+
+    /// A press in the strip opens the filter and does not sort, and a press beside it sorts: the
+    /// funnel used to be wired to a closure nothing set, so pressing it did nothing at all.
+    func testAPressInTheFunnelStripOpensTheFilterAndAPressBesideItSorts() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        let header = fixture.table.header
+        let right = fixture.coordinator.geometry.edges(of: 1).right
+        func press(_ x: CGFloat, _ y: CGFloat) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: .leftMouseDown, location: header.convert(CGPoint(x: x, y: y), to: nil),
+                modifierFlags: [], timestamp: 0, windowNumber: fixture.window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1))
+            header.mouseDown(with: event)
+        }
+        try press(right - 12, header.bounds.height - 3)
+        XCTAssertEqual(fixture.log.openFilter.map(\.0), [1], "the strip, under the chip, is the funnel")
+        XCTAssertTrue(fixture.log.sortClick.isEmpty)
+        try press(right - 40, header.bounds.midY)
+        XCTAssertEqual(fixture.log.sortClick, [1])
+        XCTAssertEqual(fixture.log.openFilter.count, 1)
+    }
+}

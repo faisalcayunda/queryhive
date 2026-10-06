@@ -11,8 +11,13 @@ enum GridMetrics {
     static let cellPadding: CGFloat = 8
     /// The vertical padding around a data cell's text. `23 = 15 + 2 × 4` at the default row height.
     static let cellVerticalPadding: CGFloat = 4
-    /// The vertical padding around the gutter's number: `25 = 13 + 2 × 6`.
-    static let gutterVerticalPadding: CGFloat = 6
+    /// The gutter cell's box height, a constant since W10-T2: the number is 11 pt, and the box is
+    /// not rebuilt from its line height (`13 + 2 × 6` at 10.5 pt, 14 + 2 × 6 at 11) because the
+    /// separator that ends at the row's base, and the order the rows paint in, were measured against
+    /// 25. The number is centred in the box rather than hung from its top.
+    static let gutterBoxHeight: CGFloat = 25
+    /// The row number's size: at the 11 pt floor, like everything a person has to read.
+    static let gutterFontSize: CGFloat = 11
     /// The header band's own vertical padding, above the label and below the chip: `50 = 6 + 15 + 3
     /// + (14 + 2 × 3) + 6`. Six rather than the cell's four, because the header band is a surface of
     /// its own and the extra point on each side is what separated it from the first row.
@@ -123,12 +128,6 @@ enum GridMetrics {
     /// A data cell's box height: one line of the cell font plus its vertical padding. 23 at the default.
     static func dataBoxHeight(fontSize: Int = DataPreferences.standardGridFontSize) -> CGFloat {
         lineHeight(of: FontChoice.codeNSFont(size: CGFloat(fontSize), weight: nil)) + 2 * cellVerticalPadding
-    }
-
-    /// The gutter cell's box height: 25 at the default, and it is what makes the gutter's separator
-    /// reach exactly the row's base while a data cell's stops a point short of it.
-    static func gutterBoxHeight() -> CGFloat {
-        lineHeight(of: FontChoice.codeNSFont(size: 10.5, weight: nil)) + 2 * gutterVerticalPadding
     }
 
     /// The box a cell of this height occupies inside its row.

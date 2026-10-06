@@ -9,28 +9,38 @@ import SwiftUI
 /// already final. `GridPalette.resolve(appearance:)` is the one place that happens, and the table
 /// throws the line cache away when it returns a different palette — see `GridRowPainter.epoch`.
 struct GridPalette: Equatable {
-    /// `ink` — white on a dark appearance, black on a light one — at the alphas the grid uses.
+    /// `ink` — white on a dark appearance, black on a light one — at the alphas the grid uses
+    /// (`GridInk`: one set for the calm look, one for Increase Contrast).
     let ink: CGColor
     let inkStrong: CGColor
     let inkLabel: CGColor
+    /// The row numbers and the header's `#`: 4.5:1 on every canvas (W10-T2).
     let inkDim: CGColor
+    /// The separators: a hairline, and 3:1 only under Increase Contrast (O-26).
     let inkFaint: CGColor
+    /// NULL and `∅`.
     let inkNull: CGColor
+    /// The idle funnel: 3:1 on every canvas.
+    let funnel: CGColor
     let rule: CGColor
     /// `recess` at 0.30: the header band, a shade *of* the surface rather than a slab over it.
     let headerBand: CGColor
     let stripe: CGColor
     let selection: CGColor
+    /// A changed cell's wash, an added row's and a deleted row's.
     let staged: CGColor
+    let insertedWash: CGColor
+    let deletedWash: CGColor
+    /// The quieter staged text: a deleted row's values, and an added row's `DEFAULT`.
+    let inkSecondary: CGColor
     let accent: CGColor
-    /// The cursor's ring. Not `accent`: four of the five accents are under 3:1 on a light canvas,
-    /// and a ring that cannot be seen is no cursor. `GridContrast.ringColour` picks the one of the
-    /// accent's two halves that stands out from the canvas, and falls back to the ink.
-    ///
-    /// ponytail: this is the rule `Tone.focusRing` (W9 D-8) will state once that token lands; the
-    /// grid keeps its own copy until then so W10-T1 is not blocked on `Theme.swift`.
+    /// The cursor's ring: `Tone.focusRing`, the one rule for it (TD-1).
     let cursor: CGColor
+    /// The staged marks: the changed cell's dot, the `+` and the `−` of an added and a deleted row.
+    /// The light variants clear 3:1 on the light canvases, which the categorical hues do not.
     let amber: CGColor
+    let markMint: CGColor
+    let markCoral: CGColor
     let secondary: CGColor
     /// The fixed categorical tints the type chip uses.
     let mint: CGColor
@@ -43,8 +53,10 @@ struct GridPalette: Equatable {
     ///
     /// Built from the same closures `Tone` uses rather than converted from a SwiftUI `Color`, so a
     /// dynamic colour keeps resolving per appearance instead of being snapshotted at whatever
-    /// appearance happened to be current.
-    static func resolve(_ appearance: NSAppearance) -> GridPalette {
+    /// appearance happened to be current. `enhanced` is Increase Contrast or Reduce Transparency,
+    /// carried by `GridStyle.contrast` so a change of it repaints like any other style change.
+    static func resolve(_ appearance: NSAppearance,
+                        enhanced: Bool = ThemeStore.shared.surface.enhanced) -> GridPalette {
         var palette: GridPalette!
         appearance.performAsCurrentDrawingAppearance {
             func ink(_ alpha: CGFloat) -> CGColor { Tone.inkNS(alpha).cgColor }
@@ -52,24 +64,29 @@ struct GridPalette: Equatable {
                 NSColor(name: nil) { $0.isDark ? NSColor.black.withAlphaComponent(alpha)
                                                 : NSColor.white.withAlphaComponent(alpha) }.cgColor
             }
+            let levels = GridInk.levels(enhanced: enhanced)
             let accent = ThemeStore.shared.accent
             palette = GridPalette(
                 ink: ink(1),
-                inkStrong: ink(0.9),
-                inkLabel: ink(0.92),
-                inkDim: ink(0.35),
-                inkFaint: ink(0.05),
-                inkNull: ink(0.3),
-                rule: ink(0.12),
+                inkStrong: ink(levels.text),
+                inkLabel: ink(levels.label),
+                inkDim: ink(levels.rowNumber),
+                inkFaint: ink(levels.separator),
+                inkNull: ink(levels.null),
+                funnel: ink(levels.funnel),
+                rule: ink(levels.rule),
                 headerBand: recess(0.30),
-                stripe: ink(0.03),
+                stripe: ink(levels.stripe),
                 selection: accent.glow.resolvedCGColor(alpha: 0.20),
-                staged: NSColor(hex: 0xFFB547).withAlphaComponent(0.20).cgColor,
+                staged: Tone.markAmberNS.withAlphaComponent(GridInk.changedWash).cgColor,
+                insertedWash: Tone.markMintNS.withAlphaComponent(GridInk.insertedWash).cgColor,
+                deletedWash: Tone.markCoralNS.withAlphaComponent(GridInk.deletedWash).cgColor,
+                inkSecondary: ink(GridInk.secondaryText),
                 accent: accent.glow.resolvedCGColor(alpha: nil),
-                cursor: GridContrast.ringColour(candidates: [NSColor(accent.glow), NSColor(accent.deep)],
-                                                canvas: NSColor(Tone.canvas),
-                                                fallback: Tone.inkNS(1)).cgColor,
-                amber: NSColor(hex: 0xFFB547).cgColor,
+                cursor: Tone.focusRingNS.cgColor,
+                amber: Tone.markAmberNS.cgColor,
+                markMint: Tone.markMintNS.cgColor,
+                markCoral: Tone.markCoralNS.cgColor,
                 secondary: ink(0.68),
                 mint: NSColor(hex: 0x3EE6A8).cgColor,
                 violet: NSColor(hex: 0x7B61FF).cgColor,
@@ -79,33 +96,6 @@ struct GridPalette: Equatable {
             )
         }
         return palette
-    }
-}
-
-/// WCAG 2.x contrast, for the one colour the grid has to choose rather than inherit.
-enum GridContrast {
-    /// The contrast ratio of two colours, 1 to 21, with alpha ignored.
-    static func ratio(_ a: NSColor, _ b: NSColor) -> Double {
-        let (high, low) = (max(luminance(a), luminance(b)), min(luminance(a), luminance(b)))
-        return (high + 0.05) / (low + 0.05)
-    }
-
-    /// The candidate that stands out most from the canvas, if any is at 3:1 or better (the floor
-    /// for a non-text mark), else `fallback`.
-    static func ringColour(candidates: [NSColor], canvas: NSColor, fallback: NSColor) -> NSColor {
-        let best = candidates.max { ratio($0, canvas) < ratio($1, canvas) }
-        guard let best, ratio(best, canvas) >= 3 else { return fallback }
-        return best
-    }
-
-    private static func luminance(_ colour: NSColor) -> Double {
-        let rgb = colour.usingColorSpace(.sRGB) ?? colour
-        func linear(_ value: CGFloat) -> Double {
-            let v = Double(value)
-            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
-        }
-        return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent)
-            + 0.0722 * linear(rgb.blueComponent)
     }
 }
 
@@ -163,6 +153,11 @@ struct GridPaintContext {
     var rowHeight: CGFloat
     var dataBoxHeight: CGFloat
     var gutterBoxHeight: CGFloat
+    /// The `+` and `−` of an added and a deleted row: the gutter's size, bold.
+    var markFont: NSFont
+    /// Whether Increase Contrast (or Reduce Transparency) is on: the palette's separators and the
+    /// ring's width follow it, and it is a field here so a change of it is a change of the style.
+    var contrast: Bool
     /// One line of a header label, and one of a chip: the two numbers the header's height is built
     /// from, measured here rather than per draw.
     var headerLabelLine: CGFloat
@@ -177,19 +172,21 @@ struct GridPaintContext {
     /// palette and the flags, which the caller supplies.
     static func resolve(style: GridInputs.GridStyle, appearance: NSAppearance) -> GridPaintContext {
         let cellFont = FontChoice.codeNSFont(size: CGFloat(style.fontSize), weight: nil)
-        let gutterFont = FontChoice.codeNSFont(size: 10.5, weight: nil)
+        let gutterFont = FontChoice.codeNSFont(size: GridMetrics.gutterFontSize, weight: nil)
         let headerFont = FontChoice.codeNSFont(size: CGFloat(style.fontSize), weight: .semibold)
         let chipFont = FontChoice.codeNSFont(size: 11, weight: .semibold)
         return GridPaintContext(
             geometry: GridColumnGeometry(gutter: 0, widths: []),
-            palette: GridPalette.resolve(appearance),
+            palette: GridPalette.resolve(appearance, enhanced: style.contrast),
             cellFont: cellFont,
             gutterFont: gutterFont,
             headerFont: headerFont,
             chipFont: chipFont,
             rowHeight: style.rowHeight,
             dataBoxHeight: GridMetrics.lineHeight(of: cellFont) + 2 * GridMetrics.cellVerticalPadding,
-            gutterBoxHeight: GridMetrics.lineHeight(of: gutterFont) + 2 * GridMetrics.gutterVerticalPadding,
+            gutterBoxHeight: GridMetrics.gutterBoxHeight,
+            markFont: FontChoice.codeNSFont(size: GridMetrics.gutterFontSize, weight: .bold),
+            contrast: style.contrast,
             headerLabelLine: GridMetrics.lineHeight(of: headerFont),
             chipLine: GridMetrics.lineHeight(of: chipFont),
             alternateRows: style.alternateRows,
@@ -214,12 +211,15 @@ enum GridRowPainter {
     /// The six paints of §6.1, in order, for one row.
     ///
     /// `row` is the row's index in the rows the grid is drawing, which is what the gutter prints and
-    /// what the selection rectangle holds.
+    /// what the selection rectangle holds. `rowState` is the row's own staged state: an added row
+    /// gets a mint wash across it and a `+`, a deleted one a coral wash, a `−` and a strike through
+    /// each value (W10-T2, FR-GRID-09); a changed cell is `staged`, a wash and a dot.
     static func paint(row: Int,
                       columns: Range<Int>,
                       context: GridPaintContext,
                       text: GridRowText,
                       staged: Set<Int>,
+                      rowState: CellEdits.CellState = .unchanged,
                       selection: CellRange?,
                       cursorColumn: Int? = nil,
                       cursorStrength: CGFloat = 1,
@@ -236,9 +236,17 @@ enum GridRowPainter {
             cg.fill(rowRect)
         }
 
+        // 1b. An added or a deleted row's wash, the whole row wide like the stripe. It paints over
+        //     the stripe (the wash is the stronger statement) and under everything else.
+        let rowMark = Self.rowMark(for: rowState, palette: context.palette)
+        if let rowMark {
+            cg.setFillColor(rowMark.wash)
+            cg.fill(rowRect)
+        }
+
         // 2. Gutter.
         if context.showRowNumbers {
-            paintGutter(row: row, context: context, lines: lines, into: cg)
+            paintGutter(row: row, context: context, mark: rowMark, lines: lines, into: cg)
         }
 
         // 3. Each column in `columns`: wash, text, staged dot, separator. The rest are off the
@@ -251,6 +259,7 @@ enum GridRowPainter {
                       context: context,
                       text: text,
                       staged: staged.contains(column),
+                      rowMark: rowMark,
                       selection: selection,
                       cursor: cursorColumn == column ? cursorStrength : nil,
                       lines: lines,
@@ -258,7 +267,27 @@ enum GridRowPainter {
         }
     }
 
-    private static func paintGutter(row: Int, context: GridPaintContext,
+    /// How an added or a deleted row is told apart: its wash, its sign and the sign's colour.
+    /// `nil` for the other two states, which are per cell.
+    struct RowMark {
+        let wash: CGColor
+        let sign: String
+        let signColour: CGColor
+        let deleted: Bool
+    }
+
+    static func rowMark(for state: CellEdits.CellState, palette: GridPalette) -> RowMark? {
+        switch state {
+        case .inserted: RowMark(wash: palette.insertedWash, sign: "+", signColour: palette.markMint, deleted: false)
+        case .deleted: RowMark(wash: palette.deletedWash, sign: "\u{2212}", signColour: palette.markCoral, deleted: true)
+        case .unchanged, .modified: nil
+        }
+    }
+
+    /// The width a sign takes inside the first cell when there is no gutter to hold it.
+    static let signInset: CGFloat = 12
+
+    private static func paintGutter(row: Int, context: GridPaintContext, mark: RowMark?,
                                     lines: GridLineCache, into cg: CGContext) {
         let rowRect = CGRect(x: 0, y: CGFloat(row) * context.rowHeight,
                              width: context.geometry.gutter, height: context.rowHeight)
@@ -271,8 +300,12 @@ enum GridRowPainter {
         let lineWidth = CTLineGetTypographicBounds(line, nil, nil, nil)
         // Right-aligned in the 44 pt column, which is what the header's "#" does too.
         let x = content.maxX - CGFloat(lineWidth)
-        draw(line: line, at: CGPoint(x: x, y: baseline(for: line, in: box, font: context.gutterFont)),
-             into: cg)
+        draw(line: line, at: CGPoint(x: x, y: baseline(for: context.gutterFont, box: box)), into: cg)
+        // The sign sits in the gutter's left padding, so a six-digit number does not run into it.
+        if let mark {
+            draw(line: lines.line(mark.sign, font: context.markFont, color: mark.signColour),
+                 at: CGPoint(x: box.minX + 2, y: baseline(for: context.markFont, box: box)), into: cg)
+        }
         cg.setFillColor(context.palette.inkFaint)
         cg.fill(CGRect(x: box.maxX - 1, y: box.minY, width: 1, height: box.height))
     }
@@ -283,6 +316,7 @@ enum GridRowPainter {
                                   context: GridPaintContext,
                                   text: GridRowText,
                                   staged: Bool,
+                                  rowMark: RowMark?,
                                   selection: CellRange?,
                                   cursor: CGFloat?,
                                   lines: GridLineCache,
@@ -294,47 +328,72 @@ enum GridRowPainter {
                                   verticalPadding: 0)
 
         // Wash: a staged change wins over the selection, because what the user has changed is the
-        // thing they most need to see.
+        // thing they most need to see. An added or a deleted row's wash is already down, row wide,
+        // and it wins over the selection too.
         let selected = selection?.contains(row: row, column: column) ?? false
-        if staged {
-            cg.setFillColor(context.palette.staged)
-            cg.fill(box)
-        } else if selected {
-            cg.setFillColor(context.palette.selection)
-            cg.fill(box)
+        if rowMark == nil {
+            if staged {
+                cg.setFillColor(context.palette.staged)
+                cg.fill(box)
+            } else if selected {
+                cg.setFillColor(context.palette.selection)
+                cg.fill(box)
+            }
         }
 
-        // Text.
+        // The sign of an added or a deleted row, in the first cell when there is no gutter to hold
+        // it; that row's text moves over to make room.
+        var content = box.insetBy(dx: GridMetrics.cellPadding, dy: 0)
+        if let rowMark, !context.showRowNumbers, column == 0 {
+            draw(line: lines.line(rowMark.sign, font: context.markFont, color: rowMark.signColour),
+                 at: CGPoint(x: content.minX, y: baseline(for: context.markFont, box: box)), into: cg)
+            content = CGRect(x: content.minX + signInset, y: content.minY,
+                             width: max(0, content.width - signInset), height: content.height)
+        }
+
+        // Text. A deleted row's is dimmer and struck through; an added row's empty cell says
+        // `DEFAULT`, which is what the INSERT will leave to the server.
         let slot = column - text.first
         let flags = text.flags.indices.contains(slot) ? text.flags[slot] : CellFlags()
         let shown = text.cells.indices.contains(slot) ? text.cells[slot] : ""
-        let content = box.insetBy(dx: GridMetrics.cellPadding, dy: 0)
         let numeric = context.numeric.indices.contains(column) ? context.numeric[column] : false
+        let deleted = rowMark?.deleted ?? false
+        let baselineY = baseline(for: context.cellFont, box: box)
+        var struck: ClosedRange<CGFloat>?
         if flags.contains(.null) {
-            draw(line: lines.line(context.nullDisplay,
-                                  font: context.cellFont,
-                                  color: context.palette.inkNull,
-                                  italic: true),
-                 at: CGPoint(x: content.minX,
-                             y: baseline(forHeight: context, in: box, font: context.cellFont)),
-                 into: cg)
+            let line = lines.line(context.nullDisplay, font: context.cellFont,
+                                  color: deleted ? context.palette.inkSecondary : context.palette.inkNull,
+                                  italic: true)
+            draw(line: line, at: CGPoint(x: content.minX, y: baselineY), into: cg)
+            struck = content.minX...(content.minX + CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)))
         } else if flags.contains(.empty) {
-            draw(line: lines.line("∅", font: context.cellFont, color: context.palette.inkNull),
-                 at: CGPoint(x: content.minX,
-                             y: baseline(forHeight: context, in: box, font: context.cellFont)),
-                 into: cg)
+            let line = lines.line("∅", font: context.cellFont,
+                                  color: deleted ? context.palette.inkSecondary : context.palette.inkNull)
+            draw(line: line, at: CGPoint(x: content.minX, y: baselineY), into: cg)
+            struck = content.minX...(content.minX + CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)))
         } else if !shown.isEmpty {
-            let clipped = lines.line(shown, font: context.cellFont, color: context.palette.inkStrong,
+            let clipped = lines.line(shown, font: context.cellFont,
+                                     color: deleted ? context.palette.inkSecondary : context.palette.inkStrong,
                                      width: content.width)
             let lineWidth = CGFloat(CTLineGetTypographicBounds(clipped, nil, nil, nil))
             let x = numeric ? content.maxX - lineWidth : content.minX
-            draw(line: clipped, at: CGPoint(x: x, y: baseline(forHeight: context, in: box, font: context.cellFont)),
-                 into: cg)
+            draw(line: clipped, at: CGPoint(x: x, y: baselineY), into: cg)
+            struck = x...(x + lineWidth)
+        } else if rowMark != nil, !deleted {
+            draw(line: lines.line("DEFAULT", font: context.cellFont, color: context.palette.inkSecondary,
+                                  italic: true),
+                 at: CGPoint(x: content.minX, y: baselineY), into: cg)
+        }
+        if deleted, let struck {
+            // 1 pt through the middle of the text, whole pixels so it does not blur.
+            cg.setFillColor(context.palette.inkStrong)
+            cg.fill(CGRect(x: struck.lowerBound, y: (baselineY - context.cellFont.xHeight / 2).rounded(),
+                           width: struck.upperBound - struck.lowerBound, height: 1))
         }
 
         // Staged dot: 4 × 4 at the box's top-right corner, 3 in from each edge. A dot as well as the
         // wash, because a cell can be both selected and changed and one tint cannot say which.
-        if staged {
+        if staged, rowMark == nil {
             cg.setFillColor(context.palette.amber)
             cg.fillEllipse(in: CGRect(x: box.maxX - 3 - 4, y: box.minY + 3, width: 4, height: 4))
         }
@@ -349,7 +408,7 @@ enum GridRowPainter {
         // `strength` is 1 while the grid has the keyboard and 0.4 when it does not, which keeps the
         // cursor findable while the focus is in the peek or another window.
         if let strength = cursor {
-            let width: CGFloat = ThemeStore.shared.surface.enhanced ? 2.5 : 2
+            let width: CGFloat = context.contrast ? 2.5 : 2
             let ring = CGPath(roundedRect: box.insetBy(dx: 1, dy: 1), cornerWidth: 3, cornerHeight: 3,
                               transform: nil)
             cg.setStrokeColor(context.palette.cursor.copy(alpha: strength) ?? context.palette.cursor)
@@ -366,16 +425,7 @@ enum GridRowPainter {
     /// value is rounded, because a fractional baseline on a 1× display resolves to one of two pixel
     /// rows depending on the row's own y, and a grid whose text jitters by a pixel between rows is
     /// exactly what the layout gate would catch.
-    private static func baseline(forHeight context: GridPaintContext, in box: CGRect,
-                                 font: NSFont) -> CGFloat {
-        baseline(for: font, box: box)
-    }
-
-    private static func baseline(for line: CTLine, in box: CGRect, font: NSFont) -> CGFloat {
-        baseline(for: font, box: box)
-    }
-
-    private static func baseline(for font: NSFont, box: CGRect) -> CGFloat {
+    static func baseline(for font: NSFont, box: CGRect) -> CGFloat {
         let ascent = CTFontGetAscent(font as CTFont)
         let descent = CTFontGetDescent(font as CTFont)
         return (box.midY + (ascent - descent) / 2).rounded()
@@ -556,6 +606,12 @@ enum GridPaintDiff {
         if oldStaged != newStaged {
             for key in oldStaged.union(newStaged) { result.insert(key.row) }
         }
+        // A row marked for deletion, or let go again, is washed across its whole width.
+        let oldDeleted = Set(old?.edits.deletedRows ?? [])
+        let newDeleted = Set(new.edits.deletedRows)
+        if oldDeleted != newDeleted {
+            for row in oldDeleted.symmetricDifference(newDeleted) where row >= 0 { result.insert(row) }
+        }
         if old?.layout != new.layout || old?.style != new.style {
             result.insert(integersIn: 0..<newRowCount)
         }
@@ -573,6 +629,8 @@ enum GridPaintDiff {
     /// column: the layout or the style moved under all of them.
     static func invalidatedColumns(old: GridInputs?, new: GridInputs) -> ClosedRange<Int>? {
         if old?.layout != new.layout || old?.style != new.style { return nil }
+        // A deleted row is a row-wide wash: every column of it repaints.
+        if old?.edits.deletedRows != new.edits.deletedRows { return nil }
         var columns = IndexSet()
         if old?.selection != new.selection {
             let all = (old?.selection?.allPositions ?? []) + (new.selection?.allPositions ?? [])
