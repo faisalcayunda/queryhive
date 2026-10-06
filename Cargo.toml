@@ -8,6 +8,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/qh-analytics-proto",
     "crates/qh-columnar",
     "crates/qh-core",
     "crates/qh-credentials",
@@ -27,6 +28,10 @@ members = [
     "crates/qh-sync",
     "crates/qh-tunnel",
 ]
+# The analytics helper (DataFusion) is its own workspace and its own process
+# (docs/architecture/blueprints/fase-6-data-plane.md section 14.1). Excluded so the
+# app's build, lock and `cargo test --workspace` never see DataFusion.
+exclude = ["helpers/analytics"]
 
 [workspace.package]
 edition = "2021"
@@ -36,6 +41,7 @@ authors = ["Faisal Nugraha Cayunda"]
 repository = "https://github.com/data-ecosystem/queryhive"
 
 [workspace.dependencies]
+qh-analytics-proto = { path = "crates/qh-analytics-proto" }
 qh-columnar = { path = "crates/qh-columnar" }
 qh-core = { path = "crates/qh-core" }
 qh-driver = { path = "crates/qh-driver" }
@@ -55,6 +61,7 @@ qh-storage = { path = "crates/qh-storage" }
 qh-sync = { path = "crates/qh-sync" }
 qh-tunnel = { path = "crates/qh-tunnel" }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # The Fase 6 data plane (blueprint fase-6-data-plane.md D-1): the result store
 # holds one Arrow RecordBatch per chunk. Pinned to 59.3, the same version as the
@@ -64,6 +71,9 @@ arrow-schema = "59.3"
 arrow-buffer = "59.3"
 arrow-data = "59.3"
 arrow-ipc = "59.3"
+# Only the analytics helper turns this on (qh-columnar feature `from-arrow`, section 5.6):
+# the app never links it.
+arrow-cast = "59.3"
 # View work (sort, filter, search) runs here, off the main thread.
 rayon = "1"
 # Grid text metrics (grapheme counts) and case folding.

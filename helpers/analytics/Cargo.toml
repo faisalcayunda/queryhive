@@ -1,0 +1,85 @@
+# The analytics helper: DataFusion in its own process, in its own workspace
+# (docs/architecture/blueprints/fase-6-data-plane.md section 14.1).
+#
+# The root `Cargo.toml` excludes this directory, so the app's lock, its build and
+# `cargo test --workspace` never see DataFusion. The helper uses the repo crates by
+# path; `qh-columnar` and `qh-result-store` are therefore compiled in both workspaces.
+[workspace]
+
+[package]
+name = "qh-analytics"
+version = "0.1.0"
+description = "queryhive-analytics: SQL over query results and local files, in a separate process"
+edition = "2021"
+# Workspace-wide the repo is on 1.85; only this workspace needs the newer compiler (F-2).
+rust-version = "1.94"
+license = "MIT"
+authors = ["Faisal Nugraha Cayunda"]
+repository = "https://github.com/data-ecosystem/queryhive"
+publish = false
+# The tests are declared by hand below: one binary for most of them (see tests/suite.rs).
+autotests = false
+
+[lib]
+name = "qh_analytics"
+path = "src/lib.rs"
+
+[[bin]]
+name = "queryhive-analytics"
+path = "src/main.rs"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+# Its own process: it sets `TMPDIR` for the whole process.
+[[test]]
+name = "spill_unsafe_dir"
+path = "tests/spill_unsafe_dir.rs"
+
+[dependencies]
+qh-analytics-proto = { path = "../../crates/qh-analytics-proto" }
+qh-core = { path = "../../crates/qh-core" }
+qh-columnar = { path = "../../crates/qh-columnar", features = ["from-arrow"] }
+qh-result-store = { path = "../../crates/qh-result-store" }
+qh-rt = { path = "../../crates/qh-rt" }
+
+# The feature set of section 14.1. Not enabled, on purpose: `compression` (gzip, bz2,
+# xz, zstd for CSV and JSON), `crypto_expressions`, `encoding_expressions`,
+# `recursive_protection` and `avro`. With this set `cargo deny check licenses` passes
+# against the repo's `deny.toml` unchanged.
+datafusion = { version = "55.1", default-features = false, features = [
+    "sql",
+    "parquet",
+    "nested_expressions",
+    "datetime_expressions",
+    "string_expressions",
+    "unicode_expressions",
+    "regex_expressions",
+] }
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+thiserror = "2"
+url = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Same release profile as the repo. `panic = "unwind"` stays: a panic in a query task
+# must reach the catch, not abort the process that owns every other open query.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+
+# Line tables only: the debug `target` with full debuginfo was 9.5 GB (section 2.2).
+[profile.dev]
+debug = "line-tables-only"

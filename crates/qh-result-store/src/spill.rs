@@ -25,6 +25,11 @@ use crate::StoreError;
 /// under their own key; the domain keeps the two apart even if a key ever
 /// served both.
 const DOMAIN_APP: [u8; 4] = *b"QHS2";
+/// Tag domain for the analytics helper's operator spill records (§14.8). The
+/// helper's own key and counter seal under it; no key is shared with the app, and
+/// the tag keeps a helper record from authenticating as an app record even if
+/// one key ever served both.
+pub const DOMAIN_HELPER: [u8; 4] = *b"QHD1";
 /// Record magic at plaintext offset 0.
 const MAGIC: &[u8; 4] = b"QHP1";
 /// Header: magic + IPC length + flags length, padded so the IPC buffer
@@ -53,6 +58,12 @@ impl SpillCipher {
     /// failure spill stays off rather than falling back to a fixed key.
     pub fn new() -> Result<Self, StoreError> {
         Self::with_domain(DOMAIN_APP)
+    }
+
+    /// A fresh random key under the helper tag domain ([`DOMAIN_HELPER`]), for the
+    /// analytics helper's operator spill.
+    pub fn new_helper() -> Result<Self, StoreError> {
+        Self::with_domain(DOMAIN_HELPER)
     }
 
     /// A fresh random key under a caller-chosen tag domain. The helper uses
@@ -385,13 +396,21 @@ pub struct SpillFile {
 
 impl SpillFile {
     pub fn create(dir: &Path, pid: u32, store_id: u64) -> Result<Self, StoreError> {
+        Self::create_named(dir, "qhs", pid, store_id)
+    }
+
+    /// The same, with the file name's prefix chosen by the owner: `qhs` for a store
+    /// (`qhs-<pid>-<store_id>-<16 hex>.spill`), `qhd` for the analytics helper's
+    /// operator files. The name only matters during the instant before the unlink,
+    /// and to anyone listing a directory after a crash.
+    pub fn create_named(dir: &Path, prefix: &str, pid: u32, id: u64) -> Result<Self, StoreError> {
         let mut random = [0u8; 8];
         ring::rand::SystemRandom::new()
             .fill(&mut random)
             .map_err(|_| StoreError::SpillUnavailable {
                 reason: "no randomness for spill name".to_owned(),
             })?;
-        let mut name = format!("qhs-{pid}-{store_id}-");
+        let mut name = format!("{prefix}-{pid}-{id}-");
         for byte in random {
             name.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
             name.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap_or('0'));

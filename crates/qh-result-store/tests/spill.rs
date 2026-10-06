@@ -603,3 +603,40 @@ fn a_corrupt_ipc_body_is_corrupt_not_a_panic() {
         let _ = decode_record(&mutated);
     }
 }
+
+#[test]
+fn the_helper_cipher_has_its_own_domain_and_its_own_files() {
+    use qh_result_store::DOMAIN_HELPER;
+
+    assert_eq!(&DOMAIN_HELPER, b"QHD1");
+    // Same key bytes, different domain: the record does not authenticate across
+    // them. (`for_test*` fixes the key; a real helper key is random and its own.)
+    let app = SpillCipher::for_test(0x61);
+    let helper = SpillCipher::for_test_with_domain(0x61, DOMAIN_HELPER);
+    let mut plain = b"operator record".to_vec();
+    let (nonce, record) = helper.seal(9, 0, &mut plain).unwrap();
+    let mut crossed = record.clone();
+    assert!(matches!(
+        app.open(9, 0, nonce, &mut crossed).unwrap_err(),
+        StoreError::SpillAuth { .. }
+    ));
+    let mut own = record;
+    assert!(helper.open(9, 0, nonce, &mut own).is_ok());
+
+    // A fresh helper cipher is random per process, and its Debug hides the key.
+    let fresh = SpillCipher::new_helper().unwrap();
+    assert!(format!("{fresh:?}").contains("<redacted>"));
+
+    // A helper file is created 0600 and unlinked like a store's.
+    let dir = temp_dir("helper-file");
+    assert!(sweep_spill_dir(&dir).spill_enabled);
+    let mut file = SpillFile::create_named(&dir, "qhd", std::process::id(), 3).unwrap();
+    assert_eq!(
+        file.metadata_for_test().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let (offset, len) = file.append(b"abc").unwrap();
+    assert_eq!(file.read(offset, len).unwrap(), b"abc");
+    let _ = std::fs::remove_dir_all(&dir);
+}

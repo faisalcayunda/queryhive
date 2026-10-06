@@ -144,6 +144,30 @@ pub fn build_main() -> std::io::Result<Runtime> {
         .build()
 }
 
+/// A runtime shaped like [`build_main`], for a process that has no app runtime to
+/// borrow: one worker per performance core, every thread at `USER_INITIATED`, workers
+/// named `{prefix}-0`, `{prefix}-1`, ...
+///
+/// The analytics helper builds its query runtime this way (`qh-sql`, blueprint
+/// `fase-6-data-plane.md` section 14.3), following the pattern of [`view_pool`]. The
+/// class is applied to the blocking-pool threads too, because `on_thread_start` runs
+/// for every thread the runtime creates, and that is what the helper wants: a chunk
+/// read it hands to `spawn_blocking` is as interactive as the query waiting on it.
+pub fn build_user_initiated(prefix: &'static str) -> std::io::Result<Runtime> {
+    let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cores().performance.max(1))
+        .thread_name_fn(move || {
+            format!(
+                "{prefix}-{}",
+                next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        })
+        .on_thread_start(|| set_thread_qos(Qos::UserInitiated))
+        .enable_all()
+        .build()
+}
+
 // The slow pools are built on first use and kept for the life of the process:
 // a runtime per call would spawn threads on every metadata lookup, which is the
 // opposite of what a pool is for.
@@ -412,6 +436,43 @@ mod tests {
                 Some(Qos::UserInitiated),
                 "the interactive pool must not be left at the default class"
             );
+        }
+    }
+
+    /// The helper's runtime: sized from performance cores, named, and at the interactive
+    /// class on its workers and on its blocking threads alike.
+    #[test]
+    fn a_named_user_initiated_runtime_applies_its_class_and_its_names() {
+        let runtime = build_user_initiated("qh-sql").expect("the runtime should build");
+        assert_eq!(runtime.metrics().num_workers(), cores().performance.max(1));
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            let name = std::thread::current().name().map(str::to_owned);
+            let blocking = tokio::task::spawn_blocking(|| {
+                (
+                    std::thread::current().name().map(str::to_owned),
+                    current_thread_qos(),
+                )
+            })
+            .await
+            .expect("the blocking task should finish");
+            let _ = sender.send((name, current_thread_qos(), blocking));
+        });
+        let (name, qos, (blocking_name, blocking_qos)) = runtime
+            .block_on(receiver)
+            .expect("the worker should report back");
+
+        assert!(
+            name.as_deref().is_some_and(|n| n.starts_with("qh-sql-")),
+            "a worker is named qh-sql-<i>, got {name:?}"
+        );
+        assert!(blocking_name
+            .as_deref()
+            .is_some_and(|n| n.starts_with("qh-sql-")));
+        if cfg!(target_os = "macos") {
+            assert_eq!(qos, Some(Qos::UserInitiated));
+            assert_eq!(blocking_qos, Some(Qos::UserInitiated));
         }
     }
 

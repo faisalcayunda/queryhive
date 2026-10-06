@@ -11,11 +11,15 @@
 
 pub mod builder;
 pub mod encoding;
+#[cfg(feature = "from-arrow")]
+pub mod from_arrow;
 pub mod read;
 pub mod tagged;
 
 pub use builder::{ChunkBuilder, SealedChunk, CHUNK_MAX_ROWS, CHUNK_TARGET_BYTES};
 pub use encoding::Encoding;
+#[cfg(feature = "from-arrow")]
+pub use from_arrow::from_arrow;
 pub use read::{offset_of, text_at, value_at};
 
 /// Everything that can go wrong mapping a `Value` to or from Arrow.

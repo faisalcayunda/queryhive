@@ -49,7 +49,7 @@ pub use render::{
 };
 pub use spill::{
     decode_record, encode_record, sweep_spill_dir, FaultyMedium, FileMedium, SpillCipher,
-    SpillFile, SpillMedium, SweepReport,
+    SpillFile, SpillMedium, SweepReport, DOMAIN_HELPER,
 };
 pub use store::{ChunkRef, Outcome, Phase, StoreError, StoreShared};
 pub use view::{

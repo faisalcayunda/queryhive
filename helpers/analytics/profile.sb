@@ -1,0 +1,63 @@
+;; The kernel sandbox the app runs the analytics helper in.
+;;
+;; The app starts the helper as
+;;
+;;     /usr/bin/sandbox-exec -p "$(contents of this file)" \
+;;         -D HELPER=<the helper executable> \
+;;         -D SPILL_DIR=<the helper's spill directory, also its working directory> \
+;;         -D HOME=<the user's home directory> \
+;;         -D COMPONENT_DIR=<~/Library/Application Support/QueryHive/Components/analytics> \
+;;         <the helper executable> --protocol 1
+;;
+;; (blueprint fase-6-data-plane.md section 14.9). The profile is a fixed text; only the
+;; four paths vary. `helpers/analytics/tests/confinement.rs` runs the helper under it and
+;; checks what it can and cannot do, so a change here is a change to that test.
+;;
+;; The rule of the file: deny everything, then allow only what a query engine reading files
+;; and sorting to disk needs. Rules are matched last to first, so an `allow` below a `deny`
+;; for the same thing wins.
+
+(version 1)
+(deny default)
+
+;; ---- the network: none ------------------------------------------------------------
+;; Already denied by `deny default`; said again so it survives a careless edit above.
+(deny network*)
+
+;; ---- processes: ourselves, and no children -----------------------------------------
+;; `sandbox-exec` execs the helper after applying this profile, so the exec of the helper
+;; itself has to be allowed. `/bin/sh` and everything else is not. Threads are not
+;; processes, so the runtime's workers do not need `process-fork`.
+(allow process-exec (literal (param "HELPER")))
+(deny process-fork)
+(allow signal (target self))
+
+;; ---- what the runtime asks the kernel ------------------------------------------------
+;; Core counts (the worker pool is one thread per performance core), page size, memory.
+(allow sysctl-read)
+(allow process-info* (target self))
+
+;; ---- reading ----------------------------------------------------------------------------
+;; A user's CSV or Parquet file can be anywhere, so reading is allowed everywhere ...
+(allow file-read*)
+;; ... except the app's own data, the app's spill, and the keychains ...
+(deny file-read*
+    (subpath (string-append (param "HOME") "/Library/Application Support/QueryHive"))
+    (subpath (string-append (param "HOME") "/Library/Caches/QueryHive/spill"))
+    (subpath (string-append (param "HOME") "/Library/Keychains"))
+    (subpath "/Library/Keychains"))
+;; ... but not the component directory, where the helper itself is.
+(allow file-read* (subpath (param "COMPONENT_DIR")))
+(allow file-map-executable (literal (param "HELPER")))
+
+;; ---- writing: the helper's spill directory, and /dev/null ------------------------------
+(allow file-write* (subpath (param "SPILL_DIR")))
+(allow file-write* (literal "/dev/null"))
+(allow file-ioctl (literal "/dev/null"))
+
+;; ---- Mach services: none -------------------------------------------------------------------
+;; Not even libsystem's logger or notification center: the helper runs without them (the
+;; confinement test starts it, serves a spilling query and ends it under exactly this
+;; profile). There is no `com.apple.SecurityServer` either, so there is no Keychain from in
+;; here. Checked on the macOS this was written on; the app's minimum, macOS 14, is the
+;; version to check next (W13-T8b).

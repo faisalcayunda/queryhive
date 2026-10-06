@@ -14,6 +14,19 @@ arrow-schema.workspace = true
 arrow-buffer.workspace = true
 arrow-ipc.workspace = true
 thiserror.workspace = true
+# Only for `from_arrow` (feature `from-arrow`): the analytics helper turns it on, the app
+# never does, so `arrow-cast` is not in the app's link.
+arrow-cast = { workspace = true, optional = true }
+# Already in the graph through arrow; named here for the zone-offset lookup.
+chrono = { version = "0.4", default-features = false, optional = true }
+# `f16` for the shortest-text rule; Arrow's own half-float type, so no new crate.
+half = { version = "2", optional = true }
+
+[features]
+# Normalise Arrow arrays from outside (DataFusion output, CSV, Parquet) into the store
+# encodings of blueprint fase-6-data-plane.md section 5.1. `chrono-tz` on `arrow-array`
+# is for named timestamp zones, which Parquet files carry.
+from-arrow = ["dep:arrow-cast", "dep:chrono", "dep:half", "arrow-array/chrono-tz"]
 
 [lints.rust]
 unsafe_code = "forbid"

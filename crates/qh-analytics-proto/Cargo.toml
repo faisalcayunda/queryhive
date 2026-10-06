@@ -1,0 +1,22 @@
+[package]
+name = "qh-analytics-proto"
+version = "0.1.0"
+description = "The QHA1 wire protocol between the app and the analytics helper process"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Kept this small on purpose: the app and the helper both link it, and the app must
+# never gain DataFusion (or a second Arrow) through it.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+arrow-array.workspace = true
+arrow-buffer.workspace = true
+arrow-schema = { workspace = true, features = ["serde"] }
+arrow-ipc.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
