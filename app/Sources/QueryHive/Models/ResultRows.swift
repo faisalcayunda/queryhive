@@ -35,9 +35,43 @@ protocol ResultRows: AnyObject, RowReading {
     /// Per source column, the widest of the first 200 *fetched* rows in Characters, capped at 64
     /// (a count of 42 or more already hits the 320 pt clamp), NULL counting 4.
     func naturalCharCounts() -> [Int]
-    /// Distinct values of a column over the fetched rows, in first-seen order, empty past
-    /// `ColumnFilter.valuePickerLimit`. Synchronous now; W6 makes it `async`.
-    func distinctValues(column: Int) -> [String?]
+    /// The distinct values of a column over the fetched rows (§13.9): NULL first, then the rest
+    /// sorted by NFC bytes. Past `ColumnFilter.valuePickerLimit + 1` of them the scan stops with
+    /// `more` set and no values. The picker is browsable when `!more && values.count <= 10`.
+    func distinctValues(column: Int) async -> DistinctSample
+
+    /// Main thread, once per display tick while `isLive`. What the rows learned since the last
+    /// call; an array answers "nothing, finished".
+    func poll() -> PollResult
+    /// Whether the rows can still change under the grid (streaming, or a view being applied).
+    var isLive: Bool { get }
+    /// The format of every column, in source order, before the grid rebuilds any text. Returns the
+    /// source columns whose rendered text a reader may have cached under the old format.
+    @discardableResult
+    func prepare(formats: [ColumnFormat]) -> IndexSet
+    /// Give back whatever the rows hold outside the process heap. Idempotent.
+    func release()
+}
+
+extension ResultRows {
+    func poll() -> PollResult { PollResult(grewFrom: nil, finished: true) }
+    var isLive: Bool { false }
+    @discardableResult
+    func prepare(formats: [ColumnFormat]) -> IndexSet { IndexSet() }
+    func release() {}
+}
+
+/// What `poll()` found: the first row of a growth in the view the grid draws, and whether the
+/// rows have stopped changing.
+struct PollResult: Equatable {
+    var grewFrom: Int?
+    var finished: Bool
+}
+
+/// The answer to `distinctValues(column:)`: `values` is empty when `more`.
+struct DistinctSample: Equatable {
+    var values: [String?]
+    var more: Bool
 }
 
 /// The existing array-backed rows, wrapped in the seam.
@@ -105,18 +139,21 @@ final class ArrayRows: ResultRows, @unchecked Sendable {
         return counts
     }
 
-    func distinctValues(column: Int) -> [String?] {
-        var seen = Set<String?>()
-        var result: [String?] = []
+    func distinctValues(column: Int) async -> DistinctSample {
+        // The same rule as `distinct_values` in `view.rs`, with the same limit Swift hands it, so
+        // the twin and the store answer alike: stop as soon as the picker could not use the answer.
+        let limit = ColumnFilter.valuePickerLimit + 1
+        var seen = Set<String>()
+        var hasNull = false
         for row in sizingRows {
-            guard column < row.count else { continue }
-            let value = row[column]
-            if seen.insert(value).inserted {
-                result.append(value)
-                if result.count >= ColumnFilter.valuePickerLimit { break }
+            if column < row.count, let value = row[column] {
+                seen.insert(value.precomposedStringWithCanonicalMapping)
+            } else {
+                hasNull = true
             }
+            if seen.count + (hasNull ? 1 : 0) > limit { return DistinctSample(values: [], more: true) }
         }
-        return result
+        return DistinctSample(values: (hasNull ? [nil] : []) + seen.sorted(), more: false)
     }
 
     private func valueAt(row: Int, column: Int) -> String? {

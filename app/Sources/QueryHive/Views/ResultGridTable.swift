@@ -156,7 +156,7 @@ struct ResultGridTable: NSViewRepresentable {
         private(set) var applied: GridInputs?
         /// The rows, resolved once per revision: `ArrayRows` reads through a filter and a sort that
         /// must not be recomputed per row.
-        private(set) var rows: any ResultRows = ArrayRows(rows: [], sizing: [], columns: [])
+        var rows: any ResultRows = ArrayRows(rows: [], sizing: [], columns: [])
         /// The column formats, read once per result and again when the store says one changed
         /// (blueprint D-5) — never per cell on the draw path.
         private(set) var formats: [ColumnFormat] = []
@@ -433,13 +433,19 @@ struct ResultGridTable: NSViewRepresentable {
         /// the queue changes on every keystroke of an editing session, while the cache is only
         /// thrown away by a revision, a style or a palette change. Caching it meant a commit kept
         /// drawing the old value under its new wash, and a discard kept drawing the typed one.
-        func rowText(_ row: Int) -> GridRowText {
-            let build: () -> GridRowText = { [self] in
+        ///
+        /// Only the display columns in `columns` (D-23), widened by a viewport either side so a
+        /// short horizontal scroll does not rebuild the row. A 500-column result would otherwise
+        /// pay 500 cell reads per row drawn, almost all of them off screen.
+        func rowText(_ row: Int, columns: Range<Int>) -> GridRowText {
+            let sources = applied?.layout.visibleSources ?? []
+            let wanted = widened(columns, count: sources.count)
+            let build: (Range<Int>) -> GridRowText = { [self] range in
                 var cells: [String] = []
                 var flags: [CellFlags] = []
-                cells.reserveCapacity(geometry.widths.count)
-                flags.reserveCapacity(geometry.widths.count)
-                for source in applied?.layout.visibleSources ?? [] {
+                cells.reserveCapacity(range.count)
+                flags.reserveCapacity(range.count)
+                for source in sources[range] {
                     let format = formats.indices.contains(source) ? formats[source] : .raw
                     let key = CellKey(row: row, column: source)
                     if let staged = tab.cellEdits.value(at: key) {
@@ -459,10 +465,23 @@ struct ResultGridTable: NSViewRepresentable {
                     cells.append(cell.text)
                     flags.append(cell.flags)
                 }
-                return GridRowText(cells: cells, flags: flags)
+                return GridRowText(first: range.lowerBound, cells: cells, flags: flags)
             }
-            guard !tab.cellEdits.hasStagedEdit(row: row) else { return build() }
-            return textCache.text(at: row, build: build)
+            guard !tab.cellEdits.hasStagedEdit(row: row) else { return build(wanted) }
+            return textCache.text(at: row, columns: wanted, build: build)
+        }
+
+        /// `columns` plus the columns one viewport's width to its left and right, clamped to what
+        /// exists. A request already wider than the viewport (a full-width dirty rect) gains the
+        /// same margin, which is cheap next to the 500 it avoids.
+        private func widened(_ columns: Range<Int>, count: Int) -> Range<Int> {
+            let all = 0..<count
+            let asked = columns.clamped(to: all)
+            guard !asked.isEmpty, let table else { return asked }
+            let margin = max(table.visibleRect.width, 1)
+            let left = geometry.edges(of: asked.lowerBound).left
+            let right = geometry.edges(of: asked.upperBound - 1).right
+            return geometry.columns(in: max(0, left - margin)...(right + margin)).clamped(to: all)
         }
 
         private func type(ofSource source: Int) -> String {
@@ -749,7 +768,7 @@ struct ResultGridTable: NSViewRepresentable {
             guard let table else { return }
             let visible = table.rows(in: table.visibleRect)
             let plan = (visible.location..<(visible.location + visible.length))
-                .map { row in (row, rowText(row)) }
+                .map { row in (row, rowText(row, columns: 0..<geometry.widths.count)) }
             let context = paint
             let cache = lineCache
             Task.detached(priority: .userInitiated) {
@@ -827,9 +846,13 @@ struct ResultGridTable: NSViewRepresentable {
 
         /// W6 calls this from a display link when a streaming result adds pages without replacing
         /// the store. In W5 a replace is the only way rows grow, so it is the identity.
-        func rowsDidGrow() {
+        func rowsDidGrow(from: Int, to: Int) {
             table?.noteNumberOfRowsChanged()
-            table?.needsDisplay = true
+            guard let table, from < to else { return }
+            // The rows already drawn did not change, so neither the text cache nor the geometry
+            // is touched (D-28): only the new rows' rects repaint.
+            table.invalidate(rows: IndexSet(integersIn: from..<to), columns: nil,
+                             geometry: geometry, paint: paint)
         }
 
         func selectCells(anchor: CellPos, focus: CellPos) {

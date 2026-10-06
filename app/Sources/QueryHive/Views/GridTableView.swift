@@ -232,12 +232,11 @@ final class GridTableView: NSTableView {
 
         // The columns it covers, plus the gutter when the rectangle reaches the left edge.
         let columns = context.geometry.columns(in: dirtyRect.minX...max(dirtyRect.maxX, dirtyRect.minX))
-        let drawsGutter = context.showRowNumbers && dirtyRect.minX < context.geometry.gutter
-        _ = columns
 
         for row in first...last {
-            let text = coordinator.rowText(row)
+            let text = coordinator.rowText(row, columns: columns)
             GridRowPainter.paint(row: row,
+                                 columns: columns,
                                  context: context,
                                  text: text,
                                  staged: coordinator.stagedColumns(row),
@@ -245,7 +244,6 @@ final class GridTableView: NSTableView {
                                  lines: coordinator.lineCache,
                                  width: bounds.width,
                                  into: cg)
-            _ = drawsGutter
         }
 
         // The signpost the SwiftUI grid fired from row 0's `onAppear`, moved to the one place that

@@ -99,11 +99,17 @@ extension Color {
 /// painter is deliberately given strings and flags rather than the rows, so it has no way to reach
 /// `UserDefaults` or to parse a JSON cell on the draw path.
 struct GridRowText {
-    /// One per **drawn** column, in display order. A slot with no text draws nothing.
+    /// The display column `cells[0]` belongs to: only a range of the columns is built (D-23), so
+    /// `cells[i]` is the text of display column `first + i`.
+    var first = 0
+    /// One per built column, in display order. A slot with no text draws nothing.
     var cells: [String]
     /// The flags that change how a cell is drawn: NULL italic, `∅` for an empty string, `…` for a
     /// value cut short.
     var flags: [CellFlags]
+
+    /// The display columns this row's text covers.
+    var built: Range<Int> { first..<(first + cells.count) }
 }
 
 /// Everything a `draw(_:)` pass shares between rows: geometry, colours, fonts and the style flags.
@@ -173,6 +179,7 @@ enum GridRowPainter {
     /// `row` is the row's index in the rows the grid is drawing, which is what the gutter prints and
     /// what the selection rectangle holds.
     static func paint(row: Int,
+                      columns: Range<Int>,
                       context: GridPaintContext,
                       text: GridRowText,
                       staged: Set<Int>,
@@ -195,8 +202,9 @@ enum GridRowPainter {
             paintGutter(row: row, context: context, lines: lines, into: cg)
         }
 
-        // 3. Each visible column: wash, text, staged dot, separator.
-        for column in 0..<context.geometry.widths.count {
+        // 3. Each column in `columns`: wash, text, staged dot, separator. The rest are off the
+        //    dirty rectangle, and their text was never built.
+        for column in columns.clamped(to: 0..<context.geometry.widths.count) {
             let edges = context.geometry.edges(of: column)
             paintCell(row: row, column: column,
                       edges: edges,
@@ -256,8 +264,9 @@ enum GridRowPainter {
         }
 
         // Text.
-        let flags = text.flags.indices.contains(column) ? text.flags[column] : CellFlags()
-        let shown = text.cells.indices.contains(column) ? text.cells[column] : ""
+        let slot = column - text.first
+        let flags = text.flags.indices.contains(slot) ? text.flags[slot] : CellFlags()
+        let shown = text.cells.indices.contains(slot) ? text.cells[slot] : ""
         let content = box.insetBy(dx: GridMetrics.cellPadding, dy: 0)
         let numeric = context.numeric.indices.contains(column) ? context.numeric[column] : false
         if flags.contains(.null) {
@@ -425,14 +434,20 @@ final class GridRowTextCache {
     private var bytes = 0
     private let byteLimit = 16 * 1_024 * 1_024
 
-    func text(at row: Int, build: () -> GridRowText) -> GridRowText {
-        if let hit = rows[row] { return hit }
-        let made = build()
-        let size = made.cells.reduce(48) { $0 + $1.utf8.count * 2 }
+    /// The text of `row` covering at least `columns`. A row built over a range that does not hold
+    /// them is built again over the new one (`build` is given the range to cover).
+    func text(at row: Int, columns: Range<Int>, build: (Range<Int>) -> GridRowText) -> GridRowText {
+        if let hit = rows[row], hit.built.lowerBound <= columns.lowerBound && columns.upperBound <= hit.built.upperBound { return hit }
+        let made = build(columns)
+        if let old = rows[row] { bytes -= Self.size(of: old) }
         rows[row] = made
-        bytes += size
+        bytes += Self.size(of: made)
         if bytes > byteLimit { prune() }
         return made
+    }
+
+    private static func size(of row: GridRowText) -> Int {
+        row.cells.reduce(48) { $0 + $1.utf8.count * 2 }
     }
 
     /// Keep the rows around `focus`: everything further than `page` rows away is dropped, and if
@@ -442,9 +457,7 @@ final class GridRowTextCache {
             let low = focus.lowerBound - page * distance
             let high = focus.upperBound + page * distance
             let kept = rows.filter { low...high ~= $0.key }
-            let size = kept.values.reduce(0) { total, row in
-                total + row.cells.reduce(48) { $0 + $1.utf8.count * 2 }
-            }
+            let size = kept.values.reduce(0) { $0 + Self.size(of: $1) }
             if size <= byteLimit || distance == 1 {
                 rows = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
                 bytes = size

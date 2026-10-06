@@ -192,4 +192,58 @@ final class ResultRowsTests: XCTestCase {
         XCTAssertEqual(fromArray.statements, fromSeam.statements)
         XCTAssertEqual(fromArray.warnings, fromSeam.warnings)
     }
+
+    // MARK: Distinct values (TM-3)
+
+    private func distinctRows(_ values: [String?]) -> ArrayRows {
+        let rows = values.map { [$0] }
+        return ArrayRows(rows: rows, sizing: rows, columns: [Event.Column(name: "k", type: "text")])
+    }
+
+    /// NULL first, the rest sorted, each once, as the whole set rather than the first ten seen.
+    func testDistinctValuesAreNullFirstThenSortedAndComplete() async {
+        let sample = await distinctRows(["b", nil, "a", "b", "c", nil]).distinctValues(column: 0)
+        XCTAssertEqual(sample, DistinctSample(values: [nil, "a", "b", "c"], more: false))
+    }
+
+    /// Eleven distinct values are a full answer that the picker still refuses (more than ten); a
+    /// twelfth is `more`, with no values, which is what `distinct_values(limit: 11)` answers.
+    func testDistinctValuesStopAtTheLimitWithMoreAndNoValues() async {
+        let eleven = (0..<11).map { Optional("v\($0)") }
+        let full = await distinctRows(eleven).distinctValues(column: 0)
+        XCTAssertFalse(full.more)
+        XCTAssertEqual(full.values.count, 11)
+        XCTAssertGreaterThan(full.values.count, ColumnFilter.valuePickerLimit)
+
+        let twelve = await distinctRows(eleven + ["v11"]).distinctValues(column: 0)
+        XCTAssertEqual(twelve, DistinctSample(values: [], more: true))
+
+        let nullCounts = await distinctRows((0..<11).map { Optional("v\($0)") } + [nil]).distinctValues(column: 0)
+        XCTAssertTrue(nullCounts.more, "a NULL is one of the entries the limit counts")
+    }
+
+    /// A key typed two ways (precomposed and decomposed) is one entry, in the composed form.
+    func testDistinctValuesNormaliseToNFC() async {
+        let sample = await distinctRows(["e\u{301}", "\u{e9}"]).distinctValues(column: 0)
+        XCTAssertEqual(sample.values.count, 1)
+        XCTAssertEqual(sample.values.first??.unicodeScalars.count, 1)
+    }
+
+    /// Rows that never reach the column count as NULL, as `ColumnFilter.distinctValues` has it.
+    func testDistinctValuesTreatAShortRowAsNull() async {
+        let rows: [[String?]] = [["x"], []]
+        let sample = await ArrayRows(rows: rows, sizing: rows,
+                                     columns: [Event.Column(name: "k", type: "text")])
+            .distinctValues(column: 0)
+        XCTAssertEqual(sample.values, [nil, "x"])
+    }
+
+    /// The rows' defaults for the parts only a live store has a use for.
+    func testAnArrayHasNothingToPollAndNoFormatToDrop() {
+        let rows = distinctRows(["a"])
+        XCTAssertEqual(rows.poll(), PollResult(grewFrom: nil, finished: true))
+        XCTAssertFalse(rows.isLive)
+        XCTAssertTrue(rows.prepare(formats: [.raw]).isEmpty)
+        rows.release()
+    }
 }

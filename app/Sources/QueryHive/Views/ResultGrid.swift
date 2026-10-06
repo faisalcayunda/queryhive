@@ -662,49 +662,44 @@ struct ResultGrid: View {
         }
     }
 
-    /// The distinct values a column actually holds in the fetched rows. Empty when the column has
-    /// too many to browse — that is the signal to fall back to a search box.
-    private func distinctValues(_ index: Int) -> [String?] {
-        tab.result.distinctValues(column: index)
-    }
-
     /// The filter popover's contents, in whichever of its two shapes this column's data calls for.
     ///
     /// Hosted in an `NSPopover` anchored to the funnel, which the table opens: the contents stay
     /// SwiftUI because there is nothing to gain from drawing a picker by hand (blueprint D-14).
+    /// The distinct list is asked for asynchronously (the store scans in Rust), and `more` is the
+    /// signal to fall back to a search box.
     @ViewBuilder func filterEditor(_ index: Int) -> some View {
         let column = tab.preview.flatMap { index < $0.columns.count ? $0.columns[index] : nil }
-        let values = distinctValues(index)
-        let browsable = values.count <= ColumnFilter.valuePickerLimit
-
-        VStack(alignment: .leading, spacing: 10) {
-            SectionLabel(text: "Filter \(column?.name ?? "column")")
-            if browsable {
-                ValuePickerList(tab: tab, index: index, values: values)
-            } else {
-                SearchFilterField(tab: tab, index: index)
-            }
-            Text("This narrows the \((tab.preview?.rows.count ?? 0).formatted()) rows already "
-                 + "fetched — it does not re-run the query, so a row outside the limit is not "
-                 + "searched.")
-                .font(.ui(11))
-                .foregroundStyle(Tone.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
+        FilterEditorBody(rows: tab.result, column: index) { sample in
+            let values = sample.values
+            let browsable = !sample.more && values.count <= ColumnFilter.valuePickerLimit
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(text: "Filter \(column?.name ?? "column")")
                 if browsable {
-                    Text("\(values.count) distinct value\(values.count == 1 ? "" : "s")")
-                        .font(.ui(10.5))
-                        .foregroundStyle(Tone.secondary)
+                    ValuePickerList(tab: tab, index: index, values: values)
+                } else {
+                    SearchFilterField(tab: tab, index: index)
                 }
-                Spacer(minLength: 0)
-                PillButton(title: "Clear", role: .quiet, compact: true) { tab.columnFilters[index] = nil }
+                Text("This narrows the \((tab.preview?.rows.count ?? 0).formatted()) rows already "
+                     + "fetched — it does not re-run the query, so a row outside the limit is not "
+                     + "searched.")
+                    .font(.ui(11))
+                    .foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    if browsable {
+                        Text("\(values.count) distinct value\(values.count == 1 ? "" : "s")")
+                            .font(.ui(10.5))
+                            .foregroundStyle(Tone.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    PillButton(title: "Clear", role: .quiet, compact: true) { tab.columnFilters[index] = nil }
+                }
             }
+            .padding(14)
+            .frame(width: 300)
         }
-        .padding(14)
-        .frame(width: 300)
     }
-
-    
 
     /// The grid's own footer: what is on screen, the limit that decided it, and the one action
     /// that turns looking into keeping. Export lives here rather than in the toolbar because it
@@ -1099,5 +1094,28 @@ private struct SearchFilterField: View {
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// Loads a column's distinct sample, then hands it to `content`; "Loading…" until it arrives.
+private struct FilterEditorBody<Content: View>: View {
+    let rows: any ResultRows
+    let column: Int
+    @ViewBuilder let content: (DistinctSample) -> Content
+    @State private var sample: DistinctSample?
+
+    var body: some View {
+        Group {
+            if let sample {
+                content(sample)
+            } else {
+                Text("Loading…")
+                    .font(.ui(11))
+                    .foregroundStyle(Tone.secondary)
+                    .padding(14)
+                    .frame(width: 300, alignment: .leading)
+            }
+        }
+        .task(id: column) { sample = await rows.distinctValues(column: column) }
     }
 }
