@@ -342,6 +342,26 @@ extension AppModel {
         return nil
     }
 
+    /// What double-click and Return do on a row: **Open** on a table, **list its objects** on a
+    /// schema or a MySQL database, and **expand** on everything else.
+    ///
+    /// A schema is where the objects are, so asking to see them is what a click there means;
+    /// expanding is still one arrow away. A connection expands rather than opening the editor: that
+    /// is what the gesture means in every other tree on the platform, and editing a connection is a
+    /// deliberate act that lives in the context menu. A Postgres database is not a level whose
+    /// objects can be listed (they live under a schema, and the engine refuses the question), so it
+    /// expands like a Trino catalog does.
+    func openNode(_ node: TreeNode) {
+        switch node.kind {
+        case .table: openTable(node)
+        case .schema: openObjects(node)
+        case .database where node.connectionKind != .postgres: openObjects(node)
+        default:
+            selectedNodeID = node.id
+            toggleExpansion(node)
+        }
+    }
+
     func toggleExpansion(_ node: TreeNode) {
         node.expanded.toggle()
         if node.expanded { loadChildren(of: node) }
@@ -578,11 +598,11 @@ extension AppModel {
     /// A table's context menu asks for truncate or drop: the engine's `table_op`, through the same
     /// confirmation the run paths use.
     ///
-    /// Whether a question is asked is the engine's own contract. At `confirm` these two operations
-    /// ask (ADR-0027's one exception to confirm refusing DDL); at `full` they run without asking;
-    /// and at `no_ddl`/`read_only` the engine refuses them before opening a connection. The app
-    /// does not pre-refuse those two levels — the engine's sentence is the answer, and duplicating
-    /// the rule in Swift is how the two would come to disagree.
+    /// Whether a question is asked is `RunConfirmation.destructiveRequest`'s call: it asks at
+    /// `confirm` (ADR-0027's one exception to confirm refusing DDL) and at `full` (D-11), and
+    /// returns `nil` at `no_ddl`/`read_only`, where the engine refuses them before opening a
+    /// connection. The app does not pre-refuse those two levels: the engine's sentence is the
+    /// answer, and duplicating the rule in Swift is how the two would come to disagree.
     func requestTableOperation(_ operation: TableOperation, node: TreeNode) {
         guard let connection = connections.first(where: { $0.id == node.connectionID }) else { return }
         let statement = operation.statement(table: node.insertableText ?? node.title)

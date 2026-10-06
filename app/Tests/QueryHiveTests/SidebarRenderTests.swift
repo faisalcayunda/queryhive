@@ -48,39 +48,47 @@ final class SidebarRenderTests: XCTestCase {
         return model
     }
 
-    // `ImageRenderer` is main-actor isolated, so the test has to be too: drawing goes through the
-    // same SwiftUI machinery the app runs on the main actor, and pretending otherwise would be a
-    // different test than the one that matters.
+    /// The whole sidebar through an AppKit hosting view, with a tree under it. `ImageRenderer` cannot
+    /// draw the object list any more (it is an `NSOutlineView`), so this is the path that shows it.
     @MainActor
     func testTheSidebarRendersWithoutAWindow() throws {
-        let renderer = ImageRenderer(
-            content: SidebarTree()
-                .environment(model())
-                .frame(width: 260, height: 460)
-        )
-        renderer.scale = 2
+        isolateConnectionStore()
+        let model = model()
+        model.connections = [Connection(id: UUID(), name: "Warehouse", color: .violet, kind: .trino,
+                                        host: "w.internal", port: 8443, sslmode: "prefer",
+                                        user: "queryhive", database: "hive", schema: "analytics",
+                                        verify: true)]
+        model.rebuildTree()
+        let root = try XCTUnwrap(model.tree.first)
+        let catalog = TreeNode.catalog("hive", parent: root)
+        let schema = TreeNode.schema("bronze", parent: catalog)
+        schema.children = ["penerima_manfaat", "jadwal_distribusi"].map { TreeNode.table($0, parent: schema) }
+        schema.expanded = true
+        catalog.children = [schema]
+        catalog.expanded = true
+        root.children = [catalog]
+        root.expanded = true
 
-        let image = try XCTUnwrap(renderer.nsImage, "the sidebar did not render at all")
-        XCTAssertEqual(image.size.height, 460, "the render came out at the size it was asked for")
-
-        let data = try XCTUnwrap(
-            NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation))?
-                .representation(using: .png, properties: [:]),
-            "the render could not be encoded as a PNG"
-        )
+        let host = NSHostingView(rootView: SidebarTree().environment(model).frame(width: 260, height: 460))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 260, height: 460),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds), "no bitmap to draw into")
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let data = try XCTUnwrap(rep.representation(using: .png, properties: [:]),
+                                 "the render could not be encoded as a PNG")
 
         // A deliberately weak check, and worth being honest about: one colour means nothing was
         // drawn. It cannot tell a correct sidebar from a wrong one -- only that something is there.
-        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: data))
         var colours = Set<Int>()
-        for x in stride(from: 0, to: bitmap.pixelsWide, by: 7) {
-            for y in stride(from: 0, to: bitmap.pixelsHigh, by: 7) {
-                if let colour = bitmap.colorAt(x: x, y: y) {
-                    colours.insert(colour.hash)
-                }
+        for x in stride(from: 0, to: rep.pixelsWide, by: 7) {
+            for y in stride(from: 0, to: rep.pixelsHigh, by: 7) {
+                if let colour = rep.colorAt(x: x, y: y) { colours.insert(colour.hash) }
             }
         }
         XCTAssertGreaterThan(colours.count, 4, "the sidebar drew one flat colour")
+        XCTAssertNotNil(host.firstDescendant(ofType: OutlineView.self), "the object tree is an outline view")
 
         let directory = Self.outputDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -299,5 +307,13 @@ final class SidebarRenderTests: XCTestCase {
         }
         return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("queryhive-renders", isDirectory: true)
+    }
+}
+
+private extension NSView {
+    func firstDescendant<T: NSView>(ofType type: T.Type) -> T? {
+        if let match = self as? T { return match }
+        for sub in subviews { if let found = sub.firstDescendant(ofType: type) { return found } }
+        return nil
     }
 }

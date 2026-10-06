@@ -16,30 +16,25 @@ struct SidebarTree: View {
     }
 
     var body: some View {
-        @Bindable var model = model
         VStack(spacing: 0) {
             header
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    // Favourites sit above the objects on purpose: the tree is a catalogue of what the
-                    // server has, and a favourite is a statement the user decided to keep. Putting it
-                    // at the top is the entire point of marking one.
-                    if !model.favouriteQueries.isEmpty {
-                        favourites
-                    }
-                    if model.tree.isEmpty {
-                        emptyState
-                    } else if let ids = visibleIDs, ids.isEmpty {
-                        noMatches
-                    } else {
-                        ForEach(model.tree) { node in
-                            TreeRow(node: node, depth: 0, visible: visibleIDs,
-                                    selectedID: model.selectedNodeID)
-                        }
-                    }
+            // Favourites sit above the objects on purpose: the tree is a catalogue of what the
+            // server has, and a favourite is a statement the user decided to keep.
+            if !model.favouriteQueries.isEmpty {
+                if model.favouriteQueries.count > 6 {
+                    ScrollView { favourites.padding(.horizontal, 6) }.frame(height: 170)
+                } else {
+                    favourites.padding(.horizontal, 6)
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
+            }
+            if model.tree.isEmpty {
+                emptyState.padding(.horizontal, 6).padding(.vertical, 5)
+                Spacer(minLength: 0)
+            } else if let ids = visibleIDs, ids.isEmpty {
+                noMatches.padding(.horizontal, 6).padding(.vertical, 5)
+                Spacer(minLength: 0)
+            } else {
+                SchemaOutline(visible: visibleIDs)
             }
         }
         .background {
@@ -73,7 +68,7 @@ struct SidebarTree: View {
             HStack(spacing: 7) {
                 HiveMark(size: 15)
                 Text("QUERYHIVE")
-                    .font(.ui(10.5, weight: .bold))
+                    .font(.ui(10, weight: .bold))
                     .tracking(1.1)
                     .foregroundStyle(Tone.secondary)
                 Spacer()
@@ -147,20 +142,11 @@ struct SidebarTree: View {
     }
 }
 
-/// One tree row plus, when it is open, its children.
-///
-/// The recursion goes through `@ViewBuilder` functions rather than a `View` whose body contains
-/// itself: a self-containing `View` is an infinitely sized type, and the old code broke that cycle
-/// with `AnyView` — which erases the type, so SwiftUI cannot diff child rows at all and rebuilds
-/// the whole subtree whenever the parent redraws. With a tree this size that is what made
-/// expanding and scrolling feel sluggish. A function can call itself and still return a concrete
-/// `some View`, so every row keeps its identity and only what changed is redrawn.
 /// The favourites section of the sidebar, on its own.
 ///
 /// A view rather than a computed property on `SidebarTree` so it can be drawn without the tree. The
-/// sidebar's rows sit in a `LazyVStack` inside a `ScrollView`, and an offscreen render gives that no
-/// viewport, so lazily-laid-out rows never draw — which is exactly what an offscreen render of the
-/// whole sidebar shows. The section standing alone does draw, and it is the part worth looking at.
+/// object rows are an `NSOutlineView`, which `ImageRenderer` cannot draw, so this is the part of the
+/// sidebar an offscreen SwiftUI render can show.
 struct FavouritesSection: View {
     let queries: [Event.SavedQuery]
     let load: (Event.SavedQuery) -> Void
@@ -168,7 +154,7 @@ struct FavouritesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("FAVOURITES")
-                .font(.ui(9.5, weight: .bold))
+                .font(.ui(10, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(Tone.secondary)
                 .padding(.horizontal, 6)
@@ -201,373 +187,5 @@ struct FavouritesSection: View {
                 .padding(.vertical, 4)
         }
         .padding(.vertical, 4)
-    }
-}
-
-struct TreeRow: View {
-    @Environment(AppModel.self) private var model
-    @Bindable var node: TreeNode
-    let depth: Int
-    let visible: Set<String>?
-    /// The selected row's id, passed down from the root rather than read from the model here.
-    ///
-    /// Reading `model.selectedNodeID` inside this body subscribed **every visible row** to the
-    /// selection, so one click re-ran every row's body instead of the two whose highlight moved
-    /// — with a few hundred rows on screen that is the click that felt heavy. As a plain `let`,
-    /// SwiftUI compares it per row and skips every body whose value did not change. The same
-    /// reason `visible` above is a value, and the reason the comment on the old `selected` flag
-    /// gave for passing it in.
-    let selectedID: String?
-    @State private var hovering = false
-
-    /// Whether this row is the selected one. Computed from the passed-in id, so the body still
-    /// reads nothing from the model.
-    private var selected: Bool { node.id == selectedID }
-
-    private var isVisible: Bool { visible?.contains(node.id) ?? true }
-    /// A filter auto-opens every level it can see, so a deep match is not hidden behind a node
-    /// the user would have to expand by hand.
-    private var showChildren: Bool { visible != nil || node.expanded }
-
-    var body: some View {
-        if isVisible {
-            VStack(alignment: .leading, spacing: 1) {
-                row
-                children
-            }
-        }
-    }
-
-    /// The children, built only when this node is actually open. A collapsed catalog contributes
-    /// one line to the layout instead of a row per schema it has never fetched.
-    @ViewBuilder private var children: some View {
-        if node.loading {
-            messageRow(text: "Loading…", tint: Tone.secondary, spinning: true)
-        } else if let error = node.error {
-            messageRow(symbol: "exclamationmark.triangle.fill", text: error, tint: Tone.coral)
-        } else if showChildren, let children = node.children {
-            if children.isEmpty {
-                // A glyph, not a spinner. The spinner is what "Loading…" wears, and this row used
-                // to wear it too — a schema with no tables under it announced itself with a
-                // progress indicator that never stopped, which reads as a load that has hung
-                // rather than as an answer. The tray is the same mark the empty result grid and
-                // the empty object pane use for "there is nothing here", so the three agree.
-                messageRow(symbol: "tray", text: "Empty", tint: Tone.ink.opacity(0.3))
-            } else {
-                // Lazy, so a wide catalog builds only the rows on screen. The recursion is a
-                // method call on the child, not a nested `TreeRow`, which is what keeps the type
-                // concrete.
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(children) { child in
-                        TreeRow(node: child, depth: depth + 1, visible: visible,
-                                selectedID: selectedID)
-                    }
-                }
-            }
-        }
-    }
-
-    private var row: some View {
-        HStack(spacing: 5) {
-            Button {
-                if node.isExpandable { model.toggleExpansion(node) }
-            } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Tone.secondary)
-                    .rotationEffect(.degrees(showChildren ? 90 : 0))
-                    .frame(width: 11, height: 11)
-                    .opacity(node.isExpandable ? 1 : 0)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            // A connection wears its driver's mark, on its own colour. Every connection used to be
-            // the same `server.rack`, so the one row that says *which database* this is said
-            // nothing at all — and the tile is already how the rest of the app answers that
-            // question, in the toolbar picker and on the connection sheet.
-            //
-            // Built from the node's values rather than from the model's connection: see
-            // `connectionTile(colour:kind:size:)` for why a row must not read that array.
-            Group {
-                if node.kind == .connection {
-                    connectionTile(colour: node.color, kind: node.connectionKind, size: 16)
-                } else {
-                    Image(systemName: node.kind.symbol)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(iconTint)
-                }
-            }
-            .frame(width: 16)
-
-            Text(node.title)
-                .font(.ui(12, weight: node.kind == .connection ? .semibold : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 2)
-        }
-        .padding(.leading, CGFloat(depth) * Metrics.treeIndent + 6)
-        .padding(.trailing, 7)
-        .frame(height: Metrics.treeRow)
-        .background(Tone.ink.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { doubleClick() }
-        .onTapGesture { model.selectedNodeID = node.id }
-        .contextMenu { menu }
-        .help(helpText)
-    }
-
-    /// A line under a row: the wait, the reason it failed, or the answer that there is nothing.
-    ///
-    /// `spinning` is asked for rather than inferred from a missing `symbol`. It used to be inferred,
-    /// and the inference was wrong the moment an empty row wanted no glyph: every such row drew a
-    /// progress indicator, so "Empty" arrived spinning and a schema with no tables looked like a
-    /// load that had hung.
-    private func messageRow(symbol: String? = nil, text: String, tint: Color,
-                            spinning: Bool = false) -> some View {
-        HStack(spacing: 5) {
-            if spinning {
-                ProgressView().controlSize(.mini)
-            } else if let symbol {
-                Image(systemName: symbol).font(.system(size: 9)).foregroundStyle(tint)
-            }
-            Text(text).font(.ui(10.5)).foregroundStyle(tint).lineLimit(2)
-            Spacer(minLength: 2)
-        }
-        .padding(.leading, CGFloat(depth + 1) * Metrics.treeIndent + 6)
-        .padding(.trailing, 7)
-        .padding(.vertical, 2)
-    }
-
-    @ViewBuilder private var menu: some View {
-        switch node.kind {
-        case .connection:
-            // Navicat's connection menu, minus the entries this app has nothing behind: no
-            // connection profiles, no server-side "New Database", no sharing. What is left is what
-            // the app can actually do — plus groups, which is where a connection is filed.
-            //
-            // The whole menu is written once against `id`, the one thing on this branch that is
-            // certain: a group is the only node without a connection, and a group is not this case.
-            if let id = node.connectionID {
-                Button("Open Connection") { model.expand(node) }
-                // Only Postgres filters system schemas away, so only there does "show all" reveal
-                // anything. MySQL and Trino already list everything `SHOW DATABASES` / `SHOW SCHEMAS`
-                // return, so offering the switch there would be a control with nothing behind it.
-                if let connection = model.connections.first(where: { $0.id == id }),
-                   connection.kind == .postgres {
-                    Button {
-                        model.toggleShowAllSchemas(id)
-                    } label: {
-                        if connection.showAllSchemas {
-                            Label("Show System Schemas", systemImage: "checkmark")
-                        } else {
-                            Text("Show System Schemas")
-                        }
-                    }
-                    // Just as Postgres-only as the switch above, and for a neighbour reason: the
-                    // other two drivers already draw their databases — MySQL's tree *is* its
-                    // databases and Trino's is its catalogs — so there the box would add a level
-                    // that is already there. Here it adds the one Postgres hides, which is why the
-                    // database level exists only when this is on.
-                    Button {
-                        model.toggleShowAllDatabases(id)
-                    } label: {
-                        if connection.showAllDatabases {
-                            Label("Show All Databases", systemImage: "checkmark")
-                        } else {
-                            Text("Show All Databases")
-                        }
-                    }
-                }
-                Divider()
-                Button("Edit Connection…") { model.presentConnectionEditor(id) }
-                Button("Duplicate Connection") { model.duplicateConnection(id) }
-                Button("Delete Connection…") { model.requestDelete(id) }
-                Divider()
-                groupMenu(for: id)
-                Divider()
-                Button("New Connection") { model.presentConnectionEditor(nil) }
-                Divider()
-                // No keyboard shortcuts in here: this app's ⌘R is Run and ⌘T is already New Query
-                // from the Query menu, so printing either beside a different action would mislead,
-                // and declaring one twice can fire it twice.
-                Button("New Query") { model.newTab(connectionID: id) }
-                Button("Open SQL File…") { model.runSQLFile(connectionID: id) }
-                Divider()
-                Menu("Color") {
-                    ForEach(ConnectionColor.allCases) { color in
-                        Button {
-                            model.setColor(color, for: id)
-                        } label: {
-                            // The colour's own name, with a tick on the one in use. A context menu
-                            // cannot draw swatches, and inventing a row of coloured dots that only
-                            // works in one menu would be worse than saying the colour.
-                            if node.color == color {
-                                Label(color.rawValue.capitalized, systemImage: "checkmark")
-                            } else {
-                                Text(color.rawValue.capitalized)
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button("Refresh") { model.refresh(node) }
-                Button("Reveal connections.json") {
-                    if let url = try? ConnectionStore.directory() {
-                        NSWorkspace.shared.activateFileViewerSelecting([url.appendingPathComponent("connections.json")])
-                    }
-                }
-            }
-        case .group:
-            // A group holds connections and nothing else, so its menu is about the filing: what to
-            // call it, what goes in it, and how to get rid of it without losing what is inside.
-            Button("New Connection in Group") {
-                model.presentConnectionEditor(nil, inGroup: node.groupID)
-            }
-            Divider()
-            Button("Rename Group…") { model.presentRenameGroup(node.groupID) }
-            // Deleting a group does **not** delete its connections. A folder that took its contents
-            // with it would make this the most dangerous item in the side bar, and there is nothing
-            // in the gesture that says "and the servers too".
-            Button("Delete Group") { model.deleteGroup(node.groupID) }
-            Divider()
-            Button("Refresh") { model.refresh(node) }
-        case .catalog, .database, .schema:
-            Button("Refresh") { model.refresh(node) }
-            Button("Copy Name") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.title, forType: .string)
-            }
-            // A catalog, database or schema always belongs to a connection — only a group has none —
-            // so the unwrap is a formality the compiler needs and the tree can always satisfy.
-            if let id = node.connectionID {
-                Divider()
-                Button("New Query") { model.newTab(connectionID: id) }
-                Button("Open SQL File…") { model.runSQLFile(connectionID: id) }
-            }
-        case .table:
-            Button("Insert into Query") { model.insert(node) }
-            if let qualified = node.insertableText {
-                Button("Copy Qualified Name") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(qualified, forType: .string)
-                }
-            }
-            Button("Copy Name") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(node.title, forType: .string)
-            }
-            Divider()
-            Button("Import Data into Table…") { model.presentImport(into: node) }
-            Divider()
-            // Destructive, and deliberately not key-bound. Whether a question is asked is the
-            // connection's Safe Mode: `confirm` asks, `full` runs, and `no_ddl`/`read_only` refuse
-            // at the engine. `requestTableOperation` carries that contract.
-            Button("Truncate Table…") { model.requestTableOperation(.truncate, node: node) }
-            Button("Drop Table…") { model.requestTableOperation(.drop, node: node) }
-            Divider()
-            Button("Refresh") { model.refresh(node) }
-        }
-    }
-
-    /// Which group a connection is filed under: the list of groups that exist, the way out of all
-    /// of them, and the way to make a new one. Every answer to "where should this live" is in this
-    /// menu, including "nowhere", which is a real answer.
-    @ViewBuilder
-    private func groupMenu(for id: UUID) -> some View {
-        let filed = model.connections.first(where: { $0.id == id })?.group
-        Menu("Group") {
-            Button {
-                model.move(id, toGroup: nil)
-            } label: {
-                if filed == nil { Label("No Group", systemImage: "checkmark") } else { Text("No Group") }
-            }
-            if !model.groups.isEmpty {
-                Divider()
-                ForEach(model.groups) { group in
-                    Button {
-                        model.move(id, toGroup: group.id)
-                    } label: {
-                        if filed == group.id {
-                            Label(group.name, systemImage: "checkmark")
-                        } else {
-                            Text(group.name)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button("New Group…") { model.presentNewGroup(with: id) }
-        }
-    }
-
-    /// The tree's double-click: **Open** on a table, **list its objects** on a schema or a MySQL
-    /// database, and **expand** on everything else.
-    ///
-    /// A schema used to expand here like a catalog does. That is the right gesture for a catalog --
-    /// you are walking down to the level you want -- but a schema is where the objects actually
-    /// are, and asking to see them is what a click there means. Expanding is still one click away
-    /// on the disclosure triangle, which is where the platform puts it anyway.
-    ///
-    /// A connection used to open the editor here, which made the one row you double-click most
-    /// often — the root of the tree, the thing you expand to start browsing — the one row that
-    /// refused to expand. Expand/collapse is what the gesture means in every other tree on the
-    /// platform, and it is what this tree does for catalogs, schemas and databases; a connection
-    /// was the single exception, and the exception was the wrong way round. Editing a connection
-    /// is a deliberate act with a form and a Save button, so it belongs in the context menu, where
-    /// it already is.
-    private func doubleClick() {
-        switch node.kind {
-        case .table: model.openTable(node)
-        case .schema: model.openObjects(node)
-        // A MySQL database *is* the level whose objects can be listed, so double-clicking one opens
-        // them. A Postgres database is not: its objects live under a schema, and asking the engine
-        // for them from here would ask a question Postgres refuses (`DB_SCHEMA ... is required`)
-        // rather than doing what the click looks like it should — showing what is inside. So it
-        // opens like a Trino catalog does, and the schemas are the next level down.
-        case .database where node.connectionKind == .postgres:
-            model.selectedNodeID = node.id
-            model.toggleExpansion(node)
-        case .database: model.openObjects(node)
-        default:
-            model.selectedNodeID = node.id
-            model.toggleExpansion(node)
-        }
-    }
-
-    private var iconTint: Color {
-        switch node.kind {
-        case .group: Tone.secondary
-        case .connection: node.color.color
-        case .catalog: Tone.violet
-        case .database: Tone.ice
-        case .schema: Tone.amber
-        case .table: Tone.secondary
-        }
-    }
-
-
-    private var helpText: String {
-        switch node.kind {
-        case .group:
-            "Group \(node.title) — holds connections. Right-click to rename or delete it."
-        case .connection:
-            "\(node.title) · \(node.connectionKind.label) — double-click to expand. Right-click to edit."
-        case .catalog:
-            "Catalog \(node.title) — expand to list schemas"
-        case .database:
-            // Which is under it depends on the driver: MySQL's database holds tables, and a
-            // Postgres one — only ever drawn by "show all databases" — holds schemas.
-            node.connectionKind == .postgres
-                ? "Database \(node.title) — expand to list its schemas"
-                : "Database \(node.title) — expand to list tables"
-        case .schema:
-            "Schema \(node.title) — expand to list tables"
-        case .table:
-            node.insertableText?.appending(" — double-click to insert") ?? node.title
-        }
     }
 }

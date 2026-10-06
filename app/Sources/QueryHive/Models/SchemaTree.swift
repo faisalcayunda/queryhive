@@ -149,6 +149,28 @@ final class TreeNode: Identifiable {
         }
     }
 
+    /// The sentence a row carries as its tooltip and its accessibility help.
+    var helpText: String {
+        switch kind {
+        case .group:
+            "Group \(title) — holds connections. Right-click to rename or delete it."
+        case .connection:
+            "\(title) · \(connectionKind.label) — double-click to expand. Right-click to edit."
+        case .catalog:
+            "Catalog \(title) — expand to list schemas"
+        case .database:
+            // MySQL's database holds tables; a Postgres one, drawn only by "show all databases",
+            // holds schemas.
+            connectionKind == .postgres
+                ? "Database \(title) — expand to list its schemas"
+                : "Database \(title) — expand to list tables"
+        case .schema:
+            "Schema \(title) — expand to list tables"
+        case .table:
+            insertableText?.appending(" — double-click to insert") ?? title
+        }
+    }
+
     /// Ids to keep on screen for a filter. The filter can only see what has already been
     /// loaded — browsing is a network round trip per level, so there is nothing to search below
     /// an unexpanded node.
