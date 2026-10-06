@@ -549,7 +549,6 @@ async fn the_callers_row_ceiling_is_honoured_across_pages() {
                 max_batch_rows: None,
                 row_limit: Some(7),
                 statement_timeout: None,
-                bulk: false,
             },
         )
         .await

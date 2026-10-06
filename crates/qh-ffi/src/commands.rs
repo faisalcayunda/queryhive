@@ -878,8 +878,6 @@ pub async fn export(
             max_batch_rows: Some(batch_size),
             row_limit: None,
             statement_timeout: timeout,
-            // The export reads every row, which is what the bulk path is for.
-            bulk: true,
         },
     )
     .await?;
@@ -1610,7 +1608,6 @@ pub async fn explain(
             max_batch_rows: Some(target.max_batch_rows()),
             row_limit: None,
             statement_timeout: timeout,
-            bulk: false,
         },
         stop_grace(&config),
     )
@@ -1681,9 +1678,6 @@ fn stopped_run(
     Ok(())
 }
 
-/// The smallest row cap at which a preview asks the driver for its bulk read path.
-const BULK_PREVIEW_ROWS: u64 = 100_000;
-
 /// A result set as one `columns` event and batched `rows` events.
 ///
 /// `preview` and `explain` share this: both put a database result set on the wire
@@ -1728,9 +1722,6 @@ async fn stream_rows(
                 .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
                 .map(|limit| limit.saturating_add(VERDICT_FETCH)),
             statement_timeout: bounds.timeout,
-            // A big read is where the server's bulk path pays; a small page is not worth its
-            // extra round trip, and its early stop would leave the server producing.
-            bulk: bounds.limit.is_none_or(|limit| limit >= BULK_PREVIEW_ROWS),
         },
         stop_grace(config),
     )

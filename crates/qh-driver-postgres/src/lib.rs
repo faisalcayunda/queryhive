@@ -86,7 +86,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod copy;
 pub mod normalize;
 pub mod tls;
 
@@ -96,7 +95,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
@@ -562,53 +561,12 @@ impl Session for PostgresSession {
             },
         )
         .await?;
-        let (columns, type_names) = describe_columns(&statement);
-        // The bulk read: the same statement, sent as `COPY (...) TO STDOUT`. Only a plain
-        // single SELECT is wrapped, so a read never becomes a write, and COPY TO is itself
-        // read-only, so a read-only session keeps refusing what it refused. The describe above
-        // is still the source of the columns and types.
-        if options.bulk
-            && !columns.is_empty()
-            && qh_sql::is_plain_select_dialect(sql, Dialect::Postgres)
-        {
-            let copy = format!(
-                "COPY (\n{}\n) TO STDOUT",
-                strip_terminator_dialect(sql, Dialect::Postgres)
-            );
-            match client.copy_out(copy.as_str()).await {
-                Ok(stream) => {
-                    self.statement_timeout = options.statement_timeout;
-                    return Ok(Box::new(PostgresCopyCursor {
-                        columns,
-                        type_names,
-                        stream: Box::pin(stream),
-                        pending: Vec::new(),
-                        scratch: Vec::new(),
-                        row_limit: options.row_limit,
-                        emitted: 0,
-                        finished: false,
-                        timeout: options.statement_timeout,
-                    }));
-                }
-                // Stopped or timed out while waiting (for a lock, say): that is the answer, and
-                // running the statement again would wait a second time. A closed connection
-                // has no second try either.
-                Err(error)
-                    if error.is_closed()
-                        || error.code().is_some_and(|code| code.code() == "57014") =>
-                {
-                    return Err(map_query_error(error, sql, options.statement_timeout));
-                }
-                // Any other refusal came before a row was produced (a server that speaks the
-                // protocol but not `COPY (query)`), so the normal path runs.
-                Err(_) => {}
-            }
-        }
         let stream = client
             .simple_query_raw(sql)
             .await
             .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
         self.statement_timeout = options.statement_timeout;
+        let (columns, type_names) = describe_columns(&statement);
 
         Ok(Box::new(PostgresCursor {
             columns,
@@ -873,127 +831,26 @@ impl Cursor for PostgresCursor {
         }
         self.emitted += rows.len();
 
-        column_batch(rows, self.columns.len())
+        // Transposed here because the store is column-major and a row is the
+        // shape the wire arrives in. This is the one place the two meet.
+        let column_count = self.columns.len();
+        let mut columns: Vec<Vec<Value>> = (0..column_count)
+            .map(|_| Vec::with_capacity(rows.len()))
+            .collect();
+        for row in rows {
+            for (index, value) in row.into_iter().enumerate() {
+                columns[index].push(value);
+            }
+        }
+        ColumnBatch::new(columns)
+            .map(Some)
+            .map_err(|error| EngineError::Internal {
+                message: format!("the cursor built a batch the store refused: {error}"),
+            })
     }
 
     fn affected_rows(&self) -> Option<u64> {
         self.affected
-    }
-}
-
-/// Rows are what the wire delivers and the store is column-major; this is the one place the two
-/// meet. Shared by the normal cursor and the COPY cursor.
-fn column_batch(
-    rows: Vec<Vec<Value>>,
-    column_count: usize,
-) -> Result<Option<ColumnBatch>, EngineError> {
-    let mut columns: Vec<Vec<Value>> = (0..column_count)
-        .map(|_| Vec::with_capacity(rows.len()))
-        .collect();
-    for row in rows {
-        for (index, value) in row.into_iter().enumerate() {
-            columns[index].push(value);
-        }
-    }
-    ColumnBatch::new(columns)
-        .map(Some)
-        .map_err(|error| EngineError::Internal {
-            message: format!("the cursor built a batch the store refused: {error}"),
-        })
-}
-
-/// Rows from `COPY (<select>) TO STDOUT`, decoded by [`copy::decode_line`] into the same
-/// [`Value`]s the normal cursor produces.
-struct PostgresCopyCursor<S> {
-    columns: Vec<ColumnMeta>,
-    type_names: Vec<String>,
-    /// `CopyOutStream` in production; the tests feed it chunks cut at chosen places.
-    stream: Pin<Box<S>>,
-    /// Bytes received but not yet a whole line. The server sends one row per message, so this
-    /// is normally empty; it is what makes a row split across messages correct anyway.
-    pending: Vec<u8>,
-    /// Scratch for one un-escaped value.
-    scratch: Vec<u8>,
-    row_limit: Option<usize>,
-    emitted: usize,
-    finished: bool,
-    timeout: Option<Duration>,
-}
-
-#[async_trait]
-impl<S, B> Cursor for PostgresCopyCursor<S>
-where
-    S: Stream<Item = Result<B, tokio_postgres::Error>> + Send + 'static,
-    B: AsRef<[u8]> + Send,
-{
-    fn columns(&self) -> &[ColumnMeta] {
-        &self.columns
-    }
-
-    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
-        if self.finished {
-            return Ok(None);
-        }
-        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(max_rows.min(1024));
-        // Consumed from `pending` as lines are decoded, so a long batch does not shift the
-        // buffer once per row.
-        let mut start = 0;
-        'fill: while rows.len() < max_rows {
-            while let Some(at) = memchr::memchr(b'\n', &self.pending[start..]) {
-                if let Some(limit) = self.row_limit {
-                    if self.emitted + rows.len() >= limit {
-                        self.finished = true;
-                        break 'fill;
-                    }
-                }
-                let line = &self.pending[start..start + at];
-                start += at + 1;
-                let mut row = Vec::with_capacity(self.columns.len());
-                copy::decode_line(
-                    line,
-                    self.columns.len(),
-                    &mut self.scratch,
-                    |index, text| {
-                        row.push(normalize::from_text(&self.type_names[index], text));
-                    },
-                )
-                .inspect_err(|_| self.finished = true)?;
-                rows.push(row);
-                if rows.len() >= max_rows {
-                    break 'fill;
-                }
-            }
-            self.pending.drain(..start);
-            start = 0;
-            if let Some(limit) = self.row_limit {
-                if self.emitted + rows.len() >= limit {
-                    self.finished = true;
-                    break;
-                }
-            }
-            match self.stream.next().await {
-                Some(Ok(chunk)) => self.pending.extend_from_slice(chunk.as_ref()),
-                Some(Err(error)) => {
-                    self.finished = true;
-                    return Err(map_query_error(error, "", self.timeout));
-                }
-                None => {
-                    self.finished = true;
-                    if !self.pending.is_empty() {
-                        return Err(EngineError::Internal {
-                            message: "the COPY stream ended in the middle of a row".to_owned(),
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-        self.pending.drain(..start);
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        self.emitted += rows.len();
-        column_batch(rows, self.columns.len())
     }
 }
 
@@ -1269,95 +1126,6 @@ fn snippet(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A COPY cursor over `chunks`, standing in for the server's `CopyData` messages.
-    fn copy_cursor(
-        chunks: Vec<Vec<u8>>,
-        row_limit: Option<usize>,
-    ) -> PostgresCopyCursor<impl Stream<Item = Result<Vec<u8>, tokio_postgres::Error>> + Send> {
-        PostgresCopyCursor {
-            columns: vec![
-                ColumnMeta::new("a", "text"),
-                ColumnMeta::new("b", "int4"),
-                ColumnMeta::new("c", "text"),
-            ],
-            type_names: vec!["text".into(), "int4".into(), "text".into()],
-            stream: Box::pin(futures_util::stream::iter(chunks.into_iter().map(Ok))),
-            pending: Vec::new(),
-            scratch: Vec::new(),
-            row_limit,
-            emitted: 0,
-            finished: false,
-            timeout: None,
-        }
-    }
-
-    async fn copy_rows(
-        cursor: &mut impl Cursor,
-        max_rows: usize,
-    ) -> Result<Vec<Vec<Value>>, EngineError> {
-        let mut rows = Vec::new();
-        while let Some(batch) = cursor.next_batch(max_rows).await? {
-            for row in 0..batch.rows() {
-                rows.push(
-                    (0..batch.width())
-                        .map(|column| batch.value(row, column).expect("cell").clone())
-                        .collect(),
-                );
-            }
-        }
-        Ok(rows)
-    }
-
-    /// Three rows: escapes in a value, a NULL beside an empty string, and a `\N` that is text.
-    const COPY_WIRE: &[u8] = b"x\\ty\t1\tz\n\\N\t2\t\n\\\\N\t\\N\t\xe6\x97\xa5\\n\n";
-
-    fn copy_expected() -> Vec<Vec<Value>> {
-        vec![
-            vec![
-                Value::Text("x\ty".into()),
-                Value::Int(1),
-                Value::Text("z".into()),
-            ],
-            vec![Value::Null, Value::Int(2), Value::Text("".into())],
-            vec![
-                Value::Text("\\N".into()),
-                Value::Null,
-                Value::Text("\u{65e5}\n".into()),
-            ],
-        ]
-    }
-
-    #[tokio::test]
-    async fn a_copy_row_is_the_same_wherever_the_messages_are_cut() {
-        // The server sends a row per message, but the protocol does not promise it: cut the
-        // stream at every byte, and into one byte per message, with every batch size.
-        let mut cuts: Vec<Vec<Vec<u8>>> = (0..=COPY_WIRE.len())
-            .map(|at| vec![COPY_WIRE[..at].to_vec(), COPY_WIRE[at..].to_vec()])
-            .collect();
-        cuts.push(COPY_WIRE.iter().map(|byte| vec![*byte]).collect());
-        for chunks in cuts {
-            for max_rows in [1, 2, 3, 100] {
-                let mut cursor = copy_cursor(chunks.clone(), None);
-                let rows = copy_rows(&mut cursor, max_rows).await.expect("decodes");
-                assert_eq!(rows, copy_expected(), "{chunks:?} in batches of {max_rows}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn a_copy_cursor_stops_at_its_row_limit_and_reports_a_torn_row() {
-        let mut cursor = copy_cursor(vec![COPY_WIRE.to_vec()], Some(2));
-        let rows = copy_rows(&mut cursor, 10).await.expect("decodes");
-        assert_eq!(rows, copy_expected()[..2].to_vec());
-        assert!(cursor.next_batch(10).await.expect("ended").is_none());
-
-        // The server ended the copy without the row's newline.
-        let mut cursor = copy_cursor(vec![COPY_WIRE[..COPY_WIRE.len() - 1].to_vec()], None);
-        let error = copy_rows(&mut cursor, 10).await.expect_err("torn row");
-        assert!(error.to_string().contains("middle of a row"), "{error}");
-        assert!(cursor.next_batch(10).await.expect("ended").is_none());
-    }
 
     #[test]
     fn the_timeout_set_is_only_sent_when_it_changes_and_never_overflows() {

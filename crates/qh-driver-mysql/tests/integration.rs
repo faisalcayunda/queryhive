@@ -360,7 +360,6 @@ async fn a_row_limit_stops_reading_without_changing_the_statement() {
         max_batch_rows: None,
         row_limit: Some(10),
         statement_timeout: None,
-        bulk: false,
     };
     let mut cursor = session
         .execute("SELECT id FROM wide_500k ORDER BY id", &options)

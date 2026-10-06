@@ -13,8 +13,6 @@ futures-util = { version = "0.3", default-features = false }
 qh-core.workspace = true
 qh-driver.workspace = true
 qh-sql.workspace = true
-# The COPY text decoder looks for tab, newline and backslash bytes.
-memchr = "2"
 # TLS, as the blueprint's §5 table requires (blueprint line 580): `rustls` so the
 # binary does not link OpenSSL, and `rustls-platform-verifier` so the roots come
 # from the platform store — the macOS Keychain — which is what makes a corporate
