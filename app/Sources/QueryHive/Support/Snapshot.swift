@@ -1,6 +1,24 @@
 import AppKit
 import SwiftUI
 
+/// A window that draws as if it were on a 2x display with an sRGB profile, whatever screen it is
+/// on. The parity baselines were recorded on a Retina screen, and the screen decides more than
+/// the pixel density: SwiftUI rounds its layout to the backing grid and TextKit snaps its glyphs
+/// to it, so the same view drawn on a 1x external display comes out with different widths, not
+/// just different anti-aliasing. Pinning the factor here (and the colour space, which otherwise is
+/// the display's) makes the picture a property of the build and not of the desk it was taken at.
+final class PinnedScaleWindow: NSWindow {
+    static let scale: CGFloat = 2
+
+    override var backingScaleFactor: CGFloat { Self.scale }
+
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask,
+                  backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        colorSpace = .sRGB
+    }
+}
+
 /// Renders the shell to a PNG:
 ///
 ///     QueryHive.app/Contents/MacOS/QueryHive --snapshot /tmp/queryhive.png
@@ -150,10 +168,10 @@ enum Snapshot {
         // The other scenes (Settings, the cell reader, the parameter sheet) are bare content.
         let isShell = !(scene.hasPrefix("settings") || scene == "parameters" || scene == "grid-json")
         if isShell { hosting.sceneBridgingOptions = [.toolbars, .title] }
-        let window = NSWindow(contentRect: hosting.frame,
-                              styleMask: isShell ? [.titled, .closable, .resizable, .fullSizeContentView]
-                                                 : [.titled, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        let window = PinnedScaleWindow(contentRect: hosting.frame,
+                                       styleMask: isShell ? [.titled, .closable, .resizable, .fullSizeContentView]
+                                                          : [.titled, .fullSizeContentView],
+                                       backing: .buffered, defer: false)
         if !isShell {
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden

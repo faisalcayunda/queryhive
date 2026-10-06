@@ -545,7 +545,7 @@ final class VisualParityTests: XCTestCase {
             .preferredColorScheme(look.scheme))
         let host = NSHostingView(rootView: root)
         host.frame = CGRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered,
+        let window = PinnedScaleWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered,
                               defer: false)
         window.appearance = look.appearance
         window.contentView = host

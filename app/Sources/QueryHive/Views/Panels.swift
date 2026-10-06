@@ -107,6 +107,15 @@ struct PanelTabButton: View {
     let action: () -> Void
     @State private var hovering = false
 
+    /// The washes behind the tab and behind its count, named so the contrast test composites the
+    /// same stack the view paints.
+    static let selectedWash = 0.13, hoverWash = 0.06, countWash = 0.08
+
+    /// The label's colour, and the count's: the accent is not an option for either. On the selected
+    /// tab's capsule the ice accent is 1.0:1 in Daylight, Cloud and Paper, and in the dark themes
+    /// violet (1.6 to 2.8), magenta and blue and ice on Nord (4.0) are all under 4.5:1.
+    static func ink(selected: Bool) -> Color { selected ? Tone.ink : Tone.secondary }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
@@ -115,16 +124,16 @@ struct PanelTabButton: View {
                 if let count {
                     Text("\(count)")
                         .font(.ui(10, weight: .semibold))
-                        .foregroundStyle(selected ? Tone.accent : Tone.secondary)
+                        .foregroundStyle(Self.ink(selected: selected))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Tone.ink.opacity(0.08), in: Capsule())
+                        .background(Tone.ink.opacity(Self.countWash), in: Capsule())
                 }
             }
-            .foregroundStyle(selected ? Tone.ink : Tone.secondary)
+            .foregroundStyle(Self.ink(selected: selected))
             .padding(.horizontal, 9)
             .frame(height: 21)
-            .background(Tone.ink.opacity(selected ? 0.13 : (hovering ? 0.06 : 0)),
+            .background(Tone.ink.opacity(selected ? Self.selectedWash : (hovering ? Self.hoverWash : 0)),
                         in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }

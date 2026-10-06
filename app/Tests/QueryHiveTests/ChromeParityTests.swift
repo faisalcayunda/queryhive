@@ -260,7 +260,7 @@ final class ChromeParityTests: XCTestCase {
         let host = NSHostingView(rootView: root)
         host.frame = CGRect(origin: .zero, size: size)
         if bridged { host.sceneBridgingOptions = [.toolbars, .title] }
-        let window = NSWindow(contentRect: host.frame,
+        let window = PinnedScaleWindow(contentRect: host.frame,
                               styleMask: bridged ? [.titled, .closable, .resizable, .fullSizeContentView] : [.titled],
                               backing: .buffered, defer: false)
         window.appearance = look.appearance

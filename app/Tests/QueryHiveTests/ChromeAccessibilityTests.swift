@@ -147,6 +147,17 @@ final class ChromeContrastTests: XCTestCase {
         return (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
+    /// `layers` painted in order over `canvas`, as one opaque colour.
+    private func flatten(_ layers: [Color], over canvas: Color, dark: Bool) -> Color {
+        var out = resolve(canvas, dark: dark)
+        for layer in layers {
+            let l = resolve(layer, dark: dark)
+            out = (r: l.r * l.a + out.r * (1 - l.a), g: l.g * l.a + out.g * (1 - l.a),
+                   b: l.b * l.a + out.b * (1 - l.a), a: 1)
+        }
+        return Color(.sRGB, red: out.r, green: out.g, blue: out.b, opacity: 1)
+    }
+
     override func tearDown() {
         ThemeStore.shared.unpinSurface()
         super.tearDown()
@@ -161,6 +172,27 @@ final class ChromeContrastTests: XCTestCase {
                     let ratio = contrast(token, over: theme.canvas, dark: theme.isDark)
                     XCTAssertGreaterThanOrEqual(ratio, 4.5,
                         "\(name) on \(theme.title), enhanced \(enhanced): \(ratio)")
+                }
+            }
+        }
+    }
+
+    /// The Log tab's count sits on a capsule over the tab's own wash over the canvas. The accent used
+    /// to be the digits' colour when selected, which is 1.0:1 on the three light themes.
+    func testTheTabCountClearsFourAndAHalfOnItsCapsuleInEveryTheme() {
+        for enhanced in [false, true] {
+            ThemeStore.shared.pin(reduceMotion: false, reduceTransparency: false,
+                                  increaseContrast: enhanced)
+            for theme in AppTheme.allCases {
+                for (state, selected, wash) in [("selected", true, PanelTabButton.selectedWash),
+                                                ("hovered", false, PanelTabButton.hoverWash),
+                                                ("idle", false, 0)] {
+                    let capsule = flatten([Tone.ink.opacity(wash), Tone.ink.opacity(PanelTabButton.countWash)],
+                                          over: theme.canvas, dark: theme.isDark)
+                    let ratio = contrast(PanelTabButton.ink(selected: selected), over: capsule,
+                                         dark: theme.isDark)
+                    XCTAssertGreaterThanOrEqual(ratio, 4.5,
+                        "\(state) count on \(theme.title), enhanced \(enhanced): \(ratio)")
                 }
             }
         }
