@@ -1047,6 +1047,19 @@ async fn live_reset(directory: &tempfile::TempDir, table: &str) {
         .expect("the table is created");
 }
 
+/// Drop `table` again so a finished test leaves the shared dev database as it found it
+/// (the golden `*_tables_live` and `*_objects_live` cases list the `public` schema).
+async fn live_drop(directory: &tempfile::TempDir, table: &str) {
+    let path = write(
+        directory,
+        &format!("{table}-drop.sql"),
+        &format!("DROP TABLE IF EXISTS {table};\n"),
+    );
+    live_import(&path, table, &[])
+        .await
+        .expect("the table is dropped");
+}
+
 /// Five rows whose fourth repeats the primary key of the second.
 fn live_rows(directory: &tempfile::TempDir, table: &str) -> PathBuf {
     write(
@@ -1102,6 +1115,7 @@ async fn live_values_land_as_the_file_wrote_them() {
             json!(["3", null, null, null, "false"]),
         ]
     );
+    live_drop(&directory, table).await;
 }
 
 #[tokio::test]
@@ -1143,6 +1157,7 @@ async fn live_stop_rolls_the_whole_file_back() {
         Vec::<String>::new(),
         "nothing landed"
     );
+    live_drop(&directory, table).await;
 }
 
 #[tokio::test]
@@ -1178,6 +1193,7 @@ async fn live_commit_cannot_keep_a_prefix_on_postgresql_and_says_so() {
         Vec::<String>::new(),
         "the table agrees"
     );
+    live_drop(&directory, table).await;
 }
 
 #[tokio::test]
@@ -1208,4 +1224,5 @@ async fn live_skip_keeps_every_valid_row_without_a_transaction() {
     // The row that was skipped did not overwrite the one that was already there.
     let rows = live_select(&format!("SELECT name FROM {table} WHERE id = 2")).await;
     assert_eq!(rows, vec![json!(["b"])]);
+    live_drop(&directory, table).await;
 }
