@@ -97,7 +97,12 @@ struct EditorOutlineData: Equatable {
 }
 
 /// One document's analysis: owns the FFI `EditorDocument` and converts its packets.
-final class EditorAnalysis {
+///
+/// `@unchecked Sendable`: the editor hands it to background queues (the idle pass, the coalesced
+/// paint) on purpose. The Rust document serialises its own state under mutexes, `pending` is only
+/// touched on `paintQueue`, and `revision` is written on the main thread: a background read that
+/// lags behind gets `.stale` back from the Rust side.
+final class EditorAnalysis: @unchecked Sendable {
     private let document: EditorDocument
     private let paintQueue = DispatchQueue(label: "queryhive.editor.analysis")
     private var pending: [(window: NSRange, budget: Int,

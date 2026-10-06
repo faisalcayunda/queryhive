@@ -811,7 +811,7 @@ struct SQLEditor: NSViewRepresentable {
         /// Paint the visible window off the main thread, coalesced: a burst of keystrokes
         /// paints once, and a scroll schedules at most one paint per frame.
         private func requestVisible() {
-            guard let analysis = analysis, textView != nil, !visibleScheduled else { return }
+            guard analysis != nil, textView != nil, !visibleScheduled else { return }
             visibleScheduled = true
             DispatchQueue.main.async { [weak self] in
                 guard let self, let textView = self.textView else {

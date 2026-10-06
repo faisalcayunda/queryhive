@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 import SwiftUI
 
@@ -683,7 +684,10 @@ enum ConnectionKeychain {
         var search = query(for: id)
         search[kSecReturnData as String] = true
         search[kSecMatchLimit as String] = kSecMatchLimitOne
-        search[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        // `kSecUseAuthenticationUIFail`'s replacement (macOS 11): a context that may not show UI.
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        search[kSecUseAuthenticationContext as String] = context
         var result: AnyObject?
         let status = SecItemCopyMatching(search as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }

@@ -1222,24 +1222,23 @@ impl Cursor for TrinoCursor {
                 self.emitted += take;
 
                 // A page is row-major and a batch is column-major, so the
-                // transpose happens here, once per batch.
-                let width = self.columns.len().max(rows.first().map_or(0, Vec::len));
+                // transpose happens here, once per batch. The width is the widest
+                // row, not the first: `decode_rows` keeps a value past the declared
+                // columns as `Unknown`, and cutting it here would drop it unseen
+                // (the store refuses the wider batch instead). A shorter row is
+                // padded with NULLs, since a ragged batch would be refused.
+                let width = rows
+                    .iter()
+                    .map(Vec::len)
+                    .fold(self.columns.len(), usize::max);
                 let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(rows.len()); width];
                 for row in rows {
-                    for (index, value) in row.into_iter().enumerate() {
-                        if index < columns.len() {
-                            columns[index].push(value);
-                        }
+                    let cells = row.len();
+                    for (column, value) in columns.iter_mut().zip(row) {
+                        column.push(value);
                     }
-                }
-                if columns.iter().any(|column| column.is_empty()) {
-                    // Fewer values than columns would make a ragged batch, which
-                    // ColumnBatch refuses. Padding with NULLs keeps the shape the
-                    // server declared.
-                    for column in columns.iter_mut() {
-                        while column.len() < take {
-                            column.push(Value::Null);
-                        }
+                    for column in &mut columns[cells..] {
+                        column.push(Value::Null);
                     }
                 }
                 return Ok(Some(ColumnBatch::new(columns).map_err(|error| {
@@ -1704,6 +1703,57 @@ mod tests {
                 vec![Value::Int(2), Value::Text("b".into())],
             ]
         );
+    }
+
+    /// A cursor holding already decoded rows, for the page-to-batch step alone.
+    fn cursor_over(columns: &[&str], rows: &[Vec<Json>]) -> TrinoCursor {
+        let wire: Vec<WireColumn> = columns
+            .iter()
+            .map(|name| WireColumn {
+                name: (*name).to_owned(),
+                type_text: "bigint".to_owned(),
+            })
+            .collect();
+        TrinoCursor {
+            client: client_for(TlsMode::Disable, None).expect("client"),
+            credentials: Credentials::new("t", None),
+            catalog: String::new(),
+            schema: String::new(),
+            running: Arc::new(Mutex::new(None)),
+            next_uri: None,
+            columns: wire
+                .iter()
+                .map(|column| ColumnMeta::new(column.name.clone(), column.type_text.clone()))
+                .collect(),
+            pending: decode_rows(&wire, rows).into(),
+            finished: true,
+            affected: None,
+            row_limit: None,
+            emitted: 0,
+            max_batch_rows: None,
+            poll_pause: POLL_INTERVAL_MIN,
+            timeout: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ragged_row_is_padded_or_kept_never_cut() {
+        let ints = |values: &[i64]| values.iter().map(|v| Json::from(*v)).collect::<Vec<_>>();
+        // A later row wider than the first used to lose its extra value.
+        let mut wide = cursor_over(&["a", "b"], &[ints(&[1, 2]), ints(&[3, 4, 5])]);
+        let batch = wide.next_batch(0).await.unwrap().unwrap();
+        assert_eq!(
+            batch.width(),
+            3,
+            "the extra value stays, and the store refuses the width"
+        );
+        assert!(matches!(batch.value(1, 2), Some(Value::Unknown { .. })));
+        assert_eq!(batch.value(0, 2), Some(&Value::Null));
+        // A shorter row used to fail the whole batch unless a column was empty.
+        let mut short = cursor_over(&["a", "b"], &[ints(&[1, 2]), ints(&[3])]);
+        let batch = short.next_batch(0).await.unwrap().unwrap();
+        assert_eq!((batch.width(), batch.rows()), (2, 2));
+        assert_eq!(batch.value(1, 1), Some(&Value::Null));
     }
 
     #[test]
