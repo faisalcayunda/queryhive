@@ -219,7 +219,7 @@ struct ResultGrid: View {
             if let placeholder = placeholder(preview) {
                 ResultGridTable(tab: tab, model: model, inputs: inputs,
                                 commands: gridCommands(preview))
-                    .frame(height: GridMetrics.headerHeight())
+                    .frame(height: GridMetrics.headerHeight(fontSize: DataPreferences.shared.gridFontSize))
                 placeholderBody(placeholder)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -303,7 +303,8 @@ struct ResultGrid: View {
             },
             filtered: Set(tab.columnFilters.keys),
             style: GridInputs.GridStyle(
-                rowHeight: DataPreferences.shared.rowHeight.points,
+                rowHeight: DataPreferences.shared.rowPoints,
+                fontSize: DataPreferences.shared.gridFontSize,
                 alternateRows: DataPreferences.shared.alternateRows,
                 showRowNumbers: DataPreferences.shared.showRowNumbers,
                 nullDisplay: DataPreferences.shared.nullDisplay,
@@ -331,7 +332,8 @@ struct ResultGrid: View {
         let counts = tab.result.naturalCharCounts()
         return GridMetrics.naturalWidths(
             headerCounts: visible.map { tab.columnLayout.label($0, original: preview.columns).count },
-            sampleCounts: visible.map { counts.indices.contains($0) ? counts[$0] : 0 }
+            sampleCounts: visible.map { counts.indices.contains($0) ? counts[$0] : 0 },
+            fontSize: DataPreferences.shared.gridFontSize
         )
     }
 

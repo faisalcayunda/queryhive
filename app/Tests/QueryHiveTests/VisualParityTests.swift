@@ -513,6 +513,7 @@ final class VisualParityTests: XCTestCase {
         prefs.autoUppercaseKeywords = layout.autoUppercaseKeywords
         prefs.runButtonPerStatement = layout.runButtonPerStatement
         prefs.tabWidth = layout.tabWidth
+        prefs.fontSize = layout.fontSize
     }
 
     // MARK: Rendering

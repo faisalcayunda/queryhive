@@ -41,10 +41,15 @@ enum GridMetrics {
     /// readable and a 300-character one from eating the panel, and the trailing 22 is the cell's own
     /// 16 pt of padding plus the room the header's funnel needs. `n` is the wider of the header label
     /// and the longest of the first 200 fetched rows; NULL counts as 4.
-    static func naturalWidths(headerCounts: [Int], sampleCounts: [Int]) -> [CGFloat] {
-        zip(headerCounts, sampleCounts).map { header, sample in
+    ///
+    /// The advance scales with the cell font, or a larger font would cut every column short with an
+    /// ellipsis; at the standard size the product is exactly 7.2, so nothing moves.
+    static func naturalWidths(headerCounts: [Int], sampleCounts: [Int],
+                              fontSize: Int = DataPreferences.standardGridFontSize) -> [CGFloat] {
+        let advance = 7.2 * CGFloat(fontSize) / 12
+        return zip(headerCounts, sampleCounts).map { header, sample in
             let n = max(header, sample)
-            return min(max(CGFloat(n) * 7.2 + 20, 84), 320) + 22
+            return min(max(CGFloat(n) * advance + 20, 84), 320) + 22
         }
     }
 
@@ -110,14 +115,14 @@ enum GridMetrics {
     }
 
     /// The header's height for the fonts the grid draws with.
-    static func headerHeight() -> CGFloat {
-        headerHeight(labelLine: lineHeight(of: FontChoice.codeNSFont(size: 12, weight: .semibold)),
+    static func headerHeight(fontSize: Int = DataPreferences.standardGridFontSize) -> CGFloat {
+        headerHeight(labelLine: lineHeight(of: FontChoice.codeNSFont(size: CGFloat(fontSize), weight: .semibold)),
                      chipLine: lineHeight(of: FontChoice.codeNSFont(size: 11, weight: .semibold)))
     }
 
     /// A data cell's box height: one line of the cell font plus its vertical padding. 23 at the default.
-    static func dataBoxHeight() -> CGFloat {
-        lineHeight(of: FontChoice.codeNSFont(size: 12, weight: nil)) + 2 * cellVerticalPadding
+    static func dataBoxHeight(fontSize: Int = DataPreferences.standardGridFontSize) -> CGFloat {
+        lineHeight(of: FontChoice.codeNSFont(size: CGFloat(fontSize), weight: nil)) + 2 * cellVerticalPadding
     }
 
     /// The gutter cell's box height: 25 at the default, and it is what makes the gutter's separator

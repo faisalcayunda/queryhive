@@ -85,7 +85,7 @@ final class GridTableView: NSTableView {
     private func configure() {
         // The row height is the grid's, not the system's: `rowSizeStyle`'s default would override it.
         rowSizeStyle = .custom
-        rowHeight = DataPreferences.shared.rowHeight.points
+        rowHeight = DataPreferences.shared.rowPoints
         usesAutomaticRowHeights = false
         intercellSpacing = .zero
         gridStyleMask = []

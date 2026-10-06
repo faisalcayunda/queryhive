@@ -25,6 +25,12 @@ final class EditorPreferences {
     private static let runButtonKey = "editorRunButtonPerStatement"
     private static let queryParametersKey = "editorQueryParameters"
     private static let tabWidthKey = "editorTabWidth"
+    private static let fontSizeKey = "editorFontSize"
+
+    /// What the editor drew in before the size was a setting, which is why it is the default.
+    static let standardFontSize = 12.5
+    /// The smallest and largest size the editor offers, in points.
+    static let fontSizeRange = 10.0...28.0
 
     /// The store these switches are read from and written to.
     ///
@@ -43,6 +49,7 @@ final class EditorPreferences {
     private var storedRunButton: Bool
     private var storedQueryParameters: Bool
     private var storedTabWidth: Int
+    private var storedFontSize: Double
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -57,6 +64,16 @@ final class EditorPreferences {
         storedQueryParameters = Self.on(defaults, Self.queryParametersKey, default: true)
         let tabWidth = defaults.integer(forKey: Self.tabWidthKey)
         storedTabWidth = tabWidth > 0 ? tabWidth : 4
+        // `double(forKey:)` answers 0 for a key never written, and 0 is not a size, so the absent
+        // key and a stored zero both fall back to the default.
+        let fontSize = defaults.double(forKey: Self.fontSizeKey)
+        storedFontSize = fontSize > 0 ? Self.clampedFontSize(fontSize) : Self.standardFontSize
+    }
+
+    /// `size` held inside the range. NaN has no place in a range, so it becomes the default.
+    static func clampedFontSize(_ size: Double) -> Double {
+        guard !size.isNaN else { return standardFontSize }
+        return min(max(size, fontSizeRange.lowerBound), fontSizeRange.upperBound)
     }
 
     /// Whether a switch nobody has touched is on.
@@ -134,6 +151,13 @@ final class EditorPreferences {
         set { storedTabWidth = min(max(newValue, 1), 8); persist() }
     }
 
+    /// The size the text is drawn in, in points. Clamped, because the value comes from a control and
+    /// a size nobody can read is not one worth honouring.
+    var fontSize: Double {
+        get { storedFontSize }
+        set { storedFontSize = Self.clampedFontSize(newValue); persist() }
+    }
+
     private func persist() {
         defaults.set(storedShowLineNumbers, forKey: Self.showLineNumbersKey)
         defaults.set(storedHighlightLine, forKey: Self.highlightLineKey)
@@ -145,6 +169,7 @@ final class EditorPreferences {
         defaults.set(storedRunButton, forKey: Self.runButtonKey)
         defaults.set(storedQueryParameters, forKey: Self.queryParametersKey)
         defaults.set(storedTabWidth, forKey: Self.tabWidthKey)
+        defaults.set(storedFontSize, forKey: Self.fontSizeKey)
     }
 }
 
@@ -164,13 +189,14 @@ struct EditorLayout: Equatable {
     var autoUppercaseKeywords: Bool
     var runButtonPerStatement: Bool
     var tabWidth: Int
+    var fontSize: Double
 
     /// What an untouched install has, for anything that needs a layout without a store behind it.
     static let standard = EditorLayout(showLineNumbers: true, highlightCurrentLine: true,
                                        highlightCurrentStatement: true, wordWrap: true,
                                        codeFolding: true, showInvisibles: false,
                                        autoUppercaseKeywords: false, runButtonPerStatement: true,
-                                       tabWidth: 4)
+                                       tabWidth: 4, fontSize: EditorPreferences.standardFontSize)
 
     static var current: EditorLayout {
         let prefs = EditorPreferences.shared
@@ -182,6 +208,7 @@ struct EditorLayout: Equatable {
                             showInvisibles: prefs.showInvisibles,
                             autoUppercaseKeywords: prefs.autoUppercaseKeywords,
                             runButtonPerStatement: prefs.runButtonPerStatement,
-                            tabWidth: prefs.tabWidth)
+                            tabWidth: prefs.tabWidth,
+                            fontSize: prefs.fontSize)
     }
 }

@@ -33,6 +33,9 @@ final class DataPreferencesTests: XCTestCase {
         XCTAssertTrue(prefs.showRowNumbers)
         XCTAssertEqual(prefs.viewerMode, .automatic)
         XCTAssertEqual(prefs.firstSortDirection, .ascending)
+        // 12 is the size the cells were hard-coded to, and at 12 the row is exactly its preset.
+        XCTAssertEqual(prefs.gridFontSize, 12)
+        XCTAssertEqual(prefs.rowPoints, 25)
     }
 
     func testAChangeIsWrittenDownAndReadBack() {
@@ -43,6 +46,7 @@ final class DataPreferencesTests: XCTestCase {
         prefs.showRowNumbers = false
         prefs.viewerMode = .text
         prefs.firstSortDirection = .descending
+        prefs.gridFontSize = 14
 
         let reopened = DataPreferences(defaults: suite)
         XCTAssertEqual(reopened.rowHeight, .tall)
@@ -51,6 +55,43 @@ final class DataPreferencesTests: XCTestCase {
         XCTAssertFalse(reopened.showRowNumbers)
         XCTAssertEqual(reopened.viewerMode, .text)
         XCTAssertEqual(reopened.firstSortDirection, .descending)
+        XCTAssertEqual(reopened.gridFontSize, 14)
+    }
+
+    func testAGridFontSizeIsClampedToWhatTheRowsCanHold() {
+        let prefs = store()
+        prefs.gridFontSize = 3
+        XCTAssertEqual(prefs.gridFontSize, 11)
+        prefs.gridFontSize = 40
+        XCTAssertEqual(prefs.gridFontSize, 16)
+        prefs.gridFontSize = 16
+        XCTAssertEqual(prefs.gridFontSize, 16, "the ends of the range are sizes")
+        prefs.gridFontSize = 11
+        XCTAssertEqual(prefs.gridFontSize, 11)
+    }
+
+    func testAStoredGridFontSizeOutsideTheRangeIsHeldInsideItOnLoad() {
+        // The absent key reads 0 and must mean "the default", not "the smallest size".
+        XCTAssertEqual(store().gridFontSize, 12)
+        suite.set(99, forKey: "gridFontSize")
+        XCTAssertEqual(store().gridFontSize, 16)
+        suite.set(-2, forKey: "gridFontSize")
+        XCTAssertEqual(store().gridFontSize, 11)
+    }
+
+    func testTheRowFollowsALargerFontByTwoPointsForEachPoint() {
+        // The standard size is the preset exactly, whatever the preset, which is what keeps the
+        // baselines where they are; above it the row grows with the font, and below it the row
+        // stays, because a smaller line does not shrink as fast as two points a size.
+        for height in DataPreferences.RowHeight.allCases {
+            XCTAssertEqual(height.points(atFontSize: 12), height.points)
+            XCTAssertEqual(height.points(atFontSize: 14), height.points + 4)
+            XCTAssertEqual(height.points(atFontSize: 11), height.points)
+        }
+        let prefs = store()
+        prefs.rowHeight = .tall
+        prefs.gridFontSize = 16
+        XCTAssertEqual(prefs.rowPoints, 38)
     }
 
     func testAnEmptyNullDisplayIsAChoiceRatherThanAMissingSetting() {

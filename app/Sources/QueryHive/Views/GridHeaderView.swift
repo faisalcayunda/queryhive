@@ -37,7 +37,7 @@ final class GridHeaderView: NSTableHeaderView {
     var columns: [Column] = [] {
         didSet {
             if columns != oldValue {
-                height = Self.measuredHeight(columns: columns)
+                height = Self.measuredHeight(columns: columns, labelSize: paint.headerFont.pointSize)
                 needsDisplay = true
             }
         }
@@ -363,8 +363,9 @@ final class GridHeaderView: NSTableHeaderView {
     ///
     /// Measured rather than assumed to be 50, because a chip that wraps makes its column taller and
     /// the band has to hold the tallest of them, which is what the SwiftUI `HStack` did.
-    static func measuredHeight(columns: [Column]) -> CGFloat {
-        let labelLine = GridMetrics.lineHeight(of: FontChoice.codeNSFont(size: 12, weight: .semibold))
+    static func measuredHeight(columns: [Column],
+                               labelSize: CGFloat = CGFloat(DataPreferences.standardGridFontSize)) -> CGFloat {
+        let labelLine = GridMetrics.lineHeight(of: FontChoice.codeNSFont(size: labelSize, weight: .semibold))
         let chipLine = GridMetrics.lineHeight(of: FontChoice.codeNSFont(size: 11, weight: .semibold))
         let tallest = columns.map { column -> CGFloat in
             let width = column.width - 2 * GridMetrics.cellPadding

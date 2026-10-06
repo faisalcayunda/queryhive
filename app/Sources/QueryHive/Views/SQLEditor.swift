@@ -86,7 +86,7 @@ struct SQLEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
-        textView.font = FontChoice.codeNSFont(size: 12.5, weight: .regular)
+        textView.font = SQLSyntax.font(italic: false)
         // Adaptive, not pinned white: this NSTextView draws on `Tone.canvas`, which is near-black
         // in a dark appearance and off-white in a light one. AppKit resolves both of these per
         // appearance, so the caret and the default text colour follow the canvas with no observer.
@@ -626,7 +626,14 @@ struct SQLEditor: NSViewRepresentable {
             scrollView?.rulersVisible = layout.showLineNumbers
             applyWrap(layout)
             textView.layoutManager?.showsInvisibleCharacters = layout.showInvisibles
-            if previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
+            // A size is the one switch that changes the font the tab stops are measured in, so it
+            // goes first and the tab pass below re-applies the width and repaints the whole text.
+            let resized = previous != nil && previous?.fontSize != layout.fontSize
+            if resized {
+                textView.font = SQLSyntax.font(italic: false)
+                ruler?.needsDisplay = true
+            }
+            if resized || previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
             // The first pass has no regions to refresh: `recolour` follows it and does the analysis.
             if let previous, previous.codeFolding != layout.codeFolding { runIdle() }
             updateRunMarks()

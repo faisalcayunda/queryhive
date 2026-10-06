@@ -64,6 +64,64 @@ final class GridMetricsTests: XCTestCase {
         XCTAssertEqual(GridMetrics.headerHeight(), 50, accuracy: 0.001)
     }
 
+    /// The boxes follow the cell font. At the standard size they are the measured ones, and a larger
+    /// font never makes a box smaller; the row grows by two points per font point, so no preset
+    /// ever overflows its row by more than Compact does at the standard size (23 in a 21 row), which
+    /// is the overflow the painter's row order was built to hide.
+    func testTheBoxesFollowTheFontAndTheRowsStayAheadOfThem() {
+        XCTAssertEqual(GridMetrics.dataBoxHeight(fontSize: 12), 23, accuracy: 0.001)
+        XCTAssertEqual(GridMetrics.headerHeight(fontSize: 12), 50, accuracy: 0.001)
+        var previousBox: CGFloat = 0
+        var previousHeader: CGFloat = 0
+        for size in DataPreferences.gridFontSizeRange {
+            let box = GridMetrics.dataBoxHeight(fontSize: size)
+            let header = GridMetrics.headerHeight(fontSize: size)
+            XCTAssertGreaterThanOrEqual(box, previousBox, "box at \(size)")
+            XCTAssertGreaterThanOrEqual(header, previousHeader, "header at \(size)")
+            previousBox = box
+            previousHeader = header
+            for preset in DataPreferences.RowHeight.allCases {
+                XCTAssertLessThanOrEqual(box - preset.points(atFontSize: size), 2,
+                                         "\(preset) at \(size): box \(box) in a row of \(preset.points(atFontSize: size))")
+            }
+        }
+        XCTAssertGreaterThan(GridMetrics.dataBoxHeight(fontSize: 16), GridMetrics.dataBoxHeight(fontSize: 12))
+        XCTAssertGreaterThan(GridMetrics.headerHeight(fontSize: 16), GridMetrics.headerHeight(fontSize: 12))
+    }
+
+    /// The painter draws the cells and the header labels in the style's size and leaves the gutter's
+    /// number and the type chip at their own; the size is part of the style, so a change of it is a
+    /// change of the inputs and the grid re-measures.
+    func testThePaintContextDrawsTheCellsAndLabelsInTheStyleSize() {
+        var style = GridInputs.GridStyle.placeholder
+        let standard = GridPaintContext.resolve(style: style, appearance: .currentDrawing())
+        XCTAssertEqual(standard.cellFont.pointSize, 12)
+        XCTAssertEqual(standard.headerFont.pointSize, 12)
+
+        style.fontSize = 15
+        let larger = GridPaintContext.resolve(style: style, appearance: .currentDrawing())
+        XCTAssertEqual(larger.cellFont.pointSize, 15)
+        XCTAssertEqual(larger.headerFont.pointSize, 15)
+        XCTAssertEqual(larger.gutterFont.pointSize, 10.5)
+        XCTAssertEqual(larger.chipFont.pointSize, 11)
+        XCTAssertGreaterThan(larger.dataBoxHeight, standard.dataBoxHeight)
+        XCTAssertGreaterThan(larger.headerLabelLine, standard.headerLabelLine)
+        XCTAssertNotEqual(style, GridInputs.GridStyle.placeholder)
+    }
+
+    /// A column's width scales with the cell font, or a larger font would cut every value short with
+    /// an ellipsis; at the standard size it is the same number as before.
+    func testAColumnIsWiderInALargerFont() {
+        let standard = GridMetrics.naturalWidths(headerCounts: [10], sampleCounts: [10])
+        XCTAssertEqual(GridMetrics.naturalWidths(headerCounts: [10], sampleCounts: [10], fontSize: 12), standard)
+        XCTAssertEqual(standard, [114])
+        // 10 × 7.2 × 16 / 12 + 20 = 116, plus 22.
+        XCTAssertEqual(GridMetrics.naturalWidths(headerCounts: [10], sampleCounts: [10], fontSize: 16)[0],
+                       138, accuracy: 0.001)
+        XCTAssertLessThan(GridMetrics.naturalWidths(headerCounts: [10], sampleCounts: [10], fontSize: 11)[0],
+                          standard[0])
+    }
+
     /// A box's edges are snapped half away from zero: a row ending at 456.5 with a box two points
     /// inside it puts the bottom at 454.5, which goes **up** to 455 — measured off the baselines,
     /// where a separator that went down sat a point below the row it belonged to.

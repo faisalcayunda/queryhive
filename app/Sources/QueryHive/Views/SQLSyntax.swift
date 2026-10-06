@@ -109,15 +109,17 @@ enum SQLSyntax {
     static let comment = colour(0x5A6072, 0x5F6672)
     static let punctuation = colour(0x9AA0B5, 0x565C6B)
 
-    /// The font the highlighter paints in, resolved fresh so it follows the code-font setting.
+    /// The font the highlighter paints in, resolved fresh so it follows the code-font and the
+    /// font-size settings.
     ///
     /// Italic is asked for through the descriptor rather than `NSFontManager`: a fixed-pitch face
     /// often has no italic cut for the manager to convert to, and it returns nil. When the chosen
     /// family has no italic either, the descriptor returns nil and the upright font is kept — a
     /// comment that is not slanted is a smaller loss than a comment that does not draw.
     static func font(italic: Bool) -> NSFont {
-        let plain = FontChoice.codeNSFont(size: 12.5, weight: .regular)
+        let size = CGFloat(EditorPreferences.shared.fontSize)
+        let plain = FontChoice.codeNSFont(size: size, weight: .regular)
         guard italic else { return plain }
-        return NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: 12.5) ?? plain
+        return NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: size) ?? plain
     }
 }

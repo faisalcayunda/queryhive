@@ -24,6 +24,9 @@ struct GridInputs: Equatable {
     /// The switches that change how the grid is drawn rather than what it holds.
     struct GridStyle: Equatable {
         var rowHeight: CGFloat
+        /// The cell and header-label font, in points. A field of the style so that a change in
+        /// Settings is a change of the inputs, which is what makes the grid repaint and re-measure.
+        var fontSize = DataPreferences.standardGridFontSize
         var alternateRows: Bool
         var showRowNumbers: Bool
         var nullDisplay: String
@@ -398,7 +401,8 @@ struct ResultGridTable: NSViewRepresentable {
             guard let header = table?.header else { return }
             let columns = buildHeaderColumns(inputs)
             header.columns = columns
-            let height = GridHeaderView.measuredHeight(columns: columns)
+            let height = GridHeaderView.measuredHeight(columns: columns,
+                                                       labelSize: CGFloat(inputs.style.fontSize))
             if abs(header.frame.height - height) > 0.01 {
                 header.frame.size.height = height
             }

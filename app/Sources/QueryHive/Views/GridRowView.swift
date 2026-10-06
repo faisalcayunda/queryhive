@@ -139,9 +139,9 @@ struct GridPaintContext {
     /// The fonts and box heights for one style, measured. Everything except the geometry, the
     /// palette and the flags, which the caller supplies.
     static func resolve(style: GridInputs.GridStyle, appearance: NSAppearance) -> GridPaintContext {
-        let cellFont = FontChoice.codeNSFont(size: 12, weight: nil)
+        let cellFont = FontChoice.codeNSFont(size: CGFloat(style.fontSize), weight: nil)
         let gutterFont = FontChoice.codeNSFont(size: 10.5, weight: nil)
-        let headerFont = FontChoice.codeNSFont(size: 12, weight: .semibold)
+        let headerFont = FontChoice.codeNSFont(size: CGFloat(style.fontSize), weight: .semibold)
         let chipFont = FontChoice.codeNSFont(size: 11, weight: .semibold)
         return GridPaintContext(
             geometry: GridColumnGeometry(gutter: 0, widths: []),

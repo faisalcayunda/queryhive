@@ -735,19 +735,44 @@ struct SectionLabel: View {
 /// The settings panes had grown a paragraph under nearly every heading, which pushed the controls
 /// apart and left the reading order as explanations-then-settings rather than the other way round.
 /// The text is worth keeping and not worth the room, so the heading carries the glyph and the
-/// sentence arrives on hover — where whoever wants it is already looking.
+/// sentence arrives on demand.
+///
+/// A button, because a hover tooltip is reachable by a pointer and by nothing else: a keyboard
+/// reaches the button and Space or Return opens the sentence in a popover, and VoiceOver reads
+/// "Help" with the sentence as its hint. The tooltip stays for the pointer that rests on it.
 struct HelpHint: View {
+    /// What VoiceOver calls it. The sentence is the hint, so the name says only what this is.
+    static let accessibilityName = "Help"
+    /// The widest the popover's text runs, in points, before it wraps.
+    static let popoverWidth: CGFloat = 280
+
     let text: String
     @State private var hovering = false
+    @State private var showing = false
 
     var body: some View {
-        Image(systemName: "questionmark.circle")
-            .font(.system(size: 10.5, weight: .medium))
-            .foregroundStyle(hovering ? Tone.ink.opacity(0.7) : Tone.secondary.opacity(0.75))
-            .frame(width: 13, height: 13)
-            .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .help(text)
+        Button { showing.toggle() } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(hovering || showing ? Tone.ink.opacity(0.7) : Tone.secondary.opacity(0.75))
+                .frame(width: 13, height: 13)
+                // Four points more to hit on every side, with the glyph and the layout unchanged:
+                // a 13-point target is a small thing to find with a trackpad.
+                .contentShape(Rectangle().inset(by: -4))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(text)
+        .accessibilityLabel(Self.accessibilityName)
+        .accessibilityHint(text)
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            Text(text)
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: Self.popoverWidth, alignment: .leading)
+                .padding(12)
+        }
     }
 }
 

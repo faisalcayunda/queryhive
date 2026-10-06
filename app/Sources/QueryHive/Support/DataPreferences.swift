@@ -32,7 +32,24 @@ final class DataPreferences {
             case .tall: 30
             }
         }
+
+        /// The row's height once the cell font is `fontSize` rather than the standard one: two
+        /// points for each point of font above the standard, so the standard size is exactly
+        /// `points` and a larger font never overfills its row.
+        ///
+        /// Below the standard the row stays where it is. A line of text loses about one point per
+        /// point of font, not two, so shrinking the row at the same rate would push Compact's box
+        /// further past its row than it already goes at the standard size; the denser rows are the
+        /// Compact preset's job.
+        func points(atFontSize fontSize: Int) -> CGFloat {
+            points + 2 * CGFloat(max(0, fontSize - DataPreferences.standardGridFontSize))
+        }
     }
+
+    /// What the cells were drawn in before the size was a setting, which is why it is the default.
+    static let standardGridFontSize = 12
+    /// The smallest and largest cell font the grid offers, in points.
+    static let gridFontSizeRange = 11...16
 
     /// What a cell reader opens on.
     ///
@@ -61,6 +78,7 @@ final class DataPreferences {
     private static let viewerModeKey = "jsonViewerMode"
     private static let firstSortKey = "gridFirstSortDirection"
     private static let autoInspectorKey = "gridAutoShowInspector"
+    private static let fontSizeKey = "gridFontSize"
 
     /// The store these are read from and written to. A parameter so a test can hand in a scratch
     /// suite: this is a singleton whose setters persist, and a test that wrote to the real
@@ -82,6 +100,7 @@ final class DataPreferences {
     private var storedViewerMode: ViewerMode
     private var storedFirstSort: GridSort.Direction
     private var storedAutoInspector: Bool
+    private var storedFontSize: Int
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -100,6 +119,14 @@ final class DataPreferences {
         // only one that defaults off: an untouched install gets the whole pane for the grid, which
         // is what it has always had.
         storedAutoInspector = Self.on(defaults, Self.autoInspectorKey, default: false)
+        // An absent key reads 0, which is out of the range, so it clamps to the smallest size
+        // rather than the default; the explicit check is what keeps an upgrade at 12.
+        let fontSize = defaults.integer(forKey: Self.fontSizeKey)
+        storedFontSize = fontSize == 0 ? Self.standardGridFontSize : Self.clampedFontSize(fontSize)
+    }
+
+    static func clampedFontSize(_ size: Int) -> Int {
+        min(max(size, gridFontSizeRange.lowerBound), gridFontSizeRange.upperBound)
     }
 
     private static func on(_ defaults: UserDefaults, _ key: String, default fallback: Bool) -> Bool {
@@ -157,6 +184,16 @@ final class DataPreferences {
         set { storedFirstSort = newValue; persist() }
     }
 
+    /// The cell and header-label font, in points. Clamped, because the value comes from a control.
+    /// The row-number gutter and the type chip keep their own sizes.
+    var gridFontSize: Int {
+        get { storedFontSize }
+        set { storedFontSize = Self.clampedFontSize(newValue); persist() }
+    }
+
+    /// The row's height in points: the preset's, moved by the font size.
+    var rowPoints: CGFloat { rowHeight.points(atFontSize: gridFontSize) }
+
     private func persist() {
         // Pinned means a render: the values are for this process only and the file is left alone.
         guard !isPinned else { return }
@@ -167,6 +204,7 @@ final class DataPreferences {
         defaults.set(storedViewerMode.rawValue, forKey: Self.viewerModeKey)
         defaults.set(storedFirstSort.rawValue, forKey: Self.firstSortKey)
         defaults.set(storedAutoInspector, forKey: Self.autoInspectorKey)
+        defaults.set(storedFontSize, forKey: Self.fontSizeKey)
     }
 
     /// Set what the grid should draw without writing any of it down.

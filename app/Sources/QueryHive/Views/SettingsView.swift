@@ -121,6 +121,10 @@ struct SettingsView: View {
         // screen this app supports.
         .frame(width: 560, height: 640)
         .background(Tone.canvas)
+        // The window says which pane is open, which is also what a screen reader announces when
+        // the window gains focus. A tab bar of our own cannot drive the title the way a native
+        // toolbar of panes would, so the title is written from here.
+        .background { WindowTitleBinder(title: pane.title).frame(width: 0, height: 0) }
     }
 
     @ViewBuilder
@@ -256,6 +260,70 @@ private struct SettingsRow<Control: View>: View {
 private struct RowDivider: View {
     var body: some View {
         Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
+    }
+}
+
+/// Writes `title` into the title of the window this view is in, and again whenever it changes.
+///
+/// `navigationTitle` is the SwiftUI way, but it is not known to reach a `Settings` scene's window,
+/// and a title that does not change is the thing this exists to fix, so the window is set directly.
+/// Applied once more on the next turn of the run loop: the scene gives the window its own title as
+/// it opens, and the first write can land before that one.
+struct WindowTitleBinder: NSViewRepresentable {
+    let title: String
+
+    func makeNSView(context: Context) -> TitleView { TitleView() }
+
+    func updateNSView(_ view: TitleView, context: Context) { view.title = title }
+
+    final class TitleView: NSView {
+        var title = "" { didSet { apply() } }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+
+        private func apply() {
+            guard let window, !title.isEmpty, window.title != title else { return }
+            window.title = title
+        }
+    }
+}
+
+/// The "Font size" row both panes carry: the number, a smaller and a larger step, and the way back.
+///
+/// Steps rather than a slider or a free field, because the sizes that read well are few and a
+/// stepper cannot produce one that is out of range. The buttons are named for a screen reader and
+/// go dim at the ends of the range.
+private struct FontSizeRow: View {
+    @Binding var size: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let standard: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Font size")
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+            Spacer(minLength: 12)
+            Text("\(size.formatted(.number.precision(.fractionLength(0...1)))) pt")
+                .font(.code(11))
+                .foregroundStyle(Tone.secondary)
+            IconButton(symbol: "minus", help: "Decrease font size", diameter: 22) {
+                size = max(size - step, range.lowerBound)
+            }
+            .disabled(size <= range.lowerBound)
+            IconButton(symbol: "plus", help: "Increase font size", diameter: 22) {
+                size = min(size + step, range.upperBound)
+            }
+            .disabled(size >= range.upperBound)
+            PillButton(title: "Reset", role: .quiet, compact: true) { size = standard }
+                .disabled(size == standard)
+        }
+        .padding(.vertical, 6)
     }
 }
 
@@ -924,6 +992,9 @@ struct EditorSettings: View {
                         .labelsHidden()
                 }
                 .padding(.vertical, 6)
+                RowDivider()
+                FontSizeRow(size: $prefs.fontSize, range: EditorPreferences.fontSizeRange, step: 0.5,
+                            standard: EditorPreferences.standardFontSize)
             }
 
             SettingsCard(title: "Interface",
@@ -1117,6 +1188,13 @@ struct DataSettings: View {
                     .labelsHidden()
                     .frame(width: 140)
                 }
+
+                RowDivider()
+
+                FontSizeRow(size: Binding(get: { Double(prefs.gridFontSize) },
+                                          set: { prefs.gridFontSize = Int($0.rounded()) }),
+                            range: Double(DataPreferences.gridFontSizeRange.lowerBound)...Double(DataPreferences.gridFontSizeRange.upperBound),
+                            step: 1, standard: Double(DataPreferences.standardGridFontSize))
 
                 RowDivider()
 
