@@ -76,6 +76,54 @@ pub fn account_for_profile(id: &str) -> String {
     format!("{PROFILE_ACCOUNT_PREFIX}{}", account_key(id))
 }
 
+/// The secrets one connection can own (blueprint W11 §8). The database password is the one
+/// that has always existed and keeps the bare UUID account; the others carry a prefix, so
+/// no prefixed account can be read as a UUID, and one connection's four items never collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Database,
+    SshPassword,
+    SshPassphrase,
+    Jwt,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 4] = [
+        Slot::Database,
+        Slot::SshPassword,
+        Slot::SshPassphrase,
+        Slot::Jwt,
+    ];
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Slot::Database => "",
+            Slot::SshPassword => "ssh-password:",
+            Slot::SshPassphrase => "ssh-passphrase:",
+            Slot::Jwt => "jwt:",
+        }
+    }
+}
+
+/// The Keychain account of one slot of one connection. The connection id goes through
+/// [`account_key`], so the Rust and Swift spellings of a UUID land on the same item, and
+/// `Slot::Database` is exactly `account_key(id)`.
+pub fn account_for(slot: Slot, connection_id: &str) -> String {
+    format!("{}{}", slot.prefix(), account_key(connection_id))
+}
+
+/// Remove every slot of one connection. Deleting what is not there is success, and the
+/// first real failure is returned only after every slot has been tried.
+pub fn delete_all(store: &dyn SecretStore, connection_id: &str) -> Result<(), CredentialError> {
+    let mut first = None;
+    for slot in Slot::ALL {
+        if let Err(error) = store.delete(&account_for(slot, connection_id)) {
+            first.get_or_insert(error);
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
 /// Why a secret could not be read or written.
 #[derive(Debug, Error)]
 pub enum CredentialError {
@@ -231,6 +279,57 @@ mod tests {
             account_key("zzzzzzzz-c36c-495a-93fc-0c247a3e6e5f"),
             "zzzzzzzz-c36c-495a-93fc-0c247a3e6e5f"
         );
+    }
+
+    #[test]
+    fn every_slot_has_one_account_and_both_spellings_of_a_uuid_agree() {
+        // These literals are the contract with Swift's `ConnectionKeychain` (the same strings
+        // are pinned in `ConnectionKeychainTests`): both sides must produce them byte for byte.
+        let swift = "E621E1F8-C36C-495A-93FC-0C247A3E6E5F";
+        let rust = "e621e1f8-c36c-495a-93fc-0c247a3e6e5f";
+        assert_eq!(account_for(Slot::Database, rust), swift);
+        assert_eq!(
+            account_for(Slot::SshPassword, rust),
+            "ssh-password:E621E1F8-C36C-495A-93FC-0C247A3E6E5F"
+        );
+        assert_eq!(
+            account_for(Slot::SshPassphrase, swift),
+            "ssh-passphrase:E621E1F8-C36C-495A-93FC-0C247A3E6E5F"
+        );
+        assert_eq!(
+            account_for(Slot::Jwt, rust),
+            "jwt:E621E1F8-C36C-495A-93FC-0C247A3E6E5F"
+        );
+        // A prefixed account is never UUID-shaped, so `account_key` leaves it alone and it
+        // can never alias the database slot or a `profile:` account.
+        for slot in Slot::ALL {
+            let account = account_for(slot, rust);
+            assert_eq!(account_key(&account), account);
+            assert!(!account.starts_with(PROFILE_ACCOUNT_PREFIX));
+        }
+        assert!(!is_uuid_shaped(&account_for(Slot::Jwt, rust)));
+    }
+
+    #[test]
+    fn delete_all_removes_the_four_slots_and_no_other_connections() {
+        let store = MemoryStore::default();
+        let id = "e621e1f8-c36c-495a-93fc-0c247a3e6e5f";
+        let other = "0c8e1f8a-1111-4222-8333-444455556666";
+        let secret = SecretString::new("x".to_owned().into_boxed_str());
+        for slot in Slot::ALL {
+            store.set(&account_for(slot, id), &secret).unwrap();
+            store.set(&account_for(slot, other), &secret).unwrap();
+        }
+        delete_all(&store, id).unwrap();
+        for slot in Slot::ALL {
+            assert!(!store.contains(&account_for(slot, id)).unwrap(), "{slot:?}");
+            assert!(
+                store.contains(&account_for(slot, other)).unwrap(),
+                "{slot:?}"
+            );
+        }
+        // Deleting what is not there is success.
+        delete_all(&store, id).unwrap();
     }
 
     #[test]

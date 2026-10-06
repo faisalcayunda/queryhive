@@ -67,7 +67,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use qh_credentials::{account_key, KeychainStore, SecretStore};
+use qh_credentials::{account_for, KeychainStore, SecretStore, Slot};
 use qh_driver::DriverKind;
 use qh_sql::SafeMode;
 use qh_storage::{ConnectionKind, ConnectionRecord, McpTokenRecord, Storage, TokenState};
@@ -374,7 +374,7 @@ fn connection_scope_schema() -> Json {
         "type": "object",
         "properties": {
             "connection": {"type": "string", "description": "A connection id from connections_list."},
-            "catalog": {"type": "string", "description": "Trino catalog (or PostgreSQL/MySQL database) to browse instead of the connection's own."},
+            "catalog": {"type": "string", "description": "Trino catalog (or MySQL database) to browse instead of the connection's own. PostgreSQL: only the connection's own database is accepted."},
             "schema": {"type": "string", "description": "Schema to browse instead of the connection's own."}
         },
         "required": ["connection"],
@@ -388,7 +388,7 @@ fn columns_schema() -> Json {
         "properties": {
             "connection": {"type": "string", "description": "A connection id from connections_list."},
             "table": {"type": "string", "description": "The table (or view) the call is about."},
-            "catalog": {"type": "string", "description": "Trino catalog (or PostgreSQL/MySQL database) that qualifies the table."},
+            "catalog": {"type": "string", "description": "Trino catalog (or MySQL database) that qualifies the table. PostgreSQL: only the connection's own database is accepted."},
             "schema": {"type": "string", "description": "Schema that qualifies the table."}
         },
         "required": ["connection", "table"],
@@ -402,7 +402,8 @@ fn preview_schema() -> Json {
         "properties": {
             "connection": {"type": "string", "description": "A connection id from connections_list."},
             "sql": {"type": "string", "description": "The SELECT to run."},
-            "limit": {"type": "integer", "description": "Maximum rows to return (default 1000, minimum 1)."}
+            "limit": {"type": "integer", "description": "Maximum rows to return (default 1000, minimum 1, maximum 10000)."},
+            "cell_char_limit": {"type": "integer", "description": "Longest text a single cell may carry before it is cut (default 4096, minimum 16, maximum 1000000). A cut cell is counted in `cells_truncated` on its `rows` event."}
         },
         "required": ["connection", "sql"],
         "additionalProperties": false
@@ -461,7 +462,7 @@ struct Resolved {
 pub fn connection_environment(
     record: &ConnectionRecord,
     options: &Json,
-    password: &str,
+    secrets: &Secrets,
 ) -> Vec<(String, String)> {
     let scheme = option_string(options, "scheme", "https");
     let sslmode = option_string(options, "sslmode", "");
@@ -475,6 +476,8 @@ pub fn connection_environment(
         .and_then(Json::as_bool)
         .unwrap_or(false);
     let trino = matches!(record.kind, ConnectionKind::Trino);
+    // A bearer token is a Trino thing: the other two drivers always send the password.
+    let jwt = trino && option_string(options, "dbAuth", "password") == "jwt";
     let transport = transport_of(&scheme);
     // `prefer` decides its own verification and never checks, so `DB_INSECURE` would
     // otherwise demote it to a required, unverified connection — a different mode and not
@@ -502,7 +505,14 @@ pub fn connection_environment(
             "DB_USER".to_owned(),
             record.user_name.clone().unwrap_or_default(),
         ),
-        ("DB_PASSWORD".to_owned(), password.to_owned()),
+        (
+            "DB_PASSWORD".to_owned(),
+            if jwt {
+                String::new()
+            } else {
+                secrets.password.clone()
+            },
+        ),
         (
             "DB_DATABASE".to_owned(),
             record.database_name.clone().unwrap_or_default(),
@@ -543,7 +553,89 @@ pub fn connection_environment(
         "DB_ALL_SCHEMAS".to_owned(),
         if show_all_schemas { "1" } else { "0" }.to_owned(),
     ));
+    // Empty values are left out: the engine reads a missing setting and a blank one the same,
+    // and the app's own mapping leaves them out too (the shared fixture compares both).
+    let mut optional = |key: &str, value: String| {
+        if !value.is_empty() {
+            pairs.push((key.to_owned(), value));
+        }
+    };
+    optional("DB_CA_FILE", option_string(options, "caFile", ""));
+    if jwt {
+        optional("DB_JWT", secrets.jwt.clone());
+    }
+    optional(
+        "STATEMENT_TIMEOUT_MS",
+        statement_timeout_ms(options).to_string(),
+    );
+    let ssh_host = option_string(options, "sshHost", "");
+    if !ssh_host.trim().is_empty() {
+        let auth = option_string(options, "sshAuth", "agent");
+        optional("SSH_HOST", ssh_host.trim().to_owned());
+        if options
+            .get("sshUseConfig")
+            .and_then(Json::as_bool)
+            .unwrap_or(false)
+        {
+            optional("SSH_USE_CONFIG", "1".to_owned());
+        }
+        let port = options.get("sshPort").and_then(Json::as_i64).unwrap_or(0);
+        if port != 0 {
+            optional("SSH_PORT", port.to_string());
+        }
+        optional("SSH_USER", option_string(options, "sshUser", ""));
+        optional("SSH_AUTH_METHOD", auth.clone());
+        optional("SSH_KEY_PATH", option_string(options, "sshKeyPath", ""));
+        match auth.as_str() {
+            "password" => optional("SSH_PASSWORD", secrets.ssh_password.clone()),
+            "key" => optional("SSH_KEY_PASSPHRASE", secrets.ssh_passphrase.clone()),
+            _ => {}
+        }
+        // The app's own trust file: read here, never written. `SSH_HOST_KEY_ACCEPT` and
+        // `SSH_HOST_KEY_DETAIL` are deliberately never set, so a host nobody has verified in the
+        // app is refused with its fingerprint and no way to accept it from here (W11 §5.6 item 8).
+        if let Some(directory) = qh_storage::import::legacy_directory() {
+            optional(
+                "SSH_APP_KNOWN_HOSTS",
+                directory.join("known_hosts").to_string_lossy().into_owned(),
+            );
+        }
+    }
     pairs
+}
+
+/// What an MCP call may run for when the connection names no bound of its own: the app's own
+/// default, so a tool call is never the one path that runs unbounded.
+pub const DEFAULT_STATEMENT_TIMEOUT_MS: i64 = 60_000;
+
+/// The longest bound a connection may ask MCP for, which is the app's stepper maximum.
+pub const MAX_STATEMENT_TIMEOUT_MS: i64 = 600_000;
+
+/// The statement bound for an MCP call: the connection's own `statementTimeoutMS` when it is a
+/// positive number, [`DEFAULT_STATEMENT_TIMEOUT_MS`] otherwise, never above
+/// [`MAX_STATEMENT_TIMEOUT_MS`]. A stored `0` means "no bound" in the app and is **not** honoured
+/// here: nobody is watching an MCP call run.
+fn statement_timeout_ms(options: &Json) -> i64 {
+    match options.get("statementTimeoutMS").and_then(Json::as_i64) {
+        Some(ms) if ms > 0 => ms.min(MAX_STATEMENT_TIMEOUT_MS),
+        _ => DEFAULT_STATEMENT_TIMEOUT_MS,
+    }
+}
+
+/// Every secret one call may need. The slots follow [`Slot`]; an empty string is "nothing
+/// stored". `Debug` prints no value, so a `{:?}` in a log line cannot leak one.
+#[derive(Default, Clone)]
+pub struct Secrets {
+    pub password: String,
+    pub ssh_password: String,
+    pub ssh_passphrase: String,
+    pub jwt: String,
+}
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secrets { .. }")
+    }
 }
 
 /// Trino's transport words, plus the fallback every other stored value lands on.
@@ -941,6 +1033,7 @@ impl Server {
                 // The target is resolved once, without extra settings, so the qualified
                 // name can be built from the same catalog/schema the connection will use.
                 let resolved = self.resolve(connection, catalog, schema)?;
+                name_argument("table", Some(table))?;
                 let qualified = sql_ident::qualified(
                     SlotStyle::of(driver_kind(resolved.record.kind)),
                     &resolved.catalog,
@@ -962,10 +1055,12 @@ impl Server {
                 let sql = required_str(arguments, "sql")?;
                 let mut extra: Vec<(&str, String)> = vec![("SQL", sql.to_owned())];
                 if let Some(limit) = arguments.get("limit").and_then(Json::as_i64) {
-                    extra.push(("LIMIT", limit.to_string()));
+                    extra.push(("LIMIT", limit.clamp(1, MAX_PREVIEW_ROWS).to_string()));
                 }
+                let cap = cell_char_limit(arguments);
                 let settings = self.connection_settings(connection, None, None, &extra)?;
-                self.run_tool(Command::Preview, settings, engine, runtime)
+                let events = self.run_tool(Command::Preview, settings, engine, runtime)?;
+                Ok(cap_cells(events, cap))
             }
             "count" => {
                 let connection = required_str(arguments, "connection")?;
@@ -979,7 +1074,8 @@ impl Server {
                 let sql = required_str(arguments, "sql")?;
                 let settings =
                     self.connection_settings(connection, None, None, &[("SQL", sql.to_owned())])?;
-                self.run_tool(Command::Explain, settings, engine, runtime)
+                let events = self.run_tool(Command::Explain, settings, engine, runtime)?;
+                Ok(cap_cells(events, DEFAULT_CELL_CHARS))
             }
             "export_to_file" => {
                 let connection = required_str(arguments, "connection")?;
@@ -1257,6 +1353,7 @@ impl Server {
             optional_str(arguments, "catalog"),
             optional_str(arguments, "schema"),
         )?;
+        name_argument("table", Some(table))?;
         let mut targets: Vec<(&str, String)> = Vec::new();
         for slot in sql_ident::slots(SlotStyle::of(driver_kind(resolved.record.kind))) {
             let (argument, value) = match slot.part {
@@ -1302,6 +1399,14 @@ impl Server {
                 "the connection '{connection}' is not allowed for this token"
             ));
         }
+        // The qualifying names are the other thing a client chooses. A token's scope is a
+        // connection. On Trino and MySQL `preview` takes any SELECT the database user may run, so
+        // a `catalog` argument opens nothing `preview` does not: what is enforced there is that
+        // names are plain and reach the engine as data. PostgreSQL has no cross-database SELECT,
+        // and `catalog` becomes the database the engine connects to, so it is the only door out of
+        // the connection's database and is checked against it below.
+        name_argument("catalog", catalog)?;
+        name_argument("schema", schema)?;
         let store = self
             .store()
             .map_err(|error| format!("could not open the connection store: {error}"))?;
@@ -1315,6 +1420,17 @@ impl Server {
         };
         if record.meta.is_deleted() {
             return Err(format!("the connection '{connection}' was not found"));
+        }
+        if matches!(record.kind, ConnectionKind::Postgres) {
+            let own = record.database_name.as_deref().unwrap_or_default();
+            if let Some(value) = catalog.filter(|value| !value.is_empty()) {
+                if !own.is_empty() && value != own {
+                    return Err(format!(
+                        "the catalog argument names a database outside this token's scope: a \
+                         PostgreSQL connection is limited to its own database '{own}'"
+                    ));
+                }
+            }
         }
         let options: Json = serde_json::from_str(&record.options_json).unwrap_or(Json::Null);
         // An argument wins when it is there and not blank; otherwise the connection's own
@@ -1342,12 +1458,12 @@ impl Server {
         resolved: &Resolved,
         extra: &[(&str, String)],
     ) -> Result<Settings, String> {
-        let password = password_for(&resolved.record)?;
+        let secrets = secrets_for(&resolved.record, &resolved.options)?;
         let mut pairs = self.base_pairs.clone();
         pairs.extend(connection_environment(
             &resolved.record,
             &resolved.options,
-            &password,
+            &secrets,
         ));
         pairs.push(("DB_DATABASE".to_owned(), resolved.catalog.clone()));
         pairs.push(("DB_SCHEMA".to_owned(), resolved.schema.clone()));
@@ -1396,25 +1512,111 @@ impl Server {
     }
 }
 
-/// The password for a connection, from the Keychain, or empty.
+/// The secrets a connection's options actually need, from the Keychain. The database password
+/// is always read (a password-less database is real and arrives empty); the SSH password, the
+/// key passphrase and the JWT only when `sshAuth` or `dbAuth` says they are used, so a call never
+/// touches an item it does not need and never raises a Keychain prompt for one.
 ///
-/// A missing item is not an error: a password-less database is real, and the same
-/// reading the `credential` command's `has`/`get` take. An error here is reported with
-/// the connection's *name* and the Keychain's own words, never the secret.
-fn password_for(record: &ConnectionRecord) -> Result<String, String> {
+/// A missing item is not an error. An error is reported with the connection's *name* and the
+/// Keychain's own words, never a value.
+fn secrets_for(record: &ConnectionRecord, options: &Json) -> Result<Secrets, String> {
     let account = record
         .secret_ref
         .clone()
         .unwrap_or_else(|| record.meta.id.to_string());
-    let key = account_key(&account);
-    match KeychainStore.get(&key) {
-        Ok(Some(secret)) => Ok(secret.expose_secret().to_owned()),
-        Ok(None) => Ok(String::new()),
-        Err(error) => Err(format!(
-            "could not read the password for '{}': {error}",
-            record.name
-        )),
+    let read = |slot: Slot, what: &str| -> Result<String, String> {
+        match KeychainStore.get(&account_for(slot, &account)) {
+            Ok(Some(secret)) => Ok(secret.expose_secret().to_owned()),
+            Ok(None) => Ok(String::new()),
+            Err(error) => Err(format!(
+                "could not read the {what} for '{}': {error}",
+                record.name
+            )),
+        }
+    };
+    let jwt = matches!(record.kind, ConnectionKind::Trino)
+        && option_string(options, "dbAuth", "password") == "jwt";
+    let tunnel = !option_string(options, "sshHost", "").trim().is_empty();
+    let ssh_auth = option_string(options, "sshAuth", "agent");
+    let mut secrets = Secrets::default();
+    if jwt {
+        secrets.jwt = read(Slot::Jwt, "JWT")?;
+    } else {
+        secrets.password = read(Slot::Database, "password")?;
     }
+    if tunnel && ssh_auth == "password" {
+        secrets.ssh_password = read(Slot::SshPassword, "SSH password")?;
+    }
+    if tunnel && ssh_auth == "key" {
+        secrets.ssh_passphrase = read(Slot::SshPassphrase, "SSH key passphrase")?;
+    }
+    Ok(secrets)
+}
+
+/// The most rows one `preview` may ask for. The default (1000) is unchanged; this is only the
+/// ceiling an agent cannot raise by asking.
+pub const MAX_PREVIEW_ROWS: i64 = 10_000;
+
+/// How much text one cell may carry back to an agent before it is cut.
+pub const DEFAULT_CELL_CHARS: usize = 4096;
+const MIN_CELL_CHARS: i64 = 16;
+const MAX_CELL_CHARS: i64 = 1_000_000;
+
+fn cell_char_limit(arguments: &Json) -> usize {
+    arguments
+        .get("cell_char_limit")
+        .and_then(Json::as_i64)
+        .map_or(DEFAULT_CELL_CHARS, |limit| {
+            limit.clamp(MIN_CELL_CHARS, MAX_CELL_CHARS) as usize
+        })
+}
+
+/// Cut every text cell of every `rows` event to `cap` characters (not bytes, so a multi-byte
+/// character is never split) and say how many were cut in `cells_truncated`, a key only a cut
+/// adds. Rows are arrays of strings and nulls on the wire; anything else is left as it is.
+fn cap_cells(mut events: Vec<Json>, cap: usize) -> Vec<Json> {
+    for event in &mut events {
+        if event.get("event").and_then(Json::as_str) != Some("rows") {
+            continue;
+        }
+        let mut cut = 0u64;
+        if let Some(rows) = event.get_mut("data").and_then(Json::as_array_mut) {
+            for cell in rows
+                .iter_mut()
+                .filter_map(|row| row.as_array_mut())
+                .flatten()
+            {
+                if let Json::String(text) = cell {
+                    if let Some((end, _)) = text.char_indices().nth(cap) {
+                        text.truncate(end);
+                        cut += 1;
+                    }
+                }
+            }
+        }
+        if cut > 0 {
+            event["cells_truncated"] = json!(cut);
+        }
+    }
+    events
+}
+
+/// The longest catalog, schema or table name an MCP argument may carry (PostgreSQL's own limit is
+/// 63 bytes, MySQL's 64 characters; this leaves room for Trino and for multi-byte names).
+const MAX_NAME_CHARS: usize = 255;
+
+/// A qualifying name from a client must be one line of printable text of sane length: no NUL, no
+/// newline, no other control character. Quoting happens further down; this keeps a name that could
+/// never be a real object (and would only be noise in a log or an error) from getting that far.
+fn name_argument(argument: &str, value: Option<&str>) -> Result<(), String> {
+    let Some(value) = value else { return Ok(()) };
+    if value.chars().count() > MAX_NAME_CHARS || value.chars().any(char::is_control) {
+        return Err(format!(
+            "the argument '{argument}' is not a valid name: it must be at most \
+             {MAX_NAME_CHARS} characters with no control characters"
+        ));
+    }
+    Ok(())
 }
 
 fn required_str<'a>(arguments: &'a Json, key: &str) -> Result<&'a str, String> {

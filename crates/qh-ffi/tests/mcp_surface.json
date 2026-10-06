@@ -1,0 +1,141 @@
+{
+  "tools": {
+    "db_drivers": {
+      "required": [],
+      "properties": []
+    },
+    "connections_list": {
+      "required": [],
+      "properties": []
+    },
+    "objects": {
+      "required": [
+        "connection"
+      ],
+      "properties": [
+        "catalog",
+        "connection",
+        "schema"
+      ]
+    },
+    "tables": {
+      "required": [
+        "connection"
+      ],
+      "properties": [
+        "catalog",
+        "connection",
+        "schema"
+      ]
+    },
+    "columns": {
+      "required": [
+        "connection",
+        "table"
+      ],
+      "properties": [
+        "catalog",
+        "connection",
+        "schema",
+        "table"
+      ]
+    },
+    "preview": {
+      "required": [
+        "connection",
+        "sql"
+      ],
+      "properties": [
+        "cell_char_limit",
+        "connection",
+        "limit",
+        "sql"
+      ]
+    },
+    "count": {
+      "required": [
+        "connection",
+        "sql"
+      ],
+      "properties": [
+        "connection",
+        "sql"
+      ]
+    },
+    "explain": {
+      "required": [
+        "connection",
+        "sql"
+      ],
+      "properties": [
+        "connection",
+        "sql"
+      ]
+    },
+    "export_to_file": {
+      "required": [
+        "connection",
+        "format",
+        "out_dir",
+        "sql"
+      ],
+      "properties": [
+        "connection",
+        "format",
+        "name",
+        "out_dir",
+        "sql"
+      ]
+    },
+    "describe_table": {
+      "required": [
+        "connection",
+        "table"
+      ],
+      "properties": [
+        "catalog",
+        "connection",
+        "schema",
+        "table"
+      ]
+    },
+    "table_ddl": {
+      "required": [
+        "connection",
+        "table"
+      ],
+      "properties": [
+        "catalog",
+        "connection",
+        "schema",
+        "table"
+      ]
+    }
+  },
+  "prompts": {
+    "explain_query": {
+      "required": [
+        "connection",
+        "sql"
+      ],
+      "arguments": [
+        "connection",
+        "sql"
+      ]
+    },
+    "summarize_tables": {
+      "required": [
+        "connection"
+      ],
+      "arguments": [
+        "connection"
+      ]
+    }
+  },
+  "resources": [
+    "queryhive://connections",
+    "queryhive://connections/{id}",
+    "queryhive://connections/{id}/objects",
+    "queryhive://connections/{id}/tables"
+  ]
+}

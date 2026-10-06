@@ -10,7 +10,9 @@
 //! Every default below was read out of `app/Sources/TrinoExporter/Models/Connections.swift`
 //! rather than invented: `color` falls back to `blue`, `kind` to `trino`, `port` to the
 //! kind's default, `scheme` to `httpScheme` and then to `https`, `verify` to `true`, and
-//! `showAllSchemas` to `false`. Two legacy spellings are read and never written
+//! `showAllSchemas` to `false`, and the W11 connection fields (`sshHost`, `sshPort`, `sshUser`,
+//! `sshAuth`, `sshKeyPath`, `sshUseConfig`, `caFile`, `dbAuth`, and `statementTimeoutMS` only
+//! when the file names one) to the values the app uses when a key is absent. Two legacy spellings are read and never written
 //! (`httpScheme`, `catalog`), and they are read with "first present wins" rather than as
 //! aliases, because that is what the decoder does — a file carrying both names is read by
 //! the app without complaint, so it has to be read here too.
@@ -443,6 +445,38 @@ fn options_json(fields: &Map<String, Value>, scheme: &str) -> String {
         "showAllSchemas".to_owned(),
         Value::Bool(flag(fields, "showAllSchemas").unwrap_or(false)),
     );
+    // The SSH tunnel, the Trino login and the CA file (blueprint W11 §10.1), under the names
+    // `connections.json` uses (D-18) and at the app's own defaults. Only what the connection
+    // *describes* is here: the secrets stay in the Keychain, and the host-key pin never leaves
+    // the run that was given it.
+    for key in ["sshHost", "sshUser", "sshKeyPath", "caFile"] {
+        options.insert(
+            key.to_owned(),
+            Value::String(text(fields, key).unwrap_or_default()),
+        );
+    }
+    options.insert(
+        "sshAuth".to_owned(),
+        Value::String(text(fields, "sshAuth").unwrap_or_else(|| "agent".to_owned())),
+    );
+    options.insert(
+        "dbAuth".to_owned(),
+        Value::String(text(fields, "dbAuth").unwrap_or_else(|| "password".to_owned())),
+    );
+    options.insert(
+        "sshPort".to_owned(),
+        Value::from(number(fields, "sshPort").unwrap_or(0)),
+    );
+    options.insert(
+        "sshUseConfig".to_owned(),
+        Value::Bool(flag(fields, "sshUseConfig").unwrap_or(false)),
+    );
+    // The per-connection statement bound, in milliseconds. Absent means "inherit": the app uses
+    // its own setting and MCP uses its default, so nothing is written for a connection that
+    // never chose one.
+    if let Some(ms) = number(fields, "statementTimeoutMS") {
+        options.insert("statementTimeoutMS".to_owned(), Value::from(ms));
+    }
     Value::Object(options).to_string()
 }
 
@@ -519,6 +553,55 @@ mod tests {
     fn plan_with_one_row(id: &str) -> ImportPlan {
         let json = format!(r#"[{{"id": "{id}", "name": "From the file"}}]"#);
         plan_json(Path::new("/tmp/connections.json"), &json, 1_700_000_000_000).expect("a plan")
+    }
+
+    fn options_of(row: &str) -> serde_json::Value {
+        let json =
+            format!(r#"[{{"id": "9db3c0cc-7062-49bb-9d47-62f765275a9b", "name": "n"{row}}}]"#);
+        let plan = plan_json(Path::new("/tmp/connections.json"), &json, 1).expect("a plan");
+        serde_json::from_str(&plan.connections[0].options_json).unwrap()
+    }
+
+    #[test]
+    fn a_file_from_before_w11_gets_the_apps_own_defaults_for_the_new_fields() {
+        let options = options_of("");
+        assert_eq!(options["sshHost"], "");
+        assert_eq!(options["sshUser"], "");
+        assert_eq!(options["sshKeyPath"], "");
+        assert_eq!(options["caFile"], "");
+        assert_eq!(options["sshAuth"], "agent");
+        assert_eq!(options["dbAuth"], "password");
+        assert_eq!(options["sshPort"], 0);
+        assert_eq!(options["sshUseConfig"], false);
+        assert!(
+            options.get("statementTimeoutMS").is_none(),
+            "inherit is not written as a value"
+        );
+    }
+
+    #[test]
+    fn the_tunnel_the_login_and_the_ca_file_come_through_under_the_apps_names() {
+        let options = options_of(
+            r#", "sshHost": "bastion", "sshPort": 2222, "sshUser": "deploy", "sshAuth": "key",
+                "sshKeyPath": "/k", "sshUseConfig": true, "caFile": "/ca.pem",
+                "dbAuth": "jwt", "statementTimeoutMS": 15000"#,
+        );
+        assert_eq!(options["sshHost"], "bastion");
+        assert_eq!(options["sshPort"], 2222);
+        assert_eq!(options["sshUser"], "deploy");
+        assert_eq!(options["sshAuth"], "key");
+        assert_eq!(options["sshKeyPath"], "/k");
+        assert_eq!(options["sshUseConfig"], true);
+        assert_eq!(options["caFile"], "/ca.pem");
+        assert_eq!(options["dbAuth"], "jwt");
+        assert_eq!(options["statementTimeoutMS"], 15000);
+        // A secret or a pin in the file is not a thing this reads.
+        let leaked = options_of(r#", "sshPassword": "p", "jwt": "t", "hostKeyAccept": "x""#);
+        let text = leaked.to_string();
+        assert!(
+            !text.contains("sshPassword") && !text.contains("hostKeyAccept"),
+            "{text}"
+        );
     }
 
     #[test]

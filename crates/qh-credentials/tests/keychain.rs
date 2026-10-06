@@ -24,7 +24,7 @@
 //! once, with the result recorded in `PROGRESS.md`: the service is the same string and
 //! the account is an upper-case UUID, which is what `account_key` produces.
 
-use qh_credentials::{account_key, KeychainStore, SecretStore};
+use qh_credentials::{account_for, account_key, delete_all, KeychainStore, SecretStore, Slot};
 use secrecy::{ExposeSecret, SecretString};
 
 const SKIP_HINT: &str = "skipped: set QH_TEST_KEYCHAIN=1 to exercise the real login keychain";
@@ -155,4 +155,48 @@ fn the_account_is_found_whichever_way_it_is_spelled() {
         ),
         "saved lowercase"
     );
+}
+
+#[test]
+fn the_four_slots_are_four_items_and_delete_all_takes_only_them() {
+    if std::env::var("QH_TEST_KEYCHAIN").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+
+    let id = account();
+    let _cleanup = Cleanup {
+        account: id.clone(),
+    };
+    // The prefixed items are not covered by `Cleanup`, so a failed assertion would leave
+    // them; `delete_all` at the end and in this guard removes them whatever happens.
+    struct All(String);
+    impl Drop for All {
+        fn drop(&mut self) {
+            let _ = delete_all(&KeychainStore, &self.0);
+        }
+    }
+    let _all = All(id.clone());
+    let store = KeychainStore;
+
+    for slot in Slot::ALL {
+        store
+            .set(&account_for(slot, &id), &secret(&format!("{slot:?}")))
+            .expect("set");
+    }
+    for slot in Slot::ALL {
+        let account = account_for(slot, &id);
+        assert!(store.contains(&account).expect("contains"), "{slot:?}");
+        assert_eq!(
+            reveal(&store.get(&account).expect("get").unwrap()),
+            format!("{slot:?}")
+        );
+    }
+    // The database slot is the bare UUID account, untouched by the other three.
+    assert_eq!(account_for(Slot::Database, &id), id);
+
+    delete_all(&store, &id).expect("delete_all");
+    for slot in Slot::ALL {
+        assert!(!store.contains(&account_for(slot, &id)).expect("contains"));
+    }
 }

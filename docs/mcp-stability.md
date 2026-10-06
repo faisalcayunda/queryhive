@@ -62,6 +62,35 @@ petunjuk ke `describe_table`.
   keluar dari scope bawaan adalah keputusan SEC yang belum diambil; sampai itu diputuskan ia ikut
   scope bawaan.
 
+## Batas hasil, scope nama, dan baseline permukaan (W11-T3r)
+
+Semuanya aditif, jadi tabel di atas berlaku:
+
+- **`preview.limit`** punya batas atas 10000 baris (bawaan tetap 1000, batas bawah tetap 1). Nilai di
+  luar rentang dipotong, bukan ditolak.
+- **`preview.cell_char_limit`** (opsional, bawaan 4096, rentang 16 sampai 1000000) memotong setiap sel
+  teks per **karakter**, bukan byte. Event `rows` yang selnya terpotong membawa `cells_truncated`
+  (jumlah sel); kunci itu tidak ada bila tidak ada yang terpotong. `explain` memakai bawaan yang sama.
+- **Nama kualifikasi** (`catalog`, `schema`, `table`) harus satu baris teks biasa, paling banyak 255
+  karakter, tanpa karakter kontrol. Pemeriksaan ini berjalan **sesudah** allowlist koneksi, jadi tidak
+  bisa dipakai untuk menebak koneksi yang tidak boleh dijangkau token. Token tidak punya scope per
+  schema atau database (itu akan butuh migrasi tabel `mcp_token`); scope-nya tetap koneksi.
+  Untuk Trino dan MySQL, `preview` menerima SELECT apa pun yang boleh dijalankan user database itu,
+  jadi membatasi `catalog` di `describe_table` saja akan jadi pagar tanpa pintu. **PostgreSQL
+  berbeda**: tidak ada SELECT lintas database, dan `catalog` menjadi database yang disambungi engine,
+  jadi argumen itu satu-satunya jalan keluar dari database koneksi. Karena itu, pada koneksi
+  PostgreSQL yang punya database tersimpan, `catalog` yang tidak sama dengan database itu ditolak
+  dengan kalimat "outside this token's scope" (sesudah allowlist) di `tables`, `objects`, `columns`,
+  `describe_table`, dan `table_ddl`. Browsing lintas database PostgreSQL lewat MCP adalah keputusan
+  owner yang belum diambil, bukan sesuatu yang sengaja diizinkan.
+- **Statement timeout.** Setiap panggilan MCP kini berjalan dengan batas: `statementTimeoutMS`
+  koneksi bila positif (maksimum 600000), selain itu 60000. Nilai 0 di app berarti tanpa batas dan
+  **tidak** dihormati di MCP.
+- **Baseline permukaan.** `crates/qh-ffi/tests/mcp_surface.json` membekukan nama tool, `required`,
+  nama properti, prompt, dan bentuk URI resource. `tests/mcp.rs` gagal bila ada yang hilang atau
+  menjadi wajib; yang bertambah lolos dan baseline direkam ulang dengan
+  `QH_RECORD_MCP_SURFACE=1 cargo test -p qh-ffi --test mcp nothing_a_client`.
+
 ## Keputusan atas sisa pengerasan §12.3
 
 Tiga item lain di rencana §12.3 diputuskan, bukan dikerjakan, dan alasannya ditulis supaya tidak

@@ -1349,7 +1349,10 @@ fn environment(kind: ConnectionKind, options: Json, password: &str) -> Json {
     pairs_to_json(mcp::connection_environment(
         &record(kind),
         &options,
-        password,
+        &mcp::Secrets {
+            password: password.to_owned(),
+            ..mcp::Secrets::default()
+        },
     ))
 }
 
@@ -1430,8 +1433,165 @@ fn the_stored_schema_and_show_all_schemas_reach_the_settings() {
 fn a_port_that_was_never_set_takes_the_kinds_default() {
     let mut bare = ConnectionRecord::new("Bare", ConnectionKind::Mysql, 1);
     bare.port = None;
-    let env = pairs_to_json(mcp::connection_environment(&bare, &json!({}), ""));
+    let env = pairs_to_json(mcp::connection_environment(
+        &bare,
+        &json!({}),
+        &mcp::Secrets::default(),
+    ));
     assert_eq!(env["DB_PORT"], json!("3306"));
+}
+
+// --------------------------------------------------------------------------- //
+// the connection mapping shared with the app (W11 section 10.1)
+// --------------------------------------------------------------------------- //
+
+fn fixture() -> Json {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/connection_env.json"
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).expect("the shared fixture"))
+        .expect("the fixture is JSON")
+}
+
+/// A `connections.json` row (the app's own field names) as the record the store holds: the
+/// columns for what has one, the whole row as the options bag, exactly as `import.rs` keeps it.
+fn record_from_row(row: &Json) -> ConnectionRecord {
+    let kind = ConnectionKind::parse(row["kind"].as_str().unwrap()).unwrap();
+    let mut record = ConnectionRecord::new("fixture", kind, 1);
+    record.host = row["host"].as_str().map(str::to_owned);
+    record.port = row["port"].as_i64().map(|port| port as u16);
+    record.user_name = row["user"].as_str().map(str::to_owned);
+    record.database_name = row["database"].as_str().map(str::to_owned);
+    record.options_json = row.to_string();
+    record
+}
+
+fn secrets_from(json: &Json) -> mcp::Secrets {
+    let text = |key: &str| json[key].as_str().unwrap_or_default().to_owned();
+    mcp::Secrets {
+        password: text("password"),
+        ssh_password: text("sshPassword"),
+        ssh_passphrase: text("sshPassphrase"),
+        jwt: text("jwt"),
+    }
+}
+
+fn app_known_hosts() -> String {
+    qh_storage::import::legacy_directory()
+        .expect("HOME is set")
+        .join("known_hosts")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn the_mapping_matches_the_fixture_the_app_is_tested_against() {
+    let fixture = fixture();
+    let keys: Vec<&str> = fixture["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    for case in fixture["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let record = record_from_row(&case["connection"]);
+        let options: Json = serde_json::from_str(&record.options_json).unwrap();
+        let env = pairs_to_json(mcp::connection_environment(
+            &record,
+            &options,
+            &secrets_from(&case["secrets"]),
+        ));
+        for key in &keys {
+            let expected = case["expect"][key].as_str().unwrap_or_default();
+            let expected = if expected == "<app-known-hosts>" {
+                app_known_hosts()
+            } else {
+                expected.to_owned()
+            };
+            let actual = env.get(*key).and_then(Json::as_str).unwrap_or_default();
+            assert_eq!(actual, expected, "{name}: {key}");
+        }
+    }
+}
+
+#[test]
+fn a_saved_connection_never_yields_a_host_key_pin_or_detail_and_never_prints_a_secret() {
+    // Over every combination of the options that shape the tunnel, with every secret filled in:
+    // MCP has no accept path, so neither key may exist (W11 5.6 item 8), and `Secrets` is not
+    // printable.
+    let secrets = mcp::Secrets {
+        password: "SENTINEL-db".to_owned(),
+        ssh_password: "SENTINEL-ssh".to_owned(),
+        ssh_passphrase: "SENTINEL-phrase".to_owned(),
+        jwt: "SENTINEL-jwt".to_owned(),
+    };
+    let rendered = format!("{secrets:?}");
+    assert!(!rendered.contains("SENTINEL"), "{rendered}");
+
+    for kind in [
+        ConnectionKind::Postgres,
+        ConnectionKind::Mysql,
+        ConnectionKind::Trino,
+    ] {
+        for host in ["", "bastion"] {
+            for auth in ["agent", "key", "password", "surprise"] {
+                for db_auth in ["password", "jwt"] {
+                    for use_config in [false, true] {
+                        let options = json!({
+                            "sshHost": host, "sshAuth": auth, "dbAuth": db_auth,
+                            "sshUseConfig": use_config, "sshPort": 22, "sshUser": "u",
+                            "sshKeyPath": "/k", "caFile": "/ca.pem",
+                        });
+                        let pairs = mcp::connection_environment(&record(kind), &options, &secrets);
+                        for (key, _) in &pairs {
+                            assert_ne!(key, "SSH_HOST_KEY_ACCEPT");
+                            assert_ne!(key, "SSH_HOST_KEY_DETAIL");
+                        }
+                        let env = pairs_to_json(pairs);
+                        // The app's trust file is named exactly when there is a bastion.
+                        assert_eq!(
+                            env.get("SSH_APP_KNOWN_HOSTS").is_some(),
+                            !host.is_empty(),
+                            "{kind:?} {host} {auth}"
+                        );
+                        // A secret appears only where its own auth mode uses it.
+                        let has = |key: &str| env.get(key).is_some();
+                        assert_eq!(has("SSH_PASSWORD"), !host.is_empty() && auth == "password");
+                        assert_eq!(has("SSH_KEY_PASSPHRASE"), !host.is_empty() && auth == "key");
+                        let jwt = kind == ConnectionKind::Trino && db_auth == "jwt";
+                        assert_eq!(has("DB_JWT"), jwt);
+                        assert_eq!(
+                            env["DB_PASSWORD"],
+                            json!(if jwt { "" } else { "SENTINEL-db" })
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_statement_bound_is_the_connections_own_or_the_default_and_never_unbounded() {
+    let bound = |options: Json| {
+        environment(ConnectionKind::Postgres, options, "")["STATEMENT_TIMEOUT_MS"].clone()
+    };
+    assert_eq!(
+        bound(json!({})),
+        json!("60000"),
+        "nothing chosen: the app's default"
+    );
+    assert_eq!(bound(json!({"statementTimeoutMS": 15000})), json!("15000"));
+    // `0` means no bound in the app; nobody watches an MCP call, so it is not honoured here.
+    assert_eq!(bound(json!({"statementTimeoutMS": 0})), json!("60000"));
+    assert_eq!(bound(json!({"statementTimeoutMS": -5})), json!("60000"));
+    assert_eq!(
+        bound(json!({"statementTimeoutMS": 9_999_999})),
+        json!("600000")
+    );
+    assert_eq!(bound(json!({"statementTimeoutMS": "soon"})), json!("60000"));
 }
 
 // --------------------------------------------------------------------------- //
@@ -1542,4 +1702,403 @@ fn the_token_listing_carries_the_prefix_and_never_the_hash() {
         row.get("token_hash").is_none(),
         "the listing never carries the hash: {row}"
     );
+}
+
+// --------------------------------------------------------------------------- //
+// windowing (DBX-14) and the qualifying names (DBX-15)
+// --------------------------------------------------------------------------- //
+
+fn rows_events(result: &Json) -> Vec<Json> {
+    call_events(result)
+        .into_iter()
+        .filter(|event| event["event"] == json!("rows"))
+        .collect()
+}
+
+#[test]
+fn a_long_cell_is_cut_to_the_cell_char_limit_by_characters_and_counted() {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let (_, mysql) = ids
+        .iter()
+        .find(|(kind, _)| *kind == ConnectionKind::Mysql)
+        .unwrap();
+    // Two bytes per character: a cut on bytes would split one in half.
+    let engine = ScriptedEngine::new(&"é".repeat(10_000));
+    let sql = "SHOW CREATE TABLE t";
+
+    let default = call_with(
+        &server,
+        &engine,
+        "preview",
+        json!({"connection": mysql, "sql": sql}),
+    );
+    let rows = rows_events(&default);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let cells: Vec<&str> = rows[0]["data"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|cell| cell.as_str().unwrap())
+        .collect();
+    assert!(
+        cells.iter().all(|cell| cell.chars().count() == 4096),
+        "default cap"
+    );
+    assert_eq!(rows[0]["cells_truncated"], json!(2));
+
+    let small = call_with(
+        &server,
+        &engine,
+        "preview",
+        json!({"connection": mysql, "sql": sql, "cell_char_limit": 20}),
+    );
+    let rows = rows_events(&small);
+    assert!(rows[0]["data"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|cell| cell.as_str().unwrap() == "é".repeat(20)));
+
+    // A limit below the floor is raised, not honoured: a cap of one character helps nobody.
+    let floor = call_with(
+        &server,
+        &engine,
+        "preview",
+        json!({"connection": mysql, "sql": sql, "cell_char_limit": 1}),
+    );
+    assert_eq!(
+        rows_events(&floor)[0]["data"][0][0]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        16
+    );
+
+    // A cell that fits is left alone and the event carries no counter.
+    let short = ScriptedEngine::new("CREATE TABLE t (id int)");
+    let fits = rows_events(&call_with(
+        &server,
+        &short,
+        "preview",
+        json!({"connection": mysql, "sql": sql}),
+    ));
+    assert!(fits[0].get("cells_truncated").is_none(), "{fits:?}");
+}
+
+#[test]
+fn a_qualifying_name_that_is_not_a_plain_name_is_refused_after_the_allowlist() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+
+    for (argument, value) in [
+        ("catalog", "hive\nDROP"),
+        ("schema", "a\u{0}b"),
+        ("catalog", &"x".repeat(256)),
+    ] {
+        for tool in [
+            "objects",
+            "tables",
+            "columns",
+            "describe_table",
+            "table_ddl",
+        ] {
+            let mut arguments = json!({"connection": allowed_id, "table": "t", "schema": "s"});
+            arguments[argument] = json!(value);
+            let text = error_text(&call(&server, &runtime(), tool, arguments));
+            assert!(
+                text.contains(&format!("the argument '{argument}' is not a valid name")),
+                "{tool} {argument}: {text}"
+            );
+            // The refusal repeats nothing the caller sent.
+            assert!(!text.contains("DROP"), "{text}");
+        }
+    }
+    let text = error_text(&call(
+        &server,
+        &runtime(),
+        "describe_table",
+        json!({"connection": allowed_id, "table": "t\tx", "schema": "s"}),
+    ));
+    assert!(
+        text.contains("the argument 'table' is not a valid name"),
+        "{text}"
+    );
+
+    // Order: a connection outside the allowlist is refused as ever, whatever the names say, so the
+    // name check cannot be used to learn anything about a connection the token may not reach.
+    let text = error_text(&call(
+        &server,
+        &runtime(),
+        "describe_table",
+        json!({"connection": denied_id, "table": "t", "catalog": "bad\nname"}),
+    ));
+    assert!(text.contains("not allowed for this token"), "{text}");
+}
+
+#[test]
+fn a_postgres_connection_cannot_be_pointed_at_another_database_through_catalog() {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let id_of = |wanted: ConnectionKind| {
+        ids.iter()
+            .find(|(kind, _)| *kind == wanted)
+            .map(|(_, id)| id.clone())
+            .unwrap()
+    };
+    let (pg, mysql) = (
+        id_of(ConnectionKind::Postgres),
+        id_of(ConnectionKind::Mysql),
+    );
+
+    for tool in [
+        "tables",
+        "objects",
+        "columns",
+        "describe_table",
+        "table_ddl",
+    ] {
+        let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+        let text = error_text(&call_with(
+            &server,
+            &engine,
+            tool,
+            json!({"connection": pg, "table": "t", "schema": "sales", "catalog": "other_db"}),
+        ));
+        assert!(
+            text.contains("outside this token's scope"),
+            "{tool}: {text}"
+        );
+        assert!(
+            engine.statements().is_empty(),
+            "{tool} reached the engine: {:?}",
+            engine.statements()
+        );
+    }
+
+    // The connection's own database, spelled out, is not a foreign one.
+    let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+    let own = call_with(
+        &server,
+        &engine,
+        "describe_table",
+        json!({"connection": pg, "table": "t", "catalog": "app"}),
+    );
+    assert_ne!(own["result"]["isError"], json!(true), "{own}");
+
+    // MySQL keeps today's behaviour: `preview` already reaches any database its user can read.
+    let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+    let other = call_with(
+        &server,
+        &engine,
+        "describe_table",
+        json!({"connection": mysql, "table": "t", "catalog": "other_db"}),
+    );
+    assert_ne!(other["result"]["isError"], json!(true), "{other}");
+}
+
+#[test]
+fn the_postgres_catalog_check_comes_after_the_allowlist() {
+    let (_dir, db_path, ids) = metadata_db();
+    let pg = ids
+        .iter()
+        .find(|(kind, _)| *kind == ConnectionKind::Postgres)
+        .map(|(_, id)| id.clone())
+        .unwrap();
+    // A token that does not list the PostgreSQL connection learns nothing from the catalog check.
+    let mut token = full_token();
+    token.connections = ids
+        .iter()
+        .filter(|(_, id)| *id != pg)
+        .map(|(_, id)| id.clone())
+        .collect();
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+    let text = error_text(&call_with(
+        &server,
+        &engine,
+        "describe_table",
+        json!({"connection": pg, "table": "t", "catalog": "other_db"}),
+    ));
+    assert!(text.contains("not allowed for this token"), "{text}");
+}
+
+// --------------------------------------------------------------------------- //
+// the tool surface is a baseline that only grows (DBX-60)
+// --------------------------------------------------------------------------- //
+
+/// What a client can see of the server, reduced to what a client can break on: each tool's name,
+/// `required` and property names, each prompt's name and argument names, and the resource shapes
+/// with the connection id left as `{id}`. No descriptions: those may be clarified (docs/mcp-stability.md).
+fn surface() -> Json {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let runtime = runtime();
+    let tools = request(
+        &server,
+        &runtime,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    );
+    let prompts = request(
+        &server,
+        &runtime,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"}),
+    );
+    let resources = request(
+        &server,
+        &runtime,
+        &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list"}),
+    );
+
+    let sorted = |mut names: Vec<String>| {
+        names.sort();
+        names.dedup();
+        Json::from(names)
+    };
+    let mut tool_map = serde_json::Map::new();
+    for tool in tools["result"]["tools"].as_array().unwrap() {
+        let schema = &tool["inputSchema"];
+        let required: Vec<String> = schema["required"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|n| n.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let properties: Vec<String> = schema["properties"]
+            .as_object()
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default();
+        tool_map.insert(
+            tool["name"].as_str().unwrap().to_owned(),
+            json!({"required": sorted(required), "properties": sorted(properties)}),
+        );
+    }
+    let mut prompt_map = serde_json::Map::new();
+    for prompt in prompts["result"]["prompts"].as_array().unwrap() {
+        let arguments = prompt["arguments"].as_array().unwrap();
+        let required: Vec<String> = arguments
+            .iter()
+            .filter(|a| a["required"] == json!(true))
+            .map(|a| a["name"].as_str().unwrap().to_owned())
+            .collect();
+        let all: Vec<String> = arguments
+            .iter()
+            .map(|a| a["name"].as_str().unwrap().to_owned())
+            .collect();
+        prompt_map.insert(
+            prompt["name"].as_str().unwrap().to_owned(),
+            json!({"required": sorted(required), "arguments": sorted(all)}),
+        );
+    }
+    let mut uris: Vec<String> = resources["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| {
+            let mut uri = resource["uri"].as_str().unwrap().to_owned();
+            for (_, id) in &ids {
+                uri = uri.replace(id.as_str(), "{id}");
+            }
+            uri
+        })
+        .collect();
+    uris.sort();
+    uris.dedup();
+    json!({"tools": tool_map, "prompts": prompt_map, "resources": uris})
+}
+
+fn surface_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mcp_surface.json")
+}
+
+fn names(value: &Json) -> Vec<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn nothing_a_client_could_rely_on_has_been_removed_or_made_required() {
+    let current = surface();
+    if std::env::var("QH_RECORD_MCP_SURFACE").as_deref() == Ok("1") {
+        std::fs::write(
+            surface_path(),
+            serde_json::to_string_pretty(&current).unwrap() + "\n",
+        )
+        .expect("record the baseline");
+        return;
+    }
+    let baseline: Json =
+        serde_json::from_str(&std::fs::read_to_string(surface_path()).expect("the baseline"))
+            .expect("the baseline is JSON");
+
+    for (name, was) in baseline["tools"].as_object().unwrap() {
+        let now = current["tools"]
+            .get(name)
+            .unwrap_or_else(|| panic!("tool '{name}' was removed or renamed"));
+        for property in names(&was["properties"]) {
+            assert!(
+                names(&now["properties"]).contains(&property),
+                "{name}: property '{property}' was removed"
+            );
+        }
+        for required in names(&now["required"]) {
+            assert!(
+                names(&was["required"]).contains(&required),
+                "{name}: '{required}' became required"
+            );
+        }
+    }
+    for (name, was) in baseline["prompts"].as_object().unwrap() {
+        let now = current["prompts"]
+            .get(name)
+            .unwrap_or_else(|| panic!("prompt '{name}' was removed or renamed"));
+        for argument in names(&was["arguments"]) {
+            assert!(
+                names(&now["arguments"]).contains(&argument),
+                "{name}: argument '{argument}' was removed"
+            );
+        }
+        for required in names(&now["required"]) {
+            assert!(
+                names(&was["required"]).contains(&required),
+                "{name}: '{required}' became required"
+            );
+        }
+    }
+    for uri in names(&baseline["resources"]) {
+        assert!(
+            names(&current["resources"]).contains(&uri),
+            "resource '{uri}' was removed"
+        );
+    }
+    // The baseline is only ever grown on purpose: a new tool, property or resource passes the
+    // check above and shows up here, which is the prompt to re-record it
+    // (`QH_RECORD_MCP_SURFACE=1 cargo test -p qh-ffi --test mcp nothing_a_client`).
+    if current != baseline {
+        eprintln!("the MCP surface grew; re-record tests/mcp_surface.json (it may only grow)");
+    }
+}
+
+#[test]
+fn the_baseline_check_has_teeth() {
+    // A baseline that asks for something the server does not have must fail the same comparison,
+    // otherwise the check above could never fail.
+    let current = surface();
+    let mut baseline = current.clone();
+    baseline["tools"]["preview"]["properties"] =
+        json!(["connection", "sql", "a_property_that_was_removed"]);
+    let removed = names(&baseline["tools"]["preview"]["properties"])
+        .into_iter()
+        .any(|property| !names(&current["tools"]["preview"]["properties"]).contains(&property));
+    assert!(removed, "the comparison cannot see a removed property");
 }
