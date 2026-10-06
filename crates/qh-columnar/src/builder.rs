@@ -8,8 +8,9 @@
 //! push and converts once to tagged on conflict. This holds `Value`s and
 //! picks the encoding once at seal, which is behavior-identical (one push,
 //! one seal, same encodings, same conflict rule) without re-encoding arrays
-//! mid-push. The typed `push_*` appends exist so W7-T1 drivers never build
-//! a `Value` they already hold as a primitive.
+//! mid-push. The typed `push_*` appends are thin wrappers over `push_value` today: the W7-T1
+//! driver path that was meant to skip the `Value` was reverted (it missed its keep rule) and the
+//! W8-F2 re-A/B reuses them, so they stay and `tests/typed_push.rs` keeps them honest.
 
 use std::sync::Arc;
 
@@ -78,7 +79,9 @@ impl ChunkBuilder {
         self.rows() >= CHUNK_MAX_ROWS || self.estimated_bytes >= CHUNK_TARGET_BYTES
     }
 
-    fn push(&mut self, column: usize, value: Value) {
+    /// Append one cell of any shape. A value the column's encoding cannot
+    /// hold makes the whole chunk-column tagged at seal (§5.3).
+    pub fn push_value(&mut self, column: usize, value: Value) {
         let width = match &value {
             Value::Text(text) | Value::Json(text) => text.len() + 9,
             Value::Bytes(bytes) => bytes.len() + 9,
@@ -92,58 +95,52 @@ impl ChunkBuilder {
         self.columns[column].push(value);
     }
 
-    /// Append one cell of any shape. A value the column's encoding cannot
-    /// hold makes the whole chunk-column tagged at seal (§5.3).
-    pub fn push_value(&mut self, column: usize, value: Value) {
-        self.push(column, value);
-    }
-
     pub fn push_null(&mut self, column: usize) {
-        self.push(column, Value::Null);
+        self.push_value(column, Value::Null);
     }
 
     pub fn push_bool(&mut self, column: usize, value: bool) {
-        self.push(column, Value::Bool(value));
+        self.push_value(column, Value::Bool(value));
     }
 
     pub fn push_i64(&mut self, column: usize, value: i64) {
-        self.push(column, Value::Int(value));
+        self.push_value(column, Value::Int(value));
     }
 
     pub fn push_u64(&mut self, column: usize, value: u64) {
-        self.push(column, Value::UInt(value));
+        self.push_value(column, Value::UInt(value));
     }
 
     pub fn push_f64(&mut self, column: usize, value: f64) {
-        self.push(column, Value::Float(value));
+        self.push_value(column, Value::Float(value));
     }
 
     pub fn push_decimal(&mut self, column: usize, unscaled: i128, scale: u8) {
-        self.push(column, Value::Decimal { unscaled, scale });
+        self.push_value(column, Value::Decimal { unscaled, scale });
     }
 
     pub fn push_str(&mut self, column: usize, value: &str) {
-        self.push(column, Value::Text(value.into()));
+        self.push_value(column, Value::Text(value.into()));
     }
 
     pub fn push_json(&mut self, column: usize, value: &str) {
-        self.push(column, Value::Json(value.into()));
+        self.push_value(column, Value::Json(value.into()));
     }
 
     pub fn push_bytes(&mut self, column: usize, value: &[u8]) {
-        self.push(column, Value::Bytes(value.to_vec()));
+        self.push_value(column, Value::Bytes(value.to_vec()));
     }
 
     pub fn push_date(&mut self, column: usize, days: i32) {
-        self.push(column, Value::Date { days });
+        self.push_value(column, Value::Date { days });
     }
 
     pub fn push_time(&mut self, column: usize, micros: i64) {
-        self.push(column, Value::Time { micros });
+        self.push_value(column, Value::Time { micros });
     }
 
     pub fn push_timestamp(&mut self, column: usize, micros: i64, offset_secs: Option<i32>) {
-        self.push(
+        self.push_value(
             column,
             Value::Timestamp {
                 micros,
@@ -153,7 +150,7 @@ impl ChunkBuilder {
     }
 
     pub fn push_interval(&mut self, column: usize, interval: qh_core::IntervalValue) {
-        self.push(column, Value::Interval(interval));
+        self.push_value(column, Value::Interval(interval));
     }
 
     /// Append rows from a column batch, stopping at the seal limit.
@@ -172,7 +169,7 @@ impl ChunkBuilder {
             }
             for column in 0..self.width {
                 let cell = batch.value(row, column).cloned().unwrap_or(Value::Null);
-                self.push(column, cell);
+                self.push_value(column, cell);
             }
             accepted += 1;
         }
@@ -316,12 +313,13 @@ fn pick_encoding(values: &[Value]) -> ColumnKind {
 /// Merge two single-value decisions. Anything that disagrees — a second
 /// variant, a second decimal scale, a second offset — becomes tagged.
 fn merge_kinds(current: ColumnKind, single: ColumnKind) -> ColumnKind {
-    match (current, single) {
-        (same, other) if same == other => same,
-        (ColumnKind::Tagged, _) | (_, ColumnKind::Tagged) => ColumnKind::Tagged,
-        _ => ColumnKind::Tagged,
+    if current == single {
+        current
+    } else {
+        ColumnKind::Tagged
     }
 }
+
 /// Build one typed Arrow array from staged values of a decided kind.
 /// NULLs go through the validity bitmap on every encoding.
 fn build_column(kind: &ColumnKind, values: &[Value]) -> Result<ArrayRef, ColumnarError> {

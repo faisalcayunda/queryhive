@@ -2,12 +2,14 @@
 //! counts and timestamps events (performance-plan.md section 4, item 0.2).
 //!
 //! ```bash
-//! cargo run --release -p qh-ffi --example bench_ffi -- <scenario> [--repeat N]
+//! cargo run --release -p qh-ffi --example bench_ffi -- <scenario> [--repeat N] [--rows N] [--cols M]
 //! ```
 //!
 //! Scenarios: `local-loop`, `emit-only`, `preview-wide`, `window`, `window-json`, `view-sort`,
 //! `view-sort-text`, `view-filter`, `view-search`, or `all` (the default). `--repeat`
-//! defaults to 5. `preview-wide` needs the dev PostgreSQL (`deploy/dev/up.sh`) on
+//! defaults to 5. `--rows` and `--cols` size the `window` scenario's window (default 128 x 30;
+//! `--rows 64 --cols 32` is the page the grid asks for), and a store narrower than `--cols` is
+//! built that many columns wide. `preview-wide` needs the dev PostgreSQL (`deploy/dev/up.sh`) on
 //! 127.0.0.1:55432 with `wide_500k` seeded (`BENCH_FFI_PG_PORT` overrides the port).
 //!
 //! # Output
@@ -29,8 +31,9 @@
 //!   `sink_ms` (time inside `on_event`), `sink_share_ratio` (`sink_ms / total_ms`). The sink
 //!   only counts, so the share is a floor for a real sink.
 //!
-//! - `window` (scenario `ffi-window`): `window_p50_ms`, `window_p95_ms`, `window_p99_ms`,
-//!   `window_max_ms` over 5,000 random 128 x 30 windows of a 1M x 30 synthetic store (bigint,
+//! - `window` (scenario `ffi-window`, or `ffi-window-<rows>x<cols>` for another size):
+//!   `window_p50_ms`, `window_p95_ms`, `window_p99_ms`, `window_max_ms` over 5,000 random windows
+//!   (128 x 30 unless `--rows` and `--cols` say otherwise) of a 1M-row synthetic store (30 bigint,
 //!   double and text columns, all resident), through `ResultHandle::window`. This is the Rust
 //!   side including the buffer copy; the UniFFI crossing is `StoreWindowBench` on the Swift side.
 //!   The target is p99 <= 0.5 ms (NFR-P8); a miss goes to W8-T2, it does not fail the run.
@@ -48,6 +51,7 @@
 use qh_ffi::host::EngineHost;
 use qh_ffi::store_api::{
     CellFormat, ColumnWire, FilterSpec, ResultHandle, SortSpec, StoreFfiError, ViewSpec,
+    MAX_WINDOW_CELLS, MAX_WINDOW_COLUMNS, MAX_WINDOW_ROWS,
 };
 use qh_ffi::uniffi_api::{EngineCommand, EventSink, RunCancel, Setting};
 use serde_json::{json, Value as Json};
@@ -244,6 +248,15 @@ fn preview_wide(repeat: u32) {
 
 const BENCH_ROWS: u32 = 1_000_000;
 const BENCH_COLUMNS: u32 = 30;
+/// The `window` scenario's size when `--rows` and `--cols` are absent: rows, then columns.
+const DEFAULT_WINDOW: (u32, u32) = (128, BENCH_COLUMNS);
+
+/// The window `--rows` and `--cols` asked for, set once by `main`.
+static WINDOW: OnceLock<(u32, u32)> = OnceLock::new();
+
+fn window_size() -> (u32, u32) {
+    *WINDOW.get().unwrap_or(&DEFAULT_WINDOW)
+}
 
 /// The registry, configured once: no spill and a budget the whole bench store fits in, so what
 /// is measured is the resident path, which is the one the 0.5 ms target is about.
@@ -266,17 +279,19 @@ fn ok<T>(what: &str, result: Result<T, StoreFfiError>) -> T {
     result.unwrap_or_else(|error| die(&format!("{what}: {error}")))
 }
 
-/// 1M x 30 synthetic rows, built once and shared by every data-plane scenario.
+/// 1M synthetic rows, 30 columns wide or as wide as the `window` scenario needs, built once and
+/// shared by every data-plane scenario.
 fn big_store() -> &'static Arc<ResultHandle> {
     static STORE: OnceLock<Arc<ResultHandle>> = OnceLock::new();
     STORE.get_or_init(|| {
         let started = Instant::now();
+        let columns = BENCH_COLUMNS.max(window_size().1);
         let store = ok(
             "store_synthetic",
-            stores().store_synthetic(BENCH_ROWS, BENCH_COLUMNS, 42),
+            stores().store_synthetic(BENCH_ROWS, columns, 42),
         );
         eprintln!(
-            "built a {BENCH_ROWS} x {BENCH_COLUMNS} store in {:.1} s",
+            "built a {BENCH_ROWS} x {columns} store in {:.1} s",
             started.elapsed().as_secs_f64()
         );
         store
@@ -367,12 +382,19 @@ fn window_case(
 }
 
 fn window(repeat: u32) {
+    let (rows, columns) = window_size();
+    // Another size is another series: it must not land in the 128 x 30 baseline's name.
+    let scenario = if (rows, columns) == DEFAULT_WINDOW {
+        "ffi-window".to_owned()
+    } else {
+        format!("ffi-window-{rows}x{columns}")
+    };
     window_case(
-        "ffi-window",
+        &scenario,
         big_store(),
         BENCH_ROWS,
-        128,
-        BENCH_COLUMNS,
+        rows,
+        columns,
         CellFormat::Raw,
         repeat,
     );
@@ -475,13 +497,37 @@ fn view_search(repeat: u32) {
 
 type Scenario = (&'static str, fn(u32));
 
+/// The number after `name` on the command line, if the flag is there.
+fn flag(args: &[String], name: &str) -> Option<u32> {
+    let value = args.get(args.iter().position(|a| a == name)? + 1)?;
+    Some(
+        value
+            .parse()
+            .unwrap_or_else(|_| die(&format!("{name} takes a number, not {value:?}"))),
+    )
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let repeat: u32 = args
-        .iter()
-        .position(|a| a == "--repeat")
-        .and_then(|i| args.get(i + 1))
-        .map_or(5, |n| n.parse().expect("--repeat takes a number"));
+    let repeat = flag(&args, "--repeat").unwrap_or(5);
+    let (rows, columns) = (
+        flag(&args, "--rows").unwrap_or(DEFAULT_WINDOW.0),
+        flag(&args, "--cols").unwrap_or(DEFAULT_WINDOW.1),
+    );
+    // The limits `ResultHandle::window` enforces, checked here so a bad size fails before the
+    // store is built rather than after it.
+    if !(1..=MAX_WINDOW_ROWS).contains(&rows)
+        || !(1..=MAX_WINDOW_COLUMNS as u32).contains(&columns)
+        || u64::from(rows) * u64::from(columns) > MAX_WINDOW_CELLS
+    {
+        die(&format!(
+            "a {rows} x {columns} window is outside 1..={MAX_WINDOW_ROWS} rows, \
+             1..={MAX_WINDOW_COLUMNS} columns and {MAX_WINDOW_CELLS} cells"
+        ));
+    }
+    WINDOW
+        .set((rows, columns))
+        .expect("main sets the window once");
     let scenario = args
         .first()
         .filter(|a| !a.starts_with("--"))

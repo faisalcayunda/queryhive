@@ -682,7 +682,9 @@ impl ResultHandle {
         })
     }
 
-    /// The width statistics for the columns, in UTF-16 units of the head of the result.
+    /// The widest cell of each column among the first 200 rows, in extended grapheme clusters and
+    /// at most 256. A NULL counts as empty (0), where `ArrayRows` counts it as the 4 characters of
+    /// "NULL"; the column width formula floors at 84 for every count up to 8, so it never shows.
     pub fn column_widths(&self) -> Result<Vec<u32>, StoreFfiError> {
         guarded(|| Ok(self.live()?.head_widths()))
     }

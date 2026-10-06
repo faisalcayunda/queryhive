@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use crate::chunk::{seal_store_chunk, ColumnStats, StoreChunk};
 use crate::registry::{Origin, StoreId, StoreRegistry};
-use crate::render::HeadWidths;
+use crate::render::{HeadWidths, HEAD_ROWS};
 use crate::spill::{decode_record, encode_record, SpillFile};
 use crate::view::{build_view, View, ViewSpec};
 
@@ -396,7 +396,12 @@ impl StoreShared {
         for chunk in sealed {
             self.publish(registry, chunk)?;
         }
-        self.feed_head_widths(batch);
+        self.feed_head_widths(batch.rows(), width, |row, column| {
+            batch
+                .value(row, column)
+                .and_then(qh_core::render::to_text)
+                .unwrap_or_default()
+        });
         self.maybe_expand_view();
         Ok(())
     }
@@ -425,7 +430,20 @@ impl StoreShared {
             });
         }
         self.set_phase(Phase::Streaming);
+        // `publish` takes the chunk, and the width stats need its first rows: slicing shares the
+        // arrays, so this copies nothing.
+        let head = chunk
+            .batch
+            .slice(0, chunk.batch.num_rows().min(HEAD_ROWS as usize));
+        let encodings = chunk.encodings.clone();
         self.publish(registry, chunk)?;
+        self.feed_head_widths(head.num_rows(), width, |row, column| {
+            qh_columnar::value_at(head.column(column).as_ref(), encodings[column], row)
+                .ok()
+                .as_ref()
+                .and_then(qh_core::render::to_text)
+                .unwrap_or_default()
+        });
         self.maybe_expand_view();
         Ok(())
     }
@@ -526,24 +544,20 @@ impl StoreShared {
         Ok(())
     }
 
-    /// Feed the width stats from a batch, for the first 200 rows only.
-    fn feed_head_widths(&self, batch: &ColumnBatch) {
-        let width = batch.width();
-        let mut guard = match self.head_widths.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
+    /// Feed the width stats from up to `rows` rows (`text(row, column)` is a cell's stored text, empty
+    /// for NULL), for the first `HEAD_ROWS` rows of the result only.
+    fn feed_head_widths(&self, rows: usize, width: usize, text: impl Fn(usize, usize) -> String) {
+        let Ok(mut guard) = self.head_widths.lock() else {
+            return;
         };
         let mut seen = self.head_rows.load(Ordering::Acquire);
         let mut texts: Vec<String> = Vec::with_capacity(width);
-        for row in 0..batch.rows() {
-            if seen >= 200 {
+        for row in 0..rows {
+            if seen >= HEAD_ROWS {
                 break;
             }
             texts.clear();
-            for column in 0..width {
-                let value = batch.value(row, column).cloned().unwrap_or(Value::Null);
-                texts.push(qh_core::render::to_text(&value).unwrap_or_default());
-            }
+            texts.extend((0..width).map(|column| text(row, column)));
             guard.observe(&texts, width);
             seen += 1;
         }
@@ -955,39 +969,12 @@ impl StoreShared {
         SpillFile::create(dir, std::process::id(), self.id.0)
     }
 
-    /// The spill file's path, for the diagnostics bundle. `None` until the
-    /// first spill, and always `None` once it is unlinked.
-    pub fn spill_path(&self) -> Option<std::path::PathBuf> {
-        self.spill
-            .lock()
-            .ok()
-            .and_then(|spill| spill.as_ref().map(|_| None))
-            .flatten()
-    }
-
     /// Bytes written to this store's spill file so far; 0 before the first spill.
     pub fn spilled_bytes(&self) -> u64 {
         self.spill
             .lock()
             .map(|spill| spill.as_ref().map_or(0, SpillFile::written_bytes))
             .unwrap_or(0)
-    }
-
-    /// Whether anything has been spilled.
-    pub fn has_spilled(&self) -> bool {
-        self.chunks
-            .read()
-            .map(|chunks| {
-                chunks.iter().any(|entry| {
-                    entry
-                        .cell
-                        .residency
-                        .lock()
-                        .map(|residency| matches!(*residency, Residency::Spilled { .. }))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
     }
 
     /// Every byte in the spill file, for the "no plaintext on disk" test.

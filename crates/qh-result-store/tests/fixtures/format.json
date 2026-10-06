@@ -1,0 +1,1642 @@
+{
+  "cases" : [
+    {
+      "format" : "raw",
+      "rendered" : "plain",
+      "type" : "varchar",
+      "value" : "plain"
+    },
+    {
+      "format" : "raw",
+      "rendered" : " {\"a\":1} ",
+      "type" : "varchar",
+      "value" : " {\"a\":1} "
+    },
+    {
+      "format" : "raw",
+      "rendered" : "",
+      "type" : "varchar",
+      "value" : ""
+    },
+    {
+      "format" : "raw",
+      "rendered" : "550e8400e29b41d4a716446655440000",
+      "type" : "varchar",
+      "value" : "550e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "text",
+      "rendered" : "6869",
+      "type" : "varchar",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "plain",
+      "type" : "varchar",
+      "value" : "plain"
+    },
+    {
+      "format" : "text",
+      "rendered" : "",
+      "type" : "varchar",
+      "value" : ""
+    },
+    {
+      "format" : "text",
+      "rendered" : "\\x6869",
+      "type" : "varchar",
+      "value" : "\\x6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "12",
+      "type" : "bigint",
+      "value" : "12"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "bytea",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "blob",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "varbinary",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "binary(16)",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "longblob",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "hi",
+      "type" : "BYTEA",
+      "value" : "6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "",
+      "type" : "bytea",
+      "value" : ""
+    },
+    {
+      "format" : "text",
+      "rendered" : "\u0000",
+      "type" : "bytea",
+      "value" : "00"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�",
+      "type" : "bytea",
+      "value" : "ff"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�",
+      "type" : "bytea",
+      "value" : "c3"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�\u0000�",
+      "type" : "bytea",
+      "value" : "ff00ff"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�(",
+      "type" : "bytea",
+      "value" : "c328"
+    },
+    {
+      "format" : "text",
+      "rendered" : "日本",
+      "type" : "bytea",
+      "value" : "e697a5e69cac"
+    },
+    {
+      "format" : "text",
+      "rendered" : "😀",
+      "type" : "bytea",
+      "value" : "f09f9880"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�",
+      "type" : "bytea",
+      "value" : "f09f98"
+    },
+    {
+      "format" : "text",
+      "rendered" : "���",
+      "type" : "bytea",
+      "value" : "eda080"
+    },
+    {
+      "format" : "text",
+      "rendered" : "���",
+      "type" : "bytea",
+      "value" : "e08080"
+    },
+    {
+      "format" : "text",
+      "rendered" : "����",
+      "type" : "bytea",
+      "value" : "f4908080"
+    },
+    {
+      "format" : "text",
+      "rendered" : "��",
+      "type" : "bytea",
+      "value" : "c0af"
+    },
+    {
+      "format" : "text",
+      "rendered" : "﻿hi",
+      "type" : "bytea",
+      "value" : "efbbbf6869"
+    },
+    {
+      "format" : "text",
+      "rendered" : "\n",
+      "type" : "bytea",
+      "value" : "0a"
+    },
+    {
+      "format" : "text",
+      "rendered" : "\u0000\u0001\u0002",
+      "type" : "bytea",
+      "value" : "000102"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�(",
+      "type" : "bytea",
+      "value" : "e28028"
+    },
+    {
+      "format" : "text",
+      "rendered" : "abc\ndef",
+      "type" : "bytea",
+      "value" : "6162630a646566"
+    },
+    {
+      "format" : "text",
+      "rendered" : "é",
+      "type" : "bytea",
+      "value" : "c3a9"
+    },
+    {
+      "format" : "text",
+      "rendered" : "é",
+      "type" : "bytea",
+      "value" : "65cc81"
+    },
+    {
+      "format" : "text",
+      "rendered" : "����",
+      "type" : "bytea",
+      "value" : "ffffffff"
+    },
+    {
+      "format" : "text",
+      "rendered" : "��",
+      "type" : "bytea",
+      "value" : "f09f98e29c"
+    },
+    {
+      "format" : "text",
+      "rendered" : "�",
+      "type" : "bytea",
+      "value" : "e282"
+    },
+    {
+      "format" : "text",
+      "rendered" : "A�B",
+      "type" : "bytea",
+      "value" : "41e28242"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "550E8400-E29B-41D4-A716-446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "550e8400-e29b-41d4-a716-446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "{550e8400-e29b-41d4-a716-446655440000}",
+      "type" : "uuid",
+      "value" : "{550e8400-e29b-41d4-a716-446655440000}"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a71644665544000",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a71644665544000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a7164466554400000",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a7164466554400000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "550e84-00e29b41d4a7-16446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "----",
+      "type" : "uuid",
+      "value" : "----"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "",
+      "type" : "uuid",
+      "value" : ""
+    },
+    {
+      "format" : "uuid",
+      "rendered" : " 550e8400e29b41d4a716446655440000",
+      "type" : "uuid",
+      "value" : " 550e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a716446655440000\n",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a716446655440000\n"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "ｆ50e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "ｆ50e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "ｆ50e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "Ｆ50e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "５50e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "５50e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a71644665544000g",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a71644665544000g"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a716446655440000́",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a716446655440000́"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "á50e8400e29b41d4a71644665544000",
+      "type" : "uuid",
+      "value" : "á50e8400e29b41d4a71644665544000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "٠50e8400e29b41d4a716446655440000",
+      "type" : "uuid",
+      "value" : "٠50e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "01234567-89ab-cdef-0123-456789abcdef",
+      "type" : "uuid",
+      "value" : "0123456789ABCDEF0123456789abcdef"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-4466554400",
+      "type" : "uuid",
+      "value" : "550e8400-e29b-41d4-a716-4466554400"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "uuid",
+      "value" : "-550e8400e29b41d4a716446655440000-"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a716446655440000‍",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a716446655440000‍"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400e29b41d4a716446655440000～",
+      "type" : "uuid",
+      "value" : "550e8400e29b41d4a716446655440000～"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "ａｂｃｄｅｆａｂ-ｃｄｅｆ-０１２３-４５６７-８９0123456789",
+      "type" : "uuid",
+      "value" : "ＡＢＣＤＥＦａｂｃｄｅｆ０１２３４５６７８９0123456789"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "not a uuid",
+      "type" : "varchar",
+      "value" : "not a uuid"
+    },
+    {
+      "format" : "uuid",
+      "rendered" : "550e8400-e29b-41d4-a716-446655440000",
+      "type" : "varchar",
+      "value" : "550e8400e29b41d4a716446655440000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "0"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:01",
+      "type" : "bigint",
+      "value" : "1"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:59",
+      "type" : "bigint",
+      "value" : "-1"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:20",
+      "type" : "bigint",
+      "value" : "1700000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:20",
+      "type" : "bigint",
+      "value" : "1700000000123"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:01",
+      "type" : "bigint",
+      "value" : "1.5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:58",
+      "type" : "bigint",
+      "value" : "-1.5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:59",
+      "type" : "bigint",
+      "value" : "-0.5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "-0.000001"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:16:40",
+      "type" : "bigint",
+      "value" : "1e3"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:16:40",
+      "type" : "bigint",
+      "value" : "1E3"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:20",
+      "type" : "bigint",
+      "value" : " 1700000000 "
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:20",
+      "type" : "bigint",
+      "value" : "\t1700000000\n"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "abc",
+      "type" : "bigint",
+      "value" : "abc"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : ""
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "NaN",
+      "type" : "bigint",
+      "value" : "NaN"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "nan",
+      "type" : "bigint",
+      "value" : "nan"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "inf",
+      "type" : "bigint",
+      "value" : "inf"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "-inf",
+      "type" : "bigint",
+      "value" : "-inf"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "infinity",
+      "type" : "bigint",
+      "value" : "infinity"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "5138-11-16 09:46:39",
+      "type" : "bigint",
+      "value" : "99999999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1973-03-03 09:46:40",
+      "type" : "bigint",
+      "value" : "100000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1200-02-26 14:13:21",
+      "type" : "bigint",
+      "value" : "-99999999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1966-10-31 14:13:20",
+      "type" : "bigint",
+      "value" : "-100000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "5138-11-16 09:46:39",
+      "type" : "bigint",
+      "value" : "99999999999.9"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "287396-10-12 08:59:00",
+      "type" : "bigint",
+      "value" : "9007199254740993"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1978-01-11 21:31:40",
+      "type" : "bigint",
+      "value" : "253402300799"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1978-01-11 21:31:40",
+      "type" : "bigint",
+      "value" : "253402300800"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "1e20"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "-1e20"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "33658-09-27 01:46:40",
+      "type" : "bigint",
+      "value" : "1e15"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "1e300"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:16",
+      "type" : "bigint",
+      "value" : "0x10"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:16",
+      "type" : "bigint",
+      "value" : "0x1p4"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1_000",
+      "type" : "bigint",
+      "value" : "1_000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:05",
+      "type" : "bigint",
+      "value" : "+5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : ".5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:05",
+      "type" : "bigint",
+      "value" : "5."
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1e",
+      "type" : "bigint",
+      "value" : "1e"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "١٢٣",
+      "type" : "bigint",
+      "value" : "١٢٣"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "１２",
+      "type" : "bigint",
+      "value" : "１２"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1,5",
+      "type" : "bigint",
+      "value" : "1,5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 23:59:59",
+      "type" : "bigint",
+      "value" : "86399"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-02 00:00:00",
+      "type" : "bigint",
+      "value" : "86400"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 00:00:00",
+      "type" : "bigint",
+      "value" : "-86400"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2000-02-29 00:00:00",
+      "type" : "bigint",
+      "value" : "951782400"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2100-03-01 00:00:00",
+      "type" : "bigint",
+      "value" : "4107542400"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2038-01-19 03:14:07",
+      "type" : "bigint",
+      "value" : "2147483647"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2038-01-19 03:14:08",
+      "type" : "bigint",
+      "value" : "2147483648"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1901-12-13 20:45:52",
+      "type" : "bigint",
+      "value" : "-2147483648"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:21",
+      "type" : "bigint",
+      "value" : "1700000000.999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:21",
+      "type" : "bigint",
+      "value" : "1700000000.9999999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1916-02-18 01:46:39",
+      "type" : "bigint",
+      "value" : "-1700000000.5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "12345678901234567890"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "0.0000001"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "-0"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1582-10-15 00:00:00",
+      "type" : "bigint",
+      "value" : "-12219292800"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1582-10-04 23:59:59",
+      "type" : "bigint",
+      "value" : "-12219292801"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1558-01-08 00:53:20",
+      "type" : "bigint",
+      "value" : "-13000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1526-05-01 23:06:40",
+      "type" : "bigint",
+      "value" : "-14000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0999-12-27 00:00:00",
+      "type" : "bigint",
+      "value" : "-30610224000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0001-01-03 00:00:00",
+      "type" : "bigint",
+      "value" : "-62135596800"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0001-01-02 23:59:59",
+      "type" : "bigint",
+      "value" : "-62135596801"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0001-01-03 00:00:00",
+      "type" : "bigint",
+      "value" : "-62167219200"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0001-01-02 23:59:59",
+      "type" : "bigint",
+      "value" : "-62167219201"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "0250-10-19 19:33:20",
+      "type" : "bigint",
+      "value" : "-70000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1966-10-31 14:13:20",
+      "type" : "bigint",
+      "value" : "-100000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1938-04-24 22:13:20",
+      "type" : "bigint",
+      "value" : "-1000000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1200-02-26 14:13:20",
+      "type" : "bigint",
+      "value" : "-100000000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1958-01-12 09:54:43",
+      "type" : "bigint",
+      "value" : "-377705116800"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1958-01-12 09:54:43",
+      "type" : "bigint",
+      "value" : "-377705116801"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1978-01-11 21:31:40",
+      "type" : "bigint",
+      "value" : "253402300799.5"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1979-07-05 05:20:00",
+      "type" : "bigint",
+      "value" : "300000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2001-09-09 01:46:40",
+      "type" : "bigint",
+      "value" : "1000000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2033-05-18 03:33:20",
+      "type" : "bigint",
+      "value" : "2000000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2286-11-20 17:46:39",
+      "type" : "bigint",
+      "value" : "9999999999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "33658-09-27 01:46:40",
+      "type" : "bigint",
+      "value" : "1000000000000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1653-02-10 06:13:20",
+      "type" : "bigint",
+      "value" : "-9999999999999"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "5828963-12-20 00:00:00",
+      "type" : "bigint",
+      "value" : "183882168921600000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "183882168921600320"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "5838270-09-20 00:00:00",
+      "type" : "bigint",
+      "value" : "-184303902528000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "",
+      "type" : "bigint",
+      "value" : "-184303902528000320"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "0.0005"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "-0.0005"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:59",
+      "type" : "bigint",
+      "value" : "-1.0005"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:01",
+      "type" : "bigint",
+      "value" : "0.9995"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:59",
+      "type" : "bigint",
+      "value" : "-0.9995"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:02",
+      "type" : "bigint",
+      "value" : "1.9995"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1969-12-31 23:59:58",
+      "type" : "bigint",
+      "value" : "-1.9995"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "0.0004"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "1970-01-01 00:00:00",
+      "type" : "bigint",
+      "value" : "-0.0004"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "2023-11-14 22:13:20",
+      "type" : "varchar",
+      "value" : "1700000000"
+    },
+    {
+      "format" : "unix_timestamp",
+      "rendered" : "x",
+      "type" : "varchar",
+      "value" : "x"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 1,   \"b\" : 2 }",
+      "type" : "json",
+      "value" : "{\"b\":2,\"a\":1}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : {     \"b\" : \"x\",     \"c\" : [       1,       2,       {         \"y\" : true,         \"z\" : null       }     ]   } }",
+      "type" : "json",
+      "value" : "{\"a\":{\"c\":[1,2,{\"z\":null,\"y\":true}],\"b\":\"x\"}}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[  ]",
+      "type" : "json",
+      "value" : "[]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{  }",
+      "type" : "json",
+      "value" : "{}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   [    ] ]",
+      "type" : "json",
+      "value" : "[[]]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   {    } ]",
+      "type" : "json",
+      "value" : "[{}]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : [    ] }",
+      "type" : "json",
+      "value" : "{\"a\":[]}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : {    } }",
+      "type" : "json",
+      "value" : "{\"a\":{}}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1,   2,   3 ]",
+      "type" : "json",
+      "value" : "[1,2,3]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1,   2 ]",
+      "type" : "json",
+      "value" : "[ 1 , 2 ]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"str\"",
+      "type" : "json",
+      "value" : "\"str\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "42",
+      "type" : "json",
+      "value" : "42"
+    },
+    {
+      "format" : "json",
+      "rendered" : "true",
+      "type" : "json",
+      "value" : "true"
+    },
+    {
+      "format" : "json",
+      "rendered" : "false",
+      "type" : "json",
+      "value" : "false"
+    },
+    {
+      "format" : "json",
+      "rendered" : "null",
+      "type" : "json",
+      "value" : "null"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1.5",
+      "type" : "json",
+      "value" : "1.5"
+    },
+    {
+      "format" : "json",
+      "rendered" : "0",
+      "type" : "json",
+      "value" : "-0"
+    },
+    {
+      "format" : "json",
+      "rendered" : "0.10000000000000001",
+      "type" : "json",
+      "value" : "0.1"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1000",
+      "type" : "json",
+      "value" : "1e3"
+    },
+    {
+      "format" : "json",
+      "rendered" : "100",
+      "type" : "json",
+      "value" : "1E+2"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1",
+      "type" : "json",
+      "value" : "1.0"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1.5",
+      "type" : "json",
+      "value" : "1.50"
+    },
+    {
+      "format" : "json",
+      "rendered" : "100000000000000000000",
+      "type" : "json",
+      "value" : "100000000000000000000"
+    },
+    {
+      "format" : "json",
+      "rendered" : "12345678901234567890",
+      "type" : "json",
+      "value" : "12345678901234567890"
+    },
+    {
+      "format" : "json",
+      "rendered" : "9223372036854775807",
+      "type" : "json",
+      "value" : "9223372036854775807"
+    },
+    {
+      "format" : "json",
+      "rendered" : "9223372036854775808",
+      "type" : "json",
+      "value" : "9223372036854775808"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-9223372036854775808",
+      "type" : "json",
+      "value" : "-9223372036854775808"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-9223372036854775809",
+      "type" : "json",
+      "value" : "-9223372036854775809"
+    },
+    {
+      "format" : "json",
+      "rendered" : "3.14159265358979323846",
+      "type" : "json",
+      "value" : "3.14159265358979323846"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1.4999999999999999e-07",
+      "type" : "json",
+      "value" : "1.5e-7"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1e400",
+      "type" : "json",
+      "value" : "1e400"
+    },
+    {
+      "format" : "json",
+      "rendered" : "0",
+      "type" : "json",
+      "value" : "1e-400"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1",
+      "type" : "json",
+      "value" : "0.1e1"
+    },
+    {
+      "format" : "json",
+      "rendered" : "123456789.123456789",
+      "type" : "json",
+      "value" : "123456789.123456789"
+    },
+    {
+      "format" : "json",
+      "rendered" : "0.30000000000000004",
+      "type" : "json",
+      "value" : "0.30000000000000004"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1e+21",
+      "type" : "json",
+      "value" : "1e21"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1e+22",
+      "type" : "json",
+      "value" : "1e22"
+    },
+    {
+      "format" : "json",
+      "rendered" : "9.9999999999999995e-08",
+      "type" : "json",
+      "value" : "1e-7"
+    },
+    {
+      "format" : "json",
+      "rendered" : "4.9406564584124654e-324",
+      "type" : "json",
+      "value" : "5e-324"
+    },
+    {
+      "format" : "json",
+      "rendered" : "1.7976931348623157e+308",
+      "type" : "json",
+      "value" : "1.7976931348623157e308"
+    },
+    {
+      "format" : "json",
+      "rendered" : "4.9406564584124654e-324",
+      "type" : "json",
+      "value" : "4.9e-324"
+    },
+    {
+      "format" : "json",
+      "rendered" : "100",
+      "type" : "json",
+      "value" : "100"
+    },
+    {
+      "format" : "json",
+      "rendered" : "100",
+      "type" : "json",
+      "value" : "1e2"
+    },
+    {
+      "format" : "json",
+      "rendered" : "2500",
+      "type" : "json",
+      "value" : "2.5E3"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-0.0015",
+      "type" : "json",
+      "value" : "-1.5E-3"
+    },
+    {
+      "format" : "json",
+      "rendered" : "0.5",
+      "type" : "json",
+      "value" : "0.5"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-7",
+      "type" : "json",
+      "value" : "-7"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1,   2.5,   3 ]",
+      "type" : "json",
+      "value" : "[1.0,2.50,3e0]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 1 }",
+      "type" : "json",
+      "value" : "{\"a\":1,\"a\":2}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"\\\/\" : \"\\\/\" }",
+      "type" : "json",
+      "value" : "{\"\/\":\"\/\"}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"é\"",
+      "type" : "json",
+      "value" : "\"\\u00e9\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"é日本😀\"",
+      "type" : "json",
+      "value" : "\"é日本😀\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"😀\"",
+      "type" : "json",
+      "value" : "\"\\ud83d\\ude00\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\ud800\"",
+      "type" : "json",
+      "value" : "\"\\ud800\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\u0000\"",
+      "type" : "json",
+      "value" : "\"\\u0000\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\u001f\"",
+      "type" : "json",
+      "value" : "\"\\u001f\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\"",
+      "type" : "json",
+      "value" : "\"\\u007f\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\" \"",
+      "type" : "json",
+      "value" : "\"\\u2028\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\n\\r\\t\\b\\f\"",
+      "type" : "json",
+      "value" : "\"\\n\\r\\t\\b\\f\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\\\\"",
+      "type" : "json",
+      "value" : "\"\\\\\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\\"\"",
+      "type" : "json",
+      "value" : "\"\\\"\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"k\" : \"line\\nbreak\" }",
+      "type" : "json",
+      "value" : "{\"k\":\"line\\nbreak\"}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   \"a\\tb\" ]",
+      "type" : "json",
+      "value" : "[\"a\\tb\"]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 5,   \"aa\" : 6,   \"b\" : 8,   \"B\" : 7,   \"e\" : 2,   \"é\" : 1,   \"z\" : 3,   \"Z\" : 4 }",
+      "type" : "json",
+      "value" : "{\"é\":1,\"e\":2,\"z\":3,\"Z\":4,\"a\":5,\"aa\":6,\"B\":7,\"b\":8}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"～\" : 2,   \"😀\" : 1 }",
+      "type" : "json",
+      "value" : "{\"😀\":1,\"～\":2}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"\" : 7,   \" \" : 8,   \"_\" : 3,   \"1\" : 4,   \"2\" : 6,   \"10\" : 5,   \"a\" : 1,   \"A\" : 2 }",
+      "type" : "json",
+      "value" : "{\"a\":1,\"A\":2,\"_\":3,\"1\":4,\"10\":5,\"2\":6,\"\":7,\" \":8}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : [     {       \"x\" : 2,       \"y\" : 1     }   ],   \"b\" : {     \"c\" : 2,     \"d\" : 1   } }",
+      "type" : "json",
+      "value" : "{\"b\":{\"d\":1,\"c\":2},\"a\":[{\"y\":1,\"x\":2}]}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 1 }",
+      "type" : "json",
+      "value" : " {\"a\":1} "
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1 ]",
+      "type" : "json",
+      "value" : "\n[1]\n"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{\"a\":1} x",
+      "type" : "json",
+      "value" : "{\"a\":1} x"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{'a':1}",
+      "type" : "json",
+      "value" : "{'a':1}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1 ]",
+      "type" : "json",
+      "value" : "[1,]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{not json",
+      "type" : "json",
+      "value" : "{not json"
+    },
+    {
+      "format" : "json",
+      "rendered" : "NaN",
+      "type" : "json",
+      "value" : "NaN"
+    },
+    {
+      "format" : "json",
+      "rendered" : "Infinity",
+      "type" : "json",
+      "value" : "Infinity"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-Infinity",
+      "type" : "json",
+      "value" : "-Infinity"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[1,2",
+      "type" : "json",
+      "value" : "[1,2"
+    },
+    {
+      "format" : "json",
+      "rendered" : "01",
+      "type" : "json",
+      "value" : "01"
+    },
+    {
+      "format" : "json",
+      "rendered" : "+1",
+      "type" : "json",
+      "value" : "+1"
+    },
+    {
+      "format" : "json",
+      "rendered" : ".5",
+      "type" : "json",
+      "value" : ".5"
+    },
+    {
+      "format" : "json",
+      "rendered" : "-",
+      "type" : "json",
+      "value" : "-"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"unterminated",
+      "type" : "json",
+      "value" : "\"unterminated"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\/\/ c\n{}",
+      "type" : "json",
+      "value" : "\/\/ c\n{}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\/* c *\/ {}",
+      "type" : "json",
+      "value" : "\/* c *\/ {}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{  }",
+      "type" : "json",
+      "value" : "﻿{}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 1 }",
+      "type" : "json",
+      "value" : "{\"a\":1,}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{\"a\" 1}",
+      "type" : "json",
+      "value" : "{\"a\" 1}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{a:1}",
+      "type" : "json",
+      "value" : "{a:1}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[1 2]",
+      "type" : "json",
+      "value" : "[1 2]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[\"a\" \"b\"]",
+      "type" : "json",
+      "value" : "[\"a\" \"b\"]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "tru",
+      "type" : "json",
+      "value" : "tru"
+    },
+    {
+      "format" : "json",
+      "rendered" : "nul",
+      "type" : "json",
+      "value" : "nul"
+    },
+    {
+      "format" : "json",
+      "rendered" : "'x'",
+      "type" : "json",
+      "value" : "'x'"
+    },
+    {
+      "format" : "json",
+      "rendered" : "",
+      "type" : "json",
+      "value" : ""
+    },
+    {
+      "format" : "json",
+      "rendered" : " ",
+      "type" : "json",
+      "value" : " "
+    },
+    {
+      "format" : "json",
+      "rendered" : "{",
+      "type" : "json",
+      "value" : "{"
+    },
+    {
+      "format" : "json",
+      "rendered" : "}",
+      "type" : "json",
+      "value" : "}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[",
+      "type" : "json",
+      "value" : "["
+    },
+    {
+      "format" : "json",
+      "rendered" : "]",
+      "type" : "json",
+      "value" : "]"
+    },
+    {
+      "format" : "json",
+      "rendered" : ",",
+      "type" : "json",
+      "value" : ","
+    },
+    {
+      "format" : "json",
+      "rendered" : ":",
+      "type" : "json",
+      "value" : ":"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{\"a\":}",
+      "type" : "json",
+      "value" : "{\"a\":}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[,1]",
+      "type" : "json",
+      "value" : "[,1]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\u0001\"",
+      "type" : "json",
+      "value" : "\"\u0001\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"tab\there\"",
+      "type" : "json",
+      "value" : "\"tab\there\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : \" \" }",
+      "type" : "json",
+      "value" : "{\"a\":\" \"}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\u00zz\"",
+      "type" : "json",
+      "value" : "\"\\u00zz\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "\"\\x\"",
+      "type" : "json",
+      "value" : "\"\\x\""
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : [     1,     2,     {       \"b\" : [         3,         {           \"c\" : 4         }       ]     }   ] }",
+      "type" : "json",
+      "value" : "{\"a\":[1,2,{\"b\":[3,{\"c\":4}]}]}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   null,   true,   false,   0,   \"\",   [    ],   {    } ]",
+      "type" : "json",
+      "value" : "[null,true,false,0,\"\",[],{}]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   [     [       [         [           [             [               [                 [                   [                     [                       [                         [                           [                             [                               [                                 [                                   [                                     [                                       [                                         [                                           [                                             [                                               [                                                 [                                                   [                                                     [                                                       [                                                         [                                                           [                                                             [                                                               [                                                                 [                                                                   [                                                                     [                                                                       [                                                                         [                                                                           [                                                                             [                                                                               [                                                                                 [                                                                                   [                                                                                     [                                                                                       [                                                                                         [                                                                                           [                                                                                             [                                                                                               [                                                                                                 [                                                                                                   [                                                                                                     [                                                                                                       [                                                                                                         [                                                                                                           [                                                                                                             [                                                                                                               [                                                                                                                 [                                                                                                                   [                                                                                                                     [                                                                                                                       [                                                                                                                         [                                                                                                                           [                                                                                                                             [                                                                                                                               [                                                                                                                                 [                                                                                                                                   [                                                                                                                                     [                                                                                                                                       [                                                                                                                                         [                                                                                                                                           [                                                                                                                                             [                                                                                                                                               [                                                                                                                                                 [                                                                                                                                                   [                                                                                                                                                     [                                                                                                                                                       [                                                                                                                                                         [                                                                                                                                                           [                                                                                                                                                             [                                                                                                                                                               [                                                                                                                                                                 [                                                                                                                                                                   [                                                                                                                                                                     [                                                                                                                                                                       [                                                                                                                                                                         [                                                                                                                                                                           [                                                                                                                                                                             [                                                                                                                                                                               [                                                                                                                                                                                 [                                                                                                                                                                                   [                                                                                                                                                                                     [                                                                                                                                                                                       [                                                                                                                                                                                         [                                                                                                                                                                                           [                                                                                                                                                                                             [                                                                                                                                                                                               [                                                                                                                                                                                                 [                                                                                                                                                                                                   [                                                                                                                                                                                                     [                                                                                                                                                                                                       [                                                                                                                                                                                                         [                                                                                                                                                                                                           [                                                                                                                                                                                                             [                                                                                                                                                                                                               [                                                                                                                                                                                                                 [                                                                                                                                                                                                                   [                                                                                                                                                                                                                     [                                                                                                                                                                                                                       [                                                                                                                                                                                                                         [                                                                                                                                                                                                                           [                                                                                                                                                                                                                             [                                                                                                                                                                                                                               [                                                                                                                                                                                                                                 [                                                                                                                                                                                                                                   [                                                                                                                                                                                                                                     [                                                                                                                                                                                                                                       [                                                                                                                                                                                                                                         [                                                                                                                                                                                                                                           [                                                                                                                                                                                                                                             [                                                                                                                                                                                                                                               [                                                                                                                                                                                                                                                 [                                                                                                                                                                                                                                                   [                                                                                                                                                                                                                                                     [                                                                                                                                                                                                                                                       [                                                                                                                                                                                                                                                         [                                                                                                                                                                                                                                                           [                                                                                                                                                                                                                                                             [                                                                                                                                                                                                                                                               [                                                                                                                                                                                                                                                                 [                                                                                                                                                                                                                                                                   [                                                                                                                                                                                                                                                                    ]                                                                                                                                                                                                                                                                 ]                                                                                                                                                                                                                                                               ]                                                                                                                                                                                                                                                             ]                                                                                                                                                                                                                                                           ]                                                                                                                                                                                                                                                         ]                                                                                                                                                                                                                                                       ]                                                                                                                                                                                                                                                     ]                                                                                                                                                                                                                                                   ]                                                                                                                                                                                                                                                 ]                                                                                                                                                                                                                                               ]                                                                                                                                                                                                                                             ]                                                                                                                                                                                                                                           ]                                                                                                                                                                                                                                         ]                                                                                                                                                                                                                                       ]                                                                                                                                                                                                                                     ]                                                                                                                                                                                                                                   ]                                                                                                                                                                                                                                 ]                                                                                                                                                                                                                               ]                                                                                                                                                                                                                             ]                                                                                                                                                                                                                           ]                                                                                                                                                                                                                         ]                                                                                                                                                                                                                       ]                                                                                                                                                                                                                     ]                                                                                                                                                                                                                   ]                                                                                                                                                                                                                 ]                                                                                                                                                                                                               ]                                                                                                                                                                                                             ]                                                                                                                                                                                                           ]                                                                                                                                                                                                         ]                                                                                                                                                                                                       ]                                                                                                                                                                                                     ]                                                                                                                                                                                                   ]                                                                                                                                                                                                 ]                                                                                                                                                                                               ]                                                                                                                                                                                             ]                                                                                                                                                                                           ]                                                                                                                                                                                         ]                                                                                                                                                                                       ]                                                                                                                                                                                     ]                                                                                                                                                                                   ]                                                                                                                                                                                 ]                                                                                                                                                                               ]                                                                                                                                                                             ]                                                                                                                                                                           ]                                                                                                                                                                         ]                                                                                                                                                                       ]                                                                                                                                                                     ]                                                                                                                                                                   ]                                                                                                                                                                 ]                                                                                                                                                               ]                                                                                                                                                             ]                                                                                                                                                           ]                                                                                                                                                         ]                                                                                                                                                       ]                                                                                                                                                     ]                                                                                                                                                   ]                                                                                                                                                 ]                                                                                                                                               ]                                                                                                                                             ]                                                                                                                                           ]                                                                                                                                         ]                                                                                                                                       ]                                                                                                                                     ]                                                                                                                                   ]                                                                                                                                 ]                                                                                                                               ]                                                                                                                             ]                                                                                                                           ]                                                                                                                         ]                                                                                                                       ]                                                                                                                     ]                                                                                                                   ]                                                                                                                 ]                                                                                                               ]                                                                                                             ]                                                                                                           ]                                                                                                         ]                                                                                                       ]                                                                                                     ]                                                                                                   ]                                                                                                 ]                                                                                               ]                                                                                             ]                                                                                           ]                                                                                         ]                                                                                       ]                                                                                     ]                                                                                   ]                                                                                 ]                                                                               ]                                                                             ]                                                                           ]                                                                         ]                                                                       ]                                                                     ]                                                                   ]                                                                 ]                                                               ]                                                             ]                                                           ]                                                         ]                                                       ]                                                     ]                                                   ]                                                 ]                                               ]                                             ]                                           ]                                         ]                                       ]                                     ]                                   ]                                 ]                               ]                             ]                           ]                         ]                       ]                     ]                   ]                 ]               ]             ]           ]         ]       ]     ]   ] ]",
+      "type" : "json",
+      "value" : "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "type" : "json",
+      "value" : "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    },
+    {
+      "format" : "json",
+      "rendered" : "{   \"a\" : 1 }",
+      "type" : "varchar",
+      "value" : "{\"a\":1}"
+    },
+    {
+      "format" : "json",
+      "rendered" : "plain text",
+      "type" : "varchar",
+      "value" : "plain text"
+    },
+    {
+      "format" : "json",
+      "rendered" : "[   1 ]",
+      "type" : "varchar",
+      "value" : "[1]"
+    }
+  ]
+}

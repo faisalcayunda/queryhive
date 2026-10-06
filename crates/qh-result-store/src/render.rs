@@ -31,6 +31,9 @@ pub const CELL_TRUNCATED: u8 = 1 << 4;
 /// + column_count 4 + visible_total 4 + heap_len 4 + reserved 4.
 pub const HEADER_LEN: usize = 32;
 
+/// How many rows from the top of a result feed the column width stats (§8).
+pub(crate) const HEAD_ROWS: u32 = 200;
+
 /// The truncation cap in UTF-16 units (§11.3).
 pub const TRUNCATE_UTF16: usize = 256;
 
@@ -411,37 +414,51 @@ fn format_text(text: &str, enc: Encoding) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Port of `GridSort.canonicalUUID`: 32 hex digits (case-insensitive, with
-/// optional dashes) → 8-4-4-4-12.
+/// Swift's `Character.isHexDigit`: the ASCII hex digits and their fullwidth forms.
+fn swift_hex_digit(c: char) -> bool {
+    c.is_ascii_hexdigit()
+        || matches!(c, '\u{FF10}'..='\u{FF19}' | '\u{FF21}'..='\u{FF26}' | '\u{FF41}'..='\u{FF46}')
+}
+
+/// Port of `ColumnFormat.canonicalUUID`: 32 hex digits (case-insensitive, with any dashes)
+/// written 8-4-4-4-12. Fullwidth digits count and are kept, lowercased, as Swift does.
 fn canonical_uuid(text: &str) -> Option<String> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if !text.chars().all(|c| swift_hex_digit(c) || c == '-') {
         return None;
     }
-    if !chars.iter().all(|c| c.is_ascii_hexdigit() || *c == '-') {
-        return None;
-    }
-    let digits: Vec<char> = chars
-        .iter()
-        .filter(|c| c.is_ascii_hexdigit())
-        .map(|c| c.to_ascii_lowercase())
+    let digits: Vec<char> = text
+        .chars()
+        .filter(|&c| swift_hex_digit(c))
+        .flat_map(char::to_lowercase)
         .collect();
     if digits.len() != 32 {
         return None;
     }
-    let s = digits.iter().collect::<String>();
+    let part = |range: std::ops::Range<usize>| digits[range].iter().collect::<String>();
     Some(format!(
         "{}-{}-{}-{}-{}",
-        &s[0..8],
-        &s[8..12],
-        &s[12..16],
-        &s[16..20],
-        &s[20..32]
+        part(0..8),
+        part(8..12),
+        part(12..16),
+        part(16..20),
+        part(20..32)
     ))
 }
 
-/// Port of `GridSort.timestamp`: `n` (or `n/1000` when `|n| >= 1e11`) seconds
-/// → `yyyy-MM-dd HH:mm:ss` UTC.
+/// The farthest instants Foundation's `DateFormatter` formats (ICU's calendar limits); past
+/// them it answers an empty string, which `ColumnFormat.timestamp` passes on.
+const DATE_MAX_SECONDS: f64 = 183_882_168_921_600.0;
+const DATE_MIN_SECONDS: f64 = -184_303_902_528_000.0;
+
+/// The first day of the Gregorian calendar, 1582-10-15, in days since the Unix epoch. Foundation's
+/// calendar counts Julian days before it.
+const GREGORIAN_START_DAYS: i64 = -141_427;
+
+/// Port of `ColumnFormat.timestamp`: `n` (or `n/1000` when `|n| >= 1e11`) seconds
+/// → `yyyy-MM-dd HH:mm:ss` UTC, the way `DateFormatter` shows it.
+///
+/// Foundation hands the formatter whole milliseconds and shows the second that instant falls in,
+/// so a fraction rounds to the millisecond first and then floors (`-1.5` is `23:59:58`).
 fn unix_timestamp(text: &str) -> Option<String> {
     let trimmed = text.trim();
     let value = collate::swift_double(trimmed)?;
@@ -453,16 +470,38 @@ fn unix_timestamp(text: &str) -> Option<String> {
     } else {
         value
     };
-    let whole = seconds as i64;
+    if !(DATE_MIN_SECONDS..=DATE_MAX_SECONDS).contains(&seconds) {
+        return Some(String::new());
+    }
+    let whole = ((seconds * 1000.0).round_ties_even() as i64).div_euclid(1000);
     let days = whole.div_euclid(86_400);
     let within_day = whole.rem_euclid(86_400);
-    let (year, month, day) = qh_core::render::civil_from_days(days);
+    let (year, month, day) = calendar_date(days);
     let hours = within_day / 3600;
     let minutes = (within_day % 3600) / 60;
     let secs = within_day % 60;
     Some(format!(
         "{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{secs:02}"
     ))
+}
+
+/// The date `yyyy` shows for a count of days since the Unix epoch: Gregorian from 1582-10-15, Julian
+/// before it, and the year of the era (1 BC is year 1) once the year is 0 or below.
+fn calendar_date(days: i64) -> (i64, u32, u32) {
+    if days >= GREGORIAN_START_DAYS {
+        return qh_core::render::civil_from_days(days);
+    }
+    // Richards' Julian-calendar conversion from the Julian day number, floored so it holds for
+    // dates before the number's zero.
+    let e = 4 * (days + 2_440_588 + 1401) + 3;
+    let h = 5 * (e.rem_euclid(1461) / 4) + 2;
+    let month = (h.div_euclid(153) + 2).rem_euclid(12) + 1;
+    let year = e.div_euclid(1461) - 4716 + (14 - month).div_euclid(12);
+    (
+        if year > 0 { year } else { 1 - year },
+        month as u32,
+        (h.rem_euclid(153) / 5 + 1) as u32,
+    )
 }
 
 /// Parse and pretty-print JSON, the port of `JSONSerialization` with
@@ -869,7 +908,7 @@ impl HeadWidths {
 
     /// Feed one row of stored texts (NULL is empty).
     pub fn observe(&mut self, texts: &[String], columns: usize) {
-        if self.rows >= 200 {
+        if self.rows >= HEAD_ROWS {
             return;
         }
         if self.widths.len() < columns {
@@ -881,7 +920,7 @@ impl HeadWidths {
             self.widths[c] = self.widths[c].max(graphemes);
         }
         self.rows += 1;
-        if self.rows == 200 {
+        if self.rows == HEAD_ROWS {
             self.done = true;
         }
     }

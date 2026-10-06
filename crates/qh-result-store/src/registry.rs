@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use qh_core::{ColumnBatch, ColumnMeta, Value};
 
@@ -88,6 +88,12 @@ pub struct RegistryStats {
 pub struct StoreRegistry {
     pub config: StoreConfig,
     cipher: Option<SpillCipher>,
+    /// The stores that are alive, by id.
+    ///
+    /// Lock order: this table, then a store's `spill` mutex. `stats` holds the table while it reads
+    /// each store's spilled bytes, so no code may take the table while holding a spill lock.
+    /// `evict_until` and `release` copy what they need and let the table go before they touch a
+    /// store.
     live: Mutex<HashMap<StoreId, Weak<StoreShared>>>,
     next_id: AtomicU64,
     resident: AtomicUsize,
@@ -111,10 +117,7 @@ impl std::fmt::Debug for StoreRegistry {
         f.debug_struct("StoreRegistry")
             .field("config", &self.config)
             .field("cipher", &self.cipher)
-            .field(
-                "stores",
-                &self.live.lock().map(|live| live.len()).unwrap_or(0),
-            )
+            .field("stores", &self.live().len())
             .finish()
     }
 }
@@ -123,7 +126,7 @@ impl StoreRegistry {
     /// Build the registry and sweep the spill directory. The sweep report is
     /// the host's to log; spill is off when the sweep turned it off.
     pub fn new(config: StoreConfig) -> (Arc<Self>, SweepReport) {
-        let report = match &config.spill_dir {
+        let mut report = match &config.spill_dir {
             Some(dir) => crate::spill::sweep_spill_dir(dir),
             // No directory means no spill: the tests and the headless paths
             // run with it off rather than writing into a temp folder nobody
@@ -134,25 +137,18 @@ impl StoreRegistry {
                 reason: Some("no spill directory configured".to_owned()),
             },
         };
-        let cipher = if report.spill_enabled {
+        let mut cipher = None;
+        if report.spill_enabled {
             match SpillCipher::new() {
-                Ok(cipher) => Some(cipher),
+                Ok(made) => cipher = Some(made),
+                // A key that cannot be made means spill off, not a weaker
+                // key. There is no fixed-key fallback (§10.1).
                 Err(error) => {
-                    // A key that cannot be made means spill off, not a weaker
-                    // key. There is no fixed-key fallback (§10.1).
-                    return (
-                        Arc::new(Self::bare(config)),
-                        SweepReport {
-                            removed: report.removed,
-                            spill_enabled: false,
-                            reason: Some(error.to_string()),
-                        },
-                    );
+                    report.spill_enabled = false;
+                    report.reason = Some(error.to_string());
                 }
             }
-        } else {
-            None
-        };
+        }
         let registry = Self {
             config,
             cipher,
@@ -166,18 +162,16 @@ impl StoreRegistry {
         (Arc::new(registry), report)
     }
 
-    /// A registry with no cipher, for the failure path above.
-    fn bare(config: StoreConfig) -> Self {
-        Self {
-            config,
-            cipher: None,
-            live: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
-            resident: AtomicUsize::new(0),
-            query_reserved: AtomicUsize::new(0),
-            clock: AtomicU64::new(1),
-            decoded: Mutex::new(Vec::new()),
-        }
+    /// The live table. A poisoned lock is recovered, never a panic: the table is only inserted into
+    /// and removed from, so a panic elsewhere cannot leave it half-updated, and `release` runs from
+    /// `Drop` and the UniFFI free path, where a panic would end the app.
+    fn live(&self) -> MutexGuard<'_, HashMap<StoreId, Weak<StoreShared>>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The decrypted-chunk cache, recovered from poison like [`Self::live`]: `release` purges it.
+    fn decoded(&self) -> MutexGuard<'_, Vec<DecodedEntry>> {
+        self.decoded.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The spill cipher, or `None` when spill is off.
@@ -201,10 +195,7 @@ impl StoreRegistry {
     pub fn create(self: &Arc<Self>) -> StoreHandle {
         let id = self.next_store_id();
         let shared = Arc::new(StoreShared::new(id, Arc::downgrade(self)));
-        self.live
-            .lock()
-            .expect("the live table should not be poisoned")
-            .insert(id, Arc::downgrade(&shared));
+        self.live().insert(id, Arc::downgrade(&shared));
         StoreHandle {
             id,
             shared,
@@ -238,38 +229,6 @@ impl StoreRegistry {
         if !columns_of_values.is_empty() {
             let batch = ColumnBatch::new(columns_of_values)?;
             writer.push(&batch)?;
-        }
-        writer.finish(Outcome::Complete { truncated: false })?;
-        Ok(handle)
-    }
-
-    /// A store of synthetic rows, for the benchmarks and the Swift UI tests.
-    pub fn synthetic(
-        self: &Arc<Self>,
-        rows: u32,
-        columns: u32,
-        seed: u64,
-    ) -> Result<StoreHandle, StoreError> {
-        let handle = self.create();
-        let writer = handle.writer();
-        let metas: Vec<ColumnMeta> = (0..columns)
-            .map(|index| ColumnMeta::new(format!("c{index}"), "text"))
-            .collect();
-        writer.begin(metas)?;
-        let mut state = seed;
-        for row in 0..rows {
-            let mut cells = Vec::with_capacity(columns as usize);
-            for _ in 0..columns {
-                // xorshift64: deterministic from the seed, so a bench run is
-                // reproducible and a Swift test can assert on the content.
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                cells.push(Value::Text(
-                    format!("row-{row}-{state:016x}").into_boxed_str(),
-                ));
-            }
-            writer.push(&ColumnBatch::new(vec![cells])?)?;
         }
         writer.finish(Outcome::Complete { truncated: false })?;
         Ok(handle)
@@ -400,13 +359,7 @@ impl StoreRegistry {
     /// FFI thread or a helper client, never main.
     fn evict_until(&self, target: usize) -> Result<(), StoreError> {
         self.trim_decoded_cache(self.config.decoded_cache_chunks.min(4));
-        let live: Vec<Arc<StoreShared>> = {
-            let table = self
-                .live
-                .lock()
-                .expect("the live table should not be poisoned");
-            table.values().filter_map(Weak::upgrade).collect()
-        };
+        let live: Vec<Arc<StoreShared>> = self.live().values().filter_map(Weak::upgrade).collect();
         // (store, chunk index, last_access), oldest first.
         let mut candidates: Vec<(Arc<StoreShared>, usize, u64)> = Vec::new();
         for store in &live {
@@ -471,10 +424,7 @@ impl StoreRegistry {
             self.uncharge(bytes);
             return chunk;
         }
-        let mut decoded = self
-            .decoded
-            .lock()
-            .expect("the decoded cache should not be poisoned");
+        let mut decoded = self.decoded();
         // A second entry for the same chunk would be charged twice.
         if let Some(position) = decoded
             .iter()
@@ -507,10 +457,7 @@ impl StoreRegistry {
 
     /// A decrypted chunk if it is still cached.
     pub fn decoded_chunk(&self, id: StoreId, index: u32) -> Option<Arc<crate::chunk::StoreChunk>> {
-        let mut decoded = self
-            .decoded
-            .lock()
-            .expect("the decoded cache should not be poisoned");
+        let mut decoded = self.decoded();
         let entry = decoded
             .iter_mut()
             .find(|entry| entry.id == id && entry.index == index)?;
@@ -520,10 +467,7 @@ impl StoreRegistry {
 
     /// Drop decoded-cache entries, oldest first, keeping `keep` of them.
     fn trim_decoded_cache(&self, keep: usize) {
-        let mut decoded = self
-            .decoded
-            .lock()
-            .expect("the decoded cache should not be poisoned");
+        let mut decoded = self.decoded();
         decoded.sort_by_key(|entry| entry.last_access);
         while decoded.len() > keep {
             let entry = decoded.remove(0);
@@ -534,10 +478,7 @@ impl StoreRegistry {
     /// Drop every decoded-cache entry for a released store, so its memory
     /// does not outlive the tab.
     fn purge_decoded(&self, id: StoreId) {
-        let mut decoded = self
-            .decoded
-            .lock()
-            .expect("the decoded cache should not be poisoned");
+        let mut decoded = self.decoded();
         let mut index = 0;
         while index < decoded.len() {
             if decoded[index].id == id {
@@ -551,44 +492,26 @@ impl StoreRegistry {
 
     /// Diagnostics.
     pub fn stats(&self) -> RegistryStats {
+        let (stores, spilled_bytes) = {
+            let live = self.live();
+            let alive = live.values().filter_map(Weak::upgrade);
+            alive.fold((0, 0), |(count, bytes), store| {
+                (count + 1, bytes + store.spilled_bytes())
+            })
+        };
         RegistryStats {
-            stores: self
-                .live
-                .lock()
-                .map(|live| live.values().filter(|weak| weak.strong_count() > 0).count())
-                .unwrap_or(0),
+            stores,
             resident_bytes: self.resident.load(Ordering::Acquire),
-            spilled_bytes: self
-                .live
-                .lock()
-                .map(|live| {
-                    live.values()
-                        .filter_map(Weak::upgrade)
-                        .map(|s| s.spilled_bytes())
-                        .sum()
-                })
-                .unwrap_or(0),
+            spilled_bytes,
             budget_bytes: self.config.budget_bytes,
-            decoded_chunks: self
-                .decoded
-                .lock()
-                .map(|decoded| decoded.len())
-                .unwrap_or(0),
+            decoded_chunks: self.decoded().len(),
         }
     }
 
     /// Release a store: mark it released, free its budget, close its spill
     /// fd, and drop it from the live table. Idempotent.
     pub fn release(&self, id: StoreId) {
-        let shared = {
-            // This runs from `Drop` and from the UniFFI free path, so a poisoned table is
-            // recovered, never a panic.
-            let mut table = self
-                .live
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            table.remove(&id).and_then(|weak| weak.upgrade())
-        };
+        let shared = self.live().remove(&id).and_then(|weak| weak.upgrade());
         if let Some(shared) = shared {
             shared.release(self);
         }
