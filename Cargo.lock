@@ -2774,6 +2774,7 @@ name = "qh-driver"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "qh-columnar",
  "qh-core",
  "rcgen",
  "rustls-pki-types",
