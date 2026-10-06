@@ -39,6 +39,8 @@ fn settings() -> Option<Vec<(&'static str, &'static str)>> {
         ("DB_HOST", "127.0.0.1"),
         ("DB_PORT", "55432"),
         ("DB_USER", "qh"),
+        // The podman cluster requires a password from the host (scram-sha-256); a trust cluster ignores it.
+        ("DB_PASSWORD", "qh-dev-only"),
         ("DB_DATABASE", "qh"),
         ("DB_SCHEMA", "public"),
         ("DB_SSLMODE", "disable"),
