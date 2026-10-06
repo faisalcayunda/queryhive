@@ -51,9 +51,22 @@ Aturan yang selalu ditulis di brief:
 - Brief selalu diakhiri permintaan: kembalikan **kesimpulan dan bukti** (perintah yang dijalankan beserta hasil lulus/gagal dan hitungan, dan daftar berkas yang berubah), bukan isi berkas.
 - Agen `Explore` dan `Plan` tidak memuat `~/.claude/CLAUDE.md`, jadi aturan di atas ditulis di brief mereka.
 
-### 0.3 Konkurensi dan worktree
+### 0.3 Lane model dan konkurensi
 
-- **Maksimal 3 implementer bersamaan.** Architect, reviewer, dan Explore tidak dihitung, tetapi tidak boleh berjalan saat sesi benchmark (§0.4).
+**Lane types** (O-22):
+- **MAIN:** the FFI lane and integration. It runs build-ffi, G-FFI, G-GOLDEN, G-APP, G-LEAK, full-workspace G-RUST and the X/Q exclusive slots.
+- **R1–R3:** Rust worktrees sharing `CARGO_TARGET_DIR`, `cargo test -p <touched>` only (reduce artifact bloat from multiple worktrees' binaries).
+- **S1–S3:** Swift worktrees, about 1 GB each. They copy `target/ffi/static/debug` from MAIN, re-copy after every Generated change, and never run build-ffi themselves.
+- **D1–D2:** docs agents on haiku (O-23).
+- At most 8 concurrent.
+
+**Live slot:** only one lane at a time runs G-LIVE or G-GOLDEN (shared dev DBs). Tests drop their own tables.
+
+**Exclusive slots (X/Q)** stop every lane and reviewers.
+
+**Integration:** lane commit → cherry-pick into MAIN → the task's MAIN-only gates → push (O-21). Remove the worktree only after the commit and a clean status, never with `--force` (I-2).
+
+- **Maksimal 3 implementer bersamaan.** Architect, reviewer, dan Explore tidak dihitung, tetapi tidak boleh berjalan saat sesi benchmark atau X-slot (§0.4).
 - **Worktree (dimatikan di run ini).** Pada 30 Sep 2026 disk bebas host 30 GiB (< 60, §2.1), jadi implementer berjalan serial di checkout utama. Aturan di bawah berlaku bila disk cukup.
 - **Worktree.** Bila ada ≥ 2 implementer yang menyentuh Swift atau Rust bersamaan, masing-masing memakai `isolation: worktree`.
   - Worktree Swift perlu `./app/build-ffi.sh debug` sekali, karena `app/Package.swift` mencari arsip di `<root worktree>/target/ffi/static/`.
@@ -101,7 +114,7 @@ Orkestrator menyimpan ledger di scratchpad sesi (bukan di repo). Isinya:
 | G-SWIFT | `cd app && swift build && swift test` | setiap tugas Swift |
 | G-VIS | `cd app && swift test --filter VisualParityTests` | setiap tugas yang menyentuh view |
 | G-GOLDEN | `cargo build --bin queryhive-engine && /usr/bin/python3 tools/golden/live_cases.py` | container hidup. Setiap selisih harus terklasifikasi di `docs/golden-deltas.md`, dan selisih baru dianggap regresi. |
-| G-LIVE | tes live di crate yang disentuh, dengan penjaga `QH_TEST_*` yang ada di crate itu: `QH_TEST_POSTGRES=1 cargo test -p qh-ffi --test real_server`, `QH_TEST_TRINO=1 cargo test -p qh-driver-trino`, `deploy/dev/qh-sshd-run.sh && QH_TEST_SSH=1 cargo test -p qh-tunnel`, `QH_TEST_KEYCHAIN=1 cargo test -p qh-credentials` | tugas yang menyentuh driver, tunnel, atau Keychain |
+| G-LIVE | tes live di crate yang disentuh, dengan penjaga `QH_TEST_*` yang ada di crate itu: `QH_TEST_POSTGRES=1 cargo test -p qh-ffi --test real_server` dan `-p qh-driver-postgres`, `QH_TEST_TRINO=1 cargo test -p qh-driver-trino`, `deploy/dev/qh-sshd-run.sh && QH_TEST_SSH=1 cargo test -p qh-tunnel`, `QH_TEST_KEYCHAIN=1 cargo test -p qh-credentials` | tugas yang menyentuh driver, tunnel, atau Keychain |
 | G-APP | `./app/build.sh && app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot "$SCRATCH/smoke.png" --scene done` | gate gelombang, dan tugas yang menyentuh `app/build.sh`, `Package.swift`, atau resource |
 | G-BENCH(a) | `python3 deploy/dev/bench_app.py --axis <a> --label <fase>-<yyyymmdd> --repeat <n>`, lalu `python3 deploy/dev/bench_fetch.py --report-only`. Untuk sumbu 3, rekaman mencatat `spilled_bytes` di samping memori (R-29), supaya hasil yang tumpah atau tidak tidak dibaca sebagai regresi. | tugas bench (eksklusif) |
 | G-BENCHQ | subset cepat `--bench ttfr-pg,scroll-1m,type-10k` dengan n = 5, dibanding rekaman gelombang sebelumnya | gate W9–W13 (NFR-P9) |
@@ -793,18 +806,18 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 
 | Berkas atau kelompok | Pemilik, berurutan |
 |---|---|
-| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W2-T1 (bila berubah) → W3-T1 → W4-T2 → W5-T2 → W6-T1 → W10-T6 (menyentuh `uniffi_api.rs`, `lib.rs`, dan `main.rs`; tidak meregenerasi `app/Generated/`, W10 R-8) → W10-T7 → W11-T1 → W11-T6 → W12-T1 → W12-T3 → W13-T4 → W13-T8b |
-| `crates/qh-core/src/error.rs` | W10-T6 |
-| `crates/qh-ffi/src/editor.rs` | W4-T2 → W10-T7 → W11-T6 → W12-T1 |
+| `app/Generated/`, `crates/qh-ffi/src/uniffi_api.rs`, empat daftar invariant #11, `Support/RustEngine.swift` (lane FFI) | W11-T1 → W12-T1b → W11-T2b2 → W10-T7b → W11-T6b → W12-T3 → W13-T4 → W13-T8b. W10-T6a takes `uniffi_api.rs`/`lib.rs` between W11-T1 and T2b2 without regenerating. |
+| `crates/qh-core/src/error.rs` | W10-T6a → W11-T2b1d |
+| `crates/qh-ffi/src/editor.rs` | W12-T1b → W10-T7b → W11-T6b |
 | `crates/qh-ffi/Cargo.toml` | W4-T2 → W5-T2 → W13-T8b |
-| `crates/qh-ffi/src/commands.rs` | W2-T1 → W3-T1 → W5-T2 → W7-T1 → W11-T1 → W13-T2 |
+| `crates/qh-ffi/src/commands.rs` | W11-T1 → W13-T2 → W12-T3 |
 | `crates/qh-ffi/src/lib.rs` (baris `mod` dianggap boleh digabung tangan) | ikut lane FFI |
-| Tiga driver | W3-T1 → W7-T1 → W7-T2 dan W7-T4 (PostgreSQL dan Trino, berkas terpisah) → W7-T3 → W10-T6 → W11-T1 → W11-T2 → W13-T2 → W13-T4 |
-| `crates/qh-ffi/src/mcp.rs` | W11-T3 → W11-T5 |
-| `Cargo.toml`, `Cargo.lock` | W3-T1 → W3-T2 (berurutan, tidak paralel) → W4-T3 → W5-T2 (hanya `Cargo.lock`, tepi `qh-ffi → qh-result-store`) → W7-T2 → W7-T5 → W13-T8a |
+| Tiga driver | W7-C → W11-T1 → W10-T6a → W11-T2b1d → W13-T2 → W13-T4 |
+| `crates/qh-ffi/src/mcp.rs` | W11-T5 → W11-T3r |
+| `Cargo.toml`, `Cargo.lock` | X4 reverts → W11-T2b1d → W13-T8a |
 | `crates/qh-sql/src/{scan.rs,classify.rs}` | W3-T0 → W3-T2 → W7-T2 (pemeriksaan satu SELECT, bila menyentuh) → W13-T2 (`classify.rs`) |
-| `crates/qh-sql/src/lib.rs` | W3-T2 → W12-T1 |
-| `crates/qh-editor/**` | W3-T2 → W10-T7 (`src/brackets.rs`) → W11-T6 (`src/refs.rs`) |
+| `crates/qh-sql/src/lib.rs` | W3-T2 → W12-T1a′ |
+| `crates/qh-editor/**` | W3-T2 → W10-T7b (`src/brackets.rs`) → W11-T6b (`src/refs.rs`) |
 | `crates/qh-rt/src/lib.rs` | W2-T1 → W4-T3 → W13-T8a |
 | `crates/qh-columnar/**` | W4-T3 → W7-T1 → W13-T8a |
 | `crates/qh-result-store/src/spill.rs` | W4-T3 → W13-T8a |
@@ -813,27 +826,27 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 | `crates/qh-ffi/examples/bench_ffi.rs` | W1-T2 → W3-T1 → W5-T2 |
 | `tests/golden/`, `crates/qh-ffi/tests/golden.rs` | W2-T1 → W11-T1 → W12-T3 |
 | `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0 (selesai) → W9-T2 (selesai; satu baris, `var navigation`). Sesudahnya, satu pemilik per extension. |
-| `Models/AppModel+Focus.swift` | W9-T0 (selesai; berkas dibuat) → W9-T2 (selesai) → W9-T6 (selesai; tidak menyentuhnya, `QuickScope` ada di `Models/QuickSearch.swift`) → W10-T7 (`adjustFontSize` bersama `currentRegion`, W10 §9.2) → W12-T2 → W12-T4 (satu baris di `closeTab`, w12 §10) |
-| `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W10-T3 → W10-T5 → W10-T6 → W11-T4 → W12-T2 → W12-T4 → W13-T1. Tidak ada tugas W9 yang menyentuhnya. |
-| `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T2 (selesai; satu baris `Announcer` di banner galat) → W9-T5 (selesai) → W9-T7 (selesai) → W10-T3 → W10-T4 → W10-T5 → W12-T4 → W13-T1 → W13-T3 |
+| `Models/AppModel+Focus.swift` | W10-T7b → W12-T2 → W12-T4 |
+| `Models/QueryTab.swift` | W10-T6b → W10-T5 → W10-T3 → W11-T4 → W12-T2 → W12-T4 → W13-T1 → W13-T3b → W13-T6 |
+| `Views/ResultGrid.swift` | W9-C → W10-T5 → W10-T3 → W10-T4 → W12-T4 → W13-T1 → W13-T3b |
 | `Models/CellSelection.swift` | W5-T1 → W6-T1 → W10-T1 (`GridCursorMath`) → W10-T3 (`GridClipboard.text` memilah blok, W10 §5.1) → W10-T4 (`GridClipboard`) |
 | `Views/ResultGridTable.swift`, `Views/GridTableView.swift`, `GridRowView`, `GridHeaderView`, `Models/GridMetrics.swift`, `Views/GridAccessibility.swift`, dan `VisualParityTests.swift` | W5-T1 → W6-T1 → W9-T1 (selesai; hanya `VisualParityTests.swift`) → W9-T7 (selesai; semua berkas kelompok ini kecuali `GridAccessibility.swift`) → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
-| `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W9-T7 (selesai) → W10-T6 → W10-T7 → W12-T2 |
-| `Views/Workspace.swift` | W2-T3 → W9-T1 (selesai) → W9-T4 (selesai) → W9-T8 → W10-T6 → W10-T7 → W12-T2 |
-| `Views/RootView.swift` | W9-T2 (selesai) → W9-T4 (selesai) → W9-T8 |
-| `App.swift` | W1-T4 → W6-T1 → W9-T2 (selesai) → W9-T8 → W10-T3 → W10-T6 → W12-T2 → W13-T8b |
-| `Models/AppMenu.swift`, `Models/Shortcuts.swift` | W9-T2 (selesai; `AppMenu.swift` dibuat) → W10-T1 → W10-T3 → W10-T5 → W10-T7. `Shortcuts.swift` lanjut ke W12-T2 (w12 §10). |
-| `Views/SettingsView.swift` | W2-T2 → W6-T1 → W9-T7 (selesai) → W13-T8c → W13-T7 |
+| `Views/SQLEditor.swift` | W7-C → W10-T6b → W10-T7b → W11-T4 → W12-T2 |
+| `Views/Workspace.swift` | W9-T8 → W9-T9 → W10-T6b → W10-T7b → W11-T4 → W12-T2 → W12-T4 |
+| `Views/RootView.swift` | W9-T8 |
+| `App.swift` | PREP-EV → W9-T8 → W10-T3 → W12-T2 → W12-T4 → W13-T5 → W13-T8b |
+| `Models/AppMenu.swift`, `Models/Shortcuts.swift` (R-ADD) | W10-T1 → W10-T3 → W10-T5 → W10-T7b. `Shortcuts.swift` lanjut ke W12-T2 (w12 §10). |
+| `Views/SettingsView.swift` | W9-T9 → W13-T8c → W13-T7 |
 | `app/build.sh` | W13-T8b → W13-T7 → W14-T5 |
 | `app/release.sh`, `app/build-dmg.sh` | W13-T8b |
 | `THIRD-PARTY-NOTICES.md` | W4-T2 (commit A) → W14-T5 |
 | `AGENTS.md`, `CLAUDE.md` | W14-T7 (baru) |
-| `Support/Theme.swift` | W9-T1 dan W9-T6 (selesai; satu commit `03e1495`, jadi urutan T1 → T6 tidak berlaku lagi) → W9-T7 (selesai) → W10-T2 |
+| `Support/Theme.swift` | W9-T9 → W10-T2 |
 | `Support/ThemeStore.swift` | W9-T1 (selesai) |
-| `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W9-T4 (selesai) → W11-T3 |
-| `Support/Snapshot.swift` | W1-T3 → W5-T1 → W6-T1 → W9-T1 (selesai; hanya menyematkan `store.pin(reduceMotion: false, ...)`, bendera `--reduce-motion`, `--reduce-transparency`, dan `--increase-contrast` tidak ditambahkan) → W9-T4 (selesai; scene `badges`) → W9-T8. W9-T7 tidak menyentuhnya, jadi `--grid-font` (P-7b) tidak ada. |
-| `Support/EditorAnalysis.swift` | W4-T2 → W10-T6 → W10-T7 |
-| `Support/EditorPreferences.swift` | W9-T7 (selesai) → W10-T7 |
+| `Views/ConnectionsViews.swift`, `Models/Connections.swift` | W11-T3s → W13-T4b |
+| `Support/Snapshot.swift` (R-ADD) | W9-T8 → W10-T5 → W10-T6b → W11-T3s → W11-T4 → W12-T4 → W13-T5 → W13-T6 |
+| `Support/EditorAnalysis.swift` | W10-T6b → W10-T7b |
+| `Support/EditorPreferences.swift` | W10-T7b |
 | `Models/RunConfirmation.swift`, `Views/RunConfirmationSheet.swift` | W9-T5 (selesai) |
 | `Support/PerfSignposts.swift` | W1-T4 → W4-T2 |
 | `Support/BenchMode.swift` | W1-T4 → W4-T2 → W6-T1 |
@@ -892,7 +905,7 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 | W14-T3 | Laporan paritas visual: baseline P, lalu setelah Fase 5 dan 6, lalu final. Pasangan berdampingan untuk setiap V ditulis ke `app/.build/parity-report/` (tidak di-commit), dengan indeks. | test-engineer · sonnet; UX | semua scene non-V lulus |
 | W14-T4 | Pass perbaikan akhir dan review per area atas diff branch (engine, store, grid, editor, shell, koneksi), plus review keamanan atas semua diff yang relevan | refactor-cleaner, code-simplifier · sonnet; CR, SEC · opus | approved per area |
 | W14-T5 | Dokumen: `PROGRESS.md`, `app/DESIGN.md` (Scope, grid, editor, shell, CLI, Stop, formatter, skrip), `docs/invariants.md` (hanya insiden nyata), status di `performance-plan.md`, `remaining-work-plan.md`, `tablepro-adoption-plan.md`, `tablepro-feature-map.md`, dan `tablepro-design-audit.md`. Ditambah `THIRD-PARTY-NOTICES.md` lengkap (semua crate dan grammar yang dikirim, termasuk helper) dan pemasangannya ke bundel lewat `app/build.sh` (kriteria rilis PRD §9). | doc-updater · sonnet | satu reviewer sonnet (O-17); `THIRD-PARTY-NOTICES.md` ada di `Contents/Resources` setelah `./app/build.sh` |
-| W14-T6 | Merge: G-HEAVY (dengan G-ANALYTICS) di branch, `git switch main && git merge --no-ff work/perf-parity -m "merge: performance, design and parity work"`, G-HEAVY sekali lagi di `main` | orkestrator | hijau |
+| W14-T6 | Merge: under O-21 every commit is already fast-forwarded to main, so `merge --no-ff` does nothing. Run the final G-HEAVY (+G-ANALYTICS) on main, which equals `work/perf-parity`, then write the §9 report. | orkestrator | hijau |
 | W14-T7 | Panduan agen repo (O-16): `AGENTS.md` sebagai sumber dan `CLAUDE.md` yang menunjuk ke sana, supaya AI mana pun yang bekerja di codebase ini menjaga kualitasnya. Isinya gate (§1), invariant, anggaran performa, gate paritas, batas lisensi (TablePro AGPL-3.0, QueryHive MIT), dan pelajaran yang didapat selama run. Ditulis dengan skill `writing-for-agents`. Nomor terakhir, tetapi dijalankan sebelum W14-T6 dan ditinjau sebelum merge, supaya ikut masuk `main`. | doc-updater · sonnet (skill `writing-for-agents`) | satu reviewer sonnet (O-17); setiap path dan perintah yang disebut ada dan dijalankan, dan `CLAUDE.md` hanya menunjuk ke `AGENTS.md` |
 
 **Isi laporan akhir untuk pemilik:**

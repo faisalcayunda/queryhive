@@ -286,7 +286,8 @@ Blueprint `code-architect` dibuat lebih dulu. **Tujuan.** Setiap Run, level poho
 3. **Kapan fallback, dan apa yang dikatakan.** In-memory dipakai hanya bila:
    - `ServerSort` atau `SearchStatement` menolak (multi-statement, atau tidak ada kolom teks);
    - hasil yang tampil adalah plan (`showingPlan`);
-   - hasil yang tampil adalah preview inspector objek.
+   - hasil yang tampil adalah preview inspector objek;
+   - hasil berasal dari script runner (W12-T3; hasil disimpan sebagai view in-memory, O-28).
 
    Bila server **gagal**, galatnya ditampilkan tanpa fallback diam-diam, sesuai larangan fallback senyap proyek ini. Pesannya:
    - in-memory atas hasil terpotong: satu baris tipis, "urutan parsial atas N baris yang sudah diambil";

@@ -1,8 +1,8 @@
 # 0037 — Spill terenkripsi (IPC Arrow dalam AES-256-GCM) dengan kunci efemeral per proses
 
 - **Status:** Diterima. Implementasi mendarat di `crates/qh-result-store` (commit `e595877`). Tinjauan keamanan
-  putaran pertama meminta perubahan (6 temuan blocking, semuanya diperbaiki di commit yang sama); putaran kedua belum
-  dilakukan, jadi implementasi berstatus **menunggu tinjau ulang** sesuai kebijakan dua putaran (O-19, O-20).
+  putaran pertama meminta perubahan (6 temuan blocking, semuanya diperbaiki di commit yang sama); putaran kedua approved
+  (2026-10-06) per ledger round-2 verification yang dijalankan orkestrator.
   Bagian "Belum ada" di Konsekuensi menyebut yang belum tersambung ke app.
 - **Tanggal:** 2 Okt 2026 (W4-D, perf-parity Fase 6-core)
 - **Konteks instruksi:** `docs/architecture/development-plan.md` §4 (jadwal ADR, baris 0037) dan W4-T3;
