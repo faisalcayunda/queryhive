@@ -61,128 +61,75 @@
 //!   `docs/golden-deltas.md`). A UUID has one text form and it has no quotes in it.
 
 use qh_core::{IntervalValue, Value};
-use qh_driver::ChunkBuilder;
 
 /// Convert one text value, given the server's type name.
 ///
 /// `text` is `None` for a SQL NULL. The type name comes from the column rather
 /// than the value, precisely so a NULL can still be reported with its type.
 pub fn from_text(type_name: &str, text: Option<&str>) -> Value {
-    ColumnParser::new(type_name).parse(text)
-}
+    let Some(text) = text else {
+        return Value::Null;
+    };
 
-/// How one column's text is read, decided once from the server's type name.
-///
-/// `from_text` used to resolve the base type per cell, about 15% of the W1-T8 profile; a
-/// cursor builds one parser per column and reuses it for every row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnParser {
-    Bool,
-    Int,
-    Float,
-    Numeric,
-    Bytea,
-    Date,
-    Time,
-    Timestamp,
-    Timestamptz,
-    Interval,
-    Json,
-    Text,
-}
-
-impl ColumnParser {
-    pub fn new(type_name: &str) -> Self {
-        match base_type(type_name) {
-            "bool" => Self::Bool,
-            "int2" | "int4" | "int8" | "oid" => Self::Int,
-            "float4" | "float8" => Self::Float,
-            "numeric" | "decimal" => Self::Numeric,
-            "bytea" => Self::Bytea,
-            "date" => Self::Date,
-            "time" => Self::Time,
-            "timestamp" => Self::Timestamp,
-            "timestamptz" => Self::Timestamptz,
-            "interval" => Self::Interval,
-            // Key order is preserved by not re-encoding: `json` promises an order and
-            // `jsonb` does not, and that difference is the user's to see.
-            "json" | "jsonb" => Self::Json,
-            // A UUID has one text form and no quotes in it (see the module doc). Arrays,
-            // geometry, `inet`, ranges and whatever PostgreSQL gains later stay the server's
-            // own text: it renders in the grid and every exporter, and a PostgreSQL
-            // array-literal parser is a separate task.
-            _ => Self::Text,
+    match base_type(type_name) {
+        "bool" => match text {
+            "t" | "true" => Value::Bool(true),
+            "f" | "false" => Value::Bool(false),
+            _ => Value::Text(text.into()),
+        },
+        "int2" | "int4" | "int8" | "oid" => match text.parse::<i64>() {
+            Ok(number) => Value::Int(number),
+            Err(_) => Value::Text(text.into()),
+        },
+        "float4" | "float8" => match text.parse::<f64>() {
+            Ok(number) => Value::Float(number),
+            Err(_) => match text {
+                // PostgreSQL's spelling of the non-finite values.
+                "Infinity" => Value::Float(f64::INFINITY),
+                "-Infinity" => Value::Float(f64::NEG_INFINITY),
+                _ => Value::Text(text.into()),
+            },
+        },
+        "numeric" | "decimal" => parse_decimal(text).unwrap_or_else(|| Value::Text(text.into())),
+        "bytea" => parse_bytea(text),
+        "date" => {
+            parse_days(text).map_or_else(|| Value::Text(text.into()), |days| Value::Date { days })
         }
-    }
-
-    /// One cell as a [`Value`]. An unparseable text keeps its text.
-    pub fn parse(self, text: Option<&str>) -> Value {
-        let Some(text) = text else {
-            return Value::Null;
-        };
-        let fallback = || Value::Text(text.into());
-        match self {
-            Self::Bool => match text {
-                "t" | "true" => Value::Bool(true),
-                "f" | "false" => Value::Bool(false),
-                _ => fallback(),
+        "time" => parse_time_micros(text)
+            .map_or_else(|| Value::Text(text.into()), |micros| Value::Time { micros }),
+        "timestamp" => parse_timestamp(text).map_or_else(
+            || Value::Text(text.into()),
+            |(micros, _)| Value::Timestamp {
+                micros,
+                offset_secs: None,
             },
-            Self::Int => text.parse::<i64>().map_or_else(|_| fallback(), Value::Int),
-            Self::Float => match text.parse::<f64>() {
-                Ok(number) => Value::Float(number),
-                Err(_) => match text {
-                    // PostgreSQL's spelling of the non-finite values.
-                    "Infinity" => Value::Float(f64::INFINITY),
-                    "-Infinity" => Value::Float(f64::NEG_INFINITY),
-                    _ => fallback(),
-                },
+        ),
+        "timestamptz" => parse_timestamp(text).map_or_else(
+            || Value::Text(text.into()),
+            |(micros, offset)| Value::Timestamp {
+                micros,
+                offset_secs: Some(offset),
             },
-            Self::Numeric => parse_decimal(text).unwrap_or_else(fallback),
-            Self::Bytea => parse_bytea(text),
-            Self::Date => parse_days(text).map_or_else(fallback, |days| Value::Date { days }),
-            Self::Time => {
-                parse_time_micros(text).map_or_else(fallback, |micros| Value::Time { micros })
-            }
-            Self::Timestamp => {
-                parse_timestamp(text).map_or_else(fallback, |(micros, _)| Value::Timestamp {
-                    micros,
-                    offset_secs: None,
-                })
-            }
-            Self::Timestamptz => {
-                parse_timestamp(text).map_or_else(fallback, |(micros, offset)| Value::Timestamp {
-                    micros,
-                    offset_secs: Some(offset),
-                })
-            }
-            Self::Interval => parse_interval(text).map_or_else(fallback, Value::Interval),
-            Self::Json => Value::Json(text.into()),
-            Self::Text => fallback(),
+        ),
+        "interval" => {
+            parse_interval(text).map_or_else(|| Value::Text(text.into()), Value::Interval)
         }
-    }
-
-    /// Append one cell straight into column `column` of `out`. Same cells as [`Self::parse`]
-    /// (the parity tests hold that); the hot types skip the `Value` in between. A text that
-    /// does not parse goes in as `Value::Text`, which makes that chunk-column tagged.
-    pub fn push(self, out: &mut ChunkBuilder, column: usize, text: Option<&str>) {
-        let Some(raw) = text else {
-            out.push_null(column);
-            return;
-        };
-        match self {
-            Self::Int => match raw.parse::<i64>() {
-                Ok(number) => out.push_i64(column, number),
-                Err(_) => out.push_str(column, raw),
-            },
-            Self::Text => out.push_str(column, raw),
-            Self::Json => out.push_json(column, raw),
-            Self::Bool => match raw {
-                "t" | "true" => out.push_bool(column, true),
-                "f" | "false" => out.push_bool(column, false),
-                _ => out.push_str(column, raw),
-            },
-            _ => out.push_value(column, self.parse(text)),
+        // Key order is preserved by not re-encoding: `json` promises an order and
+        // `jsonb` does not, and that difference is the user's to see.
+        "json" | "jsonb" => Value::Json(text.into()),
+        // A UUID has one text form and no quotes in it. The Python engine's quotes
+        // were `json.dumps(default=str)`'s, not the server's — see the module doc.
+        "uuid" | "text" | "varchar" | "bpchar" | "char" | "name" | "citext" => {
+            Value::Text(text.into())
         }
+        // Arrays, geometry, `inet`, ranges, and anything PostgreSQL gains later.
+        // Kept as text: it renders correctly in the grid and in every exporter,
+        // and the user sees the server's own format rather than a guess at
+        // structure. `{1,NULL,3}` is the server's own array output; the Python
+        // engine's `[1, null, 3]` was psycopg's decoding, and nothing downstream
+        // reads a cell as JSON, so there is nothing to decode it for. A PostgreSQL
+        // array-literal parser is a separate task.
+        _ => Value::Text(text.into()),
     }
 }
 

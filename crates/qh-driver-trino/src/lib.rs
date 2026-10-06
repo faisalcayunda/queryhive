@@ -87,8 +87,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
-    BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, Cursor, Driver, DriverKind,
-    ExecuteOptions, ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
+    BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
+    ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
 };
 use qh_sql::{strip_terminator_dialect, Dialect};
 use serde::Deserialize;
@@ -173,14 +173,18 @@ const CLIENT_CAPABILITIES_HEADER: &str = "X-Trino-Client-Capabilities";
 /// Every field is optional because the protocol says so: a `POST` answer has no
 /// `columns`, a queued page has no `data`, and the last page has no `nextUri`.
 /// Requiring any of them would fail on a response that is perfectly correct.
-#[derive(Debug, Default)]
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct Page {
+    #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
     next_uri: Option<String>,
+    #[serde(default)]
     columns: Option<Vec<WireColumn>>,
-    /// The page's rows, already decoded: the `data` array is read cell by cell straight into
-    /// [`Value`]s (W7-T1), with no `Vec<Vec<Json>>` page in between.
-    rows: Option<Vec<Vec<Value>>>,
+    #[serde(default)]
+    data: Option<Vec<Vec<Json>>>,
+    #[serde(default)]
     error: Option<WireError>,
     /// Rows the statement wrote, when it has a count to report.
     ///
@@ -189,138 +193,13 @@ struct Page {
     /// `SELECT` or a `DROP` with nothing at all. It is the field the trino client reads
     /// to set `cursor.rowcount`, so reading it is what keeps a write's report the same
     /// number the Python engine would have given.
+    #[serde(default)]
     update_count: Option<i64>,
     // `stats` carries the state (QUEUED/RUNNING/FINISHED) and a pile of counters.
     // None of it is read here: whether a query has finished is answered by the
     // absence of `nextUri`, which is the protocol's own rule, and the counters have
-    // no home in the Cursor contract. Unknown keys are skipped without being built.
-}
-
-impl<'de> Deserialize<'de> for Page {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(PageVisitor)
-    }
-}
-
-struct PageVisitor;
-
-impl<'de> serde::de::Visitor<'de> for PageVisitor {
-    type Value = Page;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a Trino page")
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Page, A::Error> {
-        let mut page = Page::default();
-        // Trino writes `columns` before `data`, so the cells decode as they stream. A page
-        // that arrives the other way round keeps its raw cells until the columns are known.
-        let mut raw: Option<Vec<Vec<Json>>> = None;
-        while let Some(key) = map.next_key::<String>()? {
-            match key.as_str() {
-                "id" => page.id = map.next_value()?,
-                "nextUri" => page.next_uri = map.next_value()?,
-                "columns" => page.columns = map.next_value()?,
-                "error" => page.error = map.next_value()?,
-                "updateCount" => page.update_count = map.next_value()?,
-                "data" => match page.columns.as_deref() {
-                    Some(columns) => page.rows = map.next_value_seed(RowsSeed(columns))?,
-                    None => raw = map.next_value()?,
-                },
-                _ => {
-                    map.next_value::<serde::de::IgnoredAny>()?;
-                }
-            }
-        }
-        if let (Some(columns), Some(raw)) = (page.columns.as_deref(), raw) {
-            page.rows = Some(decode_rows(columns, &raw));
-        }
-        Ok(page)
-    }
-}
-
-/// `data` decoded while it is read: one `Json` cell at a time, never a whole page of them.
-struct RowsSeed<'a>(&'a [WireColumn]);
-
-impl<'de> serde::de::DeserializeSeed<'de> for RowsSeed<'_> {
-    type Value = Option<Vec<Vec<Value>>>;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<Self::Value, D::Error> {
-        // `Option`, so a literal `"data": null` still means no rows.
-        deserializer.deserialize_option(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for RowsSeed<'_> {
-    type Value = Option<Vec<Vec<Value>>>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an array of rows")
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(None)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(None)
-    }
-
-    fn visit_some<D: serde::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_seq(self)
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut rows = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(row) = seq.next_element_seed(RowSeed(self.0))? {
-            rows.push(row);
-        }
-        Ok(Some(rows))
-    }
-}
-
-struct RowSeed<'a>(&'a [WireColumn]);
-
-impl<'de> serde::de::DeserializeSeed<'de> for RowSeed<'_> {
-    type Value = Vec<Value>;
-
-    fn deserialize<D: serde::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_seq(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for RowSeed<'_> {
-    type Value = Vec<Value>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a row")
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut row = Vec::with_capacity(self.0.len());
-        while let Some(cell) = seq.next_element::<Json>()? {
-            row.push(decode_cell(self.0, row.len(), &cell));
-        }
-        Ok(row)
-    }
-}
-
-/// One cell by its column's type. More values than the page declared columns keep the
-/// value rather than drop it, because dropping is invisible.
-fn decode_cell(columns: &[WireColumn], index: usize, cell: &Json) -> Value {
-    match columns.get(index) {
-        Some(column) => decode::decode(&column.type_text, cell),
-        None => Value::unknown("unknown", cell.to_string()),
-    }
+    // no home in the Cursor contract. Deserialising it anyway would be a field kept
+    // alive by hope, so the extra keys are simply ignored.
 }
 
 #[derive(Debug, Deserialize)]
@@ -1044,7 +923,7 @@ impl Session for TrinoSession {
         // Returns as soon as the POST answers, which is normally while the query
         // is still QUEUED. See the module note: waiting here for the columns would
         // mean waiting for the whole query.
-        let mut page = self.post(sql, options.statement_timeout).await?;
+        let page = self.post(sql, options.statement_timeout).await?;
         // Recorded here rather than in the cursor: the id arrives with the POST's
         // answer and belongs to the session, which is what `query_id` is asked of.
         if page.id.is_some() {
@@ -1055,7 +934,10 @@ impl Session for TrinoSession {
             .update_count
             .and_then(|count| u64::try_from(count).ok());
         let columns = columns_of(&page);
-        let pending: VecDeque<Vec<Value>> = page.rows.take().unwrap_or_default().into();
+        let pending: VecDeque<Vec<Value>> = match (page.columns.as_deref(), page.data.as_deref()) {
+            (Some(wire_columns), Some(rows)) => decode_rows(wire_columns, rows).into(),
+            _ => VecDeque::new(),
+        };
         let finished = page.next_uri.is_none();
 
         Ok(Box::new(TrinoCursor {
@@ -1273,8 +1155,8 @@ impl TrinoCursor {
             }
         }
 
-        if let Some(rows) = page.rows.take() {
-            self.pending.extend(rows);
+        if let (Some(wire_columns), Some(rows)) = (page.columns.as_deref(), page.data.as_deref()) {
+            self.pending.extend(decode_rows(wire_columns, rows));
         }
 
         // Both readings happen before anything is moved out of the page: asking
@@ -1367,82 +1249,38 @@ impl Cursor for TrinoCursor {
                 })?));
             }
 
-            if !self.refill(budget).await? {
+            if budget == 0 {
+                // The row limit is reached. Stop reading rather than run the rest
+                // of the query for rows nobody asked for.
+                self.finished = true;
                 return Ok(None);
             }
-        }
-    }
 
-    async fn next_chunk(
-        &mut self,
-        out: &mut ChunkBuilder,
-        max_rows: usize,
-    ) -> Result<usize, EngineError> {
-        loop {
-            let budget = self.budget(max_rows);
-
-            if !self.pending.is_empty() && budget > 0 {
-                // Row by row into the builder: no batch, no transpose. Stops at the seal limit,
-                // and the rest stays pending for the next chunk.
-                let width = out.width();
-                let mut taken = 0;
-                while taken < budget && !out.is_full() {
-                    let Some(row) = self.pending.pop_front() else {
-                        break;
-                    };
-                    let mut cells = row.into_iter();
-                    for column in 0..width {
-                        out.push_value(column, cells.next().unwrap_or(Value::Null));
-                    }
-                    taken += 1;
-                }
-                self.emitted += taken;
-                return Ok(taken);
-            }
-
-            if !self.refill(budget).await? {
-                return Ok(0);
-            }
-        }
-    }
-}
-
-impl TrinoCursor {
-    /// Nothing is buffered (or the budget is spent): wait for the next page. `Ok(false)` is
-    /// the end of the result; `Ok(true)` means look at `pending` again.
-    async fn refill(&mut self, budget: usize) -> Result<bool, EngineError> {
-        if budget == 0 {
-            // The row limit is reached. Stop reading rather than run the rest
-            // of the query for rows nobody asked for.
-            self.finished = true;
-            return Ok(false);
-        }
-
-        if self.finished {
-            return Ok(false);
-        }
-
-        // Nothing buffered and more to come: wait for the next page. A queued
-        // page carries no rows, so the loop keeps its promise to return rows or
-        // an end, rather than an empty batch the caller has to interpret.
-        self.fetch_page().await?;
-        if self.pending.is_empty() {
             if self.finished {
-                return Ok(false);
+                return Ok(None);
             }
-            // Still queued or running with no rows yet. Every poll returns a
-            // *new* page URI, so waiting on the URI changing would never wait
-            // and a slow query would be polled in a tight loop; the pause is
-            // what makes this a poll rather than a spin. It grows while the
-            // pages stay empty and is reset by the first one that is not, so a
-            // query that is producing is not held to the rate of a query that
-            // is still planning.
-            tokio::time::sleep(self.poll_pause).await;
-            self.poll_pause = (self.poll_pause * 2).min(POLL_INTERVAL_MAX);
-        } else {
-            self.poll_pause = POLL_INTERVAL_MIN;
+
+            // Nothing buffered and more to come: wait for the next page. A queued
+            // page carries no rows, so the loop keeps its promise to return rows or
+            // an end, rather than an empty batch the caller has to interpret.
+            self.fetch_page().await?;
+            if self.pending.is_empty() {
+                if self.finished {
+                    return Ok(None);
+                }
+                // Still queued or running with no rows yet. Every poll returns a
+                // *new* page URI, so waiting on the URI changing would never wait
+                // and a slow query would be polled in a tight loop; the pause is
+                // what makes this a poll rather than a spin. It grows while the
+                // pages stay empty and is reset by the first one that is not, so a
+                // query that is producing is not held to the rate of a query that
+                // is still planning.
+                tokio::time::sleep(self.poll_pause).await;
+                self.poll_pause = (self.poll_pause * 2).min(POLL_INTERVAL_MAX);
+            } else {
+                self.poll_pause = POLL_INTERVAL_MIN;
+            }
         }
-        Ok(true)
     }
 }
 
@@ -1464,7 +1302,12 @@ fn decode_rows(columns: &[WireColumn], rows: &[Vec<Json>]) -> Vec<Vec<Value>> {
         .map(|row| {
             row.iter()
                 .enumerate()
-                .map(|(index, cell)| decode_cell(columns, index, cell))
+                .map(|(index, cell)| match columns.get(index) {
+                    Some(column) => decode::decode(&column.type_text, cell),
+                    // More values than the page declared columns: keep the value
+                    // rather than drop it, because dropping is invisible.
+                    None => Value::unknown("unknown", cell.to_string()),
+                })
                 .collect()
         })
         .collect()
@@ -1800,32 +1643,12 @@ mod tests {
         )
         .expect("a queued page is valid");
         assert!(page.columns.is_none());
-        assert!(page.rows.is_none());
+        assert!(page.data.is_none());
         assert!(columns_of(&page).is_empty());
         // The page also carried `"stats":{"state":"QUEUED"}`, which is deliberately
         // not modelled. Its being ignored rather than rejected is part of what this
         // test pins: an unmodelled key must not fail a correct response.
         assert!(page.next_uri.is_some());
-    }
-
-    #[test]
-    fn a_page_decodes_its_cells_whichever_order_its_keys_come_in() {
-        let columns = r#""columns":[{"name":"n","type":"bigint"},{"name":"t","type":"varchar"}]"#;
-        let data = r#""data":[[1,"a"],[null,"b"],[3]]"#;
-        let expected = vec![
-            vec![Value::Int(1), Value::Text("a".into())],
-            vec![Value::Null, Value::Text("b".into())],
-            vec![Value::Int(3)],
-        ];
-        for body in [
-            format!("{{\"id\":\"q\",{columns},{data},\"stats\":{{}}}}"),
-            format!("{{{data},{columns}}}"),
-        ] {
-            let page: Page = serde_json::from_str(&body).expect("a page");
-            assert_eq!(page.rows.as_deref(), Some(expected.as_slice()), "{body}");
-        }
-        let page: Page = serde_json::from_str(&format!("{{{columns},\"data\":null}}")).unwrap();
-        assert!(page.rows.is_none());
     }
 
     #[test]

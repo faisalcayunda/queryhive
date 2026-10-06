@@ -73,21 +73,13 @@ impl ChunkBuilder {
         self.rows() == 0
     }
 
-    /// Drop every staged row past the first `rows`. For a caller that asked a cursor for
-    /// `max_rows` and was handed more.
-    pub fn truncate(&mut self, rows: usize) {
-        for column in &mut self.columns {
-            column.truncate(rows);
-        }
-    }
-
     /// True past either seal limit: callers seal and start a new chunk.
     pub fn is_full(&self) -> bool {
         self.rows() >= CHUNK_MAX_ROWS || self.estimated_bytes >= CHUNK_TARGET_BYTES
     }
 
-    fn cell_width(value: &Value) -> usize {
-        match value {
+    fn push(&mut self, column: usize, value: Value) {
+        let width = match &value {
             Value::Text(text) | Value::Json(text) => text.len() + 9,
             Value::Bytes(bytes) => bytes.len() + 9,
             Value::Unknown { text, raw, .. } => {
@@ -95,43 +87,9 @@ impl ChunkBuilder {
             }
             Value::Array(items) | Value::Row(items) => 9 + items.len() * 16,
             _ => 16,
-        }
-    }
-
-    fn push(&mut self, column: usize, value: Value) {
-        self.estimated_bytes += Self::cell_width(&value);
+        };
+        self.estimated_bytes += width;
         self.columns[column].push(value);
-    }
-
-    /// Detach the leading rows that fit one chunk (the seal limits, same estimate as
-    /// `is_full`; the row that crosses a limit is included) and keep the rest staged.
-    /// Returns everything, leaving `self` empty, when it all fits. A cursor that overfills
-    /// the builder (the `next_batch` default) is bounded by calling this until empty.
-    pub fn split_sealable(&mut self) -> ChunkBuilder {
-        let rows = self.rows();
-        let mut bytes = 0;
-        let mut take = 0;
-        while take < rows && take < CHUNK_MAX_ROWS && bytes < CHUNK_TARGET_BYTES {
-            bytes += self
-                .columns
-                .iter()
-                .map(|column| Self::cell_width(&column[take]))
-                .sum::<usize>();
-            take += 1;
-        }
-        let tail: Vec<Vec<Value>> = self.columns.iter_mut().map(|c| c.split_off(take)).collect();
-        let head_bytes = if take == rows {
-            self.estimated_bytes
-        } else {
-            bytes
-        };
-        let head = ChunkBuilder {
-            width: self.width,
-            columns: std::mem::replace(&mut self.columns, tail),
-            estimated_bytes: head_bytes,
-        };
-        self.estimated_bytes -= head_bytes;
-        head
     }
 
     /// Append one cell of any shape. A value the column's encoding cannot
@@ -196,24 +154,6 @@ impl ChunkBuilder {
 
     pub fn push_interval(&mut self, column: usize, interval: qh_core::IntervalValue) {
         self.push(column, Value::Interval(interval));
-    }
-
-    /// Append every row of an owned batch, moving the cells instead of cloning them.
-    /// No seal-limit stop: the caller asked for this many rows and gets them all.
-    pub fn push_owned(&mut self, batch: ColumnBatch) -> Result<usize, ColumnarError> {
-        if batch.width() != self.width {
-            return Err(ColumnarError::Width {
-                expected: self.width,
-                found: batch.width(),
-            });
-        }
-        let rows = batch.rows();
-        for (column, cells) in batch.into_columns().into_iter().enumerate() {
-            for cell in cells {
-                self.push(column, cell);
-            }
-        }
-        Ok(rows)
     }
 
     /// Append rows from a column batch, stopping at the seal limit.

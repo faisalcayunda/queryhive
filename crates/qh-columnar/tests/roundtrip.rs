@@ -310,28 +310,3 @@ fn a_deeply_nested_blob_is_an_error_not_a_stack_overflow() {
     let result = qh_columnar::tagged::decode_value(&mut reader);
     assert!(result.is_err(), "deep blob should be refused");
 }
-
-#[test]
-fn split_sealable_bounds_each_piece_and_loses_no_row() {
-    let mut builder = ChunkBuilder::new(2);
-    let text = "x".repeat(1024);
-    for i in 0..5_000i64 {
-        builder.push_i64(0, i);
-        builder.push_str(1, &text);
-    }
-    let mut seen = 0i64;
-    let mut pieces = 0;
-    while !builder.is_empty() {
-        let piece = builder.split_sealable();
-        let rows = piece.rows();
-        assert!(rows * 1049 <= 2 * 1024 * 1024 + 1049, "{rows} rows");
-        let sealed = piece.seal().unwrap();
-        for row in 0..rows {
-            let value = value_at(sealed.batch.column(0).as_ref(), sealed.encodings[0], row);
-            assert_eq!(value.unwrap(), Value::Int(seen));
-            seen += 1;
-        }
-        pieces += 1;
-    }
-    assert_eq!((seen, pieces > 1), (5_000, true));
-}

@@ -96,11 +96,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use normalize::ColumnParser;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
-    BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, Cursor, Driver, DriverKind,
-    ExecuteOptions, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
+    BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
+    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
 };
 use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
 use rustls::client::danger::ServerCertVerifier;
@@ -568,14 +567,10 @@ impl Session for PostgresSession {
             .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
         self.statement_timeout = options.statement_timeout;
         let (columns, type_names) = describe_columns(&statement);
-        let parsers = type_names
-            .iter()
-            .map(|name| ColumnParser::new(name))
-            .collect();
 
         Ok(Box::new(PostgresCursor {
             columns,
-            parsers,
+            type_names,
             stream: Box::pin(stream),
             row_limit: options.row_limit,
             emitted: 0,
@@ -752,8 +747,7 @@ impl Session for PostgresSession {
 /// Rows from a running statement, in batches.
 struct PostgresCursor {
     columns: Vec<ColumnMeta>,
-    /// One per column, resolved from the type name once instead of per cell.
-    parsers: Vec<ColumnParser>,
+    type_names: Vec<String>,
     /// Boxed and pinned: `SimpleQueryStream` is not `Unpin`.
     stream: Pin<Box<SimpleQueryStream>>,
     row_limit: Option<usize>,
@@ -814,7 +808,7 @@ impl Cursor for PostgresCursor {
             match self.stream.next().await {
                 Some(Ok(tokio_postgres::SimpleQueryMessage::Row(row))) => {
                     let cells = (0..self.columns.len())
-                        .map(|index| self.parsers[index].parse(row.get(index)))
+                        .map(|index| normalize::from_text(&self.type_names[index], row.get(index)))
                         .collect();
                     rows.push(cells);
                 }
@@ -853,49 +847,6 @@ impl Cursor for PostgresCursor {
             .map_err(|error| EngineError::Internal {
                 message: format!("the cursor built a batch the store refused: {error}"),
             })
-    }
-
-    async fn next_chunk(
-        &mut self,
-        out: &mut ChunkBuilder,
-        max_rows: usize,
-    ) -> Result<usize, EngineError> {
-        // A statement with no columns drains through `next_batch`, which also records the
-        // affected count.
-        if self.finished || self.columns.is_empty() {
-            return Ok(self
-                .next_batch(max_rows)
-                .await?
-                .map_or(0, |batch| batch.rows()));
-        }
-        let mut appended = 0;
-        while appended < max_rows && !out.is_full() {
-            if let Some(limit) = self.row_limit {
-                if self.emitted + appended >= limit {
-                    self.finished = true;
-                    break;
-                }
-            }
-            match self.stream.next().await {
-                Some(Ok(tokio_postgres::SimpleQueryMessage::Row(row))) => {
-                    for (index, parser) in self.parsers.iter().enumerate() {
-                        parser.push(out, index, row.get(index));
-                    }
-                    appended += 1;
-                }
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => {
-                    self.finished = true;
-                    return Err(map_query_error(error, "", self.timeout));
-                }
-                None => {
-                    self.finished = true;
-                    break;
-                }
-            }
-        }
-        self.emitted += appended;
-        Ok(appended)
     }
 
     fn affected_rows(&self) -> Option<u64> {
