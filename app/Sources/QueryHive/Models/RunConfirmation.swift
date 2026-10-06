@@ -24,6 +24,9 @@ enum RunConfirmation {
         var title: String
         /// A sentence about what the approval covers, under the statements.
         var note: String
+        /// The approve button's label, a named verb ("Run Write", "Drop Table") so the button says
+        /// what Return would have done.
+        var confirmTitle: String = "Approve and Run"
     }
 
     /// The confirmation a run of caller SQL needs, or `nil` when nothing would be asked.
@@ -44,7 +47,8 @@ enum RunConfirmation {
             statements: writes,
             title: writes.count == 1 ? "Run this write?" : "Run these \(writes.count) writes?",
             note: "Safe Mode is Confirm on this connection, so the engine runs a write only after "
-                + "an explicit approval. This approval covers this run and is not remembered.")
+                + "an explicit approval. This approval covers this run and is not remembered.",
+            confirmTitle: writes.count == 1 ? "Run Write" : "Run \(writes.count) Writes")
     }
 
     /// The confirmation a destructive table operation needs.
@@ -52,16 +56,20 @@ enum RunConfirmation {
     /// `table_op` is the engine's one exception to "confirm refuses DDL" (ADR-0027): the level
     /// exists to ask about exactly these two operations, so the engine asks instead of refusing.
     /// The app therefore asks at `confirm` even though `StatementScan` calls the statement DDL —
-    /// that is the contract, not a hole in the classifier. At every other level this returns `nil`
-    /// and the engine's own answer stands: `full` runs it, `no_ddl`/`read_only` refuse it.
-    static func destructiveRequest(for statement: String, title: String,
+    /// that is the contract, not a hole in the classifier. `full` asks too (blueprint D-11, flagged
+    /// for the owner); `no_ddl`/`read_only` return `nil` because the engine refuses before connecting.
+    static func destructiveRequest(for statement: String, title: String, confirmTitle: String? = nil,
                                    safeMode: ConnectionSafeMode) -> Request? {
-        guard safeMode == .confirm else { return nil }
-        return Request(
-            statements: [statement],
-            title: title,
-            note: "Safe Mode is Confirm on this connection, so the engine runs this only after an "
-                + "explicit approval. This approval covers this one operation and is not remembered.")
+        guard safeMode == .confirm || safeMode == .full else { return nil }
+        let verb = confirmTitle ?? (title.hasSuffix("?") ? String(title.dropLast()) : title)
+        let isDrop = statement.uppercased().hasPrefix("DROP")
+        let note = safeMode == .confirm
+            ? "Safe Mode is Confirm on this connection, so the engine runs this only after an "
+                + "explicit approval. This approval covers this one operation and is not remembered."
+            : isDrop
+            ? "This permanently removes the table and its data. It cannot be undone from this app."
+            : "This deletes every row in the table. It cannot be undone from this app."
+        return Request(statements: [statement], title: title, note: note, confirmTitle: verb)
     }
 
     /// The settings a run adds after the user approved it, merged into that run's environment only.

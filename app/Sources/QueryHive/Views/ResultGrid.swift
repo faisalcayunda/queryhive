@@ -55,6 +55,15 @@ struct ResultGrid: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let error = tab.previewError, tab.previewing == false {
+                ErrorBanner(message: error,
+                            onCopy: {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(error, forType: .string)
+                            },
+                            onShowLog: { tab.panel = .log },
+                            onDismiss: { tab.previewError = nil })
+            }
             HStack(spacing: 0) {
                 content
                 // Only while the setting asks for it and a cell is chosen. A panel on an empty
@@ -98,8 +107,6 @@ struct ResultGrid: View {
             // arrives with them, so until then there is no table to stand a spinner inside of and
             // the spinner is the whole panel.
             status(label, symbol: nil)
-        } else if let error = tab.previewError {
-            status(error, symbol: "exclamationmark.triangle.fill", tint: Tone.coral)
         } else if let preview = tab.preview, !preview.columns.isEmpty {
             grid(preview)
         } else if tab.preview?.stopped == true {
@@ -1153,5 +1160,44 @@ private struct FilterEditorBody<Content: View>: View {
             }
         }
         .task(id: column) { sample = await rows.distinctValues(column: column) }
+    }
+}
+
+/// The inline error strip above the result body: the message can be selected and copied, shown in
+/// the log, or dismissed (W9-T5, FR-RUN-06). The body below falls back to its no-result sentence.
+struct ErrorBanner: View {
+    let message: String
+    let onCopy: () -> Void
+    let onShowLog: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Tone.coral)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Query failed").font(.ui(12, weight: .semibold)).foregroundStyle(Tone.ink)
+                ScrollView {
+                    Text(message)
+                        .font(.ui(11.5))
+                        .foregroundStyle(Tone.ink)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 120)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                PillButton(title: "Copy", role: .quiet, compact: true, action: onCopy)
+                PillButton(title: "Show in Log", role: .quiet, compact: true, action: onShowLog)
+                PillButton(title: "Dismiss", role: .quiet, compact: true, action: onDismiss)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Tone.coral.opacity(0.10))
+        .accessibilityElement(children: .contain)
     }
 }

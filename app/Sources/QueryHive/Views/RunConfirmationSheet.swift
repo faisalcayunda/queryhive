@@ -12,6 +12,8 @@ struct RunConfirmationSheet: View {
     let onApprove: () -> Void
     let onCancel: () -> Void
 
+    @FocusState private var cancelFocused: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -50,12 +52,16 @@ struct RunConfirmationSheet: View {
 
             HStack(spacing: 8) {
                 Spacer()
+                // Esc cancels and starts focused; nothing is the default action, so a Return still in
+                // flight from the editor cannot approve a write.
                 PillButton(title: "Cancel", role: .quiet, action: onCancel)
-                HubButton(title: "Approve and Run", symbol: "checkmark.shield",
-                          hue: .exporter, action: onApprove)
+                    .keyboardShortcut(.cancelAction)
+                    .focused($cancelFocused)
+                PillButton(title: request.confirmTitle, role: .destructive, action: onApprove)
             }
         }
         .padding(18)
         .frame(width: 620)
+        .onAppear { cancelFocused = true }
     }
 }

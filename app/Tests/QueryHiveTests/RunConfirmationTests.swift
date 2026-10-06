@@ -131,12 +131,26 @@ final class RunConfirmationTests: XCTestCase {
         }
     }
 
-    func testADestructiveOperationOnlyAsksAtConfirm() {
+    func testADestructiveOperationAsksAtConfirmAndFullButNotWhereTheEngineRefuses() {
         let statement = TableOperation.drop.statement(table: "people")
-        XCTAssertNil(RunConfirmation.destructiveRequest(for: statement, title: "Drop?", safeMode: .full))
         XCTAssertNil(RunConfirmation.destructiveRequest(for: statement, title: "Drop?", safeMode: .noDDL))
         XCTAssertNil(RunConfirmation.destructiveRequest(for: statement, title: "Drop?", safeMode: .readOnly))
         XCTAssertNotNil(RunConfirmation.destructiveRequest(for: statement, title: "Drop?", safeMode: .confirm))
+        let full = RunConfirmation.destructiveRequest(for: statement, title: "Drop?", safeMode: .full)
+        XCTAssertTrue(full?.note.contains("cannot be undone") == true)
+    }
+
+    func testTheApproveButtonNamesTheVerb() {
+        let one = RunConfirmation.request(for: ["UPDATE t SET a = 1"], command: "preview", safeMode: .confirm)
+        XCTAssertEqual(one?.confirmTitle, "Run Write")
+        let two = RunConfirmation.request(for: ["UPDATE t SET a = 1", "DELETE FROM t"],
+                                          command: "preview", safeMode: .confirm)
+        XCTAssertEqual(two?.confirmTitle, "Run 2 Writes")
+        for operation in TableOperation.allCases {
+            let request = RunConfirmation.destructiveRequest(
+                for: operation.statement(table: "t"), title: "\(operation.title)?", safeMode: .confirm)
+            XCTAssertEqual(request?.confirmTitle, operation.title)
+        }
     }
 
     func testTheOperationNamesTheTableAndTheVerb() {
