@@ -739,6 +739,97 @@ async fn a_changed_credential_retires_the_old_sessions() {
     );
 }
 
+fn bastion_config() -> ConnectionConfig {
+    let mut config = pg_config("p1");
+    config.tunnel = Some(TunnelConfig {
+        host: "bastion.example".to_owned(),
+        port: 22,
+        user: "jump".to_owned(),
+        auth: TunnelAuth::Agent,
+        known_hosts: Some("/u/known_hosts".into()),
+        app_known_hosts: Some("/app/known_hosts".into()),
+        host_key_accept: None,
+        alias: None,
+    });
+    config
+}
+
+fn key_of(config: &ConnectionConfig) -> PoolKey {
+    PoolKey::of(config, &settings(&[]))
+}
+
+#[test]
+fn the_trust_files_of_a_tunnel_are_part_of_its_key_and_a_one_run_pin_is_not() {
+    let base = key_of(&bastion_config());
+
+    // A tunnel verified against one set of files is not reused by a run that names another:
+    // that would make choosing the file a way around verification.
+    let mut other_app_file = bastion_config();
+    other_app_file.tunnel.as_mut().unwrap().app_known_hosts = Some("/other/known_hosts".into());
+    assert_ne!(base, key_of(&other_app_file), "the app's file");
+    let mut no_app_file = bastion_config();
+    no_app_file.tunnel.as_mut().unwrap().app_known_hosts = None;
+    assert_ne!(base, key_of(&no_app_file), "having no app file");
+    let mut other_user_file = bastion_config();
+    other_user_file.tunnel.as_mut().unwrap().known_hosts = Some("/elsewhere/known_hosts".into());
+    assert_ne!(base, key_of(&other_user_file), "the user's file");
+
+    // What does not decide trust does not split the pool: the pin applies to one run, and a
+    // tunnel that was verified and recorded stays valid after it; the alias and the TLS name
+    // are derived from a host that is already in the key.
+    let mut derived = bastion_config();
+    derived.tunnel.as_mut().unwrap().host_key_accept =
+        Some("SHA256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuog".to_owned());
+    derived.tunnel.as_mut().unwrap().alias = Some("prod-bastion".to_owned());
+    derived.tls_server_name = Some("db.example".to_owned());
+    assert_eq!(base, key_of(&derived));
+}
+
+fn fixture_ca(name: &str) -> qh_driver::TlsCa {
+    let path = format!(
+        "{}/../qh-driver-postgres/tests/tls/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    qh_driver::TlsCa::load(std::path::Path::new(&path)).expect("a fixture CA")
+}
+
+#[test]
+fn a_jwt_or_a_ca_makes_a_different_connection_and_neither_prints() {
+    let trino = || {
+        ConnectionConfig::new(DriverKind::Trino, "trino.example", 443, "u").tls(TlsMode::Require)
+    };
+    let one = trino().bearer("jwt-ONE-SENTINEL");
+    let two = trino().bearer("jwt-TWO-SENTINEL");
+    assert_ne!(key_of(&one), key_of(&two), "the token is part of the key");
+    assert_ne!(key_of(&one), key_of(&trino()), "a token and none differ");
+    for rendered in [format!("{:?}", key_of(&one)), format!("{one:?}")] {
+        assert!(!rendered.contains("SENTINEL"), "{rendered}");
+    }
+
+    // The path is identity and the bytes are hashed: another file is another trust, and so is
+    // the same path with other contents.
+    let ca = fixture_ca("ca.crt");
+    let other = fixture_ca("other-ca.crt");
+    let with_ca = trino().tls_ca(ca.clone());
+    assert_ne!(key_of(&with_ca), key_of(&trino()), "a CA and none differ");
+    assert_ne!(key_of(&with_ca), key_of(&trino().tls_ca(other.clone())));
+    let swapped = |pem: &qh_driver::TlsCa| {
+        let pem_text = std::fs::read(format!(
+            "{}/../qh-driver-postgres/tests/tls/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            if pem == &ca { "ca.crt" } else { "other-ca.crt" }
+        ))
+        .unwrap();
+        trino().tls_ca(qh_driver::TlsCa::from_pem("/etc/same-path.pem", &pem_text).unwrap())
+    };
+    assert_ne!(
+        key_of(&swapped(&ca)),
+        key_of(&swapped(&other)),
+        "the same path with other bytes is other trust"
+    );
+    assert_eq!(key_of(&swapped(&ca)), key_of(&swapped(&ca)));
+}
+
 #[tokio::test]
 async fn a_cancelled_or_dropped_lease_is_handled() {
     let (world, host) = fake_host();
@@ -897,6 +988,9 @@ async fn one_tunnel_serves_every_session_of_a_key() {
         user: "jump".to_owned(),
         auth: TunnelAuth::Password("x".to_owned()),
         known_hosts: None,
+        app_known_hosts: None,
+        host_key_accept: None,
+        alias: None,
     });
 
     let query_engine = pool.engine(Lane::Query, env.clone());
@@ -1870,6 +1964,9 @@ async fn ssh_one_tunnel_for_preview_objects_and_export() {
         user: "qh".to_owned(),
         auth: TunnelAuth::Key(key),
         known_hosts: Some(known_hosts),
+        app_known_hosts: None,
+        host_key_accept: None,
+        alias: None,
     });
 
     let host = EngineHost::new();
@@ -2558,4 +2655,115 @@ fn trino_metadata_names_kinds_columns_and_ddl_through_the_host() {
         ddl["ddl"].as_str().unwrap().contains("CREATE VIEW"),
         "{ddl}"
     );
+}
+
+/// W11-T2b2, live (L-1 to L-4 through the engine's own settings): a `~/.ssh/config` alias
+/// resolves to the container, an unknown host is refused with a structured prompt, the
+/// fingerprint a person confirmed is recorded in the app's file and accepted, and a wrong pin
+/// is refused and records nothing.
+#[tokio::test]
+async fn ssh_alias_and_pinned_first_use_through_the_engines_settings() {
+    if std::env::var("QH_TEST_SSH").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_SSH=1 with the qh-sshd-dev container on 52222");
+        return;
+    }
+    let key = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/qh-sshd/id_ed25519")
+        .canonicalize()
+        .expect("the dev sshd key");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = dir.path().join("ssh_config");
+    std::fs::write(
+        &config,
+        format!(
+            "Host qh-dev\n  HostName 127.0.0.1\n  Port 52222\n  User qh\n  IdentityFile {}\n",
+            key.display()
+        ),
+    )
+    .expect("write the config");
+    let (user_file, app_file) = (
+        dir.path().join("user_known_hosts"),
+        dir.path().join("app_known_hosts"),
+    );
+    std::fs::write(&user_file, "").expect("an empty user file");
+
+    let config_text = config.to_string_lossy().into_owned();
+    let user_text = user_file.to_string_lossy().into_owned();
+    let app_text = app_file.to_string_lossy().into_owned();
+    let settings_with = |extra: &[(&str, &str)]| {
+        let mut all = vec![
+            ("SSH_HOST", "qh-dev"),
+            ("SSH_USE_CONFIG", "1"),
+            ("SSH_AUTH_METHOD", "key"),
+            ("SSH_CONFIG_PATH", config_text.as_str()),
+            ("SSH_KNOWN_HOSTS", user_text.as_str()),
+            ("SSH_APP_KNOWN_HOSTS", app_text.as_str()),
+        ];
+        all.extend_from_slice(extra);
+        settings(&all)
+    };
+    let open = |given: Settings| async move {
+        let description = qh_ffi::tunnel::settings(&given)
+            .expect("the settings describe a bastion")
+            .expect("a bastion");
+        let target = qh_tunnel::Target::new("127.0.0.1", 5432);
+        let opened = qh_ffi::tunnel::open(&description, &given, target).await;
+        (description, opened)
+    };
+    let app_file_is_empty =
+        || !app_file.exists() || std::fs::read_to_string(&app_file).unwrap().is_empty();
+
+    // L-1: the alias resolved, and a host nobody recorded is refused with what a sheet needs.
+    let (description, refused) = open(settings_with(&[])).await;
+    assert_eq!(
+        (description.host.as_str(), description.port),
+        ("127.0.0.1", 52222)
+    );
+    assert_eq!(description.alias.as_deref(), Some("qh-dev"));
+    assert_eq!(description.auth, TunnelAuth::Key(key.clone()));
+    let refused = match refused {
+        Err(error) => error,
+        Ok(_) => panic!("an unknown host must be refused"),
+    };
+    let failure = refused.host_key().expect("a structured refusal").clone();
+    assert_eq!(failure.state, qh_core::HostKeyState::Unknown);
+    assert_eq!(failure.alias.as_deref(), Some("qh-dev"));
+    assert_eq!(refused.failure_kind(), FailureKind::Permanent);
+    let fingerprint = failure.fingerprint.clone().expect("a fingerprint to show");
+    assert!(app_file_is_empty(), "a refusal records nothing");
+
+    // L-2: a pin that is not the server's key is refused, and nothing is recorded.
+    let wrong = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let (_, mismatch) = open(settings_with(&[("SSH_HOST_KEY_ACCEPT", wrong)])).await;
+    let mismatch = match mismatch {
+        Err(error) => error,
+        Ok(_) => panic!("a pin that is not the presented key must not be accepted"),
+    };
+    let failure = mismatch.host_key().expect("a structured refusal");
+    assert_eq!(failure.state, qh_core::HostKeyState::PinMismatch);
+    assert_eq!(failure.pinned.as_deref(), Some(wrong));
+    assert_eq!(failure.fingerprint.as_deref(), Some(fingerprint.as_str()));
+    assert!(app_file_is_empty(), "a refused pin records nothing");
+
+    // L-3: the fingerprint the person was shown is accepted, recorded first, and works.
+    let (_, accepted) = open(settings_with(&[("SSH_HOST_KEY_ACCEPT", &fingerprint)])).await;
+    let tunnel = accepted.unwrap_or_else(|error| panic!("the confirmed key must open: {error}"));
+    std::net::TcpStream::connect(("127.0.0.1", tunnel.local_port()))
+        .expect("the forwarded port is listening");
+    let recorded = std::fs::read_to_string(&app_file).expect("the app's file was written");
+    assert!(recorded.contains("ssh-ed25519"), "{recorded}");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&app_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the app's file is private");
+    }
+    tunnel.close().await;
+
+    // L-4: no pin needed any more, and the user's own file was never written.
+    let (_, again) = open(settings_with(&[])).await;
+    again
+        .unwrap_or_else(|error| panic!("a recorded host opens without a pin: {error}"))
+        .close()
+        .await;
+    assert_eq!(std::fs::read_to_string(&user_file).unwrap(), "");
 }

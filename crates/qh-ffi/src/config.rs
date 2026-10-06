@@ -59,7 +59,7 @@
 
 use thiserror::Error;
 
-use qh_driver::{ConnectionConfig, DriverKind, TlsMode};
+use qh_driver::{CaError, ConnectionConfig, DriverKind, TlsCa, TlsMode};
 
 use crate::env::{parse_flag, SettingError, Settings};
 use crate::tunnel::{self, TunnelConfigError};
@@ -123,6 +123,15 @@ pub enum ConfigError {
 
     #[error(transparent)]
     Setting(#[from] SettingError),
+
+    /// A combination of settings the engine refuses by name, before the network is touched.
+    /// The message never repeats a credential.
+    #[error("{0}")]
+    Usage(String),
+
+    /// `DB_CA_FILE` named a file that cannot serve as a CA bundle.
+    #[error(transparent)]
+    Ca(#[from] CaError),
 
     /// The `SSH_*` settings described no usable bastion. Kept beside the other
     /// config failures rather than raised from `connect`, because they are decided
@@ -207,12 +216,94 @@ pub fn build(settings: &Settings) -> Result<ConnectionConfig, ConfigError> {
         resolved.port = Some(443);
     }
 
-    let mut config = resolved.into_config(insecure)?;
+    let bearer = bearer(settings, &resolved)?;
+    let mut config = resolved.into_config(insecure, bearer.is_some())?;
+    config.bearer = bearer;
     // The bastion rides on the config it tunnells: the engine opens the tunnel as
     // part of `connect` (blueprint §3.2), so the description has to arrive where the
     // connect happens. `SSH_HOST` absent leaves this `None` and nothing changes.
     config.tunnel = tunnel::settings(settings)?;
+    apply_ca_file(settings, &mut config)?;
+
+    // Through a tunnel the name checked would be `127.0.0.1` (`tunnel::retarget` hands the
+    // other two drivers the database's own name; `mysql_async` cannot take one). Refused here,
+    // by name, because the handshake failure it would be otherwise explains nothing.
+    if config.tunnel.is_some() && config.kind == DriverKind::Mysql && config.tls == TlsMode::Require
+    {
+        return Err(ConfigError::Usage(
+            "MySQL cannot verify a server certificate through an SSH tunnel (the name checked \
+             would be 127.0.0.1). Use require (encrypted, not verified: the tunnel already \
+             authenticates the bastion), or connect directly"
+                .to_owned(),
+        ));
+    }
     Ok(config)
+}
+
+/// The longest bearer token accepted: far past any real JWT, short of a pasted file.
+const MAX_BEARER_CHARS: usize = 8192;
+
+/// `DB_JWT`: a Trino bearer token (blueprint W11 §7.1).
+///
+/// The engine treats it as opaque: it is not decoded or verified, and an expired one shows up as
+/// the coordinator's 401. Only its shape is checked, and a refusal never repeats it.
+fn bearer(settings: &Settings, parts: &Parts) -> Result<Option<String>, ConfigError> {
+    let token = settings.raw("DB_JWT", "").trim().to_owned();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if parts.kind != DriverKind::Trino {
+        return Err(ConfigError::Usage(format!(
+            "DB_JWT is only for Trino, and this connection is {}; send DB_PASSWORD instead",
+            parts.kind.as_str()
+        )));
+    }
+    if parts.password.is_some() {
+        return Err(ConfigError::Usage(
+            "send either DB_JWT or a password (DB_PASSWORD, or one inside DB_URL), not both"
+                .to_owned(),
+        ));
+    }
+    let token68 = |c: char| c.is_ascii_alphanumeric() || "-._~+/=".contains(c);
+    if token.chars().count() > MAX_BEARER_CHARS || !token.chars().all(token68) {
+        return Err(ConfigError::Usage(
+            "DB_JWT is not a valid bearer token".to_owned(),
+        ));
+    }
+    Ok(Some(token))
+}
+
+/// `DB_CA_FILE`: a CA bundle this connection trusts instead of the platform store (W11 §7.2).
+///
+/// Read and validated once, here, so the bytes that are checked are the bytes that are trusted.
+fn apply_ca_file(settings: &Settings, config: &mut ConnectionConfig) -> Result<(), ConfigError> {
+    let named = settings.text("DB_CA_FILE", "");
+    if named.is_empty() {
+        return Ok(());
+    }
+    if config.kind == DriverKind::Mysql {
+        return Err(ConfigError::Usage(
+            "DB_CA_FILE is not supported for MySQL: mysql_async 0.36 cannot take a CA \
+             (docs/tls-modes.md)"
+                .to_owned(),
+        ));
+    }
+    let path = match named.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                ConfigError::Usage("DB_CA_FILE starts with ~ and $HOME is not set".to_owned())
+            })?;
+            std::path::PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => std::path::PathBuf::from(named),
+    };
+    config.tls_ca = Some(TlsCa::load(&path)?);
+    // The driver checks this too; asking here puts the refusal in front of the network and
+    // under the name of the setting that caused it.
+    config
+        .ca_for_verifying_mode()
+        .map_err(|error| ConfigError::Usage(error.message().to_owned()))?;
+    Ok(())
 }
 
 /// The connection as its individual parts, before the TLS and scheme rules run.
@@ -231,7 +322,7 @@ struct Parts {
 
 impl Parts {
     /// Apply the scheme/port rules and produce the config the drivers receive.
-    fn into_config(self, insecure: bool) -> Result<ConnectionConfig, ConfigError> {
+    fn into_config(self, insecure: bool, bearer: bool) -> Result<ConnectionConfig, ConfigError> {
         let mut port = self.port.unwrap_or(0);
         // Assigned once in each branch below: the two families of server do not share
         // a spelling for this, so a default here would only be a value to overwrite.
@@ -256,11 +347,31 @@ impl Parts {
                 "verify-ca" | "verify-full" => Some(TlsMode::Require),
                 other => return Err(ConfigError::BadSSLMode(other.to_owned())),
             };
+            // A bearer token that could travel in clear is a leaked token, so a mode the caller
+            // named that can end on `http` is refused by name rather than raised: `Prefer`
+            // may fall back to it, and `disable` and an `http` scheme are it. Raising an
+            // explicit choice behind the caller's back is what the password rule below does,
+            // and it is not extended to a credential this much more portable.
+            if bearer {
+                let plain = match (named, self.scheme.as_str()) {
+                    (Some(TlsMode::Disable), _) | (None, "http") => Some("plain http"),
+                    (Some(TlsMode::Prefer), _) => Some("prefer, which may fall back to plain http"),
+                    _ => None,
+                };
+                if let Some(plain) = plain {
+                    return Err(ConfigError::Usage(format!(
+                        "DB_JWT is only sent over TLS, and this connection is {plain}; use \
+                         https, or sslmode require, verify-ca or verify-full"
+                    )));
+                }
+            }
             // `sslmode` wins where it named a mode; otherwise the scheme does, and
-            // `http` is what an absent one has always meant.
+            // `http` is what an absent one has always meant, except for a bearer token with
+            // neither named: that is the password rule's reading, TLS on the HTTPS port.
             let mut mode = match named {
                 Some(mode) => mode,
                 None if self.scheme == "https" => TlsMode::Require,
+                None if bearer && self.scheme.is_empty() => TlsMode::Require,
                 None => TlsMode::Disable,
             };
             // The two rules from the module docs: a password or a standard HTTPS port
@@ -1140,5 +1251,244 @@ mod tests {
             build(&settings(&[("DB_URL", "trino:///hive")])).unwrap_err(),
             ConfigError::NoUrlHost("trino:///hive".to_owned())
         );
+    }
+
+    // ------------------------------------------------------------------- //
+    // DB_JWT (blueprint W11 §7.1)
+    // ------------------------------------------------------------------- //
+
+    const JWT: &str = "eyJhbGciOi.SENTINEL-payload_x.sig";
+
+    fn refusal(pairs: &[(&str, &str)]) -> String {
+        match build(&settings(pairs)).expect_err("these settings must be refused") {
+            ConfigError::Usage(message) => message,
+            other => panic!("expected a usage refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_jwt_becomes_the_bearer_and_raises_the_mode_when_nothing_was_named() {
+        // The app sends `DB_SCHEME` with its picker, so the bare-host command line is the case
+        // that needs the rule: no scheme and no sslmode means TLS on the HTTPS port.
+        let bare = trino(&[("DB_JWT", JWT)]);
+        assert_eq!(bare.bearer.as_deref(), Some(JWT));
+        assert_eq!((bare.tls, bare.port), (TlsMode::Require, 443));
+        assert_eq!(bare.password, None);
+
+        // https, and require without verification, are both TLS and both allowed.
+        assert_eq!(
+            trino(&[("DB_JWT", JWT), ("DB_SCHEME", "https")]).tls,
+            TlsMode::Require
+        );
+        assert_eq!(
+            trino(&[("DB_JWT", JWT), ("DB_SSLMODE", "require")]).tls,
+            TlsMode::RequireNoVerify
+        );
+        assert_eq!(
+            trino(&[
+                ("DB_JWT", JWT),
+                ("DB_SCHEME", "https"),
+                ("DB_INSECURE", "1")
+            ])
+            .tls,
+            TlsMode::RequireNoVerify
+        );
+        // Surrounding whitespace from a paste is not part of the token.
+        assert_eq!(
+            trino(&[("DB_JWT", &format!("  {JWT}\n"))])
+                .bearer
+                .as_deref(),
+            Some(JWT)
+        );
+        // Blank is unset.
+        assert_eq!(trino(&[("DB_JWT", "  ")]).bearer, None);
+    }
+
+    #[test]
+    fn a_jwt_that_could_travel_in_clear_is_refused_by_the_mode_it_names() {
+        let base = [
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "coordinator"),
+            ("DB_JWT", JWT),
+        ];
+        let with = |extra: (&str, &str)| refusal(&[base[0], base[1], base[2], extra]);
+        assert!(with(("DB_SCHEME", "http")).contains("plain http"));
+        assert!(with(("DB_SSLMODE", "disable")).contains("plain http"));
+        assert!(with(("DB_SSLMODE", "prefer")).contains("prefer"));
+        // The refusal does not repeat the token.
+        for message in [with(("DB_SCHEME", "http")), with(("DB_SSLMODE", "prefer"))] {
+            assert!(!message.contains("SENTINEL"), "{message}");
+        }
+        // A URL's own scheme counts as named.
+        assert!(
+            refusal(&[("DB_URL", "http://coordinator:8080"), ("DB_JWT", JWT)])
+                .contains("plain http")
+        );
+    }
+
+    #[test]
+    fn a_jwt_is_refused_with_a_password_for_another_engine_and_when_malformed() {
+        assert!(refusal(&[
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "c"),
+            ("DB_JWT", JWT),
+            ("DB_PASSWORD", "pw"),
+        ])
+        .contains("not both"));
+        // A password inside the URL is a password.
+        assert!(refusal(&[
+            ("DB_URL", "trino://u:secret@c:443?sslmode=require"),
+            ("DB_JWT", JWT),
+        ])
+        .contains("not both"));
+        for kind in ["postgres", "mysql"] {
+            let message = refusal(&[("DB_KIND", kind), ("DB_HOST", "h"), ("DB_JWT", JWT)]);
+            assert!(message.contains("only for Trino"), "{message}");
+            assert!(message.contains(kind), "{message}");
+        }
+        for bad in ["has space", "semi;colon", "quote\"", "new\nline"] {
+            let message = refusal(&[
+                ("DB_KIND", "trino"),
+                ("DB_HOST", "c"),
+                ("DB_JWT", &format!("abc{bad}def")),
+            ]);
+            assert_eq!(message, "DB_JWT is not a valid bearer token");
+        }
+        let too_long = "a".repeat(8193);
+        assert_eq!(
+            refusal(&[
+                ("DB_KIND", "trino"),
+                ("DB_HOST", "c"),
+                ("DB_JWT", &too_long)
+            ]),
+            "DB_JWT is not a valid bearer token"
+        );
+        assert!(build(&settings(&[
+            ("DB_KIND", "trino"),
+            ("DB_HOST", "c"),
+            ("DB_JWT", &"a".repeat(8192))
+        ]))
+        .is_ok());
+    }
+
+    // ------------------------------------------------------------------- //
+    // DB_CA_FILE (blueprint W11 §7.2)
+    // ------------------------------------------------------------------- //
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/../qh-driver-postgres/tests/tls/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    #[test]
+    fn a_ca_file_is_read_once_and_carried_for_the_two_engines_that_can_use_it() {
+        let ca = fixture("ca.crt");
+        let postgres = config(&[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full"),
+            ("DB_CA_FILE", &ca),
+        ]);
+        assert_eq!(
+            postgres.tls_ca.as_ref().unwrap().path().to_string_lossy(),
+            ca
+        );
+        let trino = trino(&[("DB_SCHEME", "https"), ("DB_CA_FILE", &ca)]);
+        assert!(trino.tls_ca.is_some());
+        assert_eq!(trino.tls, TlsMode::Require);
+    }
+
+    #[test]
+    fn a_ca_file_where_it_would_be_ignored_or_cannot_be_used_is_refused_by_name() {
+        let ca = fixture("ca.crt");
+        // MySQL cannot take one, and says why.
+        let message = refusal(&[
+            ("DB_KIND", "mysql"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full"),
+            ("DB_CA_FILE", &ca),
+        ]);
+        assert!(message.contains("not supported for MySQL"), "{message}");
+
+        // Every mode but the verifying one would silently not use it.
+        for extra in [
+            ("DB_SSLMODE", "prefer"),
+            ("DB_SSLMODE", "require"),
+            ("DB_SSLMODE", "disable"),
+            ("DB_INSECURE", "1"),
+        ] {
+            let mut all = vec![
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "db"),
+                ("DB_CA_FILE", ca.as_str()),
+            ];
+            if extra.0 == "DB_INSECURE" {
+                all.push(("DB_SSLMODE", "verify-full"));
+            }
+            all.push(extra);
+            let message = refusal(&all);
+            assert!(message.contains(&ca), "{extra:?}: {message}");
+        }
+
+        // A private key, a missing file and a file that is no PEM are the file's own errors.
+        let key = fixture("ca.key");
+        let error = build(&settings(&[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full"),
+            ("DB_CA_FILE", &key),
+        ]))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Ca(CaError::HoldsPrivateKey { .. })),
+            "{error:?}"
+        );
+        let error = build(&settings(&[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full"),
+            ("DB_CA_FILE", "/nonexistent/ca.pem"),
+        ]))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Ca(CaError::Unreadable { .. })),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn mysql_through_a_tunnel_cannot_verify_a_certificate() {
+        let through = |mode: &str| {
+            build(&settings(&[
+                ("DB_KIND", "mysql"),
+                ("DB_HOST", "db"),
+                ("DB_SSLMODE", mode),
+                ("SSH_HOST", "bastion"),
+                ("SSH_USER", "d"),
+            ]))
+        };
+        let ConfigError::Usage(message) = through("verify-full").unwrap_err() else {
+            panic!("a usage refusal");
+        };
+        assert!(message.contains("MySQL cannot verify"), "{message}");
+        // The encrypted-not-verified mode is what the message points at, and it works.
+        assert!(through("require").is_ok());
+        // Direct, and the other engines through a tunnel, are unchanged.
+        assert!(build(&settings(&[
+            ("DB_KIND", "mysql"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full")
+        ]))
+        .is_ok());
+        assert!(build(&settings(&[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "db"),
+            ("DB_SSLMODE", "verify-full"),
+            ("SSH_HOST", "bastion"),
+            ("SSH_USER", "d"),
+        ]))
+        .is_ok());
     }
 }

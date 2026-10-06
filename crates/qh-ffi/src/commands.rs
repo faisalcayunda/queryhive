@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
+use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath, Session,
 };
@@ -1157,7 +1157,7 @@ pub async fn to_table(
         }
         if cancel.is_cancelled() {
             cancelled = true;
-            let _ = session.cancel().await;
+            let _ = cancel_bounded(STOP_CEILING, session.cancel()).await;
             break;
         }
 
@@ -1335,7 +1335,7 @@ pub async fn table_op(
     let mut affected: Option<u64> = None;
     if cancel.is_cancelled() {
         cancelled = true;
-        let _ = session.cancel().await;
+        let _ = cancel_bounded(STOP_CEILING, session.cancel()).await;
     } else {
         // Not `retry::execute`: a `DROP`/`TRUNCATE` is not safe to re-issue blind, the same
         // rule `to_table` follows.
@@ -1469,7 +1469,33 @@ const STOP_UNCONFIRMED: &str =
     "the server did not confirm the stop; the statement may still be running";
 
 /// How long the detached cancel and close may take before they are abandoned.
-const STOP_CEILING: Duration = Duration::from_secs(10);
+pub(crate) const STOP_CEILING: Duration = Duration::from_secs(10);
+
+/// Ask the server to cancel, and give up waiting after `ceiling`.
+///
+/// A cancel is a second connection (PostgreSQL's `CancelRequest`, MySQL's `KILL QUERY`, a Trino
+/// `DELETE`), and a server or a tunnel that has stopped answering can hold it open for as long
+/// as the operating system's own timeouts allow. Nothing that asks for a cancel may wait on
+/// that: a Stop that hangs on the thing it is stopping is worse than one that reports it was
+/// not confirmed. A cancel that does not finish in time is an error like any other failed
+/// cancel, so every caller already knows what to do with it.
+pub(crate) async fn cancel_bounded(
+    ceiling: Duration,
+    cancel: impl std::future::Future<Output = Result<(), EngineError>>,
+) -> Result<(), EngineError> {
+    match tokio::time::timeout(ceiling, cancel).await {
+        Ok(result) => result,
+        Err(_) => Err(cancel_timeout(ceiling)),
+    }
+}
+
+/// The error of a cancel that did not finish within `ceiling`.
+pub(crate) fn cancel_timeout(ceiling: Duration) -> EngineError {
+    EngineError::Connect {
+        message: format!("no answer to the cancel within {ceiling:?}"),
+        kind: FailureKind::Transient,
+    }
+}
 
 /// Tell the server to stop what this session is running, then close it.
 ///
@@ -1511,10 +1537,9 @@ fn spawn_stop(
 ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
     let (answer, confirmed) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let cancelled = match tokio::time::timeout(STOP_CEILING, session.cancel()).await {
-            Ok(result) => result.map_err(|error| error.to_string()),
-            Err(_) => Err(format!("no answer within {} s", STOP_CEILING.as_secs())),
-        };
+        let cancelled = cancel_bounded(STOP_CEILING, session.cancel())
+            .await
+            .map_err(|error| error.to_string());
         if let (true, Err(reason)) = (log_failure, &cancelled) {
             eprintln!("queryhive-engine: stopping a capped result failed ({reason})");
         }

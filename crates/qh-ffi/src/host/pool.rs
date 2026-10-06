@@ -90,6 +90,9 @@ pub struct Identity {
     tls: TlsMode,
     insecure: bool,
     database: DatabaseSlot,
+    /// Which file a connection's own CA came from. Its contents are in the credential hash, so a
+    /// rewritten file is a different connection and the same path never is the same trust.
+    tls_ca: Option<std::path::PathBuf>,
     tunnel: Option<TunnelIdentity>,
 }
 
@@ -111,7 +114,12 @@ struct TunnelIdentity {
     port: u16,
     user: String,
     auth: AuthIdentity,
-    known_hosts: Option<std::path::PathBuf>,
+    /// Every read-only trust file that decides this bastion's host key, in the order they are
+    /// read ([`tunnel::trust_files`]). A tunnel verified against one set must not be reused by a
+    /// run that names another, or choosing a file would be a way around verification.
+    known_hosts: Vec<std::path::PathBuf>,
+    /// The app's own `known_hosts`, the one file that is read and written.
+    app_known_hosts: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -132,9 +140,13 @@ impl PoolKey {
     /// The key of the connection `config` describes.
     ///
     /// **Both configs are taken apart without `..`.** A field added to `ConnectionConfig` or
-    /// `TunnelConfig` (a per-connection CA, a Trino JWT) stops this function compiling until it
-    /// is placed in the identity, in the credential hash, or explicitly ruled out, so a session
-    /// opened with old trust or an old secret cannot be reused by accident.
+    /// `TunnelConfig` stops this function compiling until it is placed in the identity, in the
+    /// credential hash, or explicitly ruled out, so a session opened with old trust or an old
+    /// secret cannot be reused by accident.
+    ///
+    /// Ruled out on purpose: `tls_server_name` and the tunnel's `alias` (both derived from a host
+    /// that is already in the identity), and the tunnel's `host_key_accept` (a pin for one run: a
+    /// tunnel that was verified and recorded stays valid after it).
     ///
     /// The password comes from the resolved config (a password inside `DB_URL` lands there), the
     /// bastion password from its tunnel description, and only the key passphrase from settings,
@@ -152,6 +164,9 @@ impl PoolKey {
             tls,
             insecure,
             tunnel,
+            tls_ca,
+            bearer,
+            tls_server_name: _,
         } = config;
 
         let database = match kind {
@@ -163,6 +178,21 @@ impl PoolKey {
 
         let mut hasher = credential_hasher();
         hash_secret(&mut hasher, password.as_deref());
+        hash_secret(&mut hasher, bearer.as_deref());
+        // The certificates a connection trusts, byte for byte: the same path with other contents
+        // is other trust. Length-prefixed, so two bundles cannot be cut at different places and
+        // collide.
+        match tls_ca {
+            None => hasher.write_u8(0),
+            Some(ca) => {
+                hasher.write_u8(1);
+                hasher.write_usize(ca.der().len());
+                for certificate in ca.der() {
+                    hasher.write_usize(certificate.len());
+                    hasher.write(certificate);
+                }
+            }
+        }
 
         let tunnel = tunnel.as_ref().map(|tunnel| {
             let TunnelConfig {
@@ -170,7 +200,10 @@ impl PoolKey {
                 port,
                 user,
                 auth,
-                known_hosts,
+                known_hosts: _,
+                app_known_hosts,
+                host_key_accept: _,
+                alias: _,
             } = tunnel;
             let auth = match auth {
                 TunnelAuth::Agent => AuthIdentity::Agent,
@@ -192,7 +225,8 @@ impl PoolKey {
                 port: *port,
                 user: user.clone(),
                 auth,
-                known_hosts: known_hosts.clone(),
+                known_hosts: crate::tunnel::trust_files(tunnel),
+                app_known_hosts: app_known_hosts.clone(),
             }
         });
 
@@ -205,6 +239,7 @@ impl PoolKey {
                 tls: *tls,
                 insecure: *insecure,
                 database,
+                tls_ca: tls_ca.as_ref().map(|ca| ca.path().to_path_buf()),
                 tunnel,
             },
             credential: hasher.finish(),

@@ -412,6 +412,62 @@ pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
 
+/// What an alias in the ssh config resolves to, for the connection form's preview.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SshResolution {
+    /// The name that is contacted, and the name `known_hosts` records.
+    pub host_name: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// In file order. A connect tries the first that exists on disk.
+    pub identity_files: Vec<String>,
+}
+
+/// Why an alias cannot be used. The message is the one a connect would fail with: it names the
+/// file, the line and the directive, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum SshConfigFfiError {
+    #[error("{message}")]
+    Failed { message: String },
+}
+
+/// The aliases a person can pick from `~/.ssh/config`: every `Host` name with no wildcard or
+/// negation, once each, in file order. Never fails; a config that cannot be read has none.
+#[uniffi::export]
+pub fn ssh_config_hosts() -> Vec<String> {
+    crate::tunnel::ssh_config_default_path()
+        .map(|path| crate::tunnel::alias_list(&path))
+        .unwrap_or_default()
+}
+
+/// What `alias` resolves to in `~/.ssh/config`, through the same code a connect with
+/// `SSH_USE_CONFIG=1` uses, so the preview cannot differ from the result.
+#[uniffi::export]
+pub fn ssh_config_resolve(alias: String) -> Result<SshResolution, SshConfigFfiError> {
+    let path =
+        crate::tunnel::ssh_config_default_path().map_err(|error| SshConfigFfiError::Failed {
+            message: error.to_string(),
+        })?;
+    resolution_of(&path, &alias)
+}
+
+fn resolution_of(path: &std::path::Path, alias: &str) -> Result<SshResolution, SshConfigFfiError> {
+    let resolved =
+        crate::tunnel::resolve_alias(path, alias).map_err(|error| SshConfigFfiError::Failed {
+            message: error.to_string(),
+        })?;
+    Ok(SshResolution {
+        host_name: resolved.host_name,
+        user: resolved.user,
+        port: resolved.port,
+        identity_files: resolved
+            .identity_files
+            .iter()
+            .map(|file| file.display().to_string())
+            .collect(),
+    })
+}
+
 /// Every command this build offers, spelled as the CLI spells them.
 #[uniffi::export]
 pub fn command_names() -> Vec<String> {
@@ -805,6 +861,138 @@ mod tests {
         let located = run_once(&[("ERROR_POSITION", "1")]);
         assert_eq!(located["position"], 1, "{located}");
         assert_eq!(located["message"], plain["message"]);
+    }
+
+    /// An engine whose bastion refuses the host key, as a first connection to a new one does.
+    struct UnknownHostEngine;
+
+    #[async_trait::async_trait]
+    impl Engine for UnknownHostEngine {
+        fn kinds(&self) -> Vec<qh_driver::DriverKind> {
+            qh_driver::DriverKind::ALL.to_vec()
+        }
+
+        fn driver(&self, _kind: qh_driver::DriverKind) -> &dyn qh_driver::Driver {
+            static POSTGRES: qh_driver_postgres::PostgresDriver =
+                qh_driver_postgres::PostgresDriver;
+            &POSTGRES
+        }
+
+        async fn connect(
+            &self,
+            _config: &qh_driver::ConnectionConfig,
+        ) -> Result<Box<dyn qh_driver::Session>, qh_core::EngineError> {
+            Err(qh_core::EngineError::HostKey(Box::new(
+                qh_core::HostKeyFailure {
+                    message: "the host key of the bastion bastion.corp:22 is not in known_hosts"
+                        .to_owned(),
+                    state: qh_core::HostKeyState::Unknown,
+                    host: "bastion.corp".to_owned(),
+                    port: 22,
+                    alias: Some("prod-bastion".to_owned()),
+                    key_type: Some("ssh-ed25519".to_owned()),
+                    fingerprint: Some("SHA256:abc".to_owned()),
+                    app_known_hosts: Some("/app/known_hosts".to_owned()),
+                    ca_covered: false,
+                    recorded: vec![qh_core::RecordedHostKey {
+                        fingerprint: "SHA256:def".to_owned(),
+                        key_type: "ssh-rsa".to_owned(),
+                        source: "user".to_owned(),
+                        path: "/u/.ssh/known_hosts".to_owned(),
+                        line: 3,
+                    }],
+                    pinned: None,
+                },
+            )))
+        }
+    }
+
+    #[test]
+    fn a_refused_host_key_adds_its_object_only_when_the_run_asked_for_the_detail() {
+        let run_once = |extra: &[(&str, &str)]| {
+            let sink = Recorder::default();
+            let settings = Settings::from_pairs(
+                [
+                    ("DB_KIND", "postgres"),
+                    ("DB_HOST", "127.0.0.1"),
+                    ("RETRIES", "0"),
+                    ("SQL", "SELECT 1"),
+                ]
+                .iter()
+                .chain(extra)
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+            );
+            run_with(
+                Command::Preview,
+                &settings,
+                &mut SinkEmitter {
+                    sink: Arc::new(sink.clone()),
+                },
+                &UnknownHostEngine,
+                &CancelFlag::new(),
+                None,
+            );
+            sink.events()
+                .last()
+                .expect("something was reported")
+                .clone()
+        };
+        let plain = run_once(&[]);
+        assert_eq!(plain["event"], "error", "{plain}");
+        assert!(
+            plain["message"]
+                .as_str()
+                .unwrap()
+                .contains("bastion.corp:22"),
+            "{plain}"
+        );
+        assert!(
+            plain.get("host_key").is_none(),
+            "an engine not asked stays as it was: {plain}"
+        );
+
+        let detailed = run_once(&[("SSH_HOST_KEY_DETAIL", "1")]);
+        assert_eq!(detailed["message"], plain["message"]);
+        let key = &detailed["host_key"];
+        assert_eq!(key["state"], "unknown");
+        assert_eq!(
+            (key["host"].as_str(), key["port"].as_u64()),
+            (Some("bastion.corp"), Some(22))
+        );
+        assert_eq!(key["alias"], "prod-bastion");
+        assert_eq!(key["key_type"], "ssh-ed25519");
+        assert_eq!(key["fingerprint"], "SHA256:abc");
+        assert_eq!(key["app_known_hosts"], "/app/known_hosts");
+        assert_eq!(key["ca_covered"], false);
+        assert_eq!(key["recorded"][0]["source"], "user");
+        assert_eq!(key["recorded"][0]["line"], 3);
+        assert_eq!(key["recorded"][0]["fingerprint"], "SHA256:def");
+        assert!(key.get("pinned").is_none(), "{key}");
+    }
+
+    #[test]
+    fn the_alias_exports_list_and_resolve_through_the_connect_path_code() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            "Host qh-dev\n  HostName 127.0.0.1\n  Port 52222\n  User qh\n  IdentityFile /keys/id\nHost *\n  ForwardAgent no\n",
+        )
+        .unwrap();
+        assert_eq!(crate::tunnel::alias_list(&path), ["qh-dev"]);
+        let resolved = resolution_of(&path, "qh-dev").expect("resolves");
+        assert_eq!(
+            resolved,
+            SshResolution {
+                host_name: "127.0.0.1".to_owned(),
+                user: Some("qh".to_owned()),
+                port: Some(52222),
+                identity_files: vec!["/keys/id".to_owned()],
+            }
+        );
+        let SshConfigFfiError::Failed { message } =
+            resolution_of(&path, "typo").expect_err("no such alias");
+        assert!(message.contains("typo"), "{message}");
     }
 
     #[test]

@@ -37,10 +37,42 @@ pub enum SettingError {
     Negative { key: String, value: i64 },
 }
 
+/// The settings whose values are credentials, and so never print.
+///
+/// One list, pinned by a test, that [`Settings`]'s `Debug` reads. `DB_URL` and `TRINO_URL` are
+/// here because a connection URL can carry the password (`user:secret@host`).
+pub const SECRET_KEYS: [&str; 7] = [
+    "DB_PASSWORD",
+    "TRINO_PASSWORD",
+    "DB_URL",
+    "TRINO_URL",
+    "DB_JWT",
+    "SSH_PASSWORD",
+    "SSH_KEY_PASSPHRASE",
+];
+
 /// Every setting this engine reads.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Settings {
     values: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Settings {
+    /// The keys, with every credential's value replaced by `<redacted>`.
+    ///
+    /// A derived `Debug` would print a password, a bearer token or a key passphrase into any log
+    /// or panic message that formats a `Settings` (blueprint W11 §4, hazard §1.5).
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = formatter.debug_map();
+        for (key, value) in &self.values {
+            if SECRET_KEYS.contains(&key.as_str()) {
+                map.entry(key, &"<redacted>");
+            } else {
+                map.entry(key, value);
+            }
+        }
+        map.finish()
+    }
 }
 
 impl Settings {
@@ -150,6 +182,58 @@ mod tests {
 
     fn settings(pairs: &[(&str, &str)]) -> Settings {
         Settings::from_pairs(pairs.iter().map(|(k, v)| (*k, *v)))
+    }
+
+    #[test]
+    fn debug_never_prints_a_credential() {
+        let env = settings(&[
+            ("DB_PASSWORD", "pw-SENTINEL"),
+            ("TRINO_PASSWORD", "tpw-SENTINEL"),
+            ("DB_URL", "postgres://u:url-SENTINEL@h/db"),
+            ("TRINO_URL", "trino://u:turl-SENTINEL@h"),
+            ("DB_JWT", "jwt-SENTINEL"),
+            ("SSH_PASSWORD", "ssh-SENTINEL"),
+            ("SSH_KEY_PASSPHRASE", "phrase-SENTINEL"),
+            ("DB_HOST", "db.internal"),
+        ]);
+        let printed = format!("{env:?} {env:#?}");
+        assert!(!printed.contains("SENTINEL"), "{printed}");
+        assert_eq!(printed.matches("<redacted>").count(), 2 * SECRET_KEYS.len());
+        // Everything else still prints, so a log line stays useful.
+        assert!(printed.contains("db.internal"), "{printed}");
+        assert!(printed.contains("DB_PASSWORD"), "{printed}");
+    }
+
+    #[test]
+    fn the_secret_list_is_pinned_and_covers_what_the_connection_readers_take_raw() {
+        assert_eq!(
+            SECRET_KEYS,
+            [
+                "DB_PASSWORD",
+                "TRINO_PASSWORD",
+                "DB_URL",
+                "TRINO_URL",
+                "DB_JWT",
+                "SSH_PASSWORD",
+                "SSH_KEY_PASSPHRASE"
+            ]
+        );
+        // `Settings::raw` is the reader that keeps a secret byte for byte. Every key the
+        // connection and tunnel builders read that way has to be on the list, so a new secret
+        // setting cannot be added without being redacted.
+        for (name, source) in [
+            ("config.rs", include_str!("config.rs")),
+            ("tunnel.rs", include_str!("tunnel.rs")),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            for (index, _) in production.match_indices(".raw(\"") {
+                let key = production[index + 6..].split('"').next().unwrap();
+                assert!(
+                    SECRET_KEYS.contains(&key),
+                    "{name} reads {key} with `raw` but it is not in SECRET_KEYS"
+                );
+            }
+        }
     }
 
     #[test]

@@ -134,6 +134,11 @@ impl Event {
     }
 }
 
+/// An [`Event`] builder with no `event` key, for an object nested inside one.
+fn event_object() -> Event {
+    Event { object: Map::new() }
+}
+
 /// The `error` event for a failed command, as the CLI and the app's host both write it.
 ///
 /// Carries the warnings a failure already earned: a `replace` write that dropped the old table has
@@ -158,6 +163,44 @@ pub fn error_event(error: &CliError, settings: &Settings) -> Json {
                 .position()
                 .filter(|_| settings.flag("ERROR_POSITION", false)),
         )
+        .maybe(
+            "host_key",
+            error
+                .host_key()
+                .filter(|_| settings.flag("SSH_HOST_KEY_DETAIL", false))
+                .map(host_key_object),
+        )
+        .build()
+}
+
+/// The `host_key` object of an `error` event (blueprint W11 §5.8): what the sheet that asks a
+/// person to trust a bastion shows, and nothing the engine is not allowed to say. Optional
+/// fields are left out when there is nothing to say, as everywhere else in the protocol.
+pub fn host_key_object(failure: &qh_core::HostKeyFailure) -> Json {
+    let recorded: Vec<Json> = failure
+        .recorded
+        .iter()
+        .map(|record| {
+            event_object()
+                .field("fingerprint", record.fingerprint.clone())
+                .field("key_type", record.key_type.clone())
+                .field("source", record.source.clone())
+                .field("path", record.path.clone())
+                .field("line", record.line)
+                .build()
+        })
+        .collect();
+    event_object()
+        .field("state", failure.state.as_str())
+        .field("host", failure.host.clone())
+        .field("port", failure.port)
+        .maybe("alias", failure.alias.clone())
+        .maybe("key_type", failure.key_type.clone())
+        .maybe("fingerprint", failure.fingerprint.clone())
+        .maybe("app_known_hosts", failure.app_known_hosts.clone())
+        .field("ca_covered", failure.ca_covered)
+        .field("recorded", Json::Array(recorded))
+        .maybe("pinned", failure.pinned.clone())
         .build()
 }
 

@@ -167,6 +167,12 @@ pub enum CliError {
     #[error("{message}")]
     QueryAt { message: String, position: u32 },
 
+    /// The bastion's host key was not accepted. Reads like `Connect` everywhere (the same
+    /// `Display`, the same [`CliError::message`]); the `error` event adds the structured
+    /// `host_key` object to it, and only when the run set `SSH_HOST_KEY_DETAIL`.
+    #[error("{}", .0.message)]
+    HostKey(Box<qh_core::HostKeyFailure>),
+
     /// A failure that already changed something the user has to hear about.
     ///
     /// A `replace` write drops the old table before it creates the new one, so a
@@ -261,6 +267,14 @@ impl CliError {
         }
     }
 
+    /// What a person needs to decide about a refused host key, when that is the failure.
+    pub fn host_key(&self) -> Option<&qh_core::HostKeyFailure> {
+        match self {
+            CliError::HostKey(failure) => Some(failure),
+            _ => None,
+        }
+    }
+
     /// The message, without this enum's own wording.
     pub fn message(&self) -> String {
         match self {
@@ -278,6 +292,7 @@ impl From<EngineError> for CliError {
         match error {
             EngineError::Usage { .. } => CliError::Usage(message),
             EngineError::Connect { .. } => CliError::Connect(message),
+            EngineError::HostKey(failure) => CliError::HostKey(failure),
             EngineError::Query {
                 position: Some(position),
                 ..

@@ -27,6 +27,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind};
@@ -38,6 +39,7 @@ use qh_sql::{Dialect, StatementKind};
 
 use super::pool::{Entry, LeaseGuard, SessionPool};
 use super::TunnelHandle;
+use crate::commands::{cancel_timeout, STOP_CEILING};
 use crate::env::Settings;
 use crate::retry::produced_no_page;
 
@@ -239,6 +241,27 @@ pub(crate) struct Held {
 }
 
 impl Held {
+    /// [`Session::cancel`] with a ceiling on how long it may take, lock wait included: the cancel
+    /// is a second connection, and one that hangs must not hold the Stop (or the session's lock)
+    /// hostage.
+    async fn cancel_within(&self, ceiling: Duration) -> Result<(), EngineError> {
+        // Marked first: whatever the cancel does or fails to do, this session never serves
+        // another statement, so a cancel that lands late has nothing to land on.
+        if let Some(lease) = &self.lease {
+            lease.cancelled.store(true, Ordering::SeqCst);
+        }
+        let cancel = async {
+            match self.inner.lock().await.as_ref() {
+                Some(session) => session.cancel().await,
+                None => Ok(()),
+            }
+        };
+        match tokio::time::timeout(ceiling, cancel).await {
+            Ok(result) => result,
+            Err(_) => Err(cancel_timeout(ceiling)),
+        }
+    }
+
     /// A session with no lease: the CLI's, or a long operation's. It owns its tunnel share and
     /// nothing else.
     pub(crate) fn new(inner: Box<dyn Session>, tunnel: Option<Arc<dyn TunnelHandle>>) -> Self {
@@ -506,15 +529,7 @@ impl Session for Held {
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
-        // Marked first: whatever the cancel does or fails to do, this session never serves
-        // another statement, so a cancel that lands late has nothing to land on.
-        if let Some(lease) = &self.lease {
-            lease.cancelled.store(true, Ordering::SeqCst);
-        }
-        match self.inner.lock().await.as_ref() {
-            Some(session) => session.cancel().await,
-            None => Ok(()),
-        }
+        self.cancel_within(STOP_CEILING).await
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), EngineError> {
@@ -544,5 +559,102 @@ impl Session for Held {
             lease.read_only = true;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A session whose cancel never answers: the second connection of a cancel, stuck behind a
+    /// server or a tunnel that stopped talking.
+    pub(crate) struct HangingCancel;
+
+    #[async_trait]
+    impl Session for HangingCancel {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                transactions: false,
+                multiple_result_sets: false,
+                cancel: true,
+                explain: false,
+                levels: Vec::new(),
+                objects_columns: Vec::new(),
+                persistent_connection: true,
+                statement_timeout: false,
+                parameters: None,
+                read_only: false,
+            }
+        }
+
+        fn query_id(&self) -> Option<String> {
+            None
+        }
+
+        async fn execute(
+            &mut self,
+            _sql: &str,
+            _options: &ExecuteOptions,
+        ) -> Result<Box<dyn Cursor>, EngineError> {
+            unreachable!("only cancel is exercised")
+        }
+
+        async fn browse(
+            &mut self,
+            _level: BrowseLevel,
+            _path: &ObjectPath,
+            _include_system: bool,
+        ) -> Result<Vec<String>, EngineError> {
+            unreachable!("only cancel is exercised")
+        }
+
+        async fn objects(&mut self, _path: &ObjectPath) -> Result<ObjectsPage, EngineError> {
+            unreachable!("only cancel is exercised")
+        }
+
+        fn explain_statement(&self, sql: &str) -> String {
+            sql.to_owned()
+        }
+
+        async fn cancel(&self) -> Result<(), EngineError> {
+            std::future::pending().await
+        }
+
+        async fn close(self: Box<Self>) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_that_never_answers_returns_within_its_bound() {
+        // S-1b: `session.cancel().await` on a stop used to wait for as long as the operating
+        // system's own socket timeouts, three of the four call sites unbounded.
+        let held = Held::new(Box::new(HangingCancel), None);
+        let started = std::time::Instant::now();
+        let error = held
+            .cancel_within(Duration::from_millis(50))
+            .await
+            .expect_err("a hung cancel is a failed cancel, not a wait");
+        assert!(started.elapsed() < Duration::from_secs(2), "{error:?}");
+        assert!(
+            error.message().contains("no answer to the cancel"),
+            "{error:?}"
+        );
+        // A late cancel is a failed one, and a failed cancel is worth trying again.
+        assert_eq!(error.failure_kind(), FailureKind::Transient);
+    }
+
+    #[tokio::test]
+    async fn the_shared_helper_bounds_a_bare_session_the_same_way() {
+        let session = HangingCancel;
+        let started = std::time::Instant::now();
+        let error = crate::commands::cancel_bounded(Duration::from_millis(50), session.cancel())
+            .await
+            .expect_err("bounded");
+        assert!(started.elapsed() < Duration::from_secs(2), "{error:?}");
+        assert!(
+            error.message().contains("no answer to the cancel"),
+            "{error:?}"
+        );
     }
 }

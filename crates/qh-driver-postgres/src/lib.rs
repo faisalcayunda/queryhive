@@ -249,31 +249,40 @@ impl PostgresDriver {
             pg.password(password);
         }
 
-        match config.tls {
-            TlsMode::Disable => open(&pg, config, NoTls).await,
-            // `Prefer` encrypts when the server offers it and does **not** verify the
-            // certificate. That is psycopg's behaviour, and therefore what an existing
-            // connection to an internal, self-signed server depends on: verifying here
-            // would break those connections on upgrade with an error that says only
-            // "TLS handshake". The mode is still not `RequireNoVerify` — `ssl_mode`
-            // decides that, and only `Prefer` may continue in clear when the server
-            // declines TLS entirely.
-            TlsMode::Prefer => {
-                let connector = tls::connector(tls::unverified_client_config()?);
-                open(&pg, config, connector).await
-            }
-            // The one verifying mode: a certificate the platform store does not hold is a
-            // failure, and so is a server that declines TLS.
-            TlsMode::Require => {
-                let connector = tls::connector(tls::verified_client_config(verifier)?);
-                open(&pg, config, connector).await
-            }
-            TlsMode::RequireNoVerify => {
-                let connector = tls::connector(tls::unverified_client_config()?);
-                open(&pg, config, connector).await
+        // One connector per session, used for the session **and** for its cancel: a cancel
+        // that spoke less than the session did would put the backend's pid and secret key on
+        // the wire in clear.
+        match connector_for(config.tls, verifier)? {
+            None => open(&pg, config, NoTls, CancelTls::Plain).await,
+            Some(connector) => {
+                open(&pg, config, connector.clone(), CancelTls::Tls(connector)).await
             }
         }
     }
+}
+
+/// The TLS connector a mode connects with, or `None` for the one mode that never negotiates.
+///
+/// - `Prefer` encrypts when the server offers it and does **not** verify the certificate.
+///   That is psycopg's behaviour, and therefore what an existing connection to an internal,
+///   self-signed server depends on: verifying here would break those connections on upgrade
+///   with an error that says only "TLS handshake". The mode is still not `RequireNoVerify`:
+///   `ssl_mode` decides that, and only `Prefer` may continue in clear when the server
+///   declines TLS entirely.
+/// - `Require` is the one verifying mode: a certificate the verifier does not trust is a
+///   failure, and so is a server that declines TLS.
+/// - `RequireNoVerify` encrypts and checks nothing.
+fn connector_for(
+    mode: TlsMode,
+    verifier: Arc<dyn ServerCertVerifier>,
+) -> Result<Option<tokio_postgres_rustls::MakeRustlsConnect>, EngineError> {
+    Ok(match mode {
+        TlsMode::Disable => None,
+        TlsMode::Prefer | TlsMode::RequireNoVerify => {
+            Some(tls::connector(tls::unverified_client_config()?))
+        }
+        TlsMode::Require => Some(tls::connector(tls::verified_client_config(verifier)?)),
+    })
 }
 
 /// Open the connection, and hand back a session around it.
@@ -286,6 +295,7 @@ async fn open<T>(
     pg: &tokio_postgres::Config,
     config: &ConnectionConfig,
     tls: T,
+    cancel_tls: CancelTls,
 ) -> Result<Box<dyn Session>, EngineError>
 where
     T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
@@ -318,6 +328,7 @@ where
     Ok(Box::new(PostgresSession {
         client,
         cancel_token,
+        cancel_tls,
         config: config.clone(),
         // Nothing has been asked of the server yet, so the session must not send a
         // `SET statement_timeout = 0` on its first statement and override a bound the
@@ -326,11 +337,26 @@ where
     }))
 }
 
+/// How a session's `CancelRequest` is carried.
+///
+/// The request travels on a second connection and names the backend's pid and secret key,
+/// which is everything needed to cancel (or, with a stolen key, disturb) that session. So it
+/// must be as private as the session itself: a connection that negotiated TLS cancels with
+/// the same connector, and only a `Disable` connection cancels in clear. (It used to cancel
+/// with `NoTls` whatever the mode, which sent the pair unencrypted from a TLS session.)
+#[derive(Clone)]
+enum CancelTls {
+    Plain,
+    Tls(tokio_postgres_rustls::MakeRustlsConnect),
+}
+
 /// A live PostgreSQL connection.
 struct PostgresSession {
     client: Client,
     /// Sends the `CancelRequest` on its own connection.
     cancel_token: tokio_postgres::CancelToken,
+    /// What that connection speaks: the connector this session itself connected with.
+    cancel_tls: CancelTls,
     config: ConnectionConfig,
     /// The `statement_timeout` this session last sent to the server.
     ///
@@ -706,13 +732,14 @@ impl Session for PostgresSession {
     async fn cancel(&self) -> Result<(), EngineError> {
         // Idempotent by construction: with nothing running PostgreSQL still
         // answers the CancelRequest, and there is nothing to undo.
-        self.cancel_token
-            .cancel_query(NoTls)
-            .await
-            .map_err(|error| EngineError::Connect {
-                message: format!("cancel on {}: {error}", self.config.redacted()),
-                kind: FailureKind::Transient,
-            })
+        let sent = match &self.cancel_tls {
+            CancelTls::Plain => self.cancel_token.cancel_query(NoTls).await,
+            CancelTls::Tls(connector) => self.cancel_token.cancel_query(connector.clone()).await,
+        };
+        sent.map_err(|error| EngineError::Connect {
+            message: format!("cancel on {}: {error}", self.config.redacted()),
+            kind: FailureKind::Transient,
+        })
     }
 
     async fn close(self: Box<Self>) -> Result<(), EngineError> {
@@ -1331,6 +1358,22 @@ mod tests {
         let sql = schemas_sql(false);
         assert!(sql.contains(r"NOT LIKE 'pg\_%'"), "{sql}");
         assert!(!sql.contains("NOT LIKE 'pg_%'"), "{sql}");
+    }
+
+    #[test]
+    fn every_mode_that_negotiates_tls_hands_its_connector_to_the_cancel_too() {
+        // S-1: the cancel connection is built from this same connector, so a mode that has
+        // one cancels over TLS and only `Disable` cancels in clear.
+        let verifier = || tls::platform_verifier().expect("a verifier");
+        for mode in [TlsMode::Prefer, TlsMode::Require, TlsMode::RequireNoVerify] {
+            assert!(
+                connector_for(mode, verifier()).unwrap().is_some(),
+                "{mode:?} must cancel over TLS"
+            );
+        }
+        assert!(connector_for(TlsMode::Disable, verifier())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

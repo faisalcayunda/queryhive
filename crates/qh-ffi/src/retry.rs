@@ -597,6 +597,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_host_key_is_never_retried() {
+        // W11 §5.8: presenting the same key to the same refusal cannot succeed, and `execute`
+        // repeats only what is `Transient`. The policy below allows five retries on purpose.
+        let refusal = EngineError::HostKey(Box::new(qh_core::HostKeyFailure {
+            message: "the host key of bastion.corp:22 is not on record".to_owned(),
+            state: qh_core::HostKeyState::Unknown,
+            host: "bastion.corp".to_owned(),
+            port: 22,
+            alias: None,
+            key_type: None,
+            fingerprint: None,
+            app_known_hosts: None,
+            ca_covered: false,
+            recorded: Vec::new(),
+            pinned: None,
+        }));
+        let session = ScriptedSession::new(vec![refusal], vec![Step::Rows(vec![1]), Step::End]);
+        let executes = Arc::clone(&session.executes);
+        let mut session: Box<dyn Session> = Box::new(session);
+
+        let error = drain(&mut session, &instant(5))
+            .await
+            .expect_err("a refused host key is an answer");
+        assert!(error.host_key().is_some(), "{error:?}");
+        assert_eq!(error.failure_kind(), FailureKind::Permanent);
+        assert_eq!(executes.load(Ordering::SeqCst), 1, "exactly one attempt");
+    }
+
+    #[tokio::test]
     async fn a_transient_page_request_is_retried_without_repeating_a_delivered_row() {
         // Two rows, then a page that never arrived, then the rest of the result: the
         // sequence must read 1,2,3,4 — the page is re-requested, the rows already

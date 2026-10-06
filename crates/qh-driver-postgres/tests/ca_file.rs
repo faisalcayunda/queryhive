@@ -25,6 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 const SSL_REQUEST_CODE: u32 = 80_877_103;
+const CANCEL_REQUEST_CODE: u32 = 80_877_102;
 
 /// A CA, and a server certificate it signed for `names`, in the shapes the test needs.
 struct Pki {
@@ -63,6 +64,8 @@ struct Server {
     connections: Arc<AtomicUsize>,
     /// The SNI name each completed handshake carried.
     server_names: Arc<Mutex<Vec<Option<String>>>>,
+    /// How each `CancelRequest` arrived: `"tls"` or `"plain"` (the pid and secret key in clear).
+    cancels: Arc<Mutex<Vec<&'static str>>>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -76,9 +79,11 @@ async fn server(pki: &Pki) -> Server {
     let address = listener.local_addr().expect("the bound address");
     let connections = Arc::new(AtomicUsize::new(0));
     let server_names = Arc::new(Mutex::new(Vec::new()));
+    let cancels = Arc::new(Mutex::new(Vec::new()));
 
     let count = Arc::clone(&connections);
     let names = Arc::clone(&server_names);
+    let recorded_cancels = Arc::clone(&cancels);
     let task = tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
@@ -87,13 +92,21 @@ async fn server(pki: &Pki) -> Server {
             count.fetch_add(1, Ordering::SeqCst);
             let acceptor = acceptor.clone();
             let names = Arc::clone(&names);
+            let cancels = Arc::clone(&recorded_cancels);
             tokio::spawn(async move {
                 // The SSLRequest: length 8, then its code.
                 let mut request = [0u8; 8];
-                if stream.read_exact(&mut request).await.is_err()
-                    || u32::from_be_bytes(request[4..8].try_into().unwrap()) != SSL_REQUEST_CODE
-                {
+                if stream.read_exact(&mut request).await.is_err() {
                     return;
+                }
+                match u32::from_be_bytes(request[4..8].try_into().unwrap()) {
+                    SSL_REQUEST_CODE => {}
+                    // A cancel that skipped TLS: what a `NoTls` cancel from a TLS session is.
+                    CANCEL_REQUEST_CODE => {
+                        cancels.lock().unwrap().push("plain");
+                        return;
+                    }
+                    _ => return,
                 }
                 if stream.write_all(b"S").await.is_err() {
                     return;
@@ -117,6 +130,12 @@ async fn server(pki: &Pki) -> Server {
                 if tls.read_exact(&mut startup).await.is_err() {
                     return;
                 }
+                if startup.len() == 12
+                    && u32::from_be_bytes(startup[..4].try_into().unwrap()) == CANCEL_REQUEST_CODE
+                {
+                    cancels.lock().unwrap().push("tls");
+                    return;
+                }
                 // AuthenticationOk, BackendKeyData, ReadyForQuery (idle).
                 let mut reply = Vec::new();
                 reply.extend_from_slice(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0]);
@@ -134,6 +153,7 @@ async fn server(pki: &Pki) -> Server {
         address,
         connections,
         server_names,
+        cancels,
         _task: task,
     }
 }
@@ -170,6 +190,58 @@ async fn a_certificate_signed_by_the_named_ca_verifies_for_its_name_through_a_tu
         server.server_names.lock().unwrap().as_slice(),
         [Some("db.internal".to_owned())]
     );
+}
+
+#[tokio::test]
+async fn a_cancel_from_a_tls_session_is_itself_encrypted() {
+    // S-1. The `CancelRequest` carries the backend's pid and secret key on a second
+    // connection; it used to be sent with `NoTls` whatever the session negotiated, so a
+    // `Prefer` session cancelled in clear and a verifying one could not cancel at all.
+    let pki = pki(&["db.internal"]);
+
+    // `Require` with the connection's own CA, through a tunnel-shaped address.
+    let server_a = server(&pki).await;
+    let config = through_the_tunnel(server_a.address, &pki.ca_pem).tls_server_name("db.internal");
+    let session = PostgresDriver::new()
+        .connect(&config)
+        .await
+        .expect("connects");
+    session.cancel().await.expect("the cancel speaks TLS too");
+    // The fake closes right after reading the request, so give it a moment to record.
+    wait_for(&server_a.cancels, 1).await;
+    assert_eq!(server_a.cancels.lock().unwrap().as_slice(), ["tls"]);
+
+    // `Prefer`: the mode where the cleartext cancel was reachable.
+    let server_b = server(&pki).await;
+    let config = ConnectionConfig::new(
+        DriverKind::Postgres,
+        "127.0.0.1",
+        server_b.address.port(),
+        "qh",
+    )
+    .password("not-checked")
+    .database("qh")
+    .tls(TlsMode::Prefer);
+    let session = PostgresDriver::new()
+        .connect(&config)
+        .await
+        .expect("connects");
+    session.cancel().await.expect("the cancel speaks TLS too");
+    wait_for(&server_b.cancels, 1).await;
+    assert_eq!(
+        server_b.cancels.lock().unwrap().as_slice(),
+        ["tls"],
+        "a TLS session must never cancel in clear"
+    );
+}
+
+async fn wait_for(cancels: &Mutex<Vec<&'static str>>, count: usize) {
+    for _ in 0..100 {
+        if cancels.lock().unwrap().len() >= count {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
