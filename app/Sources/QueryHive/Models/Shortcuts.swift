@@ -224,3 +224,16 @@ enum TabKeyRouter {
         return shift ? .previous : .next
     }
 }
+
+/// Keys a modal sheet binds for itself, apart from the menu's schemes.
+///
+/// A sheet is the key window while it is up, so its own key equivalents are matched before the main
+/// menu's: ⌘↩ tests the connection there even in the DBeaver scheme, where the same chord runs a
+/// statement in the editor behind it. That is why this is a table of its own and not an entry in
+/// `ShortcutAction` (which would put it into the duplicate check against the menu), and why
+/// `ShortcutConflictTests` models the sheet as its own scope.
+enum SheetShortcut {
+    /// Test Connection in the connection sheet. It was ⌘T, which is New Query in the QueryHive
+    /// scheme (W11-T3 closes that conflict).
+    static let testConnection = Shortcut(.return, .command)
+}

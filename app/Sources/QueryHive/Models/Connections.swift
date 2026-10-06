@@ -267,6 +267,38 @@ enum ConnectionState {
     }
 }
 
+/// How the SSH tunnel proves who the user is to the bastion. The words are the engine's own
+/// `SSH_AUTH_METHOD` values, so a stored connection reads the same on both sides of the bridge.
+enum SSHAuthMethod: String, CaseIterable, Identifiable, Codable {
+    /// Whatever `SSH_AUTH_SOCK` offers: the default, and the only method with no secret.
+    case agent
+    /// A private key file, with a passphrase when it has one.
+    case key
+    case password
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .agent: "Agent"
+        case .key: "Key file"
+        case .password: "Password"
+        }
+    }
+}
+
+/// How a Trino connection logs in. `jwt` sends a bearer token and never a password; the other two
+/// drivers have no such thing, so the setting is read for Trino only (the engine refuses a token
+/// anywhere else, and `AppModel.connectionEnvironment` does not send one).
+enum DatabaseAuth: String, CaseIterable, Identifiable, Codable {
+    case password
+    case jwt
+
+    var id: Self { self }
+
+    var title: String { self == .jwt ? "JWT" : "Password" }
+}
+
 /// A saved database, Navicat style. The password never lives here: it is stored separately in the
 /// Keychain, keyed by `id`, and a connection with no stored password simply connects without one.
 struct Connection: Identifiable, Codable, Equatable {
@@ -320,11 +352,40 @@ struct Connection: Identifiable, Codable, Equatable {
     /// engine.
     var environment: ConnectionEnvironment?
 
+    // The W11 fields (blueprint section 9.1). All flat, all `decodeIfPresent`, and every default is
+    // what a connection did before they existed, so a connections.json from an earlier build loads
+    // as it was and is never moved aside as corrupt. No secret is ever stored here: the bastion's
+    // password, a key's passphrase and a JWT live in the Keychain (`ConnectionKeychain.Slot`).
+
+    /// The bastion, by name or by `~/.ssh/config` alias (`sshUseConfig`). Empty means no tunnel.
+    var sshHost: String
+    /// `sshHost` is a `Host` alias in `~/.ssh/config`, and the engine reads `HostName`, `User`,
+    /// `Port` and `IdentityFile` from there for whatever the fields below leave blank.
+    var sshUseConfig: Bool
+    /// `0` means "not set": 22, or the alias's own port.
+    var sshPort: Int
+    var sshUser: String
+    var sshAuth: SSHAuthMethod
+    var sshKeyPath: String
+    /// Trino only.
+    var dbAuth: DatabaseAuth
+    /// A CA bundle this connection trusts instead of the platform store (PostgreSQL and Trino).
+    var caFile: String
+    /// Milliseconds a statement may run on this connection. `nil` inherits the app-wide setting,
+    /// which is not the same as `0` ("no bound"): it keeps following that setting when it changes.
+    var statementTimeoutMS: Int?
+
+    /// Whether a run on this connection goes through an SSH bastion.
+    var usesTunnel: Bool { !sshHost.trimmingCharacters(in: .whitespaces).isEmpty }
+
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
          user: String, database: String, schema: String, verify: Bool,
          showAllSchemas: Bool = false, showAllDatabases: Bool = false, group: UUID? = nil,
-         safeMode: ConnectionSafeMode = .full, environment: ConnectionEnvironment? = nil) {
+         safeMode: ConnectionSafeMode = .full, environment: ConnectionEnvironment? = nil,
+         sshHost: String = "", sshUseConfig: Bool = false, sshPort: Int = 0, sshUser: String = "",
+         sshAuth: SSHAuthMethod = .agent, sshKeyPath: String = "", dbAuth: DatabaseAuth = .password,
+         caFile: String = "", statementTimeoutMS: Int? = nil) {
         self.id = id
         self.name = name
         self.color = color
@@ -342,11 +403,22 @@ struct Connection: Identifiable, Codable, Equatable {
         self.group = group
         self.safeMode = safeMode
         self.environment = environment
+        self.sshHost = sshHost
+        self.sshUseConfig = sshUseConfig
+        self.sshPort = sshPort
+        self.sshUser = sshUser
+        self.sshAuth = sshAuth
+        self.sshKeyPath = sshKeyPath
+        self.dbAuth = dbAuth
+        self.caFile = caFile
+        self.statementTimeoutMS = statementTimeoutMS
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
         case showAllSchemas, showAllDatabases, group, safeMode, environment
+        case sshHost, sshUseConfig, sshPort, sshUser, sshAuth, sshKeyPath, dbAuth, caFile
+        case statementTimeoutMS
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -386,6 +458,17 @@ struct Connection: Identifiable, Codable, Equatable {
         // `try?`: a value this build does not know must not move the whole file aside as corrupt.
         let word = try? container.decodeIfPresent(String.self, forKey: .environment)
         environment = word.flatMap { ConnectionEnvironment(rawValue: $0) }
+        sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
+        sshUseConfig = try container.decodeIfPresent(Bool.self, forKey: .sshUseConfig) ?? false
+        sshPort = try container.decodeIfPresent(Int.self, forKey: .sshPort) ?? 0
+        sshUser = try container.decodeIfPresent(String.self, forKey: .sshUser) ?? ""
+        // `try?` for the two words, like the tag: one a later build wrote is the default here, not a
+        // reason to move the whole file aside.
+        sshAuth = (try? container.decodeIfPresent(SSHAuthMethod.self, forKey: .sshAuth)) ?? .agent
+        sshKeyPath = try container.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
+        dbAuth = (try? container.decodeIfPresent(DatabaseAuth.self, forKey: .dbAuth)) ?? .password
+        caFile = try container.decodeIfPresent(String.self, forKey: .caFile) ?? ""
+        statementTimeoutMS = try? container.decodeIfPresent(Int.self, forKey: .statementTimeoutMS)
     }
 
     /// One-line identity for the sidebar and the picker: `host:port/database.schema`.
@@ -424,11 +507,21 @@ struct Connection: Identifiable, Codable, Equatable {
 /// one-step way to get a connection without typing every field.
 ///
 ///     trino://user:secret@host:8443/hive/analytics
-///     postgresql://user:secret@host:5432/mydb
-///     mysql://user:secret@host:3306/mydb
+///     postgresql://user:secret@host:5432/mydb?sslmode=verify-full
+///     mysql://user:secret@host:3306/mydb?ssl-mode=REQUIRED
 ///
 /// The scheme picks the driver — the one thing a URL says that the individual fields cannot.
 /// `http`/`https` are read as Trino, because that is what they meant before the other two existed.
+///
+/// **TLS is never lowered by an import** (DBX-29). A URL that names an encryption mode is read
+/// for it: PostgreSQL's libpq words are kept verbatim (`verify-full` stays `verify-full`, it is
+/// never folded into `require`, which does not check the certificate), MySQL's `ssl-mode` and
+/// `useSSL` map to `disable`/`prefer`/`require`, and a word that means something this app cannot
+/// do — MySQL's `VERIFY_CA`/`VERIFY_IDENTITY`, libpq's `allow`, anything unknown — is refused *by
+/// name* so the person knows what to fix. The old behaviour dropped the parameter and left the
+/// form on its default, so a URL that said "verify the certificate" became a connection that did
+/// not, with no notice. `host`, `hostaddr` and `port` parameters are ignored: they would override
+/// the authority the person can see, and the form is where the host is chosen.
 enum ConnectionURL {
     struct Parsed {
         var kind: ConnectionKind
@@ -439,9 +532,24 @@ enum ConnectionURL {
         var password: String?
         var database: String
         var schema: String
+        /// Postgres and MySQL: the mode the URL named, in this app's words. `nil` when it named none.
+        var sslmode: String?
+        /// Trino: whether the URL asked for the certificate to be checked. `nil` when it did not say.
+        var verify: Bool?
+        /// Parameters that were read and deliberately not used, by name, for the form to report.
+        var ignored: [String] = []
     }
 
-    static func parse(_ raw: String) -> Parsed? {
+    /// Why a URL cannot be imported as written. The message is for the person: it names the
+    /// parameter and the value, and what would work.
+    struct Failure: LocalizedError, Equatable {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// `nil` for a URL that is not a connection URL at all; a URL that is one but says something
+    /// this app cannot honour throws a `Failure` naming it.
+    static func parse(_ raw: String) throws -> Parsed? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         // A bare `host:5432/db` would be read as the scheme `host`, so only an explicit `://`
@@ -458,7 +566,7 @@ enum ConnectionURL {
         }
 
         let path = parts.path.split(separator: "/").map(String.init)
-        return Parsed(
+        var parsed = Parsed(
             kind: kind,
             host: host,
             port: parts.port ?? kind.defaultPort,
@@ -470,6 +578,69 @@ enum ConnectionURL {
             // database with a slash in its name, which is not a thing.
             schema: kind == .trino && path.count > 1 ? path[1] : ""
         )
+        try applyQuery(parts.queryItems ?? [], to: &parsed)
+        return parsed
+    }
+
+    private static let libpqModes = ["disable", "prefer", "require", "verify-ca", "verify-full"]
+
+    private static func applyQuery(_ items: [URLQueryItem], to parsed: inout Parsed) throws {
+        for item in items {
+            let name = item.name.lowercased()
+            let value = (item.value ?? "").trimmingCharacters(in: .whitespaces)
+            switch name {
+            case "host", "hostaddr", "port":
+                parsed.ignored.append(item.name)
+            case "sslmode", "ssl-mode", "ssl_mode":
+                try applyMode(named: item.name, value: value, to: &parsed)
+            case "usessl":
+                guard parsed.kind == .mysql else { parsed.ignored.append(item.name); continue }
+                switch value.lowercased() {
+                case "true": parsed.sslmode = "require"
+                case "false": parsed.sslmode = "disable"
+                default:
+                    throw Failure(message: "\(item.name)=\(value) isn't true or false, so the TLS setting can't be imported.")
+                }
+            default:
+                parsed.ignored.append(item.name)
+            }
+        }
+    }
+
+    private static func applyMode(named name: String, value: String, to parsed: inout Parsed) throws {
+        let word = value.lowercased()
+        switch parsed.kind {
+        case .postgres:
+            guard libpqModes.contains(word) else {
+                throw Failure(message: "\(name)=\(value) isn't a PostgreSQL SSL mode this app supports. "
+                              + "Use \(libpqModes.joined(separator: ", ")).")
+            }
+            parsed.sslmode = word
+        case .mysql:
+            switch word.uppercased() {
+            case "DISABLED", "DISABLE": parsed.sslmode = "disable"
+            case "PREFERRED", "PREFER": parsed.sslmode = "prefer"
+            case "REQUIRED", "REQUIRE": parsed.sslmode = "require"
+            case "VERIFY_CA", "VERIFY_IDENTITY", "VERIFY-CA", "VERIFY-FULL", "VERIFY_FULL":
+                throw Failure(message: "\(name)=\(value) asks for the certificate to be verified, which the MySQL "
+                              + "driver can't do here. Use DISABLED, PREFERRED or REQUIRED, or set the mode by hand.")
+            default:
+                throw Failure(message: "\(name)=\(value) isn't a MySQL SSL mode this app knows. "
+                              + "Use DISABLED, PREFERRED or REQUIRED.")
+            }
+        case .trino:
+            // The engine reads `sslmode` for Trino too; the app's own picker spells it as a
+            // transport and a verify flag, so the word is translated rather than stored.
+            switch word {
+            case "disable": parsed.scheme = "http"
+            case "prefer": parsed.scheme = "prefer"
+            case "require": parsed.scheme = "https"; parsed.verify = false
+            case "verify-ca", "verify-full": parsed.scheme = "https"; parsed.verify = true
+            default:
+                throw Failure(message: "\(name)=\(value) isn't an SSL mode this app knows. "
+                              + "Use \(libpqModes.joined(separator: ", ")).")
+            }
+        }
     }
 }
 
@@ -636,11 +807,31 @@ enum ConnectionStore {
     }
 }
 
-/// One generic-password Keychain item per connection, on the legacy login keychain.
+/// The Keychain items a connection owns, on the legacy login keychain: the database password
+/// (the one that has always existed, under the bare UUID) and three more, each under a prefixed
+/// account (blueprint W11 section 8). The prefixes are a contract with the engine
+/// (`qh_credentials::account_for`): the two sides must produce the same string byte for byte, and
+/// `ConnectionKeychainTests` and the Rust test pin the same literals.
+///
 /// The app is ad-hoc signed with no entitlements, so this deliberately avoids
 /// kSecUseDataProtectionKeychain and access groups, which both need a real signing team.
 enum ConnectionKeychain {
     private static let service = "id.data-ecosystem.queryhive"
+
+    /// What a connection can keep in the Keychain. A secret is only ever here, never in
+    /// `connections.json`, never in an environment the app logs.
+    enum Slot: CaseIterable {
+        case database, sshPassword, sshPassphrase, jwt
+
+        fileprivate var prefix: String {
+            switch self {
+            case .database: ""
+            case .sshPassword: "ssh-password:"
+            case .sshPassphrase: "ssh-passphrase:"
+            case .jwt: "jwt:"
+            }
+        }
+    }
 
     struct KeychainError: Error, LocalizedError {
         let status: OSStatus
@@ -649,14 +840,18 @@ enum ConnectionKeychain {
         }
     }
 
-    private static func query(for id: UUID) -> [String: Any] {
+    /// The account string of one slot of one connection. `uuidString` is upper case, which is
+    /// the spelling the engine folds a lower-case UUID to.
+    static func account(_ slot: Slot, for id: UUID) -> String { slot.prefix + id.uuidString }
+
+    private static func query(_ slot: Slot, for id: UUID) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
-         kSecAttrAccount as String: id.uuidString]
+         kSecAttrAccount as String: account(slot, for: id)]
     }
 
-    static func set(_ credential: String, for id: UUID) throws {
-        let search = query(for: id)
+    static func set(_ credential: String, slot: Slot, for id: UUID) throws {
+        let search = query(slot, for: id)
         let data = Data(credential.utf8)
         var attributes = search
         attributes[kSecValueData as String] = data
@@ -667,8 +862,8 @@ enum ConnectionKeychain {
         guard updateStatus == errSecSuccess else { throw KeychainError(status: updateStatus) }
     }
 
-    static func get(for id: UUID) throws -> String? {
-        var search = query(for: id)
+    static func get(slot: Slot, for id: UUID) throws -> String? {
+        var search = query(slot, for: id)
         search[kSecReturnData as String] = true
         search[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
@@ -680,8 +875,8 @@ enum ConnectionKeychain {
 
     /// `get`, but never shows a prompt: an item that would need the user's approval is reported as
     /// not available. For background work (warming a session) that must not put a dialog up.
-    static func getWithoutPrompt(for id: UUID) throws -> String? {
-        var search = query(for: id)
+    static func getWithoutPrompt(slot: Slot, for id: UUID) throws -> String? {
+        var search = query(slot, for: id)
         search[kSecReturnData as String] = true
         search[kSecMatchLimit as String] = kSecMatchLimitOne
         // `kSecUseAuthenticationUIFail`'s replacement (macOS 11): a context that may not show UI.
@@ -695,8 +890,108 @@ enum ConnectionKeychain {
         return String(decoding: data, as: UTF8.self)
     }
 
-    static func delete(for id: UUID) throws {
-        let status = SecItemDelete(query(for: id) as CFDictionary)
+    /// Whether an item is saved, from its attributes only: the secret is never returned, so this
+    /// can be asked on every render of the form without a prompt.
+    static func contains(slot: Slot, for id: UUID) -> Bool {
+        var search = query(slot, for: id)
+        search[kSecMatchLimit as String] = kSecMatchLimitOne
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        search[kSecUseAuthenticationContext as String] = context
+        let status = SecItemCopyMatching(search as CFDictionary, nil)
+        // An item that exists but would need approval to read still exists.
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
+    }
+
+    static func delete(slot: Slot, for id: UUID) throws {
+        let status = SecItemDelete(query(slot, for: id) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
+    }
+
+    /// Removes every slot of a connection. Each is tried, and the first failure is thrown after the
+    /// rest have been: one stuck item must not leave the other three behind.
+    static func deleteAll(for id: UUID) throws {
+        var first: Error?
+        for slot in Slot.allCases {
+            do { try delete(slot: slot, for: id) } catch { first = first ?? error }
+        }
+        if let first { throw first }
+    }
+
+    /// The delete in `renew` went through and neither write-back did: the secret is gone from the
+    /// Keychain and the person has to enter it again. Nothing else `renew` throws means that.
+    struct SecretLost: Error, LocalizedError {
+        let slot: Slot
+        let underlying: Error
+        var errorDescription: String? { "The saved secret could not be written back: \(underlying.localizedDescription)" }
+    }
+
+    /// The notice text for secrets `SecretLost` reported, one sentence a person can act on.
+    static func lostMessage(connection: String, secrets: [String]) -> String {
+        "Couldn't write the saved \(secrets.joined(separator: ", ")) for \(connection) back to Keychain after renewing it. Enter it again in the connection form."
+    }
+
+    /// Re-writes an item that an older build left with an access list that still prompts (C-6).
+    ///
+    /// Only an item `getWithoutPrompt` says would need approval is touched, by `renew`. Returns
+    /// whether an item was rewritten.
+    @discardableResult
+    static func renewIfPrompting(slot: Slot, for id: UUID) throws -> Bool {
+        do {
+            _ = try getWithoutPrompt(slot: slot, for: id)
+            return false
+        } catch let error as KeychainError where error.status == errSecInteractionNotAllowed {
+            return try renew(slot: slot, for: id, in: SystemKeychain())
+        }
+    }
+
+    /// Reads the item (the one prompt, from a user who is saving the connection and expects
+    /// dialogs), deletes it and writes it back, so this build owns it. If the write-back fails the
+    /// value is written once more, and then `SecretLost` is thrown. A failure before the delete
+    /// throws as it is: the item is still where it was.
+    static func renew(slot: Slot, for id: UUID, in store: SecretStoring) throws -> Bool {
+        guard let value = try store.get(slot: slot, for: id) else { return false }
+        try store.delete(slot: slot, for: id)
+        do {
+            try store.set(value, slot: slot, for: id)
+        } catch {
+            do {
+                try store.set(value, slot: slot, for: id)
+            } catch {
+                throw SecretLost(slot: slot, underlying: error)
+            }
+        }
+        return true
+    }
+
+    // The database slot under the names every earlier caller uses.
+    static func set(_ credential: String, for id: UUID) throws { try set(credential, slot: .database, for: id) }
+    static func get(for id: UUID) throws -> String? { try get(slot: .database, for: id) }
+    static func getWithoutPrompt(for id: UUID) throws -> String? { try getWithoutPrompt(slot: .database, for: id) }
+    static func delete(for id: UUID) throws { try delete(slot: .database, for: id) }
+}
+
+/// Where a connection's secrets live, as the app uses them. The real answer is the Keychain
+/// (`SystemKeychain`); a test hands in a dictionary, because writing to a login keychain during an
+/// ordinary `swift test` is not a thing a test suite does unasked.
+protocol SecretStoring {
+    func contains(slot: ConnectionKeychain.Slot, for id: UUID) -> Bool
+    func get(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String?
+    func set(_ secret: String, slot: ConnectionKeychain.Slot, for id: UUID) throws
+    func delete(slot: ConnectionKeychain.Slot, for id: UUID) throws
+}
+
+struct SystemKeychain: SecretStoring {
+    func contains(slot: ConnectionKeychain.Slot, for id: UUID) -> Bool {
+        ConnectionKeychain.contains(slot: slot, for: id)
+    }
+    func get(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? {
+        try ConnectionKeychain.get(slot: slot, for: id)
+    }
+    func set(_ secret: String, slot: ConnectionKeychain.Slot, for id: UUID) throws {
+        try ConnectionKeychain.set(secret, slot: slot, for: id)
+    }
+    func delete(slot: ConnectionKeychain.Slot, for id: UUID) throws {
+        try ConnectionKeychain.delete(slot: slot, for: id)
     }
 }

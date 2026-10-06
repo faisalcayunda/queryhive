@@ -982,6 +982,36 @@ enum Snapshot {
             model.connections.append(extra)
             model.rebuildTree()
             model.presentConnectionEditor(extra.id)
+        case "connection-ssh":
+            // V-11: the editor on a tunnelled PostgreSQL connection that checks its certificate
+            // against a CA file, which is the one scene that shows every W11 section at once.
+            let tunnelled = Connection(id: UUID(), name: "Warehouse via bastion", color: .violet, kind: .postgres,
+                                       host: "pg.internal", port: 5432, sslmode: "verify-full",
+                                       user: "analyst", database: "warehouse", schema: "public", verify: true,
+                                       sshHost: "bastion.corp", sshPort: 22, sshUser: "deploy", sshAuth: .key,
+                                       sshKeyPath: "~/.ssh/id_ed25519", caFile: "/etc/qh/ca.pem",
+                                       statementTimeoutMS: 30_000)
+            model.connections.append(tunnelled)
+            model.rebuildTree()
+            ConnectionEditorSheet.revealTunnelForSnapshot = true
+            model.presentConnectionEditor(tunnelled.id)
+        case "host-key-unknown", "host-key-changed":
+            // V-11: the host-key sheet, first use and refusal. Fixed text, so the picture does not
+            // depend on any machine's known_hosts.
+            let changed = scene == "host-key-changed"
+            HostKeyCenter.shared.dismiss()
+            HostKeyCenter.shared.report(
+                Event.HostKeyDetail(
+                    state: changed ? "changed" : "unknown", host: "bastion.corp", port: 22, alias: "prod-bastion",
+                    keyType: "ssh-ed25519", fingerprint: "SHA256:uNiQuEfInGeRpRiNtFoRtHeSnApShOtSsCeNeAbCdE",
+                    appKnownHosts: "~/Library/Application Support/QueryHive/known_hosts", caCovered: false,
+                    recorded: changed
+                        ? [Event.HostKeyDetail.RecordedKey(fingerprint: "SHA256:oLdFiNgErPrInTrEcOrDeDoNtHeSeRvErBeFoReXaMp",
+                                                           keyType: "ssh-ed25519", source: "user",
+                                                           path: "~/.ssh/known_hosts", line: 3)]
+                        : nil,
+                    pinned: nil),
+                env: [:])
         case "table":
             // The table destination: same tab, different toolbar, and a panel that reports the
             // statement Trino ran rather than a file list.

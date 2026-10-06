@@ -3,9 +3,11 @@ import Foundation
 
 /// One connection read out of the `.ncx` file Navicat writes for **File ▸ Export Connections**.
 ///
-/// Deliberately not a `Connection`: the file describes things QueryHive has no slot for (an SSH
-/// tunnel, a named pipe, a MySQL character set), and those are dropped here, once, with a record of
-/// what was dropped — rather than being silently lost somewhere inside a mapping function.
+/// Deliberately not a `Connection`: the file describes things QueryHive has no slot for (a named
+/// pipe, a MySQL character set), and those are dropped here, once, with a record of what was dropped
+/// — rather than being silently lost somewhere inside a mapping function. The SSH tunnel is no
+/// longer one of them: it is read (host, port, user, method, key file, and the password or
+/// passphrase when Navicat saved one).
 struct ImportedConnection {
     var name: String
     var kind: ConnectionKind
@@ -20,10 +22,23 @@ struct ImportedConnection {
     /// Navicat's own type string — "POSTGRESQL", "MYSQL" — kept so the report can say which entries
     /// arrived under a type QueryHive does not have a matching driver for.
     var sourceType: String
-    /// The tunnel host, when the entry had one. QueryHive cannot open an SSH tunnel, so an entry
-    /// with this set will not connect until that is dealt with; the import says so instead of
-    /// pretending otherwise.
+    /// The tunnel host, when the entry has a tunnel switched on. Empty otherwise: an entry whose
+    /// `SSH` is `false` keeps a stale `SSH_Host` in the file, and that is not a tunnel.
     var sshHost: String
+    /// `0` when the file gave none.
+    var sshPort: Int = 0
+    var sshUser: String = ""
+    var sshAuth: SSHAuthMethod = .agent
+    /// Already decrypted; `nil` when Navicat did not save one.
+    var sshPassword: String?
+    var sshKeyPath: String = ""
+    var sshPassphrase: String?
+    /// Whether the entry asked for TLS (`SSL="true"`). The import raises the connection's mode to at
+    /// least `require` for it and never lowers one (`NavicatImport.tlsMode`).
+    var ssl: Bool = false
+    /// What the file had that this import did not bring in, named, for the summary: a method or an
+    /// attribute it could not read. Silence about these would be a lie of omission.
+    var notImported: [String] = []
     /// True when Navicat had a password saved for this entry and it decrypted.
     var hasPassword: Bool { password?.isEmpty == false }
 }
@@ -117,6 +132,7 @@ enum NavicatImport {
                 continue
             }
             let port = Int(attributes["Port"] ?? "") ?? defaultPort(for: kind)
+            let tunnel = tunnel(from: attributes)
             out.append(ImportedConnection(
                 name: entryName,
                 kind: kind,
@@ -138,10 +154,72 @@ enum NavicatImport {
                 password: decrypt(attributes["Password"] ?? ""),
                 remarks: attributes["Remarks"] ?? "",
                 sourceType: sourceType,
-                sshHost: attributes["SSH_Host"] ?? ""
+                sshHost: tunnel.host,
+                sshPort: tunnel.port,
+                sshUser: tunnel.user,
+                sshAuth: tunnel.auth,
+                sshPassword: tunnel.password,
+                sshKeyPath: tunnel.keyPath,
+                sshPassphrase: tunnel.passphrase,
+                ssl: (attributes["SSL"] ?? "").lowercased() == "true",
+                notImported: tunnel.notImported
             ))
         }
         return Export(connections: out, skipped: skipped)
+    }
+
+    /// The tunnel of one entry, read from the attributes Navicat writes for it.
+    ///
+    /// Verified against two real exports (65 entries, 8 of them tunnelled): `SSH` is `true` or
+    /// `false`, and a tunnelled entry carries `SSH_Host`, `SSH_Port`, `SSH_UserName`,
+    /// `SSH_AuthenMethod`, `SSH_Password` (the same hex AES-128-CBC as `Password`, and it decrypts),
+    /// `SSH_SavePassword`, `SSH_PrivateKey`, `SSH_Passphrase` and `SSH_SavePassphrase`. Only
+    /// `PASSWORD` was ever seen as a method; `PUBLICKEY` is Navicat's documented word for a key and
+    /// is read as one, but no export on hand has it. An entry with `SSL="true"` was not present in
+    /// either export, so the TLS attribute is read on the strength of its name only.
+    private static func tunnel(from attributes: [String: String]) -> (host: String, port: Int, user: String, auth: SSHAuthMethod, password: String?, keyPath: String, passphrase: String?, notImported: [String]) {
+        let host = (attributes["SSH_Host"] ?? "").trimmingCharacters(in: .whitespaces)
+        // `SSH="false"` with a host in the file is a tunnel the person switched off.
+        guard !host.isEmpty, (attributes["SSH"] ?? "true").lowercased() != "false" else {
+            return ("", 0, "", .agent, nil, "", nil, [])
+        }
+        var notes: [String] = []
+        let method = (attributes["SSH_AuthenMethod"] ?? "").uppercased()
+        let auth: SSHAuthMethod
+        switch method {
+        case "PASSWORD": auth = .password
+        case "PUBLICKEY": auth = .key
+        case "":
+            auth = .agent
+        default:
+            // A word this import does not know, such as Navicat's "Kerberos": the agent is the
+            // choice that sends no secret, and the summary says to pick the method by hand.
+            auth = .agent
+            notes.append("SSH method \(attributes["SSH_AuthenMethod"] ?? method)")
+        }
+        let savedPassword = (attributes["SSH_SavePassword"] ?? "true").lowercased() != "false"
+        let savedPassphrase = (attributes["SSH_SavePassphrase"] ?? "true").lowercased() != "false"
+        return (host,
+                Int(attributes["SSH_Port"] ?? "") ?? 0,
+                attributes["SSH_UserName"] ?? "",
+                auth,
+                auth == .password && savedPassword ? decrypt(attributes["SSH_Password"] ?? "") : nil,
+                attributes["SSH_PrivateKey"] ?? "",
+                auth == .key && savedPassphrase ? decrypt(attributes["SSH_Passphrase"] ?? "") : nil,
+                notes)
+    }
+
+    /// The `sslmode` an import writes (PF-6): **never lower than what the connection already has, and
+    /// at least `require` when the entry asked for TLS.** `current` is the stored word, where an empty
+    /// one means the driver's own default. An entry without TLS changes nothing, so re-importing an
+    /// old file cannot weaken a connection that has since been tightened.
+    static func tlsMode(kind: ConnectionKind, ssl: Bool, current: String) -> String {
+        guard ssl, kind != .trino else { return current }
+        let rank = ["disable": 0, "allow": 1, "prefer": 2, "require": 3, "verify-ca": 4, "verify-full": 5]
+        let effective = current.isEmpty ? kind.defaultSSLMode : current
+        // A word this build does not know is kept: it may be a stricter one a later build wrote.
+        guard let have = rank[effective] else { return current }
+        return have >= 3 ? current : "require"
     }
 
     /// The database this entry was actually opened on.

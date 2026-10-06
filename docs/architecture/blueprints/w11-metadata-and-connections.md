@@ -673,7 +673,7 @@ Tidak ada perintah `credential` baru: app membaca dan menulis item lewat `Connec
 
 **Siklus hidup:**
 
-1. **Simpan:** field kosong menghapus item (tidak menyimpan string kosong); field berisi menimpa. Mengganti `sshAuth` atau `dbAuth` menghapus item yang tidak lagi dipakai, supaya rahasia yang tidak terpakai tidak menggantung.
+1. **Simpan:** field kosong berarti **tetap** (PF-5, diamandemen 2026-10-06): formulir tidak bisa menampilkan rahasia yang tersimpan, jadi kosong hanya bisa berarti "tidak diketik ulang", dan menghapus item karenanya akan menghapus rahasia pengguna tanpa ia memintanya. Field berisi menimpa. Penghapusan hanya terjadi lewat tombol "Remove saved…" yang eksplisit (ditahan sampai Simpan) atau pergantian pemakaian: mengganti `sshAuth` atau `dbAuth`, mematikan tunnel, atau mengganti driver menghapus item yang tidak lagi dipakai, supaya rahasia yang tidak terpakai tidak menggantung. Tesnya: Edit lalu Simpan dengan field kosong membiarkan keempat slot utuh (`ConnectionFormIssuesTests`).
 2. **Hapus koneksi:** keempat slot dihapus (`AppModel.swift`, `deleteConnection`; sekarang hanya password).
 3. **Duplikat:** menyalin slot yang ada, seperti password hari ini (`duplicate`).
 4. **Impor Navicat:** menulis `ssh-password` dan `ssh-passphrase` bila berhasil didekripsi (§9.5); kegagalan Keychain masuk `keychainFailures` yang sudah ada.
@@ -701,7 +701,7 @@ Tidak ada perintah `credential` baru: app membaca dan menulis item lewat `Connec
 | `dbAuth` | `password`, `jwt` (Trino saja) | `password` | `jwt`: `DB_JWT` dan `DB_PASSWORD` dikosongkan |
 | `caFile` | String | `""` | `DB_CA_FILE` |
 
-Rahasia tidak masuk struct: password SSH, passphrase, dan JWT hanya di Keychain (§8). `AppModel.connectionEnvironment(kind:host:…)` menerima struct `SSHSettings` dan `ConnectionSecrets { password, sshPassword, sshPassphrase, jwt }` (dengan `description` tersensor) menggantikan parameter `password`; tiga pemanggilnya (instance, statis `(_:password:)`, dan Test Connection di `ConnectionEditorSheet`) ikut. Bila `sshHost` tidak kosong, env selalu memuat `SSH_APP_KNOWN_HOSTS` (`<ConnectionStore.directory()>/known_hosts`) dan `SSH_HOST_KEY_DETAIL=1`. **Tidak pernah** `SSH_HOST_KEY_ACCEPT`: itu hanya dipasang `HostKeyGate` untuk satu run (§9.4).
+Rahasia tidak masuk struct: password SSH, passphrase, dan JWT hanya di Keychain (§8). `AppModel.connectionEnvironment(kind:host:…)` menerima struct `SSHSettings` dan `ConnectionSecrets { password, sshPassword, sshPassphrase, jwt }` (dengan `description` tersensor) menggantikan parameter `password`; tiga pemanggilnya (instance, statis `(_:password:)`, dan Test Connection di `ConnectionEditorSheet`) ikut. Bila `sshHost` tidak kosong, env selalu memuat `SSH_APP_KNOWN_HOSTS` (`<ConnectionStore.directory()>/known_hosts`). `SSH_HOST_KEY_DETAIL=1` **tidak** dipasang di sini: `HostKeyGate` (§9.4) menambahkannya ke setiap run yang menyebut `SSH_HOST`, jadi satu tempat saja dan pemetaan murni app tetap sama persis dengan sisi MCP (fixture bersama). **Tidak pernah** `SSH_HOST_KEY_ACCEPT`: itu hanya dipasang `HostKeyGate` untuk satu run (§9.4).
 
 Pemilihan CA mengikat mode TLS di sisi app: bila `caFile` terisi, picker `sslmode` PostgreSQL dibatasi ke `verify-ca` dan `verify-full` (bawaan `verify-full`), dan Trino memaksa transport `https` dengan verifikasi menyala. Engine tetap menolak kombinasi yang salah (§7.2). Form hanya mencegah pengguna sampai ke penolakan itu.
 

@@ -86,7 +86,13 @@ protocol EngineRun: AnyObject {
 enum Engine {
     /// A `--snapshot` render draws fixture connections (`trino.internal` and friends) and must not
     /// dial them, so it gets an engine that accepts every run and never answers.
-    static let current: any DatabaseEngine = Snapshot.requestedPath() != nil ? SilentEngine() : RustEngine()
+    ///
+    /// The Rust engine is wrapped in `HostKeyGate`, which is how a host key the engine refuses
+    /// reaches a person from every call site without any of them knowing (blueprint w11 section 9.4).
+    static let current: any DatabaseEngine = {
+        if Snapshot.requestedPath() != nil { return SilentEngine() }
+        return HostKeyGate(wrapping: RustEngine(), center: .shared)
+    }()
 }
 
 /// Accepts every command and never reports anything, so a fixture's panes stay in their loading

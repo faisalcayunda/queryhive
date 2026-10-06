@@ -148,6 +148,29 @@ struct ConnectionEditorSheet: View {
     @State private var safeMode = ConnectionSafeMode.full
     /// A label shown in the tab, breadcrumb and status bar. It changes nothing else.
     @State private var environment: ConnectionEnvironment?
+    // The W11 fields. Secrets are typed here and written on Save; a saved one is never shown.
+    @State private var sshEnabled = false
+    @State private var sshHost = ""
+    @State private var sshUseConfig = false
+    /// `0` is "not set": 22, or the alias's own port.
+    @State private var sshPort = 0
+    @State private var sshUser = ""
+    @State private var sshAuth = SSHAuthMethod.agent
+    @State private var sshKeyPath = ""
+    @State private var sshPassword = ""
+    @State private var sshPassphrase = ""
+    @State private var dbAuth = DatabaseAuth.password
+    @State private var jwt = ""
+    @State private var caFile = ""
+    /// Seconds, as typed; blank inherits the app-wide setting.
+    @State private var timeoutText = ""
+    /// Slots the person pressed "Remove saved…" for. Staged: nothing leaves the Keychain until Save.
+    @State private var removals: Set<ConnectionKeychain.Slot> = []
+    @State private var aliasPreview: Result<SSHAliasInfo, SSHAliasError>?
+    /// What the URL step read and left out, for one line on the form.
+    @State private var urlNote: String?
+    /// Whether the last Test failed on the host key, so trusting the key can run it again.
+    @State private var lastTestWasHostKey = false
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
     @State private var testProcess: (any EngineRun)?
@@ -158,35 +181,83 @@ struct ConnectionEditorSheet: View {
     /// first attempt already wrote.
     @State private var draftID = UUID()
 
+    /// Set by the `connection-ssh` snapshot scene (see `formStep`). Never set by the app itself.
+    nonisolated(unsafe) static var revealTunnelForSnapshot = false
+
     private var original: Connection? { model.connections.first { $0.id == editingID } }
 
     private var isDirty: Bool {
         guard let original else {
             return !(name.isEmpty && host.isEmpty && user.isEmpty && credential.isEmpty
-                     && database.isEmpty && schema.isEmpty)
+                     && database.isEmpty && schema.isEmpty && !sshEnabled && sshPassword.isEmpty
+                     && sshPassphrase.isEmpty && jwt.isEmpty && caFile.isEmpty && timeoutText.isEmpty)
         }
-        return !credential.isEmpty || name != original.name || color != original.color
-            || kind != original.kind || host != original.host || port != original.port
-            || scheme != original.scheme || sslmode != original.sslmode
-            || user != original.user || database != original.database || schema != original.schema
-            || verifyTLS != original.verify || safeMode != original.safeMode
-            || environment != original.environment
+        return !credential.isEmpty || !sshPassword.isEmpty || !sshPassphrase.isEmpty || !jwt.isEmpty
+            || !removals.isEmpty || draftConnection(id: original.id) != original
     }
 
-    /// Name, host and user are what the engine cannot invent, and Postgres cannot open a
-    /// connection without a database at all. Port and encryption always carry a value; a blank
-    /// password simply means "connect without one".
-    private var missingRequired: Set<String> {
-        var missing = Set<String>()
-        if name.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("name") }
-        if host.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("host") }
-        if user.trimmingCharacters(in: .whitespaces).isEmpty { missing.insert("user") }
-        if !(1...65535).contains(port) { missing.insert("port") }
-        if kind.requiresDatabase, database.trimmingCharacters(in: .whitespaces).isEmpty {
-            missing.insert("database")
-        }
-        return missing
+    /// The connection the form describes, secrets aside. Compared against the saved one for the
+    /// "Unsaved changes" mark, and saved as it is.
+    private func draftConnection(id: UUID) -> Connection {
+        Connection(id: id,
+                   name: name.trimmingCharacters(in: .whitespaces),
+                   color: color,
+                   kind: kind,
+                   host: host.trimmingCharacters(in: .whitespaces),
+                   port: port,
+                   scheme: scheme,
+                   sslmode: sslmode,
+                   user: user.trimmingCharacters(in: .whitespaces),
+                   database: database.trimmingCharacters(in: .whitespaces),
+                   schema: schema.trimmingCharacters(in: .whitespaces),
+                   verify: verifyTLS,
+                   showAllSchemas: showAllSchemas,
+                   showAllDatabases: showAllDatabases,
+                   group: original?.group,
+                   safeMode: safeMode,
+                   environment: environment,
+                   // Turning the tunnel off clears its fields on Save, as the blueprint says; the
+                   // values stay in the form until then so turning it back on finds them.
+                   sshHost: sshEnabled ? sshHost.trimmingCharacters(in: .whitespaces) : "",
+                   sshUseConfig: sshEnabled && sshUseConfig,
+                   sshPort: sshEnabled ? sshPort : 0,
+                   sshUser: sshEnabled ? sshUser.trimmingCharacters(in: .whitespaces) : "",
+                   sshAuth: sshEnabled ? sshAuth : .agent,
+                   sshKeyPath: sshEnabled && sshAuth == .key ? sshKeyPath.trimmingCharacters(in: .whitespaces) : "",
+                   dbAuth: kind == .trino ? dbAuth : .password,
+                   caFile: kind == .mysql ? "" : caFile.trimmingCharacters(in: .whitespaces),
+                   statementTimeoutMS: timeoutMS)
     }
+
+    /// The per-connection bound in milliseconds, `nil` when the field is blank (inherit) or not a
+    /// number (which `ConnectionFormIssues` reports).
+    private var timeoutMS: Int? {
+        guard let seconds = Int(timeoutText.trimmingCharacters(in: .whitespaces)), (0...600).contains(seconds)
+        else { return nil }
+        return seconds * 1000
+    }
+
+    private var formState: ConnectionFormState {
+        ConnectionFormState(kind: kind, name: name, host: host, port: port, user: user, database: database,
+                            sshEnabled: sshEnabled, sshHost: sshHost, sshUseConfig: sshUseConfig,
+                            sshPort: sshPort, sshUser: sshUser, sshAuth: sshAuth, sshKeyPath: sshKeyPath,
+                            caFile: kind == .mysql ? "" : caFile, timeoutText: timeoutText)
+    }
+
+    private var resolvedAlias: SSHAliasInfo? {
+        if case .success(let info)? = aliasPreview { return info }
+        return nil
+    }
+
+    /// What is missing or wrong, by field. Name, host and user are what the engine cannot invent,
+    /// and Postgres cannot open a connection without a database at all; the tunnel's host, user and
+    /// key file count when it is on (an alias may supply the user and the key). Port and encryption
+    /// always carry a value; a blank password simply means "connect without one".
+    private var issues: [ConnectionField] {
+        ConnectionFormIssues.fields(for: formState, resolved: resolvedAlias)
+    }
+
+    private var missingRequired: Set<String> { Set(issues.map(\.rawValue)) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -212,6 +283,14 @@ struct ConnectionEditorSheet: View {
         }
         .onAppear { load() }
         .onDisappear { testProcess?.terminate() }
+        // A host key refused during Test is asked about here, over this sheet: a sheet cannot be
+        // presented over a sheet from the view that presented the first one.
+        .hostKeySheet(active: true)
+        // Trusting the key and running Test again are separate acts, but this one is what the
+        // person was in the middle of.
+        .onChange(of: HostKeyCenter.shared.trustedCount) { _, _ in
+            if lastTestWasHostKey, step == .form { runTest() }
+        }
     }
 
     /// Step one, and only for a connection that does not exist yet: pick the type from a grid of
@@ -308,8 +387,16 @@ struct ConnectionEditorSheet: View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
-            ScrollView {
-                form.padding(20)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    form.padding(20)
+                }
+                .onAppear {
+                    // Snapshot scaffolding, like `previewTestCount`: the W11 sections sit below the
+                    // fold, and a picture of the form that never shows them would not be a picture of
+                    // them. Never true in the running app.
+                    if Self.revealTunnelForSnapshot { proxy.scrollTo("tunnel", anchor: .top) }
+                }
             }
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             footer
@@ -322,20 +409,34 @@ struct ConnectionEditorSheet: View {
         if port == kind.defaultPort { port = option.defaultPort }
         kind = option
         if option.hasSSLModes, sslmode.isEmpty { sslmode = option.defaultSSLMode }
+        // What only applied to the other driver goes with it: a JWT is Trino's, and MySQL has no CA.
+        if option != .trino { dbAuth = .password; jwt = "" }
+        if option == .mysql { caFile = "" }
         step = .form
     }
 
     private func applyURL() {
-        guard let parsed = ConnectionURL.parse(urlText) else {
-            urlError = "Couldn't read that. Expected something like postgresql://user:password@host:5432/mydb"
+        let parsed: ConnectionURL.Parsed
+        do {
+            guard let read = try ConnectionURL.parse(urlText) else {
+                urlError = "Couldn't read that. Expected something like postgresql://user:password@host:5432/mydb"
+                return
+            }
+            parsed = read
+        } catch {
+            // A TLS word this app can't honour is named, never dropped: the form would otherwise
+            // open on the default and a certificate the URL asked to verify would not be.
+            urlError = error.localizedDescription
             return
         }
         urlError = nil
+        urlNote = parsed.ignored.isEmpty ? nil : "Ignored from the URL: " + parsed.ignored.joined(separator: ", ") + "."
         kind = parsed.kind
         host = parsed.host
         port = parsed.port
         scheme = parsed.scheme.isEmpty ? "https" : parsed.scheme
-        sslmode = parsed.kind.defaultSSLMode
+        sslmode = parsed.sslmode ?? parsed.kind.defaultSSLMode
+        verifyTLS = parsed.verify ?? true
         user = parsed.user
         credential = parsed.password ?? ""
         database = parsed.database
@@ -392,7 +493,8 @@ struct ConnectionEditorSheet: View {
                     // one: the other two drivers' SSL mode pickers already show it for this
                     // exact outcome. See `TrinoTransport` for how it reaches the engine.
                     LabeledField("Transport") {
-                        Segmented(selection: trinoTransport, options: TrinoTransport.allCases) { $0.label }
+                        Segmented(selection: trinoTransport,
+                                  options: caFile.isEmpty ? TrinoTransport.allCases : [.https]) { $0.label }
                     }
                     .frame(width: 235)
                     .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
@@ -420,12 +522,17 @@ struct ConnectionEditorSheet: View {
                 requiredHint("user")
             }
             LabeledField(editingID == nil ? "Password" : "Password · leave blank to keep") {
-                SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
-                    .field()
-                Text(passwordHint)
-                    .font(.ui(11))
-                    .foregroundStyle(Tone.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if kind == .trino, dbAuth == .jwt {
+                    tlsNote("Not used: this connection logs in with a JWT, set under Authentication below.")
+                } else {
+                    SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
+                        .field()
+                    Text(passwordHint)
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    removeSavedRow(.database)
+                }
             }
             HStack(alignment: .bottom, spacing: 12) {
                 LabeledField(kind.databaseLabel + (kind.requiresDatabase ? " · Required" : "")) {
@@ -477,7 +584,9 @@ struct ConnectionEditorSheet: View {
             }
             if kind.hasSSLModes {
                 LabeledField("SSL mode") {
-                    Segmented(selection: $sslmode, options: kind.sslModes) { $0 }
+                    // With a CA file chosen only the modes that check the certificate make sense.
+                    Segmented(selection: $sslmode,
+                              options: kind == .postgres && !caFile.isEmpty ? ["verify-ca", "verify-full"] : kind.sslModes) { $0 }
                 }
             } else {
                 // HTTPS is the only Trino transport with a verification answer to give, so it is
@@ -493,6 +602,7 @@ struct ConnectionEditorSheet: View {
                 switch TrinoTransport(stored: scheme) {
                 case .https:
                     ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
+                        .disabled(!caFile.isEmpty)
                 case .prefer:
                     tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
                             + "The certificate is not checked.")
@@ -535,7 +645,181 @@ struct ConnectionEditorSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            // The W11 sections come last, after everything an existing connection already showed.
+            if let urlNote { tlsNote(urlNote) }
+            LabeledField("Statement timeout (seconds)") {
+                VStack(alignment: .leading, spacing: 5) {
+                    TextField("Follow the app setting (\(model.statementTimeoutMS / 1000) s)", text: $timeoutText)
+                        .field(invalid: attemptedSave && missingRequired.contains("timeout"))
+                    tlsNote("Blank follows Settings. 0 means no bound. A statement that overruns is cancelled "
+                            + "on the server. The MCP server never runs unbounded: it uses this, or 60 s.")
+                }
+            }
+            if kind == .trino { authenticationSection }
+            if kind != .mysql { caSection } else {
+                tlsNote("MySQL can't check a certificate against a CA file of your own in this build, "
+                        + "so there is no CA setting for it.")
+            }
+            tunnelSection
         }
+    }
+
+    // MARK: W11 sections
+
+    /// Trino only: a password, or a bearer token sent over HTTPS.
+    @ViewBuilder private var authenticationSection: some View {
+        LabeledField("Authentication") {
+            VStack(alignment: .leading, spacing: 8) {
+                Segmented(selection: $dbAuth, options: DatabaseAuth.allCases) { $0.title }
+                if dbAuth == .jwt {
+                    SecureField(editingID == nil ? "Paste the token" : "Unchanged", text: $jwt).field()
+                    removeSavedRow(.jwt)
+                    tlsNote("JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved.")
+                }
+            }
+        }
+    }
+
+    /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store.
+    @ViewBuilder private var caSection: some View {
+        LabeledField("CA certificate") {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    TextField("Use the system trust store", text: $caFile)
+                        .field(invalid: attemptedSave && missingRequired.contains("caFile"))
+                    PillButton(title: "Choose…", compact: true) { chooseFile(into: $caFile, title: "Choose the CA certificate") }
+                    PillButton(title: "Clear", role: .quiet, compact: true) { caFile = "" }
+                        .disabled(caFile.isEmpty)
+                }
+                requiredHint("caFile", "File not found")
+                tlsNote("The server certificate is checked against this file only, and its name must match. "
+                        + "For an IP address the certificate needs an IP SAN.")
+            }
+        }
+        .onChange(of: caFile) { _, new in
+            // A CA only means something to a mode that checks the certificate (blueprint 9.1).
+            guard !new.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            if kind == .postgres, sslmode != "verify-ca", sslmode != "verify-full" { sslmode = "verify-full" }
+            if kind == .trino { scheme = TrinoTransport.https.rawValue; verifyTLS = true }
+        }
+    }
+
+    @ViewBuilder private var tunnelSection: some View {
+        ChipToggle(label: "Connect through an SSH tunnel", isOn: $sshEnabled)
+            .id("tunnel")
+        if sshEnabled {
+            VStack(alignment: .leading, spacing: 14) {
+                tlsNote("The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it.")
+                LabeledField("SSH host · Required") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            TextField("bastion.corp, or an alias from ~/.ssh/config",
+                                      text: Binding(get: { sshHost },
+                                                    // Typing a host of your own is not picking an alias.
+                                                    set: { sshHost = $0; sshUseConfig = false; refreshAliasPreview() }))
+                                .field(invalid: attemptedSave && missingRequired.contains("sshHost"))
+                            aliasMenu
+                        }
+                        requiredHint("sshHost")
+                        if sshUseConfig, let aliasPreview {
+                            switch aliasPreview {
+                            case .success(let info): tlsNote(info.summary)
+                            case .failure(let failure):
+                                Text(failure.message).font(.ui(11)).foregroundStyle(Tone.coral)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                HStack(alignment: .top, spacing: 12) {
+                    LabeledField("SSH user · Required") {
+                        TextField(resolvedAlias?.user ?? "deploy", text: $sshUser)
+                            .field(invalid: attemptedSave && missingRequired.contains("sshUser"))
+                        requiredHint("sshUser")
+                    }
+                    LabeledField("SSH port") {
+                        TextField("22", value: Binding(get: { sshPort == 0 ? nil : sshPort }, set: { sshPort = $0 ?? 0 }),
+                                  format: .number.grouping(.never))
+                            .field(invalid: attemptedSave && missingRequired.contains("sshPort"))
+                    }
+                    .frame(width: 120)
+                }
+                LabeledField("SSH authentication") {
+                    Segmented(selection: $sshAuth, options: SSHAuthMethod.allCases) { $0.title }
+                }
+                switch sshAuth {
+                case .agent:
+                    tlsNote("Uses the keys your ssh-agent offers. Nothing is stored.")
+                case .key:
+                    LabeledField("SSH key file · Required") {
+                        HStack(spacing: 8) {
+                            TextField(resolvedAlias?.identityFiles.first ?? "~/.ssh/id_ed25519", text: $sshKeyPath)
+                                .field(invalid: attemptedSave && missingRequired.contains("sshKeyFile"))
+                            PillButton(title: "Choose…", compact: true) { chooseFile(into: $sshKeyPath, title: "Choose the SSH private key") }
+                        }
+                        requiredHint("sshKeyFile")
+                    }
+                    LabeledField(editingID == nil ? "Key passphrase" : "Key passphrase · leave blank to keep") {
+                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $sshPassphrase).field()
+                        removeSavedRow(.sshPassphrase)
+                    }
+                case .password:
+                    LabeledField(editingID == nil ? "SSH password" : "SSH password · leave blank to keep") {
+                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $sshPassword).field()
+                        removeSavedRow(.sshPassword)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `~/.ssh/config` aliases, when there are any. Choosing one fills the host and turns on
+    /// alias mode; the engine then reads the host name, user, port and key from the file.
+    @ViewBuilder private var aliasMenu: some View {
+        let aliases = SSHConfigAliases.current.hosts()
+        if !aliases.isEmpty {
+            Menu {
+                ForEach(aliases, id: \.self) { alias in
+                    Button(alias) { sshHost = alias; sshUseConfig = true; refreshAliasPreview() }
+                }
+            } label: {
+                Text("Aliases")
+            }
+            .menuStyle(.button)
+            .fixedSize()
+        }
+    }
+
+    private func refreshAliasPreview() {
+        aliasPreview = sshUseConfig && !sshHost.isEmpty ? SSHConfigAliases.current.resolve(sshHost) : nil
+    }
+
+    /// "Remove saved…" for one secret, shown only when the Keychain has one and the person has not
+    /// already staged its removal. Nothing is deleted until Save, and an empty field alone never
+    /// deletes anything: the form cannot show a saved secret, so blank can only mean "keep".
+    @ViewBuilder private func removeSavedRow(_ slot: ConnectionKeychain.Slot) -> some View {
+        if let id = editingID, AppModel.secretStore.contains(slot: slot, for: id) {
+            if removals.contains(slot) {
+                HStack(spacing: 8) {
+                    Text("The saved \(AppModel.secretName(slot)) is removed when you save.")
+                        .font(.ui(11)).foregroundStyle(Tone.amber)
+                    PillButton(title: "Undo", role: .quiet, compact: true) { removals.remove(slot) }
+                }
+            } else {
+                PillButton(title: "Remove saved…", role: .destructive, compact: true) { removals.insert(slot) }
+                    .help("Takes the saved \(AppModel.secretName(slot)) out of the Keychain when you save")
+            }
+        }
+    }
+
+    private func chooseFile(into binding: Binding<String>, title: String) {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        if panel.runModal() == .OK, let url = panel.url { binding.wrappedValue = url.path }
     }
 
     /// The picker's own binding over the string the connection stores, so the third option
@@ -561,9 +845,9 @@ struct ConnectionEditorSheet: View {
         }
     }
 
-    @ViewBuilder private func requiredHint(_ key: String) -> some View {
+    @ViewBuilder private func requiredHint(_ key: String, _ word: String = "Required") -> some View {
         if attemptedSave && missingRequired.contains(key) {
-            Text("Required").font(.ui(11)).foregroundStyle(Tone.coral)
+            Text(word).font(.ui(11)).foregroundStyle(Tone.coral)
         }
     }
 
@@ -626,8 +910,10 @@ struct ConnectionEditorSheet: View {
                 .overlay(Capsule().strokeBorder(Tone.ink.opacity(0.14)))
             } else {
                 PillButton(title: "Test Connection", symbol: "bolt") { runTest() }
-                    .keyboardShortcut("t", modifiers: .command)
-                    .help("Test Connection (⌘T)")
+                    // ⌘↩, not ⌘T: ⌘T is New Query in the QueryHive scheme, and ⌘↩ belongs to the sheet
+                    // alone because the sheet is modal (it is the key window, so its key wins).
+                    .keyboardShortcut(SheetShortcut.testConnection.keyboard)
+                    .help("Test Connection (\(SheetShortcut.testConnection.display))")
             }
             testStatus
 
@@ -666,6 +952,7 @@ struct ConnectionEditorSheet: View {
             user = ""; database = ""; schema = ""; verifyTLS = true
             showAllSchemas = false
             showAllDatabases = false
+            resetSecuredFields()
             return
         }
         name = connection.name
@@ -683,33 +970,44 @@ struct ConnectionEditorSheet: View {
         showAllDatabases = connection.showAllDatabases
         safeMode = connection.safeMode
         environment = connection.environment
+        resetSecuredFields()
+        sshEnabled = connection.usesTunnel
+        sshHost = connection.sshHost
+        sshUseConfig = connection.sshUseConfig
+        sshPort = connection.sshPort
+        sshUser = connection.sshUser
+        sshAuth = connection.sshAuth
+        sshKeyPath = connection.sshKeyPath
+        dbAuth = connection.dbAuth
+        caFile = connection.caFile
+        timeoutText = connection.statementTimeoutMS.map { String($0 / 1000) } ?? ""
+        refreshAliasPreview()
+    }
+
+    /// Everything typed but not yet saved, and everything staged for removal, starts empty: the form
+    /// never holds a saved secret, so there is nothing else it could start with.
+    private func resetSecuredFields() {
+        sshEnabled = false; sshHost = ""; sshUseConfig = false; sshPort = 0; sshUser = ""
+        sshAuth = .agent; sshKeyPath = ""; sshPassword = ""; sshPassphrase = ""
+        dbAuth = .password; jwt = ""; caFile = ""; timeoutText = ""
+        removals = []; aliasPreview = nil; urlNote = nil; lastTestWasHostKey = false
     }
 
     private func save() {
         attemptedSave = true
-        guard missingRequired.isEmpty else { return }
+        let problems = issues
+        guard problems.isEmpty else {
+            testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
+            return
+        }
         let id = editingID ?? draftID
-        let connection = Connection(id: id,
-                                     name: name.trimmingCharacters(in: .whitespaces),
-                                     color: color,
-                                     kind: kind,
-                                     host: host.trimmingCharacters(in: .whitespaces),
-                                     port: port,
-                                     scheme: scheme,
-                                     sslmode: sslmode,
-                                     user: user.trimmingCharacters(in: .whitespaces),
-                                     database: database.trimmingCharacters(in: .whitespaces),
-                                     schema: schema.trimmingCharacters(in: .whitespaces),
-                                     verify: verifyTLS,
-                                     showAllSchemas: showAllSchemas,
-                                     showAllDatabases: showAllDatabases,
-                                     safeMode: safeMode,
-                                     environment: environment)
-        // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
+        let connection = draftConnection(id: id)
+        let draft = ConnectionSecretPlan.Draft(password: credential, sshPassword: sshPassword,
+                                               sshPassphrase: sshPassphrase, jwt: jwt, removals: removals)
+        let operations = ConnectionSecretPlan.operations(draft: draft, old: original, new: connection)
+        // Keychain first: if it throws, the JSON never claims a secret exists that isn't there.
         do {
-            if !credential.isEmpty {
-                try ConnectionKeychain.set(credential, for: id)
-            }
+            try AppModel.apply(operations, for: id)
             var next = model.connections
             if let index = next.firstIndex(where: { $0.id == id }) {
                 next[index] = connection
@@ -729,6 +1027,22 @@ struct ConnectionEditorSheet: View {
             model.notice = Notice(title: "Couldn't save connection", message: error.localizedDescription)
             return
         }
+        // An item an older build left with an access list that still prompts is rewritten now, while
+        // the person is saving and expects dialogs (C-6). Best effort: a failure here is not a
+        // failed save, except one that deleted the secret and could not put it back, which is
+        // reported so it is not found missing later.
+        if editingID != nil, AppModel.secretStore is SystemKeychain {
+            var lost: [String] = []
+            for slot in ConnectionKeychain.Slot.allCases where ConnectionSecretPlan.uses(slot, connection) {
+                do { try ConnectionKeychain.renewIfPrompting(slot: slot, for: id) } catch let error as ConnectionKeychain.SecretLost {
+                    lost.append(AppModel.secretName(error.slot))
+                } catch {}
+            }
+            if !lost.isEmpty {
+                model.notice = Notice(title: "Saved secret lost",
+                                      message: ConnectionKeychain.lostMessage(connection: connection.name, secrets: lost))
+            }
+        }
         model.rebuildTree()
         // A brand-new connection becomes the destination of the tab that opened the sheet; an
         // edit never steals the selection.
@@ -745,36 +1059,46 @@ struct ConnectionEditorSheet: View {
     }
 
     private func runTest() {
-        testProcess?.terminate()
-        testState = .running
-        let run = UUID()
-        testRun = run
-        let storedPassword: String?
-        do {
-            storedPassword = try editingID.flatMap { try ConnectionKeychain.get(for: $0) }
-        } catch {
-            testState = .failure("Couldn't read the password for \(name.isEmpty ? "this connection" : name) from Keychain: \(error.localizedDescription)")
+        // The same named check Save uses, in the same words, before anything is run.
+        let problems = issues
+        guard problems.isEmpty else {
+            attemptedSave = true
+            testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
             return
         }
-        let env = AppModel.connectionEnvironment(
-            kind: kind,
-            host: host.trimmingCharacters(in: .whitespaces),
-            port: port,
-            user: user.trimmingCharacters(in: .whitespaces),
-            password: credential.isEmpty ? storedPassword : credential,
-            database: database.trimmingCharacters(in: .whitespaces),
-            schema: schema.trimmingCharacters(in: .whitespaces),
-            scheme: scheme,
-            sslmode: sslmode,
-            verify: verifyTLS,
-            safeMode: safeMode.rawValue
-        )
+        testProcess?.terminate()
+        testState = .running
+        lastTestWasHostKey = false
+        let run = UUID()
+        testRun = run
+        let candidate = draftConnection(id: editingID ?? draftID)
+        // What was typed wins over what is saved (and a secret staged for removal is not saved any
+        // more); a slot the connection does not use is not read at all.
+        var secrets = ConnectionSecrets()
+        do {
+            for slot in ConnectionKeychain.Slot.allCases where ConnectionSecretPlan.uses(slot, candidate) {
+                let typed = ConnectionSecretPlan.Draft(password: credential, sshPassword: sshPassword,
+                                                       sshPassphrase: sshPassphrase, jwt: jwt).typed(slot)
+                if !typed.isEmpty {
+                    secrets[slot] = typed
+                } else if let id = editingID, !removals.contains(slot) {
+                    secrets[slot] = try AppModel.storedSecret(slot, for: id)
+                }
+            }
+        } catch {
+            testState = .failure("Couldn't read the saved secret for \(name.isEmpty ? "this connection" : name) from Keychain: \(error.localizedDescription)")
+            return
+        }
+        let vars = AppModel.connectionEnvironment(candidate, secrets: secrets)
         var catalogs = 0
         var message: String?
-        testProcess = Engine.current.run("test", env: env, onEvent: { event in
+        testProcess = Engine.current.run("test", env: vars, onEvent: { event in
             guard testRun == run else { return }
             if event.event == "test" { catalogs = event.catalogCount ?? 0 }
-            if event.event == "error" { message = event.message }
+            if event.event == "error" {
+                message = event.message
+                lastTestWasHostKey = event.hostKey != nil
+            }
         }, onExit: { status, log in
             guard testRun == run else { return }
             testProcess = nil

@@ -2,6 +2,73 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// The bastion settings of one run, in the engine's vocabulary (`SSH_*`).
+struct SSHSettings: Equatable {
+    var host = ""
+    var useConfig = false
+    /// `0` means not set.
+    var port = 0
+    var user = ""
+    var auth = SSHAuthMethod.agent
+    var keyPath = ""
+
+    static let none = SSHSettings()
+
+    init() {}
+
+    init(_ connection: Connection) {
+        host = connection.sshHost
+        useConfig = connection.sshUseConfig
+        port = connection.sshPort
+        user = connection.sshUser
+        auth = connection.sshAuth
+        keyPath = connection.sshKeyPath
+    }
+
+    init(host: String, useConfig: Bool, port: Int, user: String, auth: SSHAuthMethod, keyPath: String) {
+        self.host = host; self.useConfig = useConfig; self.port = port
+        self.user = user; self.auth = auth; self.keyPath = keyPath
+    }
+}
+
+/// Every secret one run may need. A value type that prints nothing: a `\(secrets)` in a log line or a
+/// failed assertion shows its shape and no value.
+struct ConnectionSecrets: CustomStringConvertible, CustomDebugStringConvertible {
+    var password: String?
+    var sshPassword: String?
+    var sshPassphrase: String?
+    var jwt: String?
+
+    init(password: String? = nil, sshPassword: String? = nil, sshPassphrase: String? = nil, jwt: String? = nil) {
+        self.password = password
+        self.sshPassword = sshPassword
+        self.sshPassphrase = sshPassphrase
+        self.jwt = jwt
+    }
+
+    subscript(slot: ConnectionKeychain.Slot) -> String? {
+        get {
+            switch slot {
+            case .database: password
+            case .sshPassword: sshPassword
+            case .sshPassphrase: sshPassphrase
+            case .jwt: jwt
+            }
+        }
+        set {
+            switch slot {
+            case .database: password = newValue
+            case .sshPassword: sshPassword = newValue
+            case .sshPassphrase: sshPassphrase = newValue
+            case .jwt: jwt = newValue
+            }
+        }
+    }
+
+    var description: String { "ConnectionSecrets(…)" }
+    var debugDescription: String { description }
+}
+
 extension AppModel {
     /// What the status bar names on the left, and what the dot beside it reports.
     ///
@@ -74,9 +141,30 @@ extension AppModel {
     /// writes a Keychain item. Nil in the real app.
     static var benchPassword: String?
 
+    /// Where secrets are read and written. The Keychain; a test replaces it with a dictionary.
+    nonisolated(unsafe) static var secretStore: any SecretStoring = SystemKeychain()
+
     /// The one place a saved connection's password is read, so `--bench` can stand in for it.
     static func storedPassword(for id: UUID) throws -> String? {
-        try benchPassword ?? ConnectionKeychain.get(for: id)
+        try benchPassword ?? secretStore.get(slot: .database, for: id)
+    }
+
+    /// One slot of a saved connection, with the same `--bench` stand-in: a benchmark's throwaway
+    /// connection has a password and nothing else, and never touches a Keychain.
+    static func storedSecret(_ slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? {
+        if let benchPassword { return slot == .database ? benchPassword : nil }
+        return try secretStore.get(slot: slot, for: id)
+    }
+
+    /// Performs what `ConnectionSecretPlan` decided, in order, stopping at the first failure so the
+    /// caller can say which write did not happen.
+    static func apply(_ operations: [ConnectionSecretPlan.Operation], for id: UUID) throws {
+        for operation in operations {
+            switch operation {
+            case .set(let slot, let value): try secretStore.set(value, slot: slot, for: id)
+            case .remove(let slot): try secretStore.delete(slot: slot, for: id)
+            }
+        }
     }
 
     func presentConnectionEditor(_ connectionID: UUID?, startAtURL: Bool = false,
@@ -193,10 +281,14 @@ extension AppModel {
             return
         }
         connections = next
-        do {
-            try ConnectionKeychain.delete(for: id)
-        } catch {
-            notice = Notice(title: "Couldn't delete the Keychain password", message: error.localizedDescription)
+        // All four slots: the database password, the bastion's password and key passphrase, the JWT.
+        // Each is tried even when one fails, so a stuck item does not leave the others behind.
+        var failure: Error?
+        for slot in ConnectionKeychain.Slot.allCases {
+            do { try Self.secretStore.delete(slot: slot, for: id) } catch { failure = failure ?? error }
+        }
+        if let failure {
+            notice = Notice(title: "Couldn't delete the Keychain items", message: failure.localizedDescription)
         }
         for tab in tabs where tab.connectionID == id {
             tab.connectionID = connections.first?.id
@@ -204,8 +296,13 @@ extension AppModel {
         rebuildTree()
     }
 
-    /// Copies a connection under a new name. The password comes along: a duplicate that silently
-    /// connects as nobody would be a worse outcome than not duplicating at all.
+    /// Copies a connection under a new name. The secrets come along: a duplicate that silently
+    /// connects as nobody would be a worse outcome than not duplicating at all. All four slots, so a
+    /// tunnelled or JWT connection still connects.
+    ///
+    /// **Under `--bench` nothing is written to the Keychain** (B-6): a benchmark's connection has a
+    /// stand-in password and no items, and copying that stand-in into a real login keychain would
+    /// leave a stranger's secret in the owner's own.
     func duplicateConnection(_ id: UUID) {
         guard let original = connections.first(where: { $0.id == id }) else { return }
         var copy = original
@@ -220,12 +317,21 @@ extension AppModel {
             return
         }
         connections = next
-        if let password = try? Self.storedPassword(for: id), !password.isEmpty {
-            do {
-                try ConnectionKeychain.set(password, for: copy.id)
-            } catch {
-                notice = Notice(title: "Duplicated, but without the password",
-                                 message: "Couldn't write the password for \(copy.name) to Keychain: \(error.localizedDescription). Set it in the connection editor.")
+        if Self.benchPassword == nil {
+            var missed: [String] = []
+            var firstError: Error?
+            for slot in ConnectionKeychain.Slot.allCases {
+                guard let secret = try? Self.secretStore.get(slot: slot, for: id), !secret.isEmpty else { continue }
+                do {
+                    try Self.secretStore.set(secret, slot: slot, for: copy.id)
+                } catch {
+                    missed.append(Self.secretName(slot))
+                    firstError = firstError ?? error
+                }
+            }
+            if let firstError {
+                notice = Notice(title: "Duplicated, but without \(missed.joined(separator: " and "))",
+                                 message: "Couldn't write it for \(copy.name) to Keychain: \(firstError.localizedDescription). Set it in the connection editor.")
             }
         }
         rebuildTree()
@@ -259,6 +365,13 @@ extension AppModel {
     /// silently rewrite a connection the user is working in — the host and the credential — which
     /// is a far worse outcome than a duplicate row they can delete.
     ///
+    /// Two invariants hold for a connection that already exists (PF-6). **An import never lowers
+    /// TLS**: an entry with SSL on raises the mode to at least `require` and an entry without it
+    /// changes nothing. **An import never overwrites a saved secret**: a password, bastion password
+    /// or key passphrase that is already in the Keychain stays, and the summary says it was kept, so
+    /// re-importing a stale file cannot swap in an old credential. A tunnel is filled in only where
+    /// the connection has none.
+    ///
     /// Keychain is written before the JSON, the same order the connection editor uses: if a write
     /// fails, the saved list never claims a password that is not there.
     func importNavicatConnections(from url: URL) {
@@ -278,9 +391,29 @@ extension AppModel {
         var noPassword: [String] = []
         var noDatabase: [String] = []
         var tunnelled: [String] = []
+        var keptSecrets: [String] = []
+        var notImported: [String] = []
         var keychainFailures: [String] = []
 
+        /// Writes one imported secret under the rules above. `overwrite` is false for a connection
+        /// that already exists: a slot with something in it is left alone and reported.
+        func save(_ secret: String?, slot: ConnectionKeychain.Slot, for id: UUID, name: String, overwrite: Bool) {
+            guard let secret, !secret.isEmpty else { return }
+            if !overwrite, Self.secretStore.contains(slot: slot, for: id) {
+                keptSecrets.append("\(name) (\(Self.secretName(slot)))")
+                return
+            }
+            do {
+                try Self.secretStore.set(secret, slot: slot, for: id)
+            } catch {
+                keychainFailures.append(name)
+            }
+        }
+
         for imported in export.connections {
+            if !imported.notImported.isEmpty {
+                notImported.append("\(imported.name): " + imported.notImported.joined(separator: ", "))
+            }
             // Same name **and** same host means this is the very connection the export describes,
             // so it is refreshed in place instead of duplicated. Without this, re-importing — which
             // is exactly what someone does when the first import turns out to have got something
@@ -301,17 +434,18 @@ extension AppModel {
                 // `schema` is deliberately not refreshed. The export has no schema to refresh it
                 // with — see `NavicatImport` — so the only thing this could do is overwrite a value
                 // the user set by hand with nothing.
+                next[index].sslmode = NavicatImport.tlsMode(kind: next[index].kind, ssl: imported.ssl,
+                                                            current: next[index].sslmode)
                 refreshed.append(imported.name)
                 if imported.database.isEmpty { noDatabase.append(imported.name) }
-                if !imported.sshHost.isEmpty { tunnelled.append(imported.name) }
-                if let password = imported.password, !password.isEmpty {
-                    do {
-                        try ConnectionKeychain.set(password, for: id)
-                    } catch {
-                        keychainFailures.append(imported.name)
-                    }
-                } else {
-                    noPassword.append(imported.name)
+                save(imported.password, slot: .database, for: id, name: imported.name, overwrite: false)
+                if imported.password?.isEmpty ?? true { noPassword.append(imported.name) }
+                // The tunnel only where there is none: one the person set up is theirs.
+                if !imported.sshHost.isEmpty, !next[index].usesTunnel {
+                    Self.applyTunnel(imported, to: &next[index])
+                    tunnelled.append(imported.name)
+                    save(imported.sshPassword, slot: .sshPassword, for: id, name: imported.name, overwrite: false)
+                    save(imported.sshPassphrase, slot: .sshPassphrase, for: id, name: imported.name, overwrite: false)
                 }
                 continue
             }
@@ -330,7 +464,7 @@ extension AppModel {
             taken.insert(name)
 
             let id = UUID()
-            let connection = Connection(
+            var connection = Connection(
                 id: id,
                 name: name,
                 // The colour is this app's own tag, not something Navicat has. Cycling the palette
@@ -340,28 +474,29 @@ extension AppModel {
                 host: imported.host,
                 port: imported.port,
                 scheme: imported.kind == .trino ? "https" : "https",
-                // The export carries encryption settings this app spells differently, and guessing
-                // a mapping would be worse than leaving the default: an sslmode that is wrong is a
-                // connection failure, not a silent one.
-                sslmode: "",
+                // Navicat's `SSL` is a yes or no, and this app's modes are a ladder: yes becomes
+                // `require` (encrypted, certificate not checked, the lowest rung that is TLS at all)
+                // and no leaves the driver's own default. Guessing a stricter mapping would be a
+                // connection failure, and a looser one would be the downgrade PF-6 forbids.
+                sslmode: NavicatImport.tlsMode(kind: imported.kind, ssl: imported.ssl, current: ""),
                 user: imported.user,
                 database: imported.database,
                 schema: imported.schema,
                 verify: false,
                 showAllSchemas: false
             )
+            if !imported.sshHost.isEmpty {
+                Self.applyTunnel(imported, to: &connection)
+                tunnelled.append(name)
+            }
 
-            if let password = imported.password, !password.isEmpty {
-                do {
-                    try ConnectionKeychain.set(password, for: id)
-                } catch {
-                    keychainFailures.append(name)
-                }
-            } else {
-                noPassword.append(name)
+            save(imported.password, slot: .database, for: id, name: name, overwrite: true)
+            if imported.password?.isEmpty ?? true { noPassword.append(name) }
+            if !imported.sshHost.isEmpty {
+                save(imported.sshPassword, slot: .sshPassword, for: id, name: name, overwrite: true)
+                save(imported.sshPassphrase, slot: .sshPassphrase, for: id, name: name, overwrite: true)
             }
             if imported.database.isEmpty { noDatabase.append(name) }
-            if !imported.sshHost.isEmpty { tunnelled.append(name) }
             added.append(name)
             next.append(connection)
         }
@@ -380,6 +515,7 @@ extension AppModel {
                         message: importSummary(added: added, refreshed: refreshed, renamed: renamed,
                                                noPassword: noPassword,
                                                noDatabase: noDatabase, tunnelled: tunnelled,
+                                               keptSecrets: keptSecrets, notImported: notImported,
                                                keychainFailures: keychainFailures,
                                                skipped: export.skipped))
     }
@@ -399,6 +535,7 @@ extension AppModel {
     /// and the user would otherwise be left to find that out one failed test at a time.
     private func importSummary(added: [String], refreshed: [String], renamed: [String],
                                noPassword: [String], noDatabase: [String], tunnelled: [String],
+                               keptSecrets: [String], notImported: [String],
                                keychainFailures: [String],
                                skipped: [NavicatImport.Skipped]) -> String {
         var lines: [String] = []
@@ -421,12 +558,41 @@ extension AppModel {
             lines.append("No database in the export for: " + noDatabase.joined(separator: ", ") + ". Pick one in the connection editor before browsing.")
         }
         if !tunnelled.isEmpty {
-            lines.append("These use an SSH tunnel, which this app doesn't open: " + tunnelled.joined(separator: ", ") + ".")
+            lines.append("SSH tunnel imported for: " + tunnelled.joined(separator: ", ")
+                         + ". The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it.")
+        }
+        if !keptSecrets.isEmpty {
+            lines.append("Kept the secret already saved for: " + keptSecrets.joined(separator: ", ")
+                         + ". An import never replaces one; edit the connection to change it.")
+        }
+        if !notImported.isEmpty {
+            lines.append("Not imported: " + notImported.joined(separator: "; ") + ". Set these in the connection editor.")
         }
         if !skipped.isEmpty {
             lines.append("Skipped: " + skipped.map { "\($0.name) (\($0.reason))" }.joined(separator: "; ") + ".")
         }
         return lines.joined(separator: "\n\n")
+    }
+
+    /// Copies an imported entry's tunnel onto a connection. The host is taken as a name, never as an
+    /// alias: Navicat has no notion of `~/.ssh/config`.
+    static func applyTunnel(_ imported: ImportedConnection, to connection: inout Connection) {
+        connection.sshHost = imported.sshHost
+        connection.sshUseConfig = false
+        connection.sshPort = imported.sshPort
+        connection.sshUser = imported.sshUser
+        connection.sshAuth = imported.sshAuth
+        connection.sshKeyPath = imported.sshKeyPath
+    }
+
+    /// What a slot is called in a sentence.
+    static func secretName(_ slot: ConnectionKeychain.Slot) -> String {
+        switch slot {
+        case .database: "password"
+        case .sshPassword: "SSH password"
+        case .sshPassphrase: "SSH key passphrase"
+        case .jwt: "JWT"
+        }
     }
 
     /// Recolours a saved connection. The colour is the user's own tag — it is what the sidebar
@@ -494,17 +660,28 @@ extension AppModel {
     /// tests, a snapshot, `--bench`). A run on a query lane writes its Safe Mode decision to the
     /// database it names, and with no name that is the Application Support file the installed app
     /// shares: a redirected session must log into its own.
+    ///
+    /// The tunnel, the JWT and the CA file follow blueprint w11 section 9.1, and the MCP server maps
+    /// a stored connection the same way: `ConnectionEnvironmentTests` and `qh-ffi`'s `tests/mcp.rs`
+    /// both read `crates/qh-ffi/tests/fixtures/connection_env.json` and must produce the same
+    /// values. A key with no value is **left out** rather than sent empty, on both sides.
+    /// `SSH_HOST_KEY_ACCEPT` is never set here: only a person pressing the host-key sheet's one
+    /// button sets it, for one run (`HostKeyCenter.trust`), and `SSH_HOST_KEY_DETAIL` is added by
+    /// `HostKeyGate` to every run that names a bastion.
     static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
-                                      password: String?, database: String, schema: String,
+                                      secrets: ConnectionSecrets, database: String, schema: String,
                                       scheme: String, sslmode: String, verify: Bool,
-                                      safeMode: String) -> [String: String] {
+                                      safeMode: String, ssh: SSHSettings = .none,
+                                      dbAuth: DatabaseAuth = .password, caFile: String = "") -> [String: String] {
         let transport = TrinoTransport(stored: scheme)
-        return localEnvironment([
+        // A bearer token is a Trino thing: the other two drivers always send the password.
+        let jwt = kind == .trino && dbAuth == .jwt
+        var vars: [String: String] = [
             "DB_KIND": kind.rawValue,
             "DB_HOST": host,
             "DB_PORT": String(port),
             "DB_USER": user,
-            "DB_PASSWORD": password ?? "",
+            "DB_PASSWORD": jwt ? "" : (secrets.password ?? ""),
             "DB_DATABASE": database,
             "DB_SCHEMA": schema,
             // Trino's transport is a scheme; the other two express encryption through sslmode.
@@ -534,15 +711,64 @@ extension AppModel {
             // server run the same guard, and neither has this picker. Sent for every
             // driver, because the levels are about SQL and not about a server.
             "SAFE_MODE": safeMode,
-        ])
+        ]
+        func put(_ key: String, _ value: String?) {
+            if let value, !value.isEmpty { vars[key] = value }
+        }
+        if jwt { put("DB_JWT", secrets.jwt) }
+        put("DB_CA_FILE", caFile.trimmingCharacters(in: .whitespaces))
+        let bastion = ssh.host.trimmingCharacters(in: .whitespaces)
+        if !bastion.isEmpty {
+            put("SSH_HOST", bastion)
+            if ssh.useConfig { put("SSH_USE_CONFIG", "1") }
+            if ssh.port != 0 { put("SSH_PORT", String(ssh.port)) }
+            put("SSH_USER", ssh.user.trimmingCharacters(in: .whitespaces))
+            put("SSH_AUTH_METHOD", ssh.auth.rawValue)
+            put("SSH_KEY_PATH", ssh.keyPath.trimmingCharacters(in: .whitespaces))
+            switch ssh.auth {
+            case .password: put("SSH_PASSWORD", secrets.sshPassword)
+            case .key: put("SSH_KEY_PASSPHRASE", secrets.sshPassphrase)
+            case .agent: break
+            }
+            // The app's own trust file: where `HostKeyCenter`'s pinned run records an accepted key.
+            if let directory = try? ConnectionStore.directory() {
+                put("SSH_APP_KNOWN_HOSTS", directory.appendingPathComponent("known_hosts").path)
+            }
+        }
+        return localEnvironment(vars)
     }
 
-    static func connectionEnvironment(_ connection: Connection, password: String?) -> [String: String] {
+    /// A saved connection with the secrets already in hand.
+    static func connectionEnvironment(_ connection: Connection, secrets: ConnectionSecrets) -> [String: String] {
         connectionEnvironment(kind: connection.kind, host: connection.host, port: connection.port,
-                              user: connection.user, password: password,
+                              user: connection.user, secrets: secrets,
                               database: connection.database, schema: connection.schema,
                               scheme: connection.scheme, sslmode: connection.sslmode,
-                              verify: connection.verify, safeMode: connection.safeMode.rawValue)
+                              verify: connection.verify, safeMode: connection.safeMode.rawValue,
+                              ssh: SSHSettings(connection), dbAuth: connection.dbAuth,
+                              caFile: connection.caFile)
+    }
+
+    /// For a caller that holds only the database password (the tree's browse and the warm-up).
+    ///
+    /// The other slots the connection uses are read **without a prompt**: this runs on paths that
+    /// must not put a dialog up, so an item that would need approval is left out, and the run says
+    /// what is missing (the engine names the setting). Under `--bench` there is no Keychain to read.
+    static func connectionEnvironment(_ connection: Connection, password: String?) -> [String: String] {
+        var secrets = ConnectionSecrets(password: password)
+        if benchPassword == nil {
+            for slot in ConnectionKeychain.Slot.allCases
+            where slot != .database && ConnectionSecretPlan.uses(slot, connection) {
+                secrets[slot] = (try? ConnectionKeychain.getWithoutPrompt(slot: slot, for: connection.id)) ?? nil
+            }
+        }
+        return connectionEnvironment(connection, secrets: secrets)
+    }
+
+    /// What a statement may run for on this connection: its own bound when it has one, the app-wide
+    /// setting otherwise. `nil` on the connection inherits, so changing the setting still moves it.
+    func effectiveStatementTimeoutMS(_ connection: Connection) -> Int {
+        connection.statementTimeoutMS ?? statementTimeoutMS
     }
 
     /// The connection variables for a saved connection, Keychain read included. Shared by `run`
@@ -552,14 +778,28 @@ extension AppModel {
     /// function every path that runs caller SQL goes through, and a bound that reached
     /// `preview` but not `count` would be a bound the user thinks they set.
     func connectionEnvironment(_ connection: Connection) throws -> [String: String] {
-        let password: String?
-        do {
-            password = try Self.storedPassword(for: connection.id)
-        } catch {
-            throw EngineLaunchError(message: "Couldn't read the password for \(connection.name) from Keychain: \(error.localizedDescription)")
+        var secrets = ConnectionSecrets()
+        for slot in ConnectionKeychain.Slot.allCases where ConnectionSecretPlan.uses(slot, connection) {
+            do {
+                secrets[slot] = try Self.storedSecret(slot, for: connection.id)
+            } catch {
+                throw EngineLaunchError(message: "Couldn't read the \(Self.secretName(slot)) for \(connection.name) from Keychain: \(error.localizedDescription)")
+            }
         }
-        var env = Self.connectionEnvironment(connection, password: password)
-        env["STATEMENT_TIMEOUT_MS"] = String(statementTimeoutMS)
-        return env
+        var vars = Self.connectionEnvironment(connection, secrets: secrets)
+        vars["STATEMENT_TIMEOUT_MS"] = String(effectiveStatementTimeoutMS(connection))
+        return vars
+    }
+
+    /// A host key was trusted in the sheet: every failed node of a tunnelled connection loads again,
+    /// which is what the person was doing when the sheet came up. Operations other than the tree
+    /// are not repeated for them; trusting a key and retrying a statement are separate acts.
+    func reloadAfterHostKeyTrusted() {
+        let tunnelled = Set(connections.filter(\.usesTunnel).map(\.id))
+        guard !tunnelled.isEmpty else { return }
+        for node in allNodes() where node.error != nil {
+            guard let id = node.connectionID, tunnelled.contains(id) else { continue }
+            refresh(node)
+        }
     }
 }

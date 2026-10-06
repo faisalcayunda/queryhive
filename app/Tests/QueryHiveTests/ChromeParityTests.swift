@@ -70,12 +70,15 @@ final class ChromeParityTests: XCTestCase {
         case settings(SettingsView.Pane)
         /// The connection sheet on its own: a sheet is a window of its own and `cacheDisplay` cannot see it.
         case connectionSheet
+        /// The host-key sheet on its own, for the same reason.
+        case hostKeySheet
 
         var size: CGSize {
             switch self {
             case .shell: CGSize(width: Shell.minWidth, height: 800)
             case .settings: CGSize(width: 560, height: 640)
             case .connectionSheet: CGSize(width: 620, height: 660)
+            case .hostKeySheet: CGSize(width: 520, height: 440)
             }
         }
     }
@@ -104,6 +107,10 @@ final class ChromeParityTests: XCTestCase {
         Scene(name: "settings-data", seed: "settings-data", surface: .settings(.data)),
         Scene(name: "settings-keyboard", seed: "settings-keyboard", surface: .settings(.keyboard)),
         Scene(name: "connection", seed: "connection", surface: .connectionSheet),
+        // V-11 (W11-T3): the tunnelled connection form and the host-key sheet, first use and refusal.
+        Scene(name: "connection-ssh", seed: "connection-ssh", surface: .connectionSheet),
+        Scene(name: "host-key-unknown", seed: "host-key-unknown", surface: .hostKeySheet),
+        Scene(name: "host-key-changed", seed: "host-key-changed", surface: .hostKeySheet),
     ]
 
     private struct Capture {
@@ -154,6 +161,8 @@ final class ChromeParityTests: XCTestCase {
     }
 
     override func tearDown() {
+        ConnectionEditorSheet.revealTunnelForSnapshot = false
+        HostKeyCenter.shared.dismiss()
         closeWindows()
         ThemeStore.shared.unpinSurface()
         let s = savedTheme!
@@ -344,6 +353,10 @@ final class ChromeParityTests: XCTestCase {
             // The sheet is drawn on its own, so the model must not also present it over a shell.
             model.editingConnection = nil
             content = AnyView(ConnectionEditorSheet(target: target).environment(model))
+        case .hostKeySheet:
+            let center = HostKeyCenter.shared
+            let prompt = try XCTUnwrap(center.prompt, "\(scene.name): the scene reports no host key")
+            content = AnyView(HostKeySheet(prompt: prompt, center: center).environment(model))
         }
         let seededSaved = model.savedQueries
         var isShell = false

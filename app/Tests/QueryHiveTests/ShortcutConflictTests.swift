@@ -40,6 +40,22 @@ final class ShortcutConflictTests: XCTestCase {
     func testNoKeyIsBoundTwiceInTheDbeaverScheme() { XCTAssertEqual(duplicates(.dbeaver), []) }
     func testNoKeyIsBoundTwiceInTheQueryhiveScheme() { XCTAssertEqual(duplicates(.queryhive), []) }
 
+    /// The connection sheet is modal, so it is its own scope: it is the key window while it is up and
+    /// its key equivalents are matched before the main menu's. ⌘↩ tests the connection there, even in
+    /// the DBeaver scheme where the same chord runs a statement behind it, and ⌘T (New Query in the
+    /// QueryHive scheme, where it used to clash with Test) is free again.
+    func testTheConnectionSheetsTestKeyIsItsOwnScopeAndNotOneOfTheMenusKeys() {
+        let key = SheetShortcut.testConnection
+        XCTAssertEqual(key.display, "⌘↩")
+        XCTAssertFalse(Self.system.contains(key))
+        XCTAssertNotEqual(key, Shortcut("t", .command))
+        // The queryhive scheme never binds it, so there is nothing to shadow there; the dbeaver
+        // scheme's Run does, and is the reason the sheet is modelled as a scope of its own.
+        XCTAssertFalse(AppMenu.specs(for: .queryhive).contains { $0.shortcut == key })
+        XCTAssertEqual(ShortcutScheme.dbeaver.shortcut(for: .run), key)
+        XCTAssertEqual(ShortcutScheme.queryhive.shortcut(for: .newQuery)?.display, "⌘T")
+    }
+
     func testNoActionUsesASystemKey() {
         for scheme in ShortcutScheme.allCases {
             for action in ShortcutAction.allCases {
@@ -79,9 +95,9 @@ final class ShortcutConflictTests: XCTestCase {
     }
 
     func testNoViewHardCodesAKeyboardShortcut() throws {
-        // Literal keys that remain, each owned by a task that has not landed: the connection
-        // sheet's Test (W11-T3 moves it) and Panels' Reveal button (the menu now owns ⇧⌘R).
-        let allowed: Set<String> = ["ConnectionsViews.swift", "Panels.swift"]
+        // The one literal key that remains is Panels' Reveal button (the menu now owns ⇧⌘R). The
+        // connection sheet's Test took its key from `SheetShortcut` (W11-T3), so it is not here.
+        let allowed: Set<String> = ["Panels.swift"]
         let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/QueryHive")

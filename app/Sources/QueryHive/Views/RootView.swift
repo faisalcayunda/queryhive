@@ -78,6 +78,9 @@ struct RootView: View {
             ConnectionEditorSheet(target: target)
                 .environment(model)
         }
+        // An SSH host key the engine refused, asked about here while no connection sheet is up; the
+        // sheet asks over itself (`ConnectionEditorSheet`), because a sheet can't open over a sheet.
+        .hostKeySheet(active: model.editingConnection == nil)
         // The engine's `confirm` Safe Mode level, asked where the engine cannot: one approval per
         // run, never remembered. The closure the model holds is what starts the approved run.
         .sheet(item: $model.pendingConfirmation) { pending in
