@@ -25,6 +25,7 @@ pub mod folds;
 pub mod issues;
 pub mod keywords;
 pub mod paint;
+pub mod refs;
 pub mod statements;
 pub mod syntax;
 pub mod text;

@@ -259,16 +259,16 @@ pub struct Stats {
 /// The analysis half of a document: it holds its own copy of the text and follows the log.
 pub struct Analyzer {
     dialect: Dialect,
-    lexer: Lexer,
-    mirror: TextBuffer,
-    stmts: Statements,
-    syntax: Syntax,
+    pub(crate) lexer: Lexer,
+    pub(crate) mirror: TextBuffer,
+    pub(crate) stmts: Statements,
+    pub(crate) syntax: Syntax,
     dirty: RangeSet,
     fonts: RangeSet,
-    revision: u64,
-    tree_bytes: usize,
-    tick: u64,
-    inactive: bool,
+    pub(crate) revision: u64,
+    pub(crate) tree_bytes: usize,
+    pub(crate) tick: u64,
+    pub(crate) inactive: bool,
 }
 
 impl Analyzer {
@@ -868,13 +868,17 @@ impl Document {
         &self.analyzer
     }
 
+    pub(crate) fn analyzer_mut(&mut self) -> &mut Analyzer {
+        &mut self.analyzer
+    }
+
     /// Replace `[start, start + len)` (UTF-16) with `text`; returns the new revision. Does no
     /// analysis.
     pub fn replace(&mut self, start: u32, len: u32, text: &str) -> Result<u64, EditError> {
         self.text.replace(start, len, text)
     }
 
-    fn sync(&mut self) -> Result<(), EditError> {
+    pub(crate) fn sync(&mut self) -> Result<(), EditError> {
         let log = self.text.drain_log();
         self.analyzer.sync(log)
     }
