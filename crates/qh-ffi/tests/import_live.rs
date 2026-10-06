@@ -128,6 +128,46 @@ async fn reset(parent: &str, child: &str) {
     .expect("the tables are created");
 }
 
+fn teardown_sql(parent: &str, child: &str) -> String {
+    format!("DROP TABLE IF EXISTS {child};\nDROP TABLE IF EXISTS {parent};\n")
+}
+
+/// Drops the test's tables when it ends, whether it passed, failed an assertion or
+/// panicked. The drop runs on its own thread and runtime because `Drop` cannot await,
+/// and the test's runtime may be unwinding.
+struct Tables {
+    parent: &'static str,
+    child: &'static str,
+}
+
+impl Tables {
+    /// Drops any leftover pair from an earlier crashed run, creates the tables and
+    /// returns the guard that drops them again.
+    async fn create(parent: &'static str, child: &'static str) -> Tables {
+        reset(parent, child).await;
+        Tables { parent, child }
+    }
+}
+
+impl Drop for Tables {
+    fn drop(&mut self) {
+        let (parent, child) = (self.parent, self.child);
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let path = script(&format!("teardown-{child}"), &teardown_sql(parent, child));
+                let _ = import(&path, &[]).await;
+            });
+        })
+        .join();
+    }
+}
+
 /// A bogus child insert that must fail while the foreign key is enforced.
 async fn fk_is_enforced(child: &str, name: &str) -> bool {
     let path = script(
@@ -144,7 +184,7 @@ async fn a_child_loads_before_its_parent_and_the_checks_come_back_on_at_commit()
         return;
     }
     let (parent, child) = ("qh_parent_a", "qh_child_a");
-    reset(parent, child).await;
+    let _tables = Tables::create(parent, child).await;
 
     // The child first, referencing a parent that does not exist yet. With the
     // checks on this is the statement a `SET session_replication_role = replica`
@@ -181,7 +221,7 @@ async fn the_checks_come_back_on_after_a_rollback_too() {
         return;
     }
     let (parent, child) = ("qh_parent_b", "qh_child_b");
-    reset(parent, child).await;
+    let _tables = Tables::create(parent, child).await;
 
     // The third statement is invalid SQL, so `stop` (the default) rolls the whole
     // load back — and the epilogue must still run.
