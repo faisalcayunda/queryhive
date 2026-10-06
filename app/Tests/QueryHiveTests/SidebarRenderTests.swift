@@ -97,6 +97,64 @@ final class SidebarRenderTests: XCTestCase {
         print("rendered the sidebar to \(path.path)")
     }
 
+    /// The card shown with no connections is centred: the middle of everything drawn inside it sits
+    /// on the sidebar's centre line. The picture is written too, so the card can be looked at.
+    ///
+    /// Read from pixels because an offscreen hosting view has no accessibility tree to ask for
+    /// frames. The card is found as the run of non-flat rows above the flat canvas at the bottom,
+    /// and its ink as whatever differs from the card's fill at the left of each row. Left-aligned, the
+    /// middle of that ink falls about 30 points short of the line; centred, it is within a point or two.
+    @MainActor
+    func testTheEmptySidebarCardIsCentred() throws {
+        isolateConnectionStore()
+        let model = AppModel()
+        XCTAssertTrue(model.tree.isEmpty, "this test needs a model with no connections")
+
+        let width: CGFloat = 260
+        let host = NSHostingView(rootView: SidebarTree().environment(model).frame(width: width, height: 460))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: width, height: 460),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds), "no bitmap to draw into")
+        host.cacheDisplay(in: host.bounds, to: rep)
+
+        let scale = CGFloat(rep.pixelsWide) / width
+        func rgb(_ x: Int, _ y: Int) -> [CGFloat] {
+            let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) ?? .clear
+            return [c.redComponent, c.greenComponent, c.blueComponent]
+        }
+        func differs(_ a: [CGFloat], _ b: [CGFloat]) -> Bool { zip(a, b).contains { abs($0 - $1) > 0.04 } }
+        func flat(_ y: Int) -> Bool {
+            let base = rgb(0, y)
+            return (0..<rep.pixelsWide).allSatisfy { !differs(rgb($0, y), base) }
+        }
+        var bottom = rep.pixelsHigh - 1
+        while bottom > 0, flat(bottom) { bottom -= 1 }
+        var top = bottom
+        while top > 0, !flat(top - 1) { top -= 1 }
+        XCTAssertGreaterThan(bottom - top, Int(60 * scale), "no card found above the flat canvas (rows \(top)...\(bottom))")
+
+        // Clear of the corners (radius 12 pt) and of the 18 pt the card keeps for itself on each side.
+        let inset = Int(24 * scale), left = Int(15 * scale), edge = Int(24 * scale)
+        var sum = 0, count = 0
+        for y in (top + inset)...(bottom - inset) {
+            let fill = rgb(left, y)
+            for x in edge..<(rep.pixelsWide - edge) where differs(rgb(x, y), fill) { sum += x; count += 1 }
+        }
+        XCTAssertGreaterThan(count, 500, "the card drew almost nothing")
+        let middle = CGFloat(sum) / CGFloat(count) / scale
+        XCTAssertEqual(middle, width / 2, accuracy: 5, "the card's content is centred on the sidebar, not on its left edge")
+
+        let data = try XCTUnwrap(rep.representation(using: .png, properties: [:]),
+                                 "the render could not be encoded as a PNG")
+        let directory = Self.outputDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("sidebar-empty.png")
+        try data.write(to: path)
+        print("rendered the empty sidebar to \(path.path)")
+    }
+
     /// The favourites section on its own.
     ///
     /// Rendered separately because the whole-sidebar render above cannot show it: the sidebar's rows

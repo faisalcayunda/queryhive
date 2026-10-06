@@ -120,7 +120,7 @@ struct SidebarTree: View {
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .center, spacing: 10) {
             Text("No connections yet.")
                 .font(.ui(12, weight: .semibold))
             Text("Add a connection to browse its catalogs, schemas and tables.")
@@ -130,8 +130,11 @@ struct SidebarTree: View {
             PillButton(title: "New Connection", symbol: "plus") { model.presentConnectionEditor(nil) }
             PillButton(title: "Add from URL…", symbol: "link", role: .quiet) { model.presentConnectionEditor(nil, startAtURL: true) }
         }
+        // Centered as a unit: the description wraps to several lines in a narrow column, and
+        // `multilineTextAlignment` is what centers those lines, not the stack's alignment.
+        .multilineTextAlignment(.center)
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .glass(12)
         .padding(.top, 4)
     }
