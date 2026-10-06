@@ -23,6 +23,13 @@ struct GridPalette: Equatable {
     let selection: CGColor
     let staged: CGColor
     let accent: CGColor
+    /// The cursor's ring. Not `accent`: four of the five accents are under 3:1 on a light canvas,
+    /// and a ring that cannot be seen is no cursor. `GridContrast.ringColour` picks the one of the
+    /// accent's two halves that stands out from the canvas, and falls back to the ink.
+    ///
+    /// ponytail: this is the rule `Tone.focusRing` (W9 D-8) will state once that token lands; the
+    /// grid keeps its own copy until then so W10-T1 is not blocked on `Theme.swift`.
+    let cursor: CGColor
     let amber: CGColor
     let secondary: CGColor
     /// The fixed categorical tints the type chip uses.
@@ -59,6 +66,9 @@ struct GridPalette: Equatable {
                 selection: accent.glow.resolvedCGColor(alpha: 0.20),
                 staged: NSColor(hex: 0xFFB547).withAlphaComponent(0.20).cgColor,
                 accent: accent.glow.resolvedCGColor(alpha: nil),
+                cursor: GridContrast.ringColour(candidates: [NSColor(accent.glow), NSColor(accent.deep)],
+                                                canvas: NSColor(Tone.canvas),
+                                                fallback: Tone.inkNS(1)).cgColor,
                 amber: NSColor(hex: 0xFFB547).cgColor,
                 secondary: ink(0.68),
                 mint: NSColor(hex: 0x3EE6A8).cgColor,
@@ -69,6 +79,33 @@ struct GridPalette: Equatable {
             )
         }
         return palette
+    }
+}
+
+/// WCAG 2.x contrast, for the one colour the grid has to choose rather than inherit.
+enum GridContrast {
+    /// The contrast ratio of two colours, 1 to 21, with alpha ignored.
+    static func ratio(_ a: NSColor, _ b: NSColor) -> Double {
+        let (high, low) = (max(luminance(a), luminance(b)), min(luminance(a), luminance(b)))
+        return (high + 0.05) / (low + 0.05)
+    }
+
+    /// The candidate that stands out most from the canvas, if any is at 3:1 or better (the floor
+    /// for a non-text mark), else `fallback`.
+    static func ringColour(candidates: [NSColor], canvas: NSColor, fallback: NSColor) -> NSColor {
+        let best = candidates.max { ratio($0, canvas) < ratio($1, canvas) }
+        guard let best, ratio(best, canvas) >= 3 else { return fallback }
+        return best
+    }
+
+    private static func luminance(_ colour: NSColor) -> Double {
+        let rgb = colour.usingColorSpace(.sRGB) ?? colour
+        func linear(_ value: CGFloat) -> Double {
+            let v = Double(value)
+            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent)
+            + 0.0722 * linear(rgb.blueComponent)
     }
 }
 
@@ -184,6 +221,8 @@ enum GridRowPainter {
                       text: GridRowText,
                       staged: Set<Int>,
                       selection: CellRange?,
+                      cursorColumn: Int? = nil,
+                      cursorStrength: CGFloat = 1,
                       lines: GridLineCache,
                       width: CGFloat,
                       into cg: CGContext) {
@@ -213,6 +252,7 @@ enum GridRowPainter {
                       text: text,
                       staged: staged.contains(column),
                       selection: selection,
+                      cursor: cursorColumn == column ? cursorStrength : nil,
                       lines: lines,
                       into: cg)
         }
@@ -244,6 +284,7 @@ enum GridRowPainter {
                                   text: GridRowText,
                                   staged: Bool,
                                   selection: CellRange?,
+                                  cursor: CGFloat?,
                                   lines: GridLineCache,
                                   into cg: CGContext) {
         let columnRect = CGRect(x: edges.left, y: rowRect.minY,
@@ -301,6 +342,21 @@ enum GridRowPainter {
         // Separator: 1 pt at the box's right edge.
         cg.setFillColor(context.palette.inkFaint)
         cg.fill(CGRect(x: box.maxX - 1, y: box.minY, width: 1, height: box.height))
+
+        // The cursor, last, so the ring sits over the wash, the text, the dot and the separator.
+        // Inside the box, which is what keeps it from changing any geometry: 2 pt (2.5 under
+        // Increase Contrast) on the box inset by 1, so the stroke runs 0…2 in from the edge.
+        // `strength` is 1 while the grid has the keyboard and 0.4 when it does not, which keeps the
+        // cursor findable while the focus is in the peek or another window.
+        if let strength = cursor {
+            let width: CGFloat = ThemeStore.shared.surface.enhanced ? 2.5 : 2
+            let ring = CGPath(roundedRect: box.insetBy(dx: 1, dy: 1), cornerWidth: 3, cornerHeight: 3,
+                              transform: nil)
+            cg.setStrokeColor(context.palette.cursor.copy(alpha: strength) ?? context.palette.cursor)
+            cg.setLineWidth(width)
+            cg.addPath(ring)
+            cg.strokePath()
+        }
     }
 
     /// Where a line's baseline sits inside a cell box.
@@ -504,6 +560,13 @@ enum GridPaintDiff {
             result.insert(integersIn: 0..<newRowCount)
         }
         return result
+    }
+
+    /// The cells whose ring has to be repainted when the cursor moves from `old` to `new`: the one
+    /// it left and the one it reached, and nothing when it did not move.
+    static func cursorInvalidations(old: CellPos?, new: CellPos?) -> [CellPos] {
+        guard old != new else { return [] }
+        return [old, new].compactMap { $0 }
     }
 
     /// The columns a change has to repaint, for the rows that both inputs share. `nil` means every

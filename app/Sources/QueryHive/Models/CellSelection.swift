@@ -60,11 +60,97 @@ struct CellRange: Equatable {
 /// A single cell position in display coordinates.
 struct CellPos: Equatable, Hashable { var row: Int; var column: Int }
 
-/// The cell cursor: anchor and focus (P-24). W10-T1 makes this authoritative and draws the ring.
+/// The cell cursor: anchor and focus (P-24), drawn as a ring on the focus cell.
+///
+/// Written by `QueryTab.selectCells(anchor:focus:)` for the pointer and the keyboard. VoiceOver is
+/// the one other writer (`Coordinator.focusCellFromAX`): it moves the cursor and leaves the
+/// selection where it was, so the cursor can rest outside the block until the next selection.
 struct GridCursor: Equatable {
     var anchor: CellPos
     var focus: CellPos
     var range: CellRange { CellRange(from: (anchor.row, anchor.column), to: (focus.row, focus.column)) }
+}
+
+/// Where the cursor may go: rows in the table's row space (the fetched rows today, plus the rows
+/// the user adds in W10-T3), the drawn columns, and how many rows one page holds.
+struct GridBounds: Equatable {
+    var rows: Int
+    var columns: Int
+    var page: Int
+}
+
+enum GridEdge: Equatable { case left, right, top, bottom }
+
+/// One thing a key asks the cursor to do, without the key that asked.
+enum GridMotion: Equatable {
+    /// One cell, in rows and columns.
+    case step(rows: Int, columns: Int)
+    /// All the way along one axis, the other staying where it is (⌘ and an arrow).
+    case toEdge(GridEdge)
+    /// A page up or down.
+    case page(down: Bool)
+    /// First or last column of the cursor's row (Home and End).
+    case rowStart, rowEnd
+    /// The top-left or bottom-right cell (⌘Home and ⌘End).
+    case gridStart, gridEnd
+    /// Tab and ⇧Tab: the neighbouring cell, wrapping onto the next row.
+    case next, previous
+}
+
+/// Where a motion takes the cursor. Pure, so every key of the map is checked without an `NSEvent`
+/// or a window (blueprint W10 §3.1).
+enum GridCursorMath {
+
+    /// The cursor after `motion`, or `nil` when there is nowhere to go: an empty grid, or Tab past
+    /// the first or last cell, which is how the grid hands the keyboard on.
+    ///
+    /// Moving takes the **focus** along. Extending leaves the anchor where it is; anything else
+    /// collapses the block onto the new cell. Tab never extends. A cursor that no longer fits the
+    /// bounds (the rows shrank under it) is brought back inside first.
+    static func apply(_ motion: GridMotion, extending: Bool, to cursor: GridCursor,
+                      in bounds: GridBounds) -> GridCursor? {
+        guard bounds.rows > 0, bounds.columns > 0 else { return nil }
+        let lastRow = bounds.rows - 1, lastColumn = bounds.columns - 1
+        let anchor = clamp(cursor.anchor, lastRow, lastColumn)
+        let from = clamp(cursor.focus, lastRow, lastColumn)
+        var to = from
+        switch motion {
+        case .step(let rows, let columns):
+            to = clamp(CellPos(row: from.row + rows, column: from.column + columns), lastRow, lastColumn)
+        case .toEdge(let edge):
+            switch edge {
+            case .left: to.column = 0
+            case .right: to.column = lastColumn
+            case .top: to.row = 0
+            case .bottom: to.row = lastRow
+            }
+        case .page(let down):
+            // One row of overlap, so the row that was last on screen is first after the page.
+            let rows = max(1, bounds.page - 1) * (down ? 1 : -1)
+            to = clamp(CellPos(row: from.row + rows, column: from.column), lastRow, lastColumn)
+        case .rowStart: to.column = 0
+        case .rowEnd: to.column = lastColumn
+        case .gridStart: to = CellPos(row: 0, column: 0)
+        case .gridEnd: to = CellPos(row: lastRow, column: lastColumn)
+        case .next, .previous:
+            let forward = motion == .next
+            if forward {
+                if from.column < lastColumn { to.column += 1 }
+                else if from.row < lastRow { to = CellPos(row: from.row + 1, column: 0) }
+                else { return nil }
+            } else {
+                if from.column > 0 { to.column -= 1 }
+                else if from.row > 0 { to = CellPos(row: from.row - 1, column: lastColumn) }
+                else { return nil }
+            }
+            return GridCursor(anchor: to, focus: to)
+        }
+        return GridCursor(anchor: extending ? anchor : to, focus: to)
+    }
+
+    private static func clamp(_ position: CellPos, _ lastRow: Int, _ lastColumn: Int) -> CellPos {
+        CellPos(row: min(max(position.row, 0), lastRow), column: min(max(position.column, 0), lastColumn))
+    }
 }
 
 /// The column a horizontal position falls in, clamped at both ends: the gutter to the left and

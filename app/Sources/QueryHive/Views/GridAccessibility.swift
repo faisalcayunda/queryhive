@@ -199,20 +199,39 @@ final class GridAXCell: NSAccessibilityElement {
     ///
     /// `r` and `c` are one-based, because they are read out loud and nobody counts from zero. The
     /// value is cut to 256 units with a marker, so a ten-megabyte cell does not become a ten-megabyte
-    /// utterance. "changed" appears only for a cell with a staged edit, which is the one thing about
-    /// a cell the grid can say that its value cannot.
+    /// utterance. What follows the value is the one thing about a cell that its value cannot say:
+    /// "changed" for a staged edit, "marked for deletion" for a row queued to be deleted.
+    ///
+    /// A NULL is the word "null" whatever the grid is set to draw it as. `nullDisplay` is a choice
+    /// about the picture, and an empty one would read as a cell with nothing in it.
     override func accessibilityLabel() -> String? {
         let staged = coordinator.stagedValue(at: key)
-        let value = staged ?? coordinator.fullValue(at: key) ?? coordinator.nullDisplay
-        let changed = staged != nil ? ", changed" : ""
+        let value = staged ?? coordinator.fullValue(at: key) ?? Self.nullWord
+        var status = ""
+        if staged != nil { status += ", changed" }
+        if coordinator.isMarkedForDeletion(row: key.row) { status += ", marked for deletion" }
         let shown = (value as NSString).length > 256
             ? (value as NSString).substring(to: 256) + "…"
             : value
-        return "Row \(key.row + 1), column \(display + 1), \(coordinator.columnName(at: key.column)): \(shown)\(changed)"
+        return "Row \(key.row + 1), column \(display + 1), \(coordinator.columnName(at: key.column)): \(shown)\(status)"
     }
 
+    /// What VoiceOver says for a NULL.
+    static let nullWord = "null"
+
     override func accessibilityValue() -> Any? {
-        coordinator.stagedValue(at: key) ?? coordinator.fullValue(at: key) ?? coordinator.nullDisplay
+        coordinator.stagedValue(at: key) ?? coordinator.fullValue(at: key) ?? Self.nullWord
+    }
+
+    /// Whether the cursor is on this cell.
+    override func isAccessibilityFocused() -> Bool { coordinator.isAXFocused(key) }
+
+    /// VoiceOver moved its focus here: the cursor follows it, the selection stays where it is, and
+    /// nothing is announced (blueprint 3.4, D-11/P-24). Taking focus *away* needs no action: the
+    /// cell that receives it is the one that writes.
+    override func setAccessibilityFocused(_ accessibilityFocused: Bool) {
+        guard accessibilityFocused else { return }
+        coordinator.focusCellFromAX(key)
     }
 
     /// The position in the result, not in the table: `Coordinator.resultRow(forTableRow:)` converts,
@@ -331,6 +350,19 @@ final class GridAXHeader: NSAccessibilityElement {
     override func accessibilityPerformPress() -> Bool {
         coordinator.commands.sortClick(sourceColumn)
         return true
+    }
+
+    /// "Filter": what the funnel does, offered as an action because a 10-point glyph in the corner
+    /// of a header is not a target a screen-reader user can be asked to find (FR-GRID-07).
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        let source = sourceColumn
+        return [NSAccessibilityCustomAction(name: "Filter") { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return false }
+                self.coordinator.commands.openFilter(source, self.coordinator.frame(ofHeader: self.column))
+                return true
+            }
+        }]
     }
 
     override func accessibilityFrameInParentSpace() -> NSRect {

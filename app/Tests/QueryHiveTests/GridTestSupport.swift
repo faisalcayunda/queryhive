@@ -55,6 +55,9 @@ final class GridFixture {
          rows: [[String?]],
          viewport: CGSize = CGSize(width: 900, height: 600),
          style: GridInputs.GridStyle = .placeholder) {
+        // The shared host's stores are configured once per process. Left to whichever test happens to
+        // run first, a grid test run on its own (`--filter`) got an empty result.
+        TestStores.ensureConfigured()
         let log = GridCommandLog()
         let commands = GridCommands(
             sortClick: { log.sortClick.append($0) },

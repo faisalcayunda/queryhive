@@ -4,10 +4,11 @@ import XCTest
 
 final class ShortcutConflictTests: XCTestCase {
     /// Keys the editor, the Open Quickly overlay and the connection sheet handle themselves, plus
-    /// the keys W10 reserves in the platform table (peek, record, rows, font size).
+    /// the keys W10 reserves in the platform table (record, rows, font size). ⌘Y, reserved for the
+    /// peek, is bound now (`peekCell`), so the duplicate check sees it as an action.
     private static let localAndReserved: [(String, String)] = [
         ("f", "⌘"), ("f", "⌥⌘"), ("g", "⌘"), ("g", "⇧⌘"), ("[", "⌥⌘"), ("]", "⌥⌘"),
-        ("y", "⌘"), ("i", "⌥⌘"), ("n", "⌥⌘"), ("\u{7F}", "⌘"),
+        ("i", "⌥⌘"), ("n", "⌥⌘"), ("\u{7F}", "⌘"),
         ("+", "⌘"), ("-", "⌘"), ("0", "⌘"),
     ]
 

@@ -30,6 +30,8 @@ import XCTest
 //                  part of it.
 //
 // Record:   QH_RECORD_BASELINES=1 swift test --filter VisualParityTests   (fails on purpose, see below)
+//           QH_RECORD_BASELINES=grid-selection,grid-edits swift test --filter VisualParityTests
+//                                                                     (only those scenes, both looks)
 // Compare:  swift test --filter VisualParityTests
 //
 // Recording fails the run after writing ("recorded N scenes; rerun without QH_RECORD_BASELINES"), so a
@@ -432,7 +434,23 @@ final class VisualParityTests: XCTestCase {
     }
 
     private static var recording: Bool {
-        ProcessInfo.processInfo.environment["QH_RECORD_BASELINES"] == "1"
+        let value = ProcessInfo.processInfo.environment["QH_RECORD_BASELINES"] ?? ""
+        return !value.isEmpty && value != "0"
+    }
+
+    /// The scenes a recording is limited to, by name without the look (`grid-selection` is both
+    /// `grid-selection-dark` and `grid-selection-light`); empty records every scene. A re-record is
+    /// for a declared V-n change, and writing the scenes that did not move would hide whether they
+    /// did.
+    private static let recordOnly: Set<String> = {
+        let value = ProcessInfo.processInfo.environment["QH_RECORD_BASELINES"] ?? ""
+        return value == "1" ? [] : Set(value.split(separator: ",").map(String.init))
+    }()
+
+    private static func isRecorded(_ name: String) -> Bool {
+        guard !recordOnly.isEmpty else { return true }
+        let base = ["-dark", "-light"].first(where: name.hasSuffix).map { String(name.dropLast($0.count)) } ?? name
+        return recordOnly.contains(base) || recordOnly.contains(name)
     }
 
     /// `__Baselines__` beside this file, so the path is the repository's and not the build's.
@@ -1090,6 +1108,7 @@ final class VisualParityTests: XCTestCase {
         encoder.outputFormatting = [.sortedKeys]
         var recorded = 0
         for (name, make) in scenes {
+            if Self.recording, !Self.isRecorded(name) { continue }
             let capture = try make()
             closeWindows()
             let pngURL = directory.appendingPathComponent("\(name).png")

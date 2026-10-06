@@ -35,6 +35,7 @@ enum AppMenu {
             spec(.focusSidebar, .view),
             spec(.focusEditor, .view),
             spec(.focusResults, .view),
+            spec(.peekCell, .view),
             spec(.nextTab, .tab),
             spec(.previousTab, .tab),
         ]
@@ -75,6 +76,9 @@ enum AppMenu {
         case .focusResults: model.focus(.results)
         case .nextTab: model.selectTab(offset: 1)
         case .previousTab: model.selectTab(offset: -1)
+        // The responder chain, because the cell lives in the grid and the grid is not the model's:
+        // it answers only while it is the first responder, which is when a peek means anything.
+        case .peekCell: NSApp.sendAction(#selector(GridTableView.peekCell(_:)), to: nil, from: nil)
         default: break
         }
     }
@@ -92,6 +96,7 @@ enum AppMenu {
         case .stop: return tab?.stage == .running
         case .revealOutput: return tab?.files.isEmpty == false
         case .nextTab, .previousTab: return model.tabs.count > 1
+        case .peekCell: return tab?.cellCursor != nil
         default: return true
         }
     }

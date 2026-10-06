@@ -189,6 +189,15 @@ struct ResultGridTable: NSViewRepresentable {
         private var formatObserver: NSObjectProtocol?
         private var scrollObserver: NSObjectProtocol?
         private var tooltipRebuild: DispatchWorkItem?
+        /// The peek (P-17), made when it is first asked for and kept for reuse.
+        private(set) var peek: CellPeekPanel?
+        /// Which cell the peek was last asked about, and which ask is the latest: a read that comes
+        /// back for an older one is dropped, so a fast run of arrow keys cannot land out of order.
+        private var peekKey: CellKey?
+        private var peekGeneration = 0
+        private var peekPending = false
+        private var peekReadingTimer: DispatchWorkItem?
+        private var announceTimer: DispatchWorkItem?
         /// The registered tooltip region in window coordinates, which is what lets
         /// `GridToolTip.local` say which coordinate system AppKit's point is in.
         private var tooltipWindowRect: NSRect?
@@ -227,7 +236,10 @@ struct ResultGridTable: NSViewRepresentable {
             scrollObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.scheduleTooltips() }
+                MainActor.assumeIsolated {
+                    self?.scheduleTooltips()
+                    self?.followPeek()
+                }
             }
         }
 
@@ -235,6 +247,10 @@ struct ResultGridTable: NSViewRepresentable {
             if let formatObserver { NotificationCenter.default.removeObserver(formatObserver) }
             if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
             tooltipRebuild?.cancel()
+            peekReadingTimer?.cancel()
+            announceTimer?.cancel()
+            let panel = peek
+            DispatchQueue.main.async { MainActor.assumeIsolated { panel?.dismiss() } }
         }
 
         /// Row index in the rows the grid draws, for a row index in the table.
@@ -255,6 +271,8 @@ struct ResultGridTable: NSViewRepresentable {
 
             let rowsChanged = force || old?.revision != inputs.revision || old?.layout != inputs.layout
             let styleChanged = force || old?.style != inputs.style
+            // The cell a peek was showing belongs to rows that are no longer these.
+            if rowsChanged, !force { closePeek() }
             if rowsChanged || styleChanged {
                 refreshRowsAndGeometry(inputs)
                 textCache.removeAll()
@@ -272,6 +290,8 @@ struct ResultGridTable: NSViewRepresentable {
                 table?.invalidate(rows: rows, columns: columns, geometry: geometry, paint: paint)
             }
             applySelection(inputs.selection, old: old?.selection)
+            // Nothing for a peek to be about once the cursor is gone (a new result, a filter).
+            if isPeekOpen, tab.cellCursor == nil { closePeek() }
             applyHeader(inputs)
             syncEditor(inputs, old: old)
             syncPopovers(inputs, old: old)
@@ -526,15 +546,19 @@ struct ResultGridTable: NSViewRepresentable {
         /// A press: select the cell under the pointer, and on the second click act on it.
         func press(at point: CGPoint, clickCount: Int) {
             guard rows.count > 0, !geometry.widths.isEmpty else { return }
+            // A click in the grid is the end of a peek (blueprint 3.3).
+            closePeek()
             let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: rows.count)
             let column = geometry.clampedColumn(atX: point.x, last: geometry.widths.count - 1)
             let position = CellPos(row: row, column: column)
             dragAnchor = position
+            // What is on screen, not what SwiftUI last applied: a key may have moved the selection
+            // since, and repainting the older block would leave the newer one painted.
+            let previousSelection = tab.cellSelection
+            let previousCursor = tab.cellCursor?.focus
             tab.selectCells(anchor: position, focus: position)
             commands.selectionChanged()
-            table?.selection = tab.cellSelection
-            table?.cursor = tab.cellCursor
-            table?.invalidateSelection(previous: applied?.selection, geometry: geometry, paint: paint)
+            syncTable(previousSelection: previousSelection, previousCursor: previousCursor)
             if clickCount == 2 { doubleClick(at: position) }
         }
 
@@ -823,6 +847,17 @@ struct ResultGridTable: NSViewRepresentable {
             tooltipWindowRect = table.convert(region, to: nil)
         }
 
+        /// A stand-in for where the pointer is, in window coordinates, for a test: a window that is
+        /// not on screen has no pointer to ask.
+        var pointerOverride: (() -> NSPoint?)?
+
+        /// Where the pointer is now, in window coordinates, while the window is on screen.
+        private func restingPointer() -> NSPoint? {
+            if let pointerOverride { return pointerOverride() }
+            guard let window = table?.window, window.isVisible else { return nil }
+            return window.mouseLocationOutsideOfEventStream
+        }
+
         /// The tooltip for the cell under the pointer — the whole value in the column's display
         /// format (§8.5), which is what the reader and an export see.
         ///
@@ -835,7 +870,8 @@ struct ResultGridTable: NSViewRepresentable {
             else { return "" }
             let sources = inputs.layout.visibleSources
             guard !sources.isEmpty else { return "" }
-            let local = GridToolTip.local(point: point, in: table, registered: tooltipWindowRect)
+            let local = GridToolTip.local(point: point, in: table, registered: tooltipWindowRect,
+                                          pointer: restingPointer())
             // The pointer over the row-number gutter belongs to no column, and `clampedColumn`
             // would silently hand it the first one instead of nothing.
             guard table.bounds.contains(local), local.x >= geometry.gutter else { return "" }
@@ -850,6 +886,320 @@ struct ResultGridTable: NSViewRepresentable {
                 ?? rows.fullValue(row: row, column: source, format: format)
             guard let value, !value.isEmpty else { return "" }
             return GridToolTip.cap(value)
+        }
+
+        // MARK: The keyboard
+
+        /// What the key map needs to know about the grid right now.
+        var keyState: GridKeyState {
+            let selection = tab.cellSelection
+            return GridKeyState(hasCursor: tab.cellCursor != nil,
+                                hasSelection: selection != nil,
+                                selectionIsBlock: (selection?.cellCount ?? 0) > 1,
+                                peekOpen: isPeekOpen,
+                                editing: editingKey != nil)
+        }
+
+        /// Where the cursor can go: the table's rows, the drawn columns, and a page of rows.
+        var gridBounds: GridBounds {
+            let visible = visibleRowRange()
+            return GridBounds(rows: rows.count, columns: geometry.widths.count,
+                              page: visible.upperBound - visible.lowerBound)
+        }
+
+        /// A key, from `GridTableView.keyDown`. `true` when the grid took it.
+        func handleKey(_ key: GridKey) -> Bool {
+            guard let action = GridKeyMap.action(for: key, in: keyState) else { return false }
+            switch action {
+            case .move(let motion, let extending): moveCursor(motion, extending: extending)
+            case .activate:
+                if let focus = tab.cellCursor?.focus { doubleClick(at: focus) }
+            case .togglePeek: togglePeek()
+            case .cancelEdit: cancelEdit()
+            case .closePeek: closePeek()
+            case .collapseSelection:
+                if let focus = tab.cellCursor?.focus {
+                    place(GridCursor(anchor: focus, focus: focus), extending: false)
+                }
+            case .clearSelection: clearSelection()
+            case .deleteRows: break  // W10-T3 draws and stages them; the map never offers it before
+            }
+            return true
+        }
+
+        /// One motion of the cursor. With no cursor yet the first key lands on the first cell on
+        /// screen, which is where a person who tabbed in is looking.
+        private func moveCursor(_ motion: GridMotion, extending: Bool) {
+            // No cell to land on (no rows, or no drawn columns): Tab must still leave, because
+            // `keyDown` swallows a key the coordinator took and the grid always accepts the keyboard.
+            guard rows.count > 0, !geometry.widths.isEmpty else { leaveGrid(motion); return }
+            guard let cursor = tab.cellCursor else {
+                let first = CellPos(row: firstUsableRow(), column: 0)
+                place(GridCursor(anchor: first, focus: first), extending: false)
+                return
+            }
+            guard let next = GridCursorMath.apply(motion, extending: extending, to: cursor, in: gridBounds) else {
+                leaveGrid(motion)  // Tab past the first or last cell
+                return
+            }
+            guard next != cursor else { return }
+            place(next, extending: extending)
+        }
+
+        /// Tab and Shift-Tab hand the keyboard to the next or previous key view; every other motion
+        /// stops at the edge.
+        private func leaveGrid(_ motion: GridMotion) {
+            if motion == .next { table?.window?.selectNextKeyView(table) }
+            if motion == .previous { table?.window?.selectPreviousKeyView(table) }
+        }
+
+        /// The first row that is wholly on screen and not under the header, which is where a
+        /// person who has just arrived is looking.
+        private func firstUsableRow() -> Int {
+            guard let scroll, paint.rowHeight > 0 else { return 0 }
+            let clip = scroll.contentView
+            let top = clip.bounds.minY + clip.contentInsets.top
+            return min(max(0, Int(ceil(top / paint.rowHeight))), max(0, rows.count - 1))
+        }
+
+        /// Put the cursor (and with it the block) somewhere, the way a click does: the tab's own
+        /// writer, the table's copies, only the cells that changed repainted, the cell scrolled
+        /// into view, and the inspector and the peek told.
+        private func place(_ cursor: GridCursor, extending: Bool) {
+            let previousSelection = tab.cellSelection
+            let previousCursor = tab.cellCursor?.focus
+            tab.selectCells(anchor: cursor.anchor, focus: cursor.focus)
+            syncTable(previousSelection: previousSelection, previousCursor: previousCursor)
+            commands.selectionChanged()
+            commands.settleSelection()
+            scrollToVisible(cell: cursor.focus)
+            if isPeekOpen { showPeek(at: cursor.focus, opening: false) }
+            cursorMovedForAX(extending: extending)
+        }
+
+        /// Esc on a single cell: nothing is selected any more, and the cursor stays where it was so
+        /// the next arrow starts from there rather than from the top.
+        private func clearSelection() {
+            let previousSelection = tab.cellSelection
+            let previousCursor = tab.cellCursor
+            tab.cellSelection = nil
+            tab.cellCursor = previousCursor
+            syncTable(previousSelection: previousSelection, previousCursor: previousCursor?.focus)
+            commands.selectionChanged()
+            commands.settleSelection()
+        }
+
+        /// The table's copies of the selection and the cursor, and a repaint of what changed: the
+        /// cells the selection gained or lost, and the one the ring left and the one it reached.
+        private func syncTable(previousSelection: CellRange?, previousCursor: CellPos?) {
+            table?.selection = tab.cellSelection
+            table?.cursor = tab.cellCursor
+            table?.invalidateSelection(previous: previousSelection, geometry: geometry, paint: paint)
+            for cell in GridPaintDiff.cursorInvalidations(old: previousCursor, new: tab.cellCursor?.focus) {
+                table?.invalidate(cell: cell, geometry: geometry, paint: paint)
+            }
+        }
+
+        /// The table gained or lost the keyboard: the ring goes between full strength and 40%.
+        func focusChanged() {
+            guard let table, let focus = table.cursor?.focus else { return }
+            table.invalidate(cell: focus, geometry: geometry, paint: paint)
+        }
+
+        /// The window became or stopped being key: the same repaint, and a peek does not outlive it.
+        func windowKeyChanged() {
+            focusChanged()
+            guard isPeekOpen, let window = table?.window else { return }
+            // One turn later: while the key moves from this window to another, nobody is key yet.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    if !window.isKeyWindow { self?.closePeek() }
+                }
+            }
+        }
+
+        // MARK: Scrolling to the cursor
+
+        /// A cell's rectangle in the table's own coordinates. The first column starts at the left
+        /// edge, so reaching it brings the row numbers back with it.
+        func rect(ofCell position: CellPos) -> CGRect {
+            guard let table, position.column >= 0, position.column < geometry.widths.count else { return .zero }
+            let edges = geometry.edges(of: position.column)
+            let rowRect = table.rect(ofRow: position.row)
+            return CGRect(x: position.column == 0 ? 0 : edges.left, y: rowRect.minY,
+                          width: edges.right - (position.column == 0 ? 0 : edges.left),
+                          height: rowRect.height)
+        }
+
+        /// The least scrolling that shows a cell, once per key press and without animation.
+        func scrollToVisible(cell position: CellPos) {
+            guard let scroll, position.row >= 0, position.row < rows.count else { return }
+            let clip = scroll.contentView
+            let target = GridScrollMath.origin(revealing: rect(ofCell: position), in: clip.bounds,
+                                               insets: clip.contentInsets)
+            guard target != clip.bounds.origin else { return }
+            let constrained = clip.constrainBoundsRect(NSRect(origin: target, size: clip.bounds.size))
+            clip.scroll(to: constrained.origin)
+            scroll.reflectScrolledClipView(clip)
+        }
+
+        // MARK: The peek
+
+        /// Whether a peek has been asked for and not closed: from the key press, through the read,
+        /// to the panel being up. The cursor moving while the first read is still in flight must
+        /// carry the peek along, which "the panel is visible" would not.
+        var isPeekOpen: Bool { peekKey != nil }
+
+        /// Space and Cmd-Y: open the peek on the cursor's cell, or close it.
+        func togglePeek() {
+            if isPeekOpen { closePeek(); return }
+            guard let focus = tab.cellCursor?.focus else { return }
+            showPeek(at: focus, opening: true)
+        }
+
+        func closePeek() {
+            peekGeneration += 1
+            peekReadingTimer?.cancel()
+            peekPending = false
+            peekKey = nil
+            peek?.dismiss()
+        }
+
+        /// Read one cell and show it. The read is `rowsOrThrow` for one row and one column, on a
+        /// background queue (a ten-megabyte value must not cost a frame), and the panel appears
+        /// when the value does, or after 50 ms as "Reading..." if it takes longer.
+        private func showPeek(at position: CellPos, opening: Bool) {
+            guard table?.window != nil, let source = sourceColumn(at: position.column),
+                  let key = validKey(row: position.row, source: source) else { closePeek(); return }
+            let panel = peek ?? CellPeekPanel()
+            peek = panel
+            peekGeneration += 1
+            let generation = peekGeneration
+            peekKey = key
+            peekPending = true
+            peekReadingTimer?.cancel()
+            let column = rows.columns[source]
+
+            // A staged edit is what the cell shows, and there is nothing to read for it.
+            if let staged = tab.cellEdits.value(at: key) {
+                peekShow(staged, note: "A staged edit, not written yet.", position: position, column: column,
+                         announce: opening)
+                return
+            }
+
+            let reading = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.peekGeneration == generation, self.peekPending else { return }
+                    self.peek?.showReading(anchor: self.screenRect(ofCell: position),
+                                           appearance: self.table?.window?.effectiveAppearance)
+                }
+            }
+            peekReadingTimer = reading
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: reading)
+
+            let reader = PeekReader(rows: rows)
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let outcome = Result { try reader.value(row: key.row, column: source) }
+                await self?.peekDidRead(outcome, generation: generation, position: position,
+                                        column: column, announce: opening)
+            }
+        }
+
+        private func peekDidRead(_ outcome: Result<String?, Error>, generation: Int, position: CellPos,
+                                 column: Event.Column, announce: Bool) {
+            guard generation == peekGeneration else { return }
+            peekReadingTimer?.cancel()
+            switch outcome {
+            case .success(let value):
+                peekShow(value, note: value == nil ? "This cell is NULL." : nil, position: position,
+                         column: column, announce: announce)
+            case .failure(let error):
+                peekPending = false
+                // Said in the panel and not clipped to nothing: a blank peek would pass for an
+                // empty value, which is the wrong thing to believe about a cell that failed to read.
+                let message = (error as? StoreFailure)?.isStale == true
+                    ? "These rows are gone." : "Could not read this cell."
+                peek?.showFailure(message, anchor: screenRect(ofCell: position),
+                                  appearance: table?.window?.effectiveAppearance)
+            }
+        }
+
+        private func peekShow(_ value: String?, note: String?, position: CellPos, column: Event.Column,
+                              announce: Bool) {
+            peekPending = false
+            peek?.show(value: value ?? "", column: column.name, type: column.type,
+                       connectionID: tab.connectionID, table: tab.sourceTable, extraNote: note,
+                       anchor: screenRect(ofCell: position),
+                       appearance: table?.window?.effectiveAppearance)
+            if announce {
+                Announcer.post("Peek: \(column.name), \(String((value ?? "null").prefix(160)))")
+            }
+        }
+
+        /// A cell's rectangle on screen, which is what the panel hangs under.
+        private func screenRect(ofCell position: CellPos) -> CGRect {
+            guard let table, let window = table.window else { return .zero }
+            return window.convertToScreen(table.convert(rect(ofCell: position), to: nil))
+        }
+
+        /// The grid scrolled, or the window moved: the panel follows its cell, and goes if the cell
+        /// has left the window.
+        func followPeek() {
+            guard isPeekOpen, let table, let focus = tab.cellCursor?.focus else { return }
+            guard table.visibleRect.intersects(rect(ofCell: focus)) else { closePeek(); return }
+            peek?.follow(anchor: screenRect(ofCell: focus))
+        }
+
+        // MARK: VoiceOver and the cursor
+
+        /// The last cell a keyboard move told VoiceOver about, for the tests: the real notification
+        /// goes to the system and nothing in a test process can read it back.
+        private(set) var lastAXFocusPost: CellKey?
+
+        /// VoiceOver put its focus on a cell: the cursor goes there, and the selection stays.
+        ///
+        /// The second writer of the cursor, besides `QueryTab.selectCells` (blueprint 3.4). A screen
+        /// reader's focus is not a choice: reading down a column must not select every cell it
+        /// passes, so the block is left alone and the cursor may rest outside it. Nothing is
+        /// announced, because VoiceOver is already reading the cell it moved to.
+        func focusCellFromAX(_ key: CellKey) {
+            guard let display = visibleSources.firstIndex(of: key.column), key.row >= 0,
+                  key.row < rows.count else { return }
+            let position = CellPos(row: key.row, column: display)
+            let previous = tab.cellCursor?.focus
+            guard tab.cellCursor != GridCursor(anchor: position, focus: position) else { return }
+            tab.cellCursor = GridCursor(anchor: position, focus: position)
+            syncTable(previousSelection: tab.cellSelection, previousCursor: previous)
+            scrollToVisible(cell: position)
+            if isPeekOpen { showPeek(at: position, opening: false) }
+        }
+
+        /// Whether a cell is where the cursor is, which is what VoiceOver's focused attribute says.
+        func isAXFocused(_ key: CellKey) -> Bool {
+            guard let focus = tab.cellCursor?.focus, let display = visibleSources.firstIndex(of: key.column)
+            else { return false }
+            return focus == CellPos(row: key.row, column: display)
+        }
+
+        /// Whether the whole row is marked for deletion, for the label (W10-T3 does the marking).
+        func isMarkedForDeletion(row: Int) -> Bool { tab.cellEdits.isDeleted(row) }
+
+        /// A keyboard move: VoiceOver is told its focus moved, and an *extension* is announced once,
+        /// 250 ms after the last key that made it, so holding Shift-Down reads one total and not one
+        /// per row. A plain move is read by VoiceOver itself, as the new cell.
+        private func cursorMovedForAX(extending: Bool) {
+            guard axClientAttached else { return }
+            if let cell = axTree.focusedCell {
+                lastAXFocusPost = cell.key
+                NSAccessibility.post(element: cell, notification: .focusedUIElementChanged)
+            }
+            announceTimer?.cancel()
+            guard extending else { return }
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { self?.announceSelectionForAX() }
+            }
+            announceTimer = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
 
         // MARK: Rows grew

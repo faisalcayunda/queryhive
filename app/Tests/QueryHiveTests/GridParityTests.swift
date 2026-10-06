@@ -138,6 +138,41 @@ final class GridParityTests: XCTestCase {
                        "and so does the view-space one")
     }
 
+    /// The pointer settles the tooltip's cell whatever coordinate system AppKit used for `point`: a
+    /// tooltip is for the pointer resting over the region, so where the pointer is answers it. This
+    /// is what closes the open question about `point` (it documents neither), because the point is
+    /// no longer what the answer rests on.
+    func testTheTooltipFollowsThePointerWhateverPointAppKitHandsOver() throws {
+        let fixture = makeGrid(rowCount: 400)
+        fixture.apply()
+        GridFixture.pause(for: 0.3)
+        fixture.scroll.contentView.scroll(to: NSPoint(x: 0, y: 750))
+        fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+        GridFixture.pause(for: 0.3)
+
+        let tag = fixture.table.addToolTip(fixture.table.visibleRect, owner: fixture.coordinator, userData: nil)
+        fixture.coordinator.pointerOverride = { fixture.windowPoint(inCell: 33, column: 1) }
+        // Three different `point`s — the cell in view coordinates, the cell in window coordinates,
+        // and nonsense — all answer the cell the pointer is over.
+        for point in [fixture.pointInCell(row: 33, column: 1), fixture.windowPoint(inCell: 33, column: 1),
+                      NSPoint(x: 5_000, y: -300)] {
+            XCTAssertEqual(fixture.coordinator.view(fixture.table, stringForToolTip: tag, point: point,
+                                                    userData: nil), "33")
+        }
+
+        // A pointer outside the table (it left while the string was being asked for) says nothing,
+        // and the point is read the old way.
+        fixture.coordinator.pointerOverride = { NSPoint(x: -400, y: -400) }
+        XCTAssertEqual(fixture.coordinator.view(fixture.table, stringForToolTip: tag,
+                                                point: fixture.pointInCell(row: 33, column: 1), userData: nil),
+                       "33")
+        // No window on screen, no pointer: the tests above this one.
+        fixture.coordinator.pointerOverride = { nil }
+        XCTAssertEqual(fixture.coordinator.view(fixture.table, stringForToolTip: tag,
+                                                point: fixture.windowPoint(inCell: 34, column: 1), userData: nil),
+                       "34")
+    }
+
     /// The header's two strings, taken from the grid that shipped rather than from the blueprint's
     /// §12.4 phrasing: a header click routes **server-first** (`AppModel.setSort`), so the wording
     /// about rows already fetched would describe only the fallback path (§13 item 25).
@@ -294,6 +329,299 @@ final class GridParityTests: XCTestCase {
         table.cacheDisplay(in: rect, to: rep)
         let bytes = try XCTUnwrap(rep.bitmapData)
         return Data(bytes: bytes, count: rep.bytesPerRow * rep.pixelsHigh)
+    }
+
+    // MARK: The cell cursor (W10-T1)
+
+    private func keyEvent(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags = [],
+                          in fixture: GridFixture) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                                       windowNumber: fixture.window.windowNumber, context: nil,
+                                       characters: "", charactersIgnoringModifiers: "",
+                                       isARepeat: false, keyCode: keyCode))
+    }
+
+    /// A real arrow-key event through `keyDown`: the cursor and the selection move together, and the
+    /// table's own row selection does not (D-15 of Fase 5: it is never drawn, so it must never move).
+    func testArrowKeysMoveTheCursorAndTheSelectionAndNotTheTablesRows() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 3, column: 1), clickCount: 1)
+        fixture.coordinator.release()
+
+        fixture.table.keyDown(with: try keyEvent(125, [.numericPad, .function], in: fixture))  // down
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 4, column: 1))
+        XCTAssertEqual(fixture.tab.cellSelection, CellRange(from: (4, 1), to: (4, 1)))
+
+        fixture.table.keyDown(with: try keyEvent(124, [.numericPad, .function], in: fixture))  // right
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 4, column: 2))
+
+        fixture.table.keyDown(with: try keyEvent(126, [.option], in: fixture))  // option-up: unmapped
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 4, column: 2), "swallowed, not applied")
+
+        XCTAssertEqual(fixture.table.selectedRowIndexes, IndexSet(), "no row of the table was selected")
+        XCTAssertEqual(fixture.table.selection, fixture.tab.cellSelection, "the table's copy follows")
+        XCTAssertEqual(fixture.table.cursor, fixture.tab.cellCursor)
+        XCTAssertGreaterThanOrEqual(fixture.log.selectionChanged, 3)
+        XCTAssertGreaterThanOrEqual(fixture.log.settleSelection, 2, "the inspector reads the cursor's cell")
+    }
+
+    func testShiftArrowExtendsFromTheAnchorAndEscapeShrinksItBack() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 3, column: 0), clickCount: 1)
+        fixture.coordinator.release()
+
+        fixture.table.keyDown(with: try keyEvent(125, [.shift], in: fixture))
+        fixture.table.keyDown(with: try keyEvent(125, [.shift], in: fixture))
+        fixture.table.keyDown(with: try keyEvent(124, [.shift], in: fixture))
+        XCTAssertEqual(fixture.tab.cellCursor?.anchor, CellPos(row: 3, column: 0), "the anchor stays")
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 5, column: 1))
+        XCTAssertEqual(fixture.tab.cellSelection, CellRange(from: (3, 0), to: (5, 1)))
+
+        // Esc: the block shrinks to the cursor's cell, then the selection goes, the cursor stays.
+        fixture.table.keyDown(with: try keyEvent(53, in: fixture))
+        XCTAssertEqual(fixture.tab.cellSelection, CellRange(from: (5, 1), to: (5, 1)))
+        fixture.table.keyDown(with: try keyEvent(53, in: fixture))
+        XCTAssertNil(fixture.tab.cellSelection)
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 5, column: 1), "the next arrow starts here")
+        XCTAssertNil(fixture.table.selection)
+        fixture.table.keyDown(with: try keyEvent(125, in: fixture))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 6, column: 1))
+    }
+
+    /// Nothing selected, nothing under the cursor: the first arrow lands on the first cell on screen
+    /// instead of doing nothing.
+    func testTheFirstArrowLandsOnTheFirstVisibleCell() throws {
+        let fixture = makeGrid(rowCount: 400)
+        fixture.apply()
+        fixture.scroll.contentView.scroll(to: NSPoint(x: 0, y: 750))
+        fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+        XCTAssertNil(fixture.tab.cellCursor)
+
+        // The first row that is wholly on screen: the header covers the top of the clip view.
+        let clip = fixture.scroll.contentView
+        let expected = Int(ceil((clip.bounds.minY + clip.contentInsets.top) / fixture.style.rowHeight))
+        XCTAssertGreaterThan(expected, 0)
+
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.down)))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: expected, column: 0))
+        XCTAssertEqual(clip.bounds.minY, 750, "it was already in view, so nothing scrolled")
+    }
+
+    func testTheCursorIsScrolledIntoViewWithOneStepOfScroll() throws {
+        let fixture = makeGrid(rowCount: 400)
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 0, column: 0), clickCount: 1)
+        fixture.coordinator.release()
+
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.down, command: true)))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus.row, 399)
+        let visible = fixture.table.rows(in: fixture.table.visibleRect)
+        XCTAssertTrue(NSLocationInRange(399, visible), "the last row is on screen: \(visible)")
+
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.up, command: true)))
+        let clip = fixture.scroll.contentView
+        XCTAssertEqual(clip.bounds.minY, -clip.contentInsets.top, accuracy: 0.5,
+                       "and back at the top, with the first row clear of the header")
+    }
+
+    func testAPageMovesByTheRowsOnScreenLessOne() throws {
+        let fixture = makeGrid(rowCount: 400)
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 0, column: 0), clickCount: 1)
+        fixture.coordinator.release()
+        let page = fixture.coordinator.gridBounds.page
+        XCTAssertGreaterThan(page, 10)
+
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.pageDown)))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus.row, page - 1)
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.pageDown, shift: true)))
+        XCTAssertEqual(fixture.tab.cellSelection?.top, page - 1, "extending keeps the anchor")
+    }
+
+    /// Tab walks the cells, and past the last one the grid lets go of the keyboard.
+    func testTabWalksTheCellsAndLeavesAtTheEnd() throws {
+        let fixture = makeGrid(rowCount: 3)
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 0, column: 2), clickCount: 1)
+        fixture.coordinator.release()
+
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.tab)))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 1, column: 0), "wrapped onto the next row")
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.tab, shift: true)))
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 0, column: 2))
+
+        fixture.coordinator.press(at: fixture.pointInCell(row: 2, column: 2), clickCount: 1)
+        fixture.coordinator.release()
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.tab)), "the key is taken: it hands the focus on")
+        XCTAssertEqual(fixture.tab.cellCursor?.focus, CellPos(row: 2, column: 2), "and the cursor stays")
+    }
+
+    /// A grid with nothing to move to (no rows, or no drawn columns) is not a keyboard trap: the
+    /// grid takes the keyboard, so Tab and Shift-Tab have to hand it on instead of being swallowed.
+    func testTabLeavesAnEmptyGrid() throws {
+        for (label, rowCount, sources) in [("no rows", 0, nil), ("no drawn columns", 3, [Int]())] as [(String, Int, [Int]?)] {
+            let fixture = makeGrid(rowCount: rowCount)
+            fixture.apply(fixture.inputs(visibleSources: sources))
+
+            // A field either side of the grid, in the key-view loop, for the keyboard to land on.
+            let container = NSView(frame: fixture.scroll.frame)
+            let before = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 20))
+            let after = NSTextField(frame: NSRect(x: 100, y: 0, width: 80, height: 20))
+            container.addSubview(fixture.scroll)
+            container.addSubview(before)
+            container.addSubview(after)
+            fixture.window.contentView = container
+            before.nextKeyView = fixture.table
+            fixture.table.nextKeyView = after
+            after.nextKeyView = before
+
+            XCTAssertTrue(fixture.window.makeFirstResponder(fixture.table), label)
+            XCTAssertTrue(fixture.window.firstResponder === fixture.table, label)
+            fixture.table.keyDown(with: try keyEvent(48, in: fixture))  // tab
+            XCTAssertFalse(fixture.window.firstResponder === fixture.table, "\(label): Tab left the grid")
+            XCTAssertTrue(after.currentEditor() != nil && fixture.window.firstResponder === after.currentEditor(),
+                          "\(label): and landed on the next key view")
+
+            XCTAssertTrue(fixture.window.makeFirstResponder(fixture.table), label)
+            fixture.table.keyDown(with: try keyEvent(48, [.shift], in: fixture))  // shift-tab
+            XCTAssertTrue(before.currentEditor() != nil && fixture.window.firstResponder === before.currentEditor(),
+                          "\(label): Shift-Tab landed on the previous key view")
+
+            // The other motions are still taken and still stop: there is nowhere for them to go.
+            XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.down)), label)
+            XCTAssertNil(fixture.tab.cellCursor, label)
+        }
+    }
+
+    /// Return does what a double-click does on the cell: it opens the editor on a plain value.
+    func testReturnOpensTheEditorOnTheCursorCell() throws {
+        let fixture = makeGrid()
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 5, column: 0), clickCount: 1)
+        fixture.coordinator.release()
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.returnKey)))
+        XCTAssertNotNil(fixture.coordinator.editor)
+        XCTAssertEqual(fixture.log.beginEdit, [CellKey(row: 5, column: 0)])
+
+        // The field now has the keyboard: the grid's map answers only Esc, which abandons the edit.
+        XCTAssertFalse(fixture.coordinator.handleKey(GridKey(.down)))
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.escape)))
+        XCTAssertNil(fixture.coordinator.editor)
+        XCTAssertEqual(fixture.log.cancelEdit, 1)
+    }
+
+    // MARK: The ring
+
+    /// The ring is repainted where it was and where it is, and nowhere else.
+    func testTheRingInvalidatesTheCellItLeftAndTheCellItReached() {
+        let a = CellPos(row: 2, column: 1), b = CellPos(row: 7, column: 3)
+        XCTAssertEqual(GridPaintDiff.cursorInvalidations(old: a, new: b), [a, b])
+        XCTAssertEqual(GridPaintDiff.cursorInvalidations(old: nil, new: b), [b])
+        XCTAssertEqual(GridPaintDiff.cursorInvalidations(old: a, new: nil), [a])
+        XCTAssertEqual(GridPaintDiff.cursorInvalidations(old: a, new: a), [], "a cursor that did not move")
+        XCTAssertEqual(GridPaintDiff.cursorInvalidations(old: nil, new: nil), [])
+    }
+
+    private func cellRect(_ fixture: GridFixture, row: Int, column: Int) -> NSRect {
+        let edges = fixture.coordinator.geometry.edges(of: column)
+        let rowRect = fixture.table.rect(ofRow: row)
+        return NSRect(x: edges.left, y: rowRect.minY, width: edges.right - edges.left, height: rowRect.height)
+    }
+
+    func testAKeyMoveRepaintsTheTwoCellsAndNotARowFarAway() throws {
+        let fixture = makeGrid(rowCount: 40)
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 3, column: 1), clickCount: 1)
+        fixture.coordinator.release()
+
+        fixture.table.invalidationLog = []
+        XCTAssertTrue(fixture.coordinator.handleKey(GridKey(.down)))
+        let log = try XCTUnwrap(fixture.table.invalidationLog)
+        XCTAssertEqual(Set(log), [cellRect(fixture, row: 3, column: 1), cellRect(fixture, row: 4, column: 1)],
+                       "the cell the ring left and the cell it reached, and no other")
+    }
+
+    /// Gaining or losing the keyboard repaints the cursor's cell only (it goes between 40% and full).
+    func testFocusChangedRepaintsOnlyTheCursorCell() throws {
+        let fixture = makeGrid(rowCount: 40)
+        fixture.apply()
+        fixture.coordinator.press(at: fixture.pointInCell(row: 3, column: 1), clickCount: 1)
+        fixture.coordinator.release()
+
+        let ring = cellRect(fixture, row: 3, column: 1)
+        fixture.table.invalidationLog = []
+        fixture.coordinator.focusChanged()
+        XCTAssertEqual(fixture.table.invalidationLog, [ring])
+
+        // And through the responder chain, which is what a click on the grid does.
+        fixture.table.invalidationLog = []
+        XCTAssertTrue(fixture.window.makeFirstResponder(fixture.table))
+        XCTAssertTrue(fixture.table.isKeyboardFocused)
+        XCTAssertEqual(fixture.table.invalidationLog, [ring])
+        XCTAssertEqual(fixture.table.cursorStrength, 0.4, "this window is not key, so the ring stays dim")
+
+        fixture.table.invalidationLog = []
+        XCTAssertTrue(fixture.window.makeFirstResponder(nil))
+        XCTAssertFalse(fixture.table.isKeyboardFocused)
+        XCTAssertEqual(fixture.table.invalidationLog, [ring], "losing the keyboard repaints it too")
+    }
+
+    /// The ring draws on the cursor's row and nowhere else, and it is a stroke inside the cell: the
+    /// same row without a cursor is the same pixels except for it.
+    func testTheRingIsDrawnInsideTheCursorCellOnly() throws {
+        let fixture = makeGrid(rowCount: 40)
+        fixture.apply()
+        let rowRect = fixture.table.rect(ofRow: 5).integral
+        let otherRow = fixture.table.rect(ofRow: 8).integral
+
+        let before = try raster(rowRect, in: fixture.table)
+        let beforeOther = try raster(otherRow, in: fixture.table)
+        fixture.coordinator.press(at: fixture.pointInCell(row: 5, column: 1), clickCount: 1)
+        fixture.coordinator.release()
+        fixture.tab.cellSelection = nil  // the wash is not what is being looked at
+        fixture.tab.cellCursor = GridCursor(anchor: CellPos(row: 5, column: 1), focus: CellPos(row: 5, column: 1))
+        fixture.table.selection = nil
+        fixture.table.cursor = fixture.tab.cellCursor
+
+        let after = try raster(rowRect, in: fixture.table)
+        XCTAssertNotEqual(before, after, "a ring was drawn on the cursor's row")
+        XCTAssertEqual(beforeOther, try raster(otherRow, in: fixture.table), "and on no other")
+
+        fixture.table.cursor = nil
+        XCTAssertEqual(before, try raster(rowRect, in: fixture.table), "taking the cursor away takes the ring away")
+    }
+
+    // MARK: The ring's colour
+
+    /// Four of the five accents are under 3:1 on a light canvas, so the ring picks whichever half of
+    /// the accent stands out from the canvas, and falls back to the ink (W9 D-8's rule).
+    func testTheRingTakesTheAccentHalfThatStandsOutFromTheCanvas() {
+        let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        let near = NSColor(srgbRed: 0.05, green: 0.06, blue: 0.09, alpha: 1)
+        let ice = NSColor(hex: 0x4FD8FF), violet = NSColor(hex: 0x7B61FF)
+        let ink = NSColor.black
+
+        XCTAssertLessThan(GridContrast.ratio(ice, white), 3, "the glow is no ring on white")
+        XCTAssertEqual(GridContrast.ringColour(candidates: [ice, violet], canvas: white, fallback: ink), violet)
+        XCTAssertEqual(GridContrast.ringColour(candidates: [ice, violet], canvas: near, fallback: ink), ice,
+                       "on a dark canvas the glow wins")
+        let pale = NSColor(hex: 0xEEEEEE)
+        XCTAssertEqual(GridContrast.ringColour(candidates: [pale, pale], canvas: white, fallback: ink), ink,
+                       "when neither half reaches 3:1, the ink")
+        XCTAssertEqual(GridContrast.ratio(NSColor.black, white), 21, accuracy: 0.01)
+    }
+
+    func testThePaletteRingIsAlwaysAtLeastThreeToOneAgainstTheCanvas() {
+        for dark in [false, true] {
+            let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)!
+            let palette = GridPalette.resolve(appearance)
+            var canvas = NSColor.clear
+            appearance.performAsCurrentDrawingAppearance { canvas = NSColor(Tone.canvas) }
+            XCTAssertGreaterThanOrEqual(GridContrast.ratio(NSColor(cgColor: palette.cursor) ?? .clear, canvas), 3,
+                                        "dark: \(dark)")
+        }
     }
 
     // MARK: A column's format

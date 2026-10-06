@@ -26,6 +26,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case focusResults
     case nextTab
     case previousTab
+    case peekCell
 
     /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
     enum Scope { case scheme, platform }
@@ -75,6 +76,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .focusResults: "Focus Results"
         case .nextTab: "Show Next Tab"
         case .previousTab: "Show Previous Tab"
+        case .peekCell: "Peek Cell"
         }
     }
 }
@@ -169,6 +171,8 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         .focusResults: Shortcut("3", [.command, .option]),
         .nextTab: Shortcut("]", [.command, .shift]),
         .previousTab: Shortcut("[", [.command, .shift]),
+        // Space does the same inside the grid; this is the menu's way to it.
+        .peekCell: Shortcut("y", .command),
     ]
 
     private static let dbeaverTable: [ShortcutAction: Shortcut] = [

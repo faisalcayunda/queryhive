@@ -31,9 +31,20 @@ final class GridTableView: NSTableView {
     /// windowed result (blueprint §5.4) would move no selection.
     var selection: CellRange?
 
-    /// The cell cursor: what a VoiceOver focus or the keyboard would move. Modelled now, drawn in
-    /// W10 (P-24).
+    /// The cell cursor (P-24): what the keyboard and a VoiceOver focus move, drawn as a ring on its
+    /// focus cell. A copy of `QueryTab.cellCursor`, the way `selection` is one of the selection.
     var cursor: GridCursor?
+
+    /// Whether this table is the first responder, kept by `become`/`resignFirstResponder` rather
+    /// than read from the window: during `resignFirstResponder` the window still names this table.
+    private(set) var isKeyboardFocused = false
+
+    /// How strongly the ring is drawn: fully while the grid has the keyboard in the key window, and
+    /// at 40% otherwise, so the cursor stays findable while the focus is in the peek or elsewhere
+    /// (blueprint D-3).
+    var cursorStrength: CGFloat {
+        isKeyboardFocused && window?.isKeyWindow == true ? 1 : 0.4
+    }
 
     /// Whether the body's own menu has been asked for at least once, which is what tells a plain
     /// right-click from one AppKit synthesised for the header.
@@ -42,6 +53,11 @@ final class GridTableView: NSTableView {
     // MARK: Polling
 
     private var displayLink: CADisplayLink?
+    private var keyObservers: [NSObjectProtocol] = []
+
+    deinit {
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+    }
 
     /// Whether the rows can still change under the grid, which is what keeps the display link
     /// running. The coordinator turns it on while a result streams or a view is being applied, and
@@ -56,7 +72,20 @@ final class GridTableView: NSTableView {
         super.viewDidMoveToWindow()
         displayLink?.invalidate()
         displayLink = nil
-        guard window != nil else { return }
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
+        guard let window else {
+            // Out of a window (a tab switched away, a tab closed): a peek has nothing to sit under.
+            coordinator?.closePeek()
+            return
+        }
+        // Whether the window is key is part of how strongly the ring is drawn, and losing it
+        // closes the peek (blueprint W10 §3.3).
+        keyObservers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.coordinator?.windowKeyChanged() }
+            }
+        }
         let link = displayLink(target: self, selector: #selector(displayTick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         link.isPaused = !isPolling
@@ -286,6 +315,8 @@ final class GridTableView: NSTableView {
         // The columns it covers, plus the gutter when the rectangle reaches the left edge.
         let columns = context.geometry.columns(in: dirtyRect.minX...max(dirtyRect.maxX, dirtyRect.minX))
 
+        let ring = cursor?.focus
+        let strength = cursorStrength
         for row in first...last {
             let text = coordinator.rowText(row, columns: columns)
             GridRowPainter.paint(row: row,
@@ -294,6 +325,8 @@ final class GridTableView: NSTableView {
                                  text: text,
                                  staged: coordinator.stagedColumns(row),
                                  selection: selection,
+                                 cursorColumn: ring?.row == row ? ring?.column : nil,
+                                 cursorStrength: strength,
                                  lines: coordinator.lineCache,
                                  width: bounds.width,
                                  into: cg)
@@ -345,6 +378,23 @@ final class GridTableView: NSTableView {
         }
     }
 
+    /// Every rectangle asked to repaint, while a test is recording them. `nil` in the app, where a
+    /// fling asks for a great many and nobody reads them; `needsToDraw(_:)` cannot stand in for this
+    /// because a window that is not on screen answers `true` for every rectangle.
+    var invalidationLog: [NSRect]?
+
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        invalidationLog?.append(invalidRect)
+        super.setNeedsDisplay(invalidRect)
+    }
+
+    /// Repaint one cell, which is all a ring that moved from one cell to another has to touch.
+    func invalidate(cell: CellPos, geometry: GridColumnGeometry, paint: GridPaintContext) {
+        guard cell.column >= 0, cell.column < geometry.widths.count else { return }
+        invalidate(rows: IndexSet(integer: cell.row), columns: cell.column...cell.column,
+                   geometry: geometry, paint: paint)
+    }
+
     /// Repaint the difference between two selection rectangles, and nothing else.
     ///
     /// The rows in the symmetric difference are repainted whole; a row in both gets only the columns
@@ -365,7 +415,20 @@ final class GridTableView: NSTableView {
     /// A click makes the table the first responder, which is what puts ⌘C on the responder chain.
     override var acceptsFirstResponder: Bool { true }
 
-    override func becomeFirstResponder() -> Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        isKeyboardFocused = true
+        coordinator?.focusChanged()
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            isKeyboardFocused = false
+            coordinator?.focusChanged()
+        }
+        return resigned
+    }
 
     /// The grid's own copy. The responder chain sends ⌘C down to whatever implements `copy:`, and
     /// this is the first responder that does — `NSTableView` itself has no such method, so this is
@@ -378,22 +441,32 @@ final class GridTableView: NSTableView {
     /// accessibility tree would announce a selection nobody can see.
     @objc override func selectAll(_ sender: Any?) {}
 
+    /// Space and ⌘Y: open or close the peek on the cursor's cell (View > Peek Cell).
+    @objc func peekCell(_ sender: Any?) {
+        coordinator?.togglePeek()
+    }
+
     /// ⌘C is only offered when there is a block to copy, and ⌘A is always refused. Without this the
     /// menu items would be enabled on an empty selection and do nothing when chosen.
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(copy(_:)) { return selection != nil }
         if item.action == #selector(selectAll(_:)) { return false }
+        if item.action == #selector(peekCell(_:)) { return cursor != nil }
         return super.validateUserInterfaceItem(item)
     }
 
-    /// The arrow keys move a row selection the grid does not draw. W10-T1 is what binds them to the
-    /// cell cursor; until then they do nothing rather than change an invisible selection. Page Up,
-    /// Page Down, Home and End still scroll, because those move the view and not the selection.
+    /// The grid's keyboard (blueprint W10 §3.1): the key is turned into a `GridKey`, `GridKeyMap`
+    /// says what it means, and the coordinator does it.
+    ///
+    /// An arrow the map has no use for (⌥← and the like) is still swallowed, because
+    /// letting it reach `NSTableView` would move the row selection that the grid never draws.
+    /// Everything else the map leaves alone goes to AppKit.
     override func keyDown(with event: NSEvent) {
-        switch event.keyCode {
-        case 123, 124, 125, 126: return  // left, right, down, up
-        default: super.keyDown(with: event)
+        if let key = GridKey(event: event) {
+            if coordinator?.handleKey(key) == true { return }
+            if key.isArrow { return }
         }
+        super.keyDown(with: event)
     }
 
     /// The body's menu, from the coordinator. A right click must not move the selection, so nothing

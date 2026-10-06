@@ -32,15 +32,25 @@ enum GridToolTip {
         return result + "…"
     }
 
-    /// The pointer's location in `view`'s coordinates, from the point AppKit hands the owner.
+    /// The pointer's location in `view`'s coordinates.
     ///
-    /// `view(_:stringForToolTip:point:userData:)` documents neither the point's coordinate system
-    /// nor a conversion helper, and both readings are plausible: the rectangle is *registered* in
-    /// view coordinates, while the tracking that fires it runs in window ones. So the registered
-    /// rectangle settles it — whichever reading lands inside the region that is actually on screen
-    /// is where the pointer is — and a tie (a table whose origin sits near the window's) resolves
-    /// to the view reading, because that is the one the rectangle was registered in.
-    static func local(point: NSPoint, in view: NSView, registered: NSRect?) -> NSPoint {
+    /// **The pointer itself, when it is known.** `view(_:stringForToolTip:point:userData:)` documents
+    /// neither the point's coordinate system nor a conversion helper, and a unit test cannot hover
+    /// (a window that is not on screen never receives the tracking events that start a tooltip), so
+    /// the question was never settled by measurement. It does not need to be: a tooltip is shown
+    /// for the pointer resting over the region, so where the pointer *is* answers it whichever way
+    /// AppKit expresses `point`. `pointer` is that location in window coordinates, and it wins
+    /// whenever it lands inside the view.
+    ///
+    /// Without it (the window is not visible, as in the tests) the point is read as both and the
+    /// registered rectangle settles it: whichever reading lands inside the region that is actually
+    /// on screen is where the pointer is, and a tie (a table whose origin sits near the window's)
+    /// resolves to the view reading, because that is the one the rectangle was registered in.
+    static func local(point: NSPoint, in view: NSView, registered: NSRect?, pointer: NSPoint? = nil) -> NSPoint {
+        if let pointer {
+            let resting = view.convert(pointer, from: nil)
+            if view.bounds.contains(resting) { return resting }
+        }
         guard let registered else { return point }
         let asWindowIfLocal = view.convert(point, to: nil)
         if registered.contains(point) && !registered.contains(asWindowIfLocal) {
