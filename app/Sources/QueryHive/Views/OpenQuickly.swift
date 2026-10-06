@@ -9,10 +9,24 @@ import SwiftUI
 struct OpenQuickly: View {
     @Environment(AppModel.self) private var model
     @FocusState private var fieldFocused: Bool
+    @State private var scope = QuickScope.all
+
+    /// Computed here, not through `AppModel.quickResults`, so the scope can filter it without a
+    /// model change. ponytail: fold into `AppModel+Focus` (`quicklyScope`) when the split lands.
+    private var results: [QuickResult] {
+        QuickSearch.results(query: model.openQuicklyQuery, nodes: model.allNodes(),
+                            savedQueries: model.savedQueries, history: model.historyEntries,
+                            scope: scope)
+    }
+
+    private func moveHighlight(by delta: Int, in results: [QuickResult]) {
+        guard !results.isEmpty else { return }
+        model.openQuicklyIndex = min(max(model.openQuicklyIndex + delta, 0), results.count - 1)
+    }
 
     var body: some View {
         @Bindable var model = model
-        let results = model.quickResults
+        let results = results
         VStack(spacing: 0) {
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass")
@@ -25,15 +39,27 @@ struct OpenQuickly: View {
                     .foregroundStyle(Tone.ink)
                     .focused($fieldFocused)
                     .onSubmit { pick(results) }
-                    .onKeyPress(.upArrow) { model.moveQuickHighlight(by: -1); return .handled }
-                    .onKeyPress(.downArrow) { model.moveQuickHighlight(by: 1); return .handled }
+                    .onKeyPress(.upArrow) { moveHighlight(by: -1, in: results); return .handled }
+                    .onKeyPress(.downArrow) { moveHighlight(by: 1, in: results); return .handled }
+                    .onKeyPress(keys: [.tab]) { press in
+                        scope = scope.rotated(by: press.modifiers.contains(.shift) ? -1 : 1)
+                        return .handled
+                    }
+                    .accessibilityLabel("Open Quickly")
                     .onKeyPress(.escape) { model.openQuicklyOpen = false; return .handled }
+                Text("Tab changes scope")
+                    .font(.ui(11))
+                    .foregroundStyle(Tone.secondary)
                 Text("\(results.count)")
                     .font(.code(11))
                     .foregroundStyle(Tone.secondary)
             }
             .padding(.horizontal, 14)
             .frame(height: 46)
+
+            Segmented(selection: $scope, options: QuickScope.allCases, label: \.title)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
 
             Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
 
@@ -46,14 +72,28 @@ struct OpenQuickly: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
-                            row(result, selected: index == model.openQuicklyIndex)
-                                .onTapGesture { model.applyQuickResult(result) }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 1) {
+                            ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
+                                row(result, selected: index == model.openQuicklyIndex)
+                                    .id(result.id)
+                                    .onTapGesture { model.applyQuickResult(result) }
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityValue("\(index + 1) of \(results.count)")
+                                    .accessibilityAddTraits(index == model.openQuicklyIndex
+                                                            ? .isSelected : [])
+                            }
+                        }
+                        .padding(6)
+                    }
+                    .accessibilityLabel("Results")
+                    // No anchor: the list scrolls the least it can to bring the row into view.
+                    .onChange(of: model.openQuicklyIndex) {
+                        if results.indices.contains(model.openQuicklyIndex) {
+                            proxy.scrollTo(results[model.openQuicklyIndex].id)
                         }
                     }
-                    .padding(6)
                 }
                 .frame(maxHeight: 320)
             }
@@ -67,6 +107,7 @@ struct OpenQuickly: View {
         // The highlight is an index into the results, so a new query starts it over rather than
         // leaving it past the end of a shorter list.
         .onChange(of: model.openQuicklyQuery) { model.openQuicklyIndex = 0 }
+        .onChange(of: scope) { model.openQuicklyIndex = 0 }
     }
 
     private func pick(_ results: [QuickResult]) {
@@ -86,7 +127,7 @@ struct OpenQuickly: View {
                     .foregroundStyle(Tone.ink)
                     .lineLimit(1)
                 Text(result.subtitle)
-                    .font(.code(10.5))
+                    .font(.code(11))
                     .foregroundStyle(Tone.ink.opacity(0.6))
                     .lineLimit(1)
             }

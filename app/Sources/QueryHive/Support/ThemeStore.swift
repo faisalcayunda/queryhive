@@ -279,9 +279,56 @@ struct ThemePreset: Identifiable, Equatable {
 ///
 /// `@Observable` is what carries that tracking across the static indirection; a plain value in
 /// `UserDefaults` would persist the choice and never redraw.
+/// What the system's Accessibility > Display switches ask of the chrome. One source, so the glass,
+/// the hairlines and the animations all follow the same three booleans.
+struct SurfacePolicy: Equatable {
+    var reduceMotion = false
+    var reduceTransparency = false
+    var increaseContrast = false
+    /// Solid fills, stronger hairlines and secondary text, and no glow.
+    var enhanced: Bool { reduceTransparency || increaseContrast }
+
+    static func fromSystem() -> SurfacePolicy {
+        let workspace = NSWorkspace.shared
+        return SurfacePolicy(reduceMotion: workspace.accessibilityDisplayShouldReduceMotion,
+                             reduceTransparency: workspace.accessibilityDisplayShouldReduceTransparency,
+                             increaseContrast: workspace.accessibilityDisplayShouldIncreaseContrast)
+    }
+}
+
 @Observable
 final class ThemeStore {
     static let shared = ThemeStore()
+
+    /// Read from `NSWorkspace` and refreshed by its notification; `pin` overrides it for a
+    /// snapshot or a test, which must not depend on the machine's settings.
+    private(set) var surface = SurfacePolicy.fromSystem()
+    private var surfacePinned = false
+
+    init() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.surfacePinned else { return }
+                self.surface = .fromSystem()
+            }
+        }
+    }
+
+    func pin(reduceMotion: Bool? = nil, reduceTransparency: Bool? = nil,
+             increaseContrast: Bool? = nil) {
+        surfacePinned = true
+        if let reduceMotion { surface.reduceMotion = reduceMotion }
+        if let reduceTransparency { surface.reduceTransparency = reduceTransparency }
+        if let increaseContrast { surface.increaseContrast = increaseContrast }
+    }
+
+    /// Back to the system's values, for a test that pinned them.
+    func unpinSurface() {
+        surfacePinned = false
+        surface = .fromSystem()
+    }
 
     private static let themeKey = "appTheme"
     private static let accentKey = "accentChoice"

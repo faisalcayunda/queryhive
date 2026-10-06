@@ -85,6 +85,8 @@ enum Snapshot {
         store.pin(theme: requested?.theme, accent: requested?.accent, tone: requested?.tone,
                   mode: requested?.mode, systemIsDark: requested?.systemIsDark,
                   uiFont: requested?.uiFont, codeFont: requested?.codeFont)
+        // A picture must not depend on the machine's Accessibility > Display switches.
+        store.pin(reduceMotion: false, reduceTransparency: false, increaseContrast: false)
         let scheme = store.mode.colorScheme
         let app = NSApplication.shared
         // .accessory keeps it out of the Dock and out of the menu bar for the second it lives.

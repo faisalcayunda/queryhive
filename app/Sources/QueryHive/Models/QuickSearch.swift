@@ -19,6 +19,27 @@ struct QuickResult: Identifiable, Equatable {
     let symbol: String
 }
 
+/// Which of the three sources Open Quickly is looking at.
+enum QuickScope: String, CaseIterable {
+    case all, objects, saved, history
+
+    var title: String {
+        switch self {
+        case .all: "All"
+        case .objects: "Objects"
+        case .saved: "Saved"
+        case .history: "History"
+        }
+    }
+
+    /// The next scope in the ring, or the previous one for Shift-Tab.
+    func rotated(by delta: Int) -> QuickScope {
+        let all = QuickScope.allCases
+        let index = all.firstIndex(of: self)!
+        return all[(index + delta % all.count + all.count) % all.count]
+    }
+}
+
 /// What Open Quickly searches, and in what order it offers what it found.
 ///
 /// Three sources, all of them already in memory: the object tree's loaded nodes, the saved queries
@@ -33,11 +54,12 @@ enum QuickSearch {
                         nodes: [TreeNode],
                         savedQueries: [Event.SavedQuery],
                         history: [Event.HistoryEntry],
+                        scope: QuickScope = .all,
                         limit: Int = 40) -> [QuickResult] {
         var candidates: [QuickResult] = []
         candidates.reserveCapacity(nodes.count + savedQueries.count + history.count)
 
-        for node in nodes {
+        for node in nodes where scope == .all || scope == .objects {
             candidates.append(QuickResult(
                 id: "node:\(node.id)",
                 action: .revealNode(node.id),
@@ -45,7 +67,7 @@ enum QuickSearch {
                 subtitle: node.subtitle ?? node.kind.noun,
                 symbol: node.kind.symbol))
         }
-        for query in savedQueries {
+        for query in savedQueries where scope == .all || scope == .saved {
             candidates.append(QuickResult(
                 id: "saved:\(query.id)",
                 action: .loadSQL(query.sql),
@@ -53,7 +75,7 @@ enum QuickSearch {
                 subtitle: firstLine(query.sql),
                 symbol: "bookmark"))
         }
-        for entry in history {
+        for entry in history where scope == .all || scope == .history {
             candidates.append(QuickResult(
                 id: "history:\(entry.id)",
                 action: .loadSQL(entry.sql),

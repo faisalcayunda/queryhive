@@ -92,4 +92,30 @@ final class QuickSearchTests: XCTestCase {
         XCTAssertEqual(QuickSearch.firstLine(""), "statement")
         XCTAssertEqual(QuickSearch.firstLine("   "), "statement")
     }
+
+    func testEachScopeKeepsOnlyItsSource() {
+        let nodes = [node("Analytics")], savedQ = [saved("Monthly")], hist = [history("SELECT 1")]
+        func run(_ scope: QuickScope) -> [QuickResult] {
+            QuickSearch.results(query: "", nodes: nodes, savedQueries: savedQ, history: hist,
+                                scope: scope)
+        }
+        XCTAssertEqual(run(.all).count, 3)
+        XCTAssertEqual(kinds(run(.objects)), ["node"])
+        XCTAssertEqual(run(.saved).map(\.title), ["Monthly"])
+        XCTAssertEqual(run(.history).map(\.title), ["SELECT 1"])
+    }
+
+    func testAScopedSearchStillRanksAndLimits() {
+        let many = (1...30).map { saved("query \($0)") } + [saved("zz query")]
+        let results = QuickSearch.results(query: "query", nodes: [node("query node")],
+                                          savedQueries: many, history: [], scope: .saved, limit: 5)
+        XCTAssertEqual(results.count, 5)
+        XCTAssertFalse(kinds(results).contains("node"))
+    }
+
+    func testScopeRotatesBothWaysAndWraps() {
+        XCTAssertEqual(QuickScope.all.rotated(by: 1), .objects)
+        XCTAssertEqual(QuickScope.history.rotated(by: 1), .all)
+        XCTAssertEqual(QuickScope.all.rotated(by: -1), .history)
+    }
 }

@@ -54,6 +54,28 @@ struct Workspace: View {
     }
 }
 
+/// The strings the empty workspace and the editor show, as values so a test can read them.
+enum EmptyCopy {
+    static let workspace = "Open a query tab, write SQL, and press Run to see the rows. Export writes a file."
+
+    /// An example that names the shape of a table in the dialect the tab is connected to, rather
+    /// than a table of one particular deployment.
+    static func placeholder(for kind: ConnectionKind?) -> String {
+        switch kind {
+        case .trino: "SELECT * FROM catalog.schema.table"
+        case .postgres: "SELECT * FROM schema.table"
+        case .mysql: "SELECT * FROM database.table"
+        case nil: "SELECT * FROM table"
+        }
+    }
+
+    /// "New Query (⌘T)" with the key of the scheme in force, since DBeaver's is not ⌘T.
+    static func help(_ title: String, _ action: ShortcutAction, scheme: ShortcutScheme) -> String {
+        guard let key = scheme.shortcut(for: action)?.display else { return title }
+        return "\(title) (\(key))"
+    }
+}
+
 /// Shown when every tab has been closed.
 struct EmptyWorkspace: View {
     @Environment(AppModel.self) private var model
@@ -62,7 +84,7 @@ struct EmptyWorkspace: View {
         VStack(spacing: 14) {
             HiveHero(size: 190)
             Text("No query open").font(.heroTitle)
-            Text("Open a query tab, write SQL, and Run streams the result straight to disk.")
+            Text(EmptyCopy.workspace)
                 .font(.body13)
                 .foregroundStyle(Tone.secondary)
                 .multilineTextAlignment(.center)
@@ -96,7 +118,7 @@ struct TabStrip: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("New Query (⌘T)")
+                    .help(EmptyCopy.help("New Query", .newQuery, scheme: model.shortcutScheme))
                 }
                 .padding(.horizontal, Metrics.gutter)
                 .padding(.vertical, 4)
@@ -104,24 +126,66 @@ struct TabStrip: View {
         }
         .frame(height: Metrics.tabStrip)
         .background(Tone.recess.opacity(0.22))
-        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.hairline).frame(height: 1) }
     }
 }
 
+/// What a tab chip says to VoiceOver and what glyph it draws, as a value so a test can read it
+/// without a window.
+struct TabChipSpec: Equatable {
+    enum Glyph: Equatable { case none, spinner, checkmark, exclamation }
+
+    let label: String
+    /// "running", "finished" or "failed"; nil for an idle tab.
+    let value: String?
+    let isSelected: Bool
+    let glyph: Glyph
+    let actions: [String]
+
+    init(title: String, stage: QueryTab.Stage, isSelected: Bool) {
+        label = title
+        self.isSelected = isSelected
+        actions = ["Close"]
+        switch stage {
+        case .idle: value = nil; glyph = .none
+        case .running: value = "running"; glyph = .spinner
+        case .done: value = "finished"; glyph = .checkmark
+        case .failed: value = "failed"; glyph = .exclamation
+        }
+    }
+}
+
+/// A tab is two sibling buttons, select and close, never one button wrapping the other.
 struct TabChip: View {
     @Environment(AppModel.self) private var model
     let tab: QueryTab
     @State private var hovering = false
 
     private var selected: Bool { model.selectedTabID == tab.id }
+    private var spec: TabChipSpec { TabChipSpec(title: tab.title, stage: tab.stage, isSelected: selected) }
+    private var closeVisible: Bool { hovering || selected }
 
     var body: some View {
-        HStack(spacing: 7) {
-            Circle().fill(dot).frame(width: 6, height: 6)
-            Text(tab.title)
-                .font(.ui(12, weight: selected ? .semibold : .regular))
-                .lineLimit(1)
-                .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
+        let spec = spec
+        HStack(spacing: 4) {
+            Button { model.selectTab(tab.id) } label: {
+                HStack(spacing: 6) {
+                    glyph(spec.glyph)
+                    Text(tab.title)
+                        .font(.ui(12, weight: selected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(spec.label)
+            .accessibilityValue(spec.value ?? "")
+            .accessibilityAddTraits(spec.isSelected ? .isSelected : [])
+            // The close button is hidden from VoiceOver while it is invisible, so the action lives
+            // here instead.
+            .accessibilityAction(named: "Close") { model.closeTab(tab.id) }
+
             Button { model.closeTab(tab.id) } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -130,7 +194,9 @@ struct TabChip: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(hovering || selected ? 1 : 0)
+            .opacity(closeVisible ? 1 : 0)
+            .accessibilityHidden(!closeVisible)
+            .accessibilityLabel("Close \(tab.title)")
             .help("Close \(tab.title)")
         }
         .padding(.horizontal, 10)
@@ -140,7 +206,6 @@ struct TabChip: View {
         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
             .strokeBorder(selected ? Tone.accent.opacity(0.35) : .clear))
         .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .onTapGesture { model.selectTab(tab.id) }
         .onHover { hovering = $0 }
         .contextMenu {
             Button("Close") { model.closeTab(tab.id) }
@@ -154,12 +219,28 @@ struct TabChip: View {
         .help(tab.summary)
     }
 
-    private var dot: Color {
-        switch tab.stage {
-        case .idle: Tone.gray.opacity(0.55)
-        case .running: Tone.ice
-        case .done: Tone.mint
-        case .failed: Tone.coral
+    /// A shape as well as a colour, so the stage does not depend on telling two hues apart. The
+    /// running glyph pulses unless Reduce Motion is on, and is then a still dotted circle.
+    @ViewBuilder private func glyph(_ glyph: TabChipSpec.Glyph) -> some View {
+        switch glyph {
+        case .none:
+            EmptyView()
+        case .spinner:
+            Image(systemName: "circle.dotted")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.ice)
+                .symbolEffect(.pulse, isActive: !ThemeStore.shared.surface.reduceMotion)
+                .accessibilityHidden(true)
+        case .checkmark:
+            Image(systemName: "checkmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.markMint)
+                .accessibilityHidden(true)
+        case .exclamation:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.markCoral)
+                .accessibilityHidden(true)
         }
     }
 }
@@ -212,7 +293,7 @@ struct QueryToolbar: View {
             HubButton(title: "Run", symbol: "play.fill", hue: .exporter) { model.preview(tab) }
                 .disabled(running || model.runBlockedReason != nil)
                 .keyboardShortcut(model.shortcut(for: .run))
-                .help(model.runBlockedReason ?? "Run the query and show the rows (⌘R)")
+                .help(model.runBlockedReason ?? EmptyCopy.help("Run the query and show the rows", .run, scheme: model.shortcutScheme))
 
             Menu {
                 Button("Run") { model.preview(tab) }
@@ -363,7 +444,7 @@ struct EditorPane: View {
             .overlay(alignment: .topLeading) {
                 if tab.sql.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("SELECT * FROM hive.analytics.penerima_manfaat")
+                        Text(EmptyCopy.placeholder(for: model.connection(for: tab)?.kind))
                             .font(.code(13))
                             .foregroundStyle(Tone.ink.opacity(0.26))
                         Text("Suggestions appear as you type · ⌃Space to ask for them")

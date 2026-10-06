@@ -461,6 +461,7 @@ final class VisualParityTests: XCTestCase {
 
     override func tearDown() {
         closeWindows()
+        ThemeStore.shared.unpinSurface()
         let s = savedTheme!
         ThemeStore.shared.pin(theme: s.dark, accent: s.accent, tone: s.tone, mode: s.mode,
                               systemIsDark: s.systemIsDark, uiFont: s.ui, codeFont: s.code)
@@ -487,6 +488,8 @@ final class VisualParityTests: XCTestCase {
 
     /// Fixed appearance, fixed fonts. `pin` never writes the user's preferences.
     private func applyAppearance(_ look: Look) {
+        // The Accessibility > Display switches of the machine must not reach a baseline.
+        ThemeStore.shared.pin(reduceMotion: false, reduceTransparency: false, increaseContrast: false)
         ThemeStore.shared.pin(theme: look.theme, accent: .ice, tone: .glow, mode: look.mode,
                               systemIsDark: look == .dark, uiFont: "", codeFont: "")
     }
@@ -1130,6 +1133,20 @@ final class VisualParityTests: XCTestCase {
 
     func testEditorScenesMatchTheirBaselines() throws {
         try check(editorScenes())
+    }
+
+    /// A machine with Increase Contrast on must still match the baselines: the scene setup pins
+    /// the surface, and the pin wins over what the system says.
+    func testBaselinesIgnoreTheMachinesAccessibilitySettings() throws {
+        let plain = editorScenes().filter { $0.name.hasPrefix("editor-plain") }
+        XCTAssertFalse(plain.isEmpty)
+        let scenes = plain.map { scene in
+            (name: scene.name, make: { () throws -> Capture in
+                ThemeStore.shared.pin(reduceMotion: true, reduceTransparency: true, increaseContrast: true)
+                return try scene.make()
+            })
+        }
+        try check(scenes)
     }
 
     // MARK: Baselines against each other

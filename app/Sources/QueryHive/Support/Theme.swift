@@ -96,7 +96,28 @@ enum Tone {
     static var recess: Color { Color(nsColor: NSColor(name: nil) { $0.isDark ? .black : .white }) }
 
     /// Secondary body text: the chrome's ink at 68%, which is what `Tone.secondary` has always been.
-    static var secondary: Color { ink.opacity(0.68) }
+    static var secondary: Color { ink.opacity(ThemeStore.shared.surface.enhanced ? 0.85 : 0.68) }
+
+    /// Hairlines between regions: 7% ink, 20% when the system asks for more contrast.
+    static var hairline: Color { ink.opacity(ThemeStore.shared.surface.enhanced ? 0.20 : 0.07) }
+
+    /// The edge of a control: 10% ink, 55% when the system asks for more contrast (3:1 on every canvas).
+    static var outline: Color { ink.opacity(ThemeStore.shared.surface.enhanced ? 0.55 : 0.10) }
+
+    /// Tab-stage tints that stay readable on a light canvas. The dark values are the categorical
+    /// colours; the light ones clear 3:1 on all three light canvases.
+    static var markMint: Color { stageTint(dark: 0x3EE6A8, light: 0x0B7D5E) }
+    static var markCoral: Color { stageTint(dark: 0xFF5E6C, light: 0xD6283A) }
+    static var markAmber: Color { stageTint(dark: 0xFFB547, light: 0x9A5B00) }
+
+    static func stageTint(dark: UInt32, light: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let hex = appearance.isDark ? dark : light
+            return NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                           green: CGFloat((hex >> 8) & 0xFF) / 255,
+                           blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+        })
+    }
 
     /// The quiet readouts: the editor's line numbers and the line count in its corner.
     ///
@@ -127,7 +148,7 @@ enum Tone {
     }
 
     /// Written once and read by both, so the two readouts cannot drift apart again.
-    private static let readoutOpacity: CGFloat = 0.55
+    private static var readoutOpacity: CGFloat { ThemeStore.shared.surface.enhanced ? 0.75 : 0.55 }
 }
 
 extension NSAppearance {
@@ -234,7 +255,7 @@ struct Backdrop: View {
             // The two radial glows are gradients, so a flat tone drops them entirely rather than
             // merely dimming them — "no gradient" has to mean no gradient, and a faint radial wash
             // is exactly the thing being switched off.
-            if store.tone.isLuminous {
+            if store.tone.isLuminous && !store.surface.enhanced {
                 RadialGradient(colors: [hue.glow, .clear], center: .center, startRadius: 0, endRadius: 340)
                     .frame(width: 680, height: 680)
                     .opacity(store.lit(0.30))
@@ -245,7 +266,7 @@ struct Backdrop: View {
                     .offset(x: -260, y: 320)
             }
         }
-        .animation(.easeInOut(duration: 0.8), value: hue.glow)
+        .animation(store.surface.reduceMotion ? nil : .easeInOut(duration: 0.8), value: hue.glow)
         .ignoresSafeArea()
     }
 }
@@ -255,15 +276,23 @@ extension View {
     /// light, matched to CleanMyMac's glass rather than a flat white wash. `tint` overrides the
     /// border colour (used to show which connection a panel belongs to).
     func glass(_ radius: CGFloat = 14, tint: Color? = nil, tintOpacity: Double = 0.45, lineWidth: CGFloat = 1) -> some View {
-        background {
-            RoundedRectangle(cornerRadius: radius, style: .continuous).fill(.ultraThinMaterial)
-            RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Tone.canvas.opacity(0.45))
-            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                .fill(LinearGradient(colors: [.white.opacity(0.10), .clear], startPoint: .top, endPoint: .center))
+        // Reduce Transparency or Increase Contrast: a solid canvas with a recessed wash and no
+        // material, no top light and an edge that can be seen.
+        let enhanced = ThemeStore.shared.surface.enhanced
+        return background {
+            if enhanced {
+                RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Tone.canvas)
+                RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Tone.recess.opacity(0.30))
+            } else {
+                RoundedRectangle(cornerRadius: radius, style: .continuous).fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Tone.canvas.opacity(0.45))
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(LinearGradient(colors: [.white.opacity(0.10), .clear], startPoint: .top, endPoint: .center))
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .strokeBorder(tint?.opacity(tintOpacity) ?? Tone.ink.opacity(0.12), lineWidth: lineWidth))
+            .strokeBorder(tint?.opacity(tintOpacity) ?? (enhanced ? Tone.hairline : Tone.ink.opacity(0.12)), lineWidth: lineWidth))
     }
 
     func field(invalid: Bool = false) -> some View {
@@ -297,7 +326,7 @@ extension View {
     /// Hairline panel edge used between the sidebar, the toolbar and the panel.
     func panelEdge(_ edge: Edge) -> some View {
         overlay(alignment: edge == .trailing ? .trailing : edge == .leading ? .leading : edge == .top ? .top : .bottom) {
-            Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: edge == .leading || edge == .trailing ? 1 : nil,
+            Rectangle().fill(Tone.hairline).frame(width: edge == .leading || edge == .trailing ? 1 : nil,
                                                          height: edge == .top || edge == .bottom ? 1 : nil)
         }
     }
@@ -372,7 +401,7 @@ struct HubButton: View {
         }
         .buttonStyle(PressScale())
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .animation(ThemeStore.shared.surface.reduceMotion ? nil : .easeOut(duration: 0.18), value: hovering)
     }
 }
 
@@ -381,6 +410,9 @@ struct IconButton: View {
     let symbol: String
     var tint: Color = Tone.ink
     var help: String = ""
+    /// What VoiceOver says. Defaults to `help`; a caller with no tooltip passes `label`, and
+    /// `AccessibilityLabelTests` fails when a call has neither.
+    var label: String? = nil
     var diameter: CGFloat = 28
     let action: () -> Void
     @Environment(\.isEnabled) private var enabled
@@ -401,7 +433,8 @@ struct IconButton: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .onHover { hovering = $0 }
-        .help(help)
+        .accessibilityLabel(label ?? help)
+        .help(help.isEmpty ? (label ?? "") : help)
     }
 }
 
@@ -409,7 +442,7 @@ struct PressScale: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.95 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(ThemeStore.shared.surface.reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }
 
@@ -623,6 +656,8 @@ func pluralized(_ n: Int, _ singular: String, _ plural: String? = nil) -> String
 struct Chip: View {
     let text: String
     var tint: Color = Tone.ice
+    /// What the chip measures ("Type"), so VoiceOver reads "Type: varchar" rather than "varchar".
+    var kind: String? = nil
 
     var body: some View {
         Text(text)
@@ -631,6 +666,7 @@ struct Chip: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(tint.opacity(0.14), in: Capsule())
+            .accessibilityLabel(kind.map { "\($0): \(text)" } ?? text)
     }
 }
 
@@ -862,10 +898,10 @@ struct HiveHero: View {
             .frame(width: size * 0.78, height: size * 0.78)
             .shadow(color: Tone.brandGlow.opacity(ThemeStore.shared.tone.isLuminous ? 0.35 : 0), radius: 20)
             .offset(y: bob ? -4 : 4)
-            .animation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true), value: bob)
+            .animation(ThemeStore.shared.surface.reduceMotion ? nil : .easeInOut(duration: 2.6).repeatForever(autoreverses: true), value: bob)
         }
         .frame(width: size, height: size)
-        .onAppear { bob = true }
+        .onAppear { bob = !ThemeStore.shared.surface.reduceMotion }
     }
 }
 

@@ -130,6 +130,9 @@ struct PanelTabButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .accessibilityLabel(panel.label(for: destination))
+        .accessibilityValue(count.map(String.init) ?? "")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
