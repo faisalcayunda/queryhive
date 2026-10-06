@@ -1484,3 +1484,33 @@ fn row_count_and_set_view_agree_on_the_view() {
     assert_eq!((count.view_id, count.visible), (info.view_id, info.visible));
     assert_eq!(host.store_stats().unwrap().spilled_bytes, 0);
 }
+
+/// A cursor that overfills the builder (the `next_batch` default path, as MySQL takes) must
+/// still publish chunks within the seal limits: one fetch of 16,384 rows of ~1 KiB text is
+/// 16 MiB, so it has to land as several chunks of about 2 MiB, not one.
+#[test]
+fn an_overfilling_cursor_still_publishes_chunks_within_the_seal_limit() {
+    let columns = vec![ColumnMeta::new("n", "bigint"), ColumnMeta::new("t", "text")];
+    let rows: Vec<Vec<Value>> = (0..16_384)
+        .map(|i| vec![Value::Int(i), Value::Text("x".repeat(1024).into())])
+        .collect();
+    let host = host(script(columns, &rows, 16_384), 1 << 29, None);
+    let (store, _sink) = into_store(&host, Some("100000"));
+    assert_eq!(store.row_count().unwrap().fetched, 16_384);
+    let chunks = store.shared_for_test().chunk_refs();
+    assert!(
+        chunks.len() >= 7,
+        "one fetch must split: {} chunk(s)",
+        chunks.len()
+    );
+    let row_bytes = 1024 + 9 + 16;
+    for chunk in &chunks {
+        assert!(
+            (chunk.rows as usize) * row_bytes <= 2 * 1024 * 1024 + row_bytes,
+            "chunk {} holds {} rows",
+            chunk.index,
+            chunk.rows
+        );
+    }
+    assert_eq!(chunks.iter().map(|c| c.rows).sum::<u32>(), 16_384);
+}

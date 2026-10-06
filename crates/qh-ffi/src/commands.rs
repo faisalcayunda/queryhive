@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
 use qh_driver::{
-    BrowseLevel, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath, Session,
+    BrowseLevel, ChunkBuilder, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath,
+    Session,
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
@@ -1809,6 +1810,21 @@ trait RowTarget {
         batch: &ColumnBatch,
         rows: std::ops::Range<usize>,
     ) -> Result<(), CliError>;
+    /// True when the pump should fetch with `Cursor::next_chunk` and hand the sealed chunk
+    /// to `accept_chunk` (the store); false keeps the `next_batch` path (NDJSON).
+    fn wants_chunks(&self) -> bool {
+        false
+    }
+    /// Take a chunk the cursor wrote straight into a `ChunkBuilder`. Only called when
+    /// `wants_chunks` is true.
+    fn accept_chunk(
+        &mut self,
+        _out: &mut dyn Emitter,
+        _chunk: qh_driver::qh_columnar::SealedChunk,
+        _rows: usize,
+    ) -> Result<(), CliError> {
+        Err(CliError::Internal("this target takes batches".to_owned()))
+    }
     /// The result ended without a failure. Returns the rows delivered.
     fn finish(
         &mut self,
@@ -1928,6 +1944,21 @@ impl StoreTarget {
     }
 }
 
+impl StoreTarget {
+    /// Count rows the store took and send a `progress` at most every `STORE_PROGRESS_MS`.
+    fn delivered_rows(&mut self, out: &mut dyn Emitter, taken: usize) -> Result<(), CliError> {
+        self.delivered += taken as u64;
+        let due = self
+            .last_progress
+            .is_none_or(|at| at.elapsed().as_millis() >= STORE_PROGRESS_MS);
+        if due {
+            self.last_progress = Some(Instant::now());
+            out.emit(event("progress").field("rows", self.delivered).build())?;
+        }
+        Ok(())
+    }
+}
+
 impl RowTarget for StoreTarget {
     fn max_batch_rows(&self) -> usize {
         STORE_FETCH_MAX
@@ -1979,15 +2010,21 @@ impl RowTarget for StoreTarget {
             .map_err(|error| CliError::Internal(error.to_string()))?;
             self.writer.push(&cut)?;
         }
-        self.delivered += taken as u64;
-        let due = self
-            .last_progress
-            .is_none_or(|at| at.elapsed().as_millis() >= STORE_PROGRESS_MS);
-        if due {
-            self.last_progress = Some(Instant::now());
-            out.emit(event("progress").field("rows", self.delivered).build())?;
-        }
-        Ok(())
+        self.delivered_rows(out, taken)
+    }
+
+    fn wants_chunks(&self) -> bool {
+        true
+    }
+
+    fn accept_chunk(
+        &mut self,
+        out: &mut dyn Emitter,
+        chunk: qh_driver::qh_columnar::SealedChunk,
+        rows: usize,
+    ) -> Result<(), CliError> {
+        self.writer.push_chunk(chunk)?;
+        self.delivered_rows(out, rows)
     }
 
     fn finish(
@@ -2152,6 +2189,57 @@ async fn pump_loop(
                     }
                 }
                 let size = target.fetch_size(limit.map(|limit| limit.saturating_sub(accepted)));
+                if target.wants_chunks() && !cursor.columns().is_empty() {
+                    // The store path: the cursor writes straight into the builder, `size`
+                    // already stops at the cap, and a chunk is sealed per fetch.
+                    let mut builder = ChunkBuilder::new(cursor.columns().len());
+                    let appended = match cancel {
+                        Some(cancel) => {
+                            match until_stopped(cancel, cursor.next_chunk(&mut builder, size)).await
+                            {
+                                Some(fetched) => fetched?,
+                                None => {
+                                    cancelled = true;
+                                    break 'outer;
+                                }
+                            }
+                        }
+                        None => cursor.next_chunk(&mut builder, size).await?,
+                    };
+                    if appended == 0 {
+                        break;
+                    }
+                    // A cursor may hand back more than it was asked for; the cap still holds.
+                    let take = match limit {
+                        Some(limit) => limit.saturating_sub(accepted).min(appended as u64) as usize,
+                        None => appended,
+                    };
+                    builder.truncate(take);
+                    // Backstop: a cursor that overfilled (the `next_batch` default, MySQL)
+                    // still publishes chunks within the 2 MiB / 65,536-row seal limits.
+                    while !builder.is_empty() {
+                        let piece = builder.split_sealable();
+                        let piece_rows = piece.rows();
+                        let chunk = piece
+                            .seal()
+                            .map_err(|error| CliError::Internal(error.to_string()))?;
+                        match target.accept_chunk(out, chunk, piece_rows) {
+                            Ok(()) => {}
+                            Err(CliError::Store(StoreError::Released)) => {
+                                cancelled = true;
+                                break 'outer;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    accepted += take as u64;
+                    if take < appended {
+                        // One row past the cap: the cap, not the end of the result, stopped this.
+                        truncated = true;
+                        break;
+                    }
+                    continue;
+                }
                 let fetched = match cancel {
                     Some(cancel) => match until_stopped(cancel, cursor.next_batch(size)).await {
                         Some(fetched) => fetched?,
