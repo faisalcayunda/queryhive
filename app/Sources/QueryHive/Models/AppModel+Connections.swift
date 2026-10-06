@@ -382,8 +382,16 @@ extension AppModel {
             notice = Notice(title: "Couldn't read the Navicat export", message: error.localizedDescription)
             return
         }
+        applyImport(ImportBatch(connections: export.connections, skipped: export.skipped), source: "Navicat")
+    }
 
+    /// Adds a batch of imported connections under the rules `importNavicatConnections` documents.
+    /// One body for every source (Navicat, DBeaver, DataGrip), so a rule about TLS or secrets cannot
+    /// be right for one importer and forgotten in another.
+    func applyImport(_ batch: ImportBatch, source: String) {
         var next = connections
+        var nextGroups = groups
+        var createdGroups: [String] = []
         var taken = Set(next.map(\.name))
         var added: [String] = []
         var refreshed: [String] = []
@@ -410,7 +418,17 @@ extension AppModel {
             }
         }
 
-        for imported in export.connections {
+        /// The flat group an imported folder path becomes ("A / B"), made when it is first needed.
+        func groupID(named name: String) -> UUID? {
+            guard !name.isEmpty else { return nil }
+            if let found = nextGroups.first(where: { $0.name == name }) { return found.id }
+            let made = ConnectionGroup(name: name)
+            nextGroups.append(made)
+            createdGroups.append(name)
+            return made.id
+        }
+
+        for imported in batch.connections {
             if !imported.notImported.isEmpty {
                 notImported.append("\(imported.name): " + imported.notImported.joined(separator: ", "))
             }
@@ -424,18 +442,19 @@ extension AppModel {
             // different server is a different connection, and it still gets a suffix rather than
             // having its host rewritten underneath it.
             if let index = next.firstIndex(where: {
-                $0.name == imported.name && $0.host == imported.host
+                $0.name == imported.name && $0.host == imported.host && $0.kind == imported.kind
             }) {
                 let id = next[index].id
-                next[index].kind = imported.kind
                 next[index].port = imported.port
                 next[index].user = imported.user
                 next[index].database = imported.database
                 // `schema` is deliberately not refreshed. The export has no schema to refresh it
                 // with — see `NavicatImport` — so the only thing this could do is overwrite a value
                 // the user set by hand with nothing.
-                next[index].sslmode = NavicatImport.tlsMode(kind: next[index].kind, ssl: imported.ssl,
-                                                            current: next[index].sslmode)
+                Self.applyTLS(imported, to: &next[index], isNew: false)
+                // Filing and the label are the person's once set; an import only fills a blank.
+                if next[index].group == nil { next[index].group = groupID(named: imported.group) }
+                if next[index].environment == nil { next[index].environment = imported.environment }
                 refreshed.append(imported.name)
                 if imported.database.isEmpty { noDatabase.append(imported.name) }
                 save(imported.password, slot: .database, for: id, name: imported.name, overwrite: false)
@@ -473,18 +492,21 @@ extension AppModel {
                 kind: imported.kind,
                 host: imported.host,
                 port: imported.port,
-                scheme: imported.kind == .trino ? "https" : "https",
-                // Navicat's `SSL` is a yes or no, and this app's modes are a ladder: yes becomes
-                // `require` (encrypted, certificate not checked, the lowest rung that is TLS at all)
-                // and no leaves the driver's own default. Guessing a stricter mapping would be a
-                // connection failure, and a looser one would be the downgrade PF-6 forbids.
-                sslmode: NavicatImport.tlsMode(kind: imported.kind, ssl: imported.ssl, current: ""),
+                scheme: "https",
                 user: imported.user,
                 database: imported.database,
                 schema: imported.schema,
                 verify: false,
                 showAllSchemas: false
             )
+            // Navicat's `SSL` is a yes or no, and this app's modes are a ladder: yes becomes
+            // `require` (encrypted, certificate not checked, the lowest rung that is TLS at all)
+            // and no leaves the driver's own default. A source that names a mode (DBeaver,
+            // DataGrip) gets that mode. Guessing a stricter mapping would be a connection failure,
+            // and a looser one would be the downgrade PF-6 forbids.
+            Self.applyTLS(imported, to: &connection, isNew: true)
+            connection.group = groupID(named: imported.group)
+            connection.environment = imported.environment
             if !imported.sshHost.isEmpty {
                 Self.applyTunnel(imported, to: &connection)
                 tunnelled.append(name)
@@ -502,32 +524,55 @@ extension AppModel {
         }
 
         do {
-            try ConnectionStore.save(ConnectionsDocument(groups: groups, connections: next))
+            try ConnectionStore.save(ConnectionsDocument(groups: nextGroups, connections: next))
         } catch {
             notice = Notice(title: "Couldn't save the imported connections",
                             message: error.localizedDescription)
             return
         }
         connections = next
+        groups = nextGroups
         rebuildTree()
         notice = Notice(title: noticeTitle(added: added.count, refreshed: refreshed.count,
-                                            skipped: export.skipped.count),
+                                            skipped: batch.skipped.count, source: source),
                         message: importSummary(added: added, refreshed: refreshed, renamed: renamed,
                                                noPassword: noPassword,
                                                noDatabase: noDatabase, tunnelled: tunnelled,
                                                keptSecrets: keptSecrets, notImported: notImported,
                                                keychainFailures: keychainFailures,
-                                               skipped: export.skipped))
+                                               skipped: batch.skipped,
+                                               createdGroups: createdGroups, notes: batch.notes,
+                                               source: source))
     }
 
-    private func noticeTitle(added: Int, refreshed: Int, skipped: Int) -> String {
+    /// The TLS an import writes. Never lower than what the connection has (PF-6, DBX-29): a source
+    /// that names a mode raises to it, one that names nothing changes nothing, and for Trino an
+    /// existing plain `http` connection is lifted to `https` while an `https` one is left alone.
+    static func applyTLS(_ imported: ImportedConnection, to connection: inout Connection, isNew: Bool) {
+        if connection.kind == .trino {
+            guard let scheme = imported.trinoScheme else { return }
+            if isNew {
+                connection.scheme = scheme
+                connection.verify = imported.trinoVerify ?? true
+            } else if scheme == "https", TrinoTransport(stored: connection.scheme) == .http {
+                connection.scheme = "https"
+                connection.verify = imported.trinoVerify ?? true
+            }
+            return
+        }
+        connection.sslmode = NavicatImport.tlsMode(kind: connection.kind,
+                                                   requested: imported.sslmode ?? (imported.ssl ? "require" : nil),
+                                                   current: connection.sslmode)
+    }
+
+    private func noticeTitle(added: Int, refreshed: Int, skipped: Int, source: String) -> String {
         var parts: [String] = []
         if added > 0 { parts.append("Imported \(added) \(added == 1 ? "connection" : "connections")") }
         if refreshed > 0 { parts.append("refreshed \(refreshed)") }
         if parts.isEmpty { parts.append("Nothing new") }
         var title = parts.joined(separator: ", ")
         if skipped > 0 { title += ", skipped \(skipped)" }
-        return title + " from Navicat"
+        return title + " from \(source)"
     }
 
     /// Every line here exists because silence about it would be a lie of omission — a connection
@@ -537,7 +582,8 @@ extension AppModel {
                                noPassword: [String], noDatabase: [String], tunnelled: [String],
                                keptSecrets: [String], notImported: [String],
                                keychainFailures: [String],
-                               skipped: [NavicatImport.Skipped]) -> String {
+                               skipped: [NavicatImport.Skipped],
+                               createdGroups: [String], notes: [String], source: String) -> String {
         var lines: [String] = []
         if !added.isEmpty { lines.append("Added: " + added.joined(separator: ", ") + ".") }
         if !refreshed.isEmpty {
@@ -545,11 +591,12 @@ extension AppModel {
                          + refreshed.joined(separator: ", ") + ".")
         }
         if lines.isEmpty { lines.append("Nothing was added or updated.") }
+        if !createdGroups.isEmpty { lines.append("New groups: " + createdGroups.joined(separator: ", ") + ".") }
         if !renamed.isEmpty {
             lines.append("Renamed, because the name was already in use: " + renamed.joined(separator: ", ") + ".")
         }
         if !noPassword.isEmpty {
-            lines.append("No password in the export for: " + noPassword.joined(separator: ", ") + ". Set one in the connection editor.")
+            lines.append("No password in the \(source) import for: " + noPassword.joined(separator: ", ") + ". Set one in the connection editor.")
         }
         if !keychainFailures.isEmpty {
             lines.append("Password couldn't be saved to Keychain for: " + keychainFailures.joined(separator: ", ") + ".")
@@ -571,7 +618,203 @@ extension AppModel {
         if !skipped.isEmpty {
             lines.append("Skipped: " + skipped.map { "\($0.name) (\($0.reason))" }.joined(separator: "; ") + ".")
         }
+        lines += notes
         return lines.joined(separator: "\n\n")
+    }
+
+    // MARK: DBeaver, DataGrip and QueryHive's own list (W13-T16)
+
+    /// Asks for DBeaver's `data-sources.json` (or the folder around it) and adds what is in it.
+    ///
+    /// The panel opens on DBeaver's usual folder when it exists, which is a path check and not a
+    /// read; the files are read only once the person has chosen them, and the message says that the
+    /// credentials file beside `data-sources.json` is part of the choice.
+    func presentDBeaverImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Connections from DBeaver"
+        panel.message = "Choose DBeaver's data-sources.json. The credentials-config.json next to it is read too, for saved user names and passwords."
+        panel.prompt = "Import"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.showsHiddenFiles = true
+        let usual = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/DBeaverData/workspace6/General/.dbeaver")
+        if FileManager.default.fileExists(atPath: usual.path) { panel.directoryURL = usual }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importDBeaverConnections(from: url)
+    }
+
+    func importDBeaverConnections(from url: URL) {
+        let batch: ImportBatch
+        do {
+            batch = try DBeaverImport.read(url)
+        } catch {
+            notice = Notice(title: "Couldn't read the DBeaver connections", message: error.localizedDescription)
+            return
+        }
+        applyImport(batch, source: "DBeaver")
+    }
+
+    /// Asks for DataGrip's `dataSources.xml` (with its two companions) and, only if the person says
+    /// so, reads the saved passwords out of the Keychain. Consent is asked here, in words, before the
+    /// first system prompt: macOS then asks again per item, and each of those is the person's to refuse.
+    func presentDataGripImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Connections from DataGrip"
+        panel.message = "Choose dataSources.xml (required), and dataSources.local.xml and db-forest-config.xml if you have them, or the folder that holds them."
+        panel.prompt = "Choose"
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.showsHiddenFiles = true
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Read DataGrip's passwords from Keychain?"
+        alert.informativeText = "DataGrip keeps saved passwords in your macOS Keychain, not in its files. If you continue, macOS asks you to allow QueryHive to read each one. Cancel a prompt and QueryHive stops asking. The passwords are copied into QueryHive's own Keychain items; DataGrip's are not changed."
+        alert.addButton(withTitle: "Read Passwords")
+        alert.addButton(withTitle: "Import Without Passwords")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: importDataGripConnections(from: panel.urls, keychain: SystemForeignKeychain())
+        case .alertSecondButtonReturn: importDataGripConnections(from: panel.urls, keychain: nil)
+        default: return
+        }
+    }
+
+    /// `keychain` is `nil` for "import without passwords".
+    func importDataGripConnections(from urls: [URL], keychain: (any ForeignKeychain)?) {
+        let batch: ImportBatch
+        do {
+            batch = try DataGripImport.read(DataGripImport.locate(urls), keychain: keychain)
+        } catch {
+            notice = Notice(title: "Couldn't read the DataGrip connections", message: error.localizedDescription)
+            return
+        }
+        applyImport(batch, source: "DataGrip")
+    }
+
+    /// Writes the connection list, groups included, with no secret in it.
+    func presentConnectionListExport() {
+        guard !connections.isEmpty else {
+            notice = Notice(title: "Nothing to export", message: "There are no saved connections yet.")
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "Export Connection List"
+        panel.message = "Connections and groups only. No password, token or key passphrase is written."
+        panel.nameFieldStringValue = "QueryHive connections.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportConnectionList(to: url)
+    }
+
+    func exportConnectionList(to url: URL) {
+        do {
+            try ConnectionListTransfer.export(groups: groups, connections: connections)
+                .write(to: url, options: .atomic)
+        } catch {
+            notice = Notice(title: "Couldn't export the connections", message: error.localizedDescription)
+            return
+        }
+        notice = Notice(title: "Exported \(connections.count) \(connections.count == 1 ? "connection" : "connections")",
+                        message: "No passwords, tokens or key passphrases are in the file; whoever imports it sets those on their own Mac. Key-file and CA paths are as they are here.")
+    }
+
+    func presentConnectionListImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Connection List"
+        panel.message = "Choose a connection list exported from QueryHive."
+        panel.prompt = "Import"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importConnectionList(from: url)
+    }
+
+    /// Adds a list exported by `exportConnectionList`. **Only adds**: a connection already here
+    /// (same name, host and driver) is left exactly as it is, because a file that carried a Safe
+    /// Mode or a TLS mode must not be able to rewrite one the person tightened since. Each added
+    /// connection gets a new id, so it cannot meet a Keychain item that belongs to another one.
+    func importConnectionList(from url: URL) {
+        let document: ConnectionsDocument
+        do {
+            document = try ConnectionListTransfer.read(Data(contentsOf: url))
+        } catch {
+            notice = Notice(title: "Couldn't read the connection list", message: error.localizedDescription)
+            return
+        }
+
+        var next = connections
+        var nextGroups = groups
+        var madeGroups: [UUID: UUID] = [:]
+        var taken = Set(next.map(\.name))
+        var added: [String] = []
+        var renamed: [String] = []
+        var present: [String] = []
+        var localFiles: [String] = []
+
+        func groupID(for old: UUID?) -> UUID? {
+            guard let old, let source = document.groups.first(where: { $0.id == old }) else { return nil }
+            if let made = madeGroups[old] { return made }
+            if let found = nextGroups.first(where: { $0.name == source.name }) {
+                madeGroups[old] = found.id
+                return found.id
+            }
+            let made = ConnectionGroup(name: source.name)
+            nextGroups.append(made)
+            madeGroups[old] = made.id
+            return made.id
+        }
+
+        for var connection in document.connections {
+            if next.contains(where: { $0.name == connection.name && $0.host == connection.host && $0.kind == connection.kind }) {
+                present.append(connection.name)
+                continue
+            }
+            var name = connection.name
+            if taken.contains(name) {
+                var suffix = 2
+                while taken.contains("\(name) \(suffix)") { suffix += 1 }
+                renamed.append("\(name) → \(name) \(suffix)")
+                name = "\(name) \(suffix)"
+            }
+            taken.insert(name)
+            connection.id = UUID()
+            connection.name = name
+            connection.group = groupID(for: connection.group)
+            if !connection.sshKeyPath.isEmpty || !connection.caFile.isEmpty { localFiles.append(name) }
+            next.append(connection)
+            added.append(name)
+        }
+
+        do {
+            try ConnectionStore.save(ConnectionsDocument(groups: nextGroups, connections: next))
+        } catch {
+            notice = Notice(title: "Couldn't save the imported connections", message: error.localizedDescription)
+            return
+        }
+        connections = next
+        groups = nextGroups
+        rebuildTree()
+
+        var lines: [String] = []
+        lines.append(added.isEmpty ? "Nothing was added." : "Added: " + added.joined(separator: ", ") + ".")
+        if !renamed.isEmpty { lines.append("Renamed, because the name was already in use: " + renamed.joined(separator: ", ") + ".") }
+        if !present.isEmpty {
+            lines.append("Already here, left as they are: " + present.joined(separator: ", ")
+                         + ". An import never changes a connection you have.")
+        }
+        if !added.isEmpty {
+            lines.append("The list carries no passwords, tokens or key passphrases. Set them in the connection editor.")
+        }
+        if !localFiles.isEmpty {
+            lines.append("These point at a key file or CA bundle by path; check the files exist on this Mac: "
+                         + localFiles.joined(separator: ", ") + ".")
+        }
+        notice = Notice(title: added.isEmpty ? "Nothing new from the list"
+                                : "Imported \(added.count) \(added.count == 1 ? "connection" : "connections") from a QueryHive list",
+                        message: lines.joined(separator: "\n\n"))
     }
 
     /// Copies an imported entry's tunnel onto a connection. The host is taken as a name, never as an

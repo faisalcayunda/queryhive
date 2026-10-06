@@ -696,6 +696,60 @@ struct ConnectionsDocument: Codable, Equatable {
     }
 }
 
+/// QueryHive's own connection list as a file you can hand to another Mac (DBX-74).
+///
+/// **No secret is in it, by construction**: `Connection` has no slot for one (the four Keychain
+/// items are keyed by `id` and never leave the Keychain), so the export is the same record
+/// `connections.json` already holds, wrapped in a header that says what it is. Ids are not
+/// carried over on import: a connection gets a fresh one, so it can never alias a Keychain item
+/// of the machine it came from. The Swift side owns this: it needs no engine round trip, and
+/// `qh-storage`'s `import_connections` stays the engine's own (W11-T3r).
+enum ConnectionListTransfer {
+    static let format = "queryhive-connections"
+    static let version = 1
+
+    struct Failure: LocalizedError, Equatable {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    private struct Header: Decodable {
+        var format: String?
+        var version: Int?
+    }
+
+    private struct Envelope: Encodable {
+        var format: String
+        var version: Int
+        var groups: [ConnectionGroup]
+        var connections: [Connection]
+    }
+
+    static func export(groups: [ConnectionGroup], connections: [Connection]) throws -> Data {
+        // Only the groups a connection is filed under travel, so an unused folder is not exported.
+        let used = Set(connections.compactMap(\.group))
+        let envelope = Envelope(format: format, version: version,
+                                groups: groups.filter { used.contains($0.id) }, connections: connections)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(envelope)
+    }
+
+    static func read(_ data: Data) throws -> ConnectionsDocument {
+        guard let header = try? JSONDecoder().decode(Header.self, from: data), header.format == format else {
+            throw Failure(message: "That isn't a QueryHive connection list.")
+        }
+        guard let found = header.version, found >= 1, found <= version else {
+            throw Failure(message: "This list was written by a newer QueryHive (version \(header.version.map(String.init) ?? "unknown")); update the app to read it.")
+        }
+        do {
+            return try JSONDecoder().decode(ConnectionsDocument.self, from: data)
+        } catch {
+            throw Failure(message: "The connection list is damaged: \(error.localizedDescription)")
+        }
+    }
+}
+
 /// JSON array of connections in Application Support. No secrets in this file.
 enum ConnectionStore {
     struct StoreError: Error, LocalizedError {
