@@ -1,6 +1,6 @@
 # Blueprint Fase 6: data plane lewat result store Arrow, siap DataFusion
 
-- **Status:** blueprint tingkat berkas, revisi 30 Sep 2026 atas dua keputusan pemilik: O-15 (Arrow dan Apache DataFusion diadopsi) dan O-18 (DataFusion menjadi komponen opsional terpisah, supaya app tetap sekitar 30 MB, sedangkan store Arrow tetap di app). Revisi ini menggantikan rancangan W2-A3 (codec kustom `QHC1` + rayon). Rancangan lama dan verdict AR-nya disimpan di bagian "Riwayat" di akhir. Verdict AR atas revisi ini ada di bagian "Verdict architect-reviewer (Arrow/DataFusion)" sebelum Riwayat. Disegarkan terhadap seam Fase 5 di W6-A1 sebelum W6-T1 mulai.
+- **Status:** blueprint tingkat berkas, revisi 30 Sep 2026 atas dua keputusan pemilik: O-15 (Arrow dan Apache DataFusion diadopsi) dan O-18 (DataFusion menjadi komponen opsional terpisah, supaya app tetap sekitar 30 MB, sedangkan store Arrow tetap di app). Revisi ini menggantikan rancangan W2-A3 (codec kustom `QHC1` + rayon). Rancangan lama dan verdict AR-nya disimpan di bagian "Riwayat" di akhir. Verdict AR atas revisi ini ada di bagian "Verdict architect-reviewer (Arrow/DataFusion)" sebelum Riwayat. **Disegarkan W6-A1 (2026-10-06)** terhadap seam Fase 5 yang dibangun W5-T1 (`7b44e29` sampai `13ea642`, ADR-0032) dan permukaan engine yang dibangun W5-T2 (`df445fd`, `bfb9680`) dan ditutup W5-C (`1b59154`, `465a0c6`); bagian yang berubah ditandai dengan frasa itu: §1.1 fakta 11, §1.3, §2.9, D-22 sampai D-29, §11.4, §11.5, §12, §13.10, §15, §16.1, §17 sampai §19, §21, §22, §25, dan §26. Tinjau architect-reviewer atas penyegaran ini menemukan lima koreksi blocking (B1 sampai B5: baseline yang sudah usang, cache halaman saat streaming, balapan `poll()` dengan `apply`, host tes yang tidak bisa menumpahkan, dan aturan tes kembaran); semuanya sudah diterapkan di sini (2026-10-06), dan verdict akhir belum ada.
 - **Untuk:** W4-T3 (inti store Arrow, spill terenkripsi, view), W4-T4 (fixture diferensial), W5-T2 (sink engine dan `ResultHandle` lewat UniFFI), W6-T1 (integrasi Swift), W7-T1 (driver menulis array Arrow langsung), dan tugas baru W13-T8a (helper analitik `queryhive-analytics`), W13-T8b (klien helper di app, unduh, dan verifikasi), serta W13-T8c (hook komponen di Settings). Pemeriksa: `architect-reviewer`; `security-reviewer` untuk §10, §14.2, §14.8, dan §14.9.
 - **Sumber:** keputusan pemilik O-15 dan O-18 (2026-09-30); `app/build.sh`, `app/release.sh`, `app/build-dmg.sh`, `app/QueryHive.entitlements`, `app/sparkle-public-key.txt`; `performance-plan.md` §7 (arti "off"), §9 (seam `ResultRows`), §10 (Fase 6), §11 (Fase 7.1), §13 (alasan lama menolak DataFusion), §17; PRD FR-PERF-05, FR-GRID-03/04, NFR-P1 S2, NFR-P2, P3, P8, NFR-S3, NFR-S5, NFR-C, O-8, O-9, O-12; profil W1-T8 (`target/run/w1-t8-profile.md`); `deny.toml`; ADR-0002, 0007, 0008, 0011, 0012, 0013, 0014, 0018; `docs/invariants.md` #1, #4, #10, #11. Angka di §2 diukur dengan probe sekali pakai di `target/run/df-probe`.
 - **Bahasa:** dokumen ini Indonesia. Identifier, komentar kode, pesan log, dan pesan galat Inggris.
@@ -41,8 +41,8 @@ DataFusion hidup di executable terpisah, `queryhive-analytics`, yang dibangun da
 7. **`Progress` tidak cocok untuk ≤ 1 event per 16 ms** (aturan "satu event per 1.000 baris", `progress.rs:64-75`).
 8. **Fetch adaptif diatur pemanggil.** `ExecuteOptions::max_batch_rows` adalah plafon (`qh-driver/src/lib.rs:242-251`), dan `next_batch(max_rows)` menerima ukuran per panggilan (`:547`).
 9. **`EngineError::StaleHandle` sudah ada** (`qh-core/src/error.rs:80`).
-10. **Semantik Swift yang di-port** (tidak berubah dari W2-A3): `GridSort.compare/number/isPlainNumber` (`Models/GridSort.swift:83-149`), `ColumnFilter.matches/matchesText/distinctValues` (`Models/QueryTab.swift:201-284`), urutan filter → search → sort di `displayedRows` (`QueryTab.swift:824-848`), `GridSearch.matches` (`Models/GridSearch.swift:21-29`), `GridValue.isOpenable/looksLikeJSON/prettyPrinted` (`Models/GridValue.swift:55-97`), `ColumnFormat.render` (`Models/ColumnFormat.swift:48-94`), `HexDump.decodedHex` (`Support/HexDump.swift:16-40`), `naturalWidths` (`Views/ResultGrid.swift:82-96`), tooltip terformat (`ResultGrid.swift:1023-1033`), perataan kanan per tipe kolom (`ResultGrid.swift:1164-1168`). Filter dan search bekerja atas teks tersimpan (`QueryTab.swift:829-839`).
-11. **`RustEngine` satu-satunya pengimpor modul FFI** (`Support/RustEngine.swift:6-8`).
+10. **Semantik Swift yang di-port** (tidak berubah dari W2-A3): `GridSort.compare/number/isPlainNumber` (`Models/GridSort.swift:83-149`), `ColumnFilter.matches/matchesText/distinctValues` (`Models/QueryTab.swift:201-284`), urutan filter → search → sort di `displayedRows` (`QueryTab.swift:824-848`), `GridSearch.matches` (`Models/GridSearch.swift:21-29`), `GridValue.isOpenable/looksLikeJSON/prettyPrinted` (`Models/GridValue.swift:55-97`), `ColumnFormat.render` (`Models/ColumnFormat.swift:48-94`), `HexDump.decodedHex` (`Support/HexDump.swift:16-40`), `naturalWidths` (`Models/GridMetrics.swift:45-50`, dipanggil dari `ResultGrid.columnWidths`, `Views/ResultGrid.swift:295-301`), tooltip terformat (`Coordinator.view(_:stringForToolTip:point:userData:)`, `Views/ResultGridTable.swift:803-824`), perataan kanan per tipe kolom (`context.numeric`, `Views/ResultGridTable.swift:288-291`, dipakai `GridRowPainter.paintCell`, `Views/GridRowView.swift:262` dan `:280`). Filter dan search bekerja atas teks tersimpan (`QueryTab.swift:829-839`).
+11. **`RustEngine` satu-satunya pengimpor modul FFI** (`Support/RustEngine.swift:6-8`). **Disegarkan W6-A1 (2026-10-06): tidak lagi benar.** Sejak W4, `Support/EditorAnalysis.swift` dan `Models/QueryTab.swift` (`sqlStatementRanges`) memakai FFI, dan `Models/ResultRows.swift`, `Models/CellSelection.swift`, dan `Models/GridMetrics.swift` mengimpornya tanpa memakai satu pun tipe FFI. Yang tetap dijaga untuk data plane: tipe `ResultHandle` dan kawan-kawannya hanya muncul di `Models/StoreRows.swift` dan `Support/RustEngine.swift` (§17.1), dan `DatabaseEngine.swift` tetap bebas FFI.
 12. **Driver mencampur varian dalam satu kolom.** PostgreSQL membaca lewat protokol teks dan menyimpan teks apa adanya bila parse gagal (`qh-driver-postgres/src/normalize.rs:69-134`): `numeric` `'NaN'`, `timestamp` `'infinity'`, dan `date` `'infinity'` menjadi `Value::Text` di kolom bertipe. `numeric` tanpa typmod membawa skala per nilai (`1.5`, `1.25`). Array PostgreSQL tetap teks. Trino mengirim `Array`, `Row`, `Map`, dan `Unknown` (`qh-driver-trino/src/decode.rs:546-547`, `lib.rs:1285`). `base_type()` (`normalize.rs:138`) dihitung per sel lewat `from_text` (`normalize.rs:74`, dipanggil dari `lib.rs:714`), dan baris ditranspos di `lib.rs:737-748`.
 13. **Profil W1-T8** (jalur FFI in-process, `wide_500k`): decode driver 38,4%, transpose/clone 26,8%, `to_text` 13,2%, serde_json 19,6%; satu sel teks disalin sekitar 4 kali; plafon `COPY` sekitar 990k baris/s.
 
@@ -63,6 +63,38 @@ F-6. **Zona waktu tetap di Arrow** hanya `±HH:MM`, `±HHMM`, atau `±HH` (`arro
 F-7. **`Decimal128`**: presisi ≤ 38, skala ≤ presisi (`arrow-array-59.3.0/src/types.rs:1412-1440`). `Value::Decimal` memegang `i128` (sampai 39 digit) dan skala `u8`.
 
 F-8. **Graf crate** (normal + build, `aarch64-apple-darwin`, `cargo tree` dan `cargo metadata`): `qh-ffi` hari ini 367 crate. Gugus arrow untuk store (`arrow-array`, `-schema`, `-buffer`, `-ipc`, `-ord`, `-select`, `-cast`) menambah 18. DataFusion dengan fitur minimal (§2.3) menambah 88, termasuk codec Parquet. DataFusion dengan fitur bawaan menambah 107. Jadi "ratusan crate" di `performance-plan.md` §13 terlalu besar: yang benar 88 untuk konfigurasi yang dipakai.
+
+### 1.3 Yang ada sekarang (temuan W6-A1, 2026-10-06)
+
+**Disegarkan W6-A1 (2026-10-06).** Diperiksa terhadap commit `465a0c6` (HEAD `work/perf-parity`). Penyegaran ini dimulai dari `5e5b6f9`; dua commit W5-C masuk sesudahnya dan sudah diperhitungkan: `1b59154` (sisi Rust: `claim_run`, pra-taksiran `rows_text`, `spilled_bytes` yang nyata, satu snapshot view di `row_count()`) dan `465a0c6` (sisi Swift: `SilentEngine`, `ResultGrid`, `ResultGridTable`, `DatabaseEngine`). Berkas-berkas itu kini stabil, jadi nomor baris di bagian ini dan di §17 berlaku di `465a0c6`. Setiap butir menunjuk bagian yang memakainya.
+
+TM-1. **Seam sebagaimana dibangun W5-T1.** `ResultRows` (`Models/ResultRows.swift`) berisi `count`, `fetched`, `columns`, `cell(row:column:format:) -> CellText`, `fullValue(row:column:format:)`, `rows(in:columns:)`, `naturalCharCounts()` (hitungan `Character`, batas 64), dan `distinctValues(column:)` yang sinkron. Ia mewarisi `RowReading.row(at:)` (`Models/CellSelection.swift`) tanpa implementasi bawaan. Tidak ada metode yang melempar, dan tidak ada `poll`, `phase`, `viewID`, `apply`, `release`, atau `columnWidths()`. Selisih terhadap rancangan W2-A3 ada di §17.0.
+
+TM-2. **Tabel membangun dan mengecat semua kolom di setiap baris.** `Coordinator.rowText(_:)` (`ResultGridTable.swift:436`) memanggil `rows.cell` (`:458`) untuk setiap kolom di `visibleSources` (`:442`), dan `GridRowPainter.paint` (`GridRowView.swift:175`) mengecat `0..<geometry.widths.count` (`:199`). `GridTableView.draw` (`GridTableView.swift:208`) menghitung `geometry.columns(in:)` lalu membuangnya (`_ = columns`, `:236`). Hasil 500 kolom membayar 500 pembacaan sel per baris yang digambar, termasuk kolom di luar layar; dengan halaman 32 kolom itu 16 panggilan `window` per halaman baris. Rancangan lama mengandaikan pembacaan per sel hanya untuk kolom terlihat. Diperbaiki di commit 6a (§17.3, D-23).
+
+TM-3. **Regresi W5-T1 pada daftar nilai unik.** `ArrayRows.distinctValues` (`ResultRows.swift:108`) berhenti di 10 nilai pertama (urutan kemunculan) dan mengembalikannya. `ResultGrid.filterEditor` memutuskan `browsable = values.count <= ColumnFilter.valuePickerLimit` (`ResultGrid.swift:678`), jadi kolom dengan 50 nilai unik kini mendapat pemilih berisi 10 nilai. `ColumnFilter.distinctValues(in:column:)` (`QueryTab.swift:215`) mengembalikan himpunan lengkap, dan itulah yang membuat kolom seperti itu jatuh ke kolom pencarian teks. Tidak ada tes yang menjaganya. Diperbaiki di 6a lewat kontrak baru (§17.2).
+
+TM-4. **`closeTab` tidak menghentikan Run dan Explain yang sedang berjalan.** `AppModel.closeTab` (`AppModel.swift:708`) memanggil `tabs[index].process?.terminate()` (`:710`), sedangkan `preview` dan `explain` disimpan di `previewProcess` (`:2475` dan `:2973`). `TabCloseTests` tidak mencakupnya. Dengan store, run itu baru berhenti saat `push` berikutnya melihat `Released`; query yang masih menunggu server (belum ada batch pertama) berjalan terus. Diperbaiki di §19.
+
+TM-5. **Pembaca dan penulis `PreviewResult.rows`.** Produksi: `QueryTab` (`displayedRows`, `result`), `ResultGrid` (`summaryText`, `filterEditor`), dan `PreviewResult.summary`. Penulis: `AppModel` 6 situs, `Snapshot` 8 situs ditambah 7 mutasi di tempat (`tab.preview?.rows[i][j] = …`), `BenchMode` 1 situs. Tes: 21 situs konstruksi di 8 berkas, pembacaan `displayedRows` di 5 berkas (termasuk `VisualParityTests.swift`, yang menurut ADR-0032 "tidak diubah" tetapi ikut berubah di W6-T1), dan `baseResult`/`BaseResultCache` di `Batch7Tests`.
+
+TM-6. **Bentuk engine di Swift.** `RustEngine` adalah `struct` dengan `private static let host = EngineHost()` (`RustEngine.swift:60`). `Engine.current` adalah `static let` (`DatabaseEngine.swift:75`). `SilentEngine` untuk `--snapshot` (`DatabaseEngine.swift:80`) sudah ter-commit di `465a0c6`, dan hari ini hanya mengimplementasikan `run`, `terminateAll`, dan `runBlocking`. `Sink.onEvent` memindahkan setiap event ke main. `RustRun.deliversAfterStop` sudah benar untuk `preview` dan `explain`. Selain `MockEngine` di tes dan `SilentEngine` untuk `--snapshot`, tidak ada seam untuk menyuntikkan engine.
+
+TM-7. **Bit flag QHW1 tidak sama dengan `CellFlags`.** Rust: NULL 1, EMPTY 2, OPENABLE 4, NUMERIC 8, TRUNCATED 16 (`render.rs`). Swift: `null` 1, `empty` 2, `truncated` 4, `numeric` 8, `openable` 16. `CellFlags(rawValue: byte)` akan menukar `openable` dan `truncated` tanpa galat kompilasi.
+
+TM-8. **`column_widths()`: dokumentasi Rust salah, dan NULL bernilai 0.** Komentar `column_widths()` di `store_api.rs:685` menulis "UTF-16 units", padahal `HeadWidths::observe` menghitung grapheme (batas 256) dan memperlakukan NULL sebagai teks kosong (0), bukan 4 seperti §8 dan `ArrayRows`. Tidak berdampak pada lebar: rumus `min(max(n × 7,2 + 20, 84), 320) + 22` memberi 84 untuk semua n ≤ 8, dan selisih 0 lawan 4 hanya menyentuh n di bawah itu. Komentar itu masih utuh di `465a0c6`: W5-C sudah ditutup (`1b59154`, `465a0c6`) tanpa memperbaikinya, jadi koreksinya masuk backlog ledger, bukan W5-C.
+
+TM-9. **`StoreStats.spilled_bytes` nyata sejak `1b59154`.** Di `bfb9680` nilainya selalu 0. Di `465a0c6`, `host.rs:397` meneruskan `stats.spilled_bytes` dari `registry.rs:561`, yang menjumlahkan `StoreShared::spilled_bytes()` (byte yang sudah ditulis ke berkas spill) atas store yang masih hidup. Jadi nol sesudah semua tab ditutup mengikuti `stores == 0`, dan angkanya bermakna selama store masih hidup (R-29, G-BENCH(3)).
+
+TM-10. **Fixture diferensial hanya mencakup sort, filter, dan search.** W4-T4 membangun satu berkas, `differential.json` (210 kasus: 6 sort, 171 filter, 27 search, 6 pipeline). Sembilan berkas §15.2 (`format`, `openable`, `width`, `number`, dan seterusnya) tidak dibuat. Printer `Json` dan port format `Text`, `Uuid`, `UnixTimestamp` di `render.rs` hanya punya empat tes unit (dua UUID, satu timestamp, satu JSON), sehingga paritasnya terhadap `ColumnFormat.render` belum diuji sama sekali. Ini yang menentukan §11.4.
+
+TM-11. **Cakupan angka jendela W5-T2.** `bench_ffi window` mengukur panggilan Rust `ResultHandle::window` atas 1 juta × 30 sel yang seluruhnya resident: tanpa penyeberangan UniFFI dan tanpa chunk yang tumpah (§2.9).
+
+TM-12. **Plafon baris dan batas fd.** `AppModel.productRowLimitCeiling` masih 200.000 (`rowLimitCeiling` hanya ditimpa `--bench`). Di mesin ini `launchctl limit maxfiles` memberi 256 (lunak) dan tak terbatas (keras), dan `kern.maxfilesperproc` 61.440. Tidak ada bench yang mengukur fd per store yang tumpah; ADR-0037 NEG-005 menyatakan penanganan `EMFILE` belum diverifikasi tes.
+
+TM-13. **`SortFixtureExport.swift` memanggil implementasi Swift yang akan dihapus** (`GridSort.order`, `ColumnFilter.matchesText`, `GridSearch.matches`), jadi "dilewati setelah W6-T1" (§15.1) tidak cukup: berkas itu tidak akan terkompilasi.
+
+TM-14. **Skenario bench sintetis membangun datanya di Swift.** `scroll-30x1m` memakai `syntheticResult(rows: 1_000_000, columns: 30)` (30 juta sel `String?`), `scroll-500x10k` dan `open-500x10k` 5 juta sel, dan `tabs-100` 2.000 × 10 per tab dengan satu tab hidup dalam satu waktu. `store_synthetic` hanya konstruktor Rust (D-13).
 
 ## 2. Pengukuran
 
@@ -150,6 +182,24 @@ Semua jalur jauh di bawah NFR-P8 (numerik ≤ 100 ms, teks ≤ 300 ms). Untuk ur
 - `SessionContext::new_with_config_rt` + registrasi UDF: **39 µs**. Membuat sesi per tab, bahkan per query, praktis gratis.
 - `SELECT count(*)` atas 500k: 0,1 ms (dari statistik `MemTable`). `GROUP BY i0 % 100` dengan `sum(Decimal128)`, `avg(Float64)`, dan `count(*)` atas data `typed` 500k × 30, 4 partisi: 1,2 ms, 199 grup (diperiksa).
 
+### 2.9 Angka W5-T2: jendela dan view di sisi Rust
+
+**Disegarkan W6-A1 (2026-10-06).** Sumber: `target/run/w5t2-bench-window.json` (lima ulangan) dan `target/run/w5t2-bench.json` (tiga ulangan), `bench_ffi` rilis di M4 (`view_pool` 4 thread), commit `bfb9680`. Store sintetis 1 juta × 30 (kolom bigint, double, dan teks bergantian, seluruhnya resident). Jendela: 5.000 panggilan acak per ulangan setelah 200 pemanasan, lewat `ResultHandle::window` (termasuk salinan buffer, tanpa penyeberangan UniFFI).
+
+| Kasus | p50 | p95 | p99 | Catatan |
+|---|---|---|---|---|
+| `window` 128 × 30 (3.840 sel, 73.010 byte) | 0,369–0,380 ms | 0,388–0,406 ms | **0,396–0,449 ms** | sekitar 103–117 ns per sel di p99. Target lokal blueprint (p99 ≤ 0,25 ms, §21.1) **meleset**. Target NFR-P8 (≤ 0,5 ms termasuk UniFFI) belum bisa dinilai |
+| `window-json` 128 × 8 (1.024 sel, 253.476 byte) | 1,73–1,75 ms | 1,79–2,82 ms | 1,91–5,88 ms | dicatat, tidak digate (§11.5); satu kali maksimum 51,8 ms |
+
+| View di 1 juta × 30 (`set_view`, 3 ulangan) | Waktu | Ekstrapolasi linear ke 500k (belum diukur) | Target |
+|---|---|---|---|
+| sort bigint | 166–221 ms | 83–111 ms | NFR-P8 ≤ 100 ms: di tepi |
+| sort teks, kunci natural | 153–182 ms | 76–91 ms | NFR-P8 ≤ 300 ms: lulus |
+| filter `Text` | 25–27 ms | 12,5–13,3 ms | sasaran ≤ 300 ms: lulus |
+| search semua kolom | 768–796 ms | 384–398 ms | sasaran ≤ 300 ms: **meleset**, dicatat |
+
+Yang tidak tercakup: penyeberangan UniFFI (`StoreWindowBench`, W6-T1), chunk yang tumpah (sekitar 0,4 ms tambahan untuk dekripsi dan decode per miss chunk, §2.5), dan 500k nyata (W5-T3 dan W6-T2). Search 800 ms atas 1 juta baris adalah alasan `apply` bersifat asinkron dan grid tetap menampilkan view lama sampai yang baru siap (§17.2).
+
 ## 3. Keputusan desain
 
 | # | Keputusan | Alasan |
@@ -175,13 +225,21 @@ Semua jalur jauh di bawah NFR-P8 (numerik ≤ 100 ms, teks ≤ 300 ms). Untuk ur
 | D-19 | **Helper dikirim lewat unduhan saat pertama dipakai, bukan di dalam bundel.** Artefaknya satu Mach-O arm64 terkompresi LZFSE, aset rilis GitHub yang sama dengan DMG, dan dipatok per build app: URL, panjang, tanda tangan EdDSA (kunci Sparkle yang sama), dan SHA-256 executable ditulis `build.sh` ke `Info.plist`. Swift memverifikasi sebelum memasang, dan Rust memeriksa ulang SHA-256 sebelum setiap spawn (§14.2). | O-18: app kecil. Tanda tangan kode ad-hoc (distribusi hari ini; notarisasi di luar lingkup PRD §10) hanya membuktikan integritas, bukan asal. Asal dibuktikan kunci EdDSA yang sudah dijaga jalur rilis Sparkle, dan hash yang dipatok mengikat helper ke satu build app, sehingga tidak ada selisih versi. |
 | D-20 | **IPC: bingkai biner di atas stdin/stdout helper, data sebagai stream IPC Arrow, chunk ditarik helper sesuai kebutuhan.** App mengirim batch logis (§5.4). Helper mengirim chunk yang sudah dinormalkan ke encoding store (§5.1). Helper tidak pernah melihat berkas spill app atau kuncinya (§14.3, §14.4). | Pipa anonim tidak punya path dan listener yang bisa dihubungi proses lain. IPC Arrow adalah format yang stabil lintas versi arrow-rs. Data menyeberang sekali lewat kernel dan di-decode tanpa salinan. App tidak butuh `arrow-cast`, dan memvalidasi keluaran helper dengan validator rekaman spill (§6.3). Alternatif yang ditolak: helper membaca spill app (kunci harus keluar proses) dan memori bersama (butuh `unsafe` dan aturan umur lintas proses). |
 | D-21 | **Helper dikurung:** `sandbox-exec` dengan profil tetap. Baca berkas boleh, kecuali data app dan Keychain; tulis hanya ke direktori spill helper; tanpa jaringan; tanpa exec lain. Lingkungan dikosongkan, dan hanya tiga fd standar yang diwariskan. Tanpa kurungan, helper tidak dijalankan (§14.9). | NFR-S5 dijaga kernel, bukan hanya oleh `SQLOptions`. App sendiri tidak disandbox (ADR-0007), tetapi helper bisa. Entitlement App Sandbox butuh tanda tangan Developer ID untuk diverifikasi, dan mesin ini tidak punya (ADR-0014), jadi itu jalur migrasi di ADR-0045. |
+| D-22 | **Disegarkan W6-A1 (2026-10-06). Halaman jendela 64 baris × blok 32 kolom sumber, sementara; miss sinkron di main; tanpa prefetch.** `PAGE_ROWS`, `COL_BLOCK`, dan batas cache (≤ 24 halaman, ≤ 8 MB, tidak pernah di bawah 8 halaman) adalah konstanta yang W5-T3 dan `StoreWindowBench` mengonfirmasi atau mengganti. | 128 × 30 bertipe sudah 0,396–0,449 ms p99 di sisi Rust (§2.9), jadi 128 × 32 tidak punya margin terhadap 0,5 ms setelah UniFFI. 64 × 32 ≈ 0,22–0,24 ms. Satu halaman menutupi 1.344–1.920 pt, jadi fling 3.000 pt/s hanya memicu sekitar dua miss per detik (§17.2). |
+| D-23 | **Disegarkan W6-A1 (2026-10-06). Tabel membangun dan mengecat hanya kolom yang tergambar** (rentang dari `GridColumnGeometry.columns(in:)` ± satu lebar viewport), dikerjakan di commit 6a di atas `ArrayRows`. | TM-2. Tanpa ini hasil 500 kolom membaca 500 sel per baris. 6a diverifikasi dengan G-VIS tanpa rekam ulang sebelum store masuk. |
+| D-24 | **Disegarkan W6-A1 (2026-10-06). Pintu darurat format = `StoreRows.swiftRenderedFormats`, awalnya `{.json}`.** Kolom di himpunan itu dibaca lewat `rows_text` (teks penuh) dan `ColumnFormat.render` di Swift untuk sel yang digambar. Tanpa parameter FFI baru. Format lain pindah ke himpunan itu bila tes kembaran W6-T1 menemukan selisih yang **bukan divergensi tercatat** (§17.2): potongan 256 unit UTF-16 dan semantik `TRUNCATED` milik `window` (lawan 1.024 `Character` milik `ArrayRows`), serta `openable` kembaran yang lebih longgar, adalah divergensi, bukan selisih. **`Raw` tidak pernah pindah**: selisih `Raw` di luar divergensi tercatat adalah bug dan menghentikan W6-T1. | TM-10: tidak ada fixture paritas format. Perilaku Swift hari ini terjaga persis, dan biayanya hanya jatuh pada kolom berformat yang dipilih pengguna. Tanpa divergensi tercatat, setiap format, `Raw` termasuk, akan selisih pada sel panjang (potongan 256 lawan 1.024), dan aturan "selisih memindahkan format" akan memindahkan `Raw` ke jalur Swift, yang menggagalkan rancangan jendela. |
+| D-25 | **Disegarkan W6-A1 (2026-10-06). `ArrayRows` dan implementasi sort, filter, dan search Swift pindah ke target tes sebagai kembaran acuan**, tidak dihapus. Produksi memakai `EmptyRows` untuk "belum ada hasil". | Pemakai produksi `ArrayRows` habis setelah W6-T1. Sebagai kembaran ia memberi jaring paritas format dan flag yang tidak dibuat W4-T4, menjaga sepuluh tes `ResultRowsTests`, dan membuat `SortFixtureExport` tetap bisa meregenerasi fixture (TM-13). |
+| D-26 | **Disegarkan W6-A1 (2026-10-06). Mitigasi R-19: `RLIMIT_NOFILE` lunak dinaikkan ke min(batas keras, 4.096) saat peluncuran.** Menutup fd store yang menganggur **tidak mungkin**. | Berkas spill di-unlink sebelum byte pertama (D-5), sehingga fd adalah satu-satunya pegangan ke datanya: menutupnya membuang data. Batas lunak launchd 256 terukur (TM-12). 4.096 adalah 16 kali lipat, jauh di atas 100 tab × 2 store. |
+| D-27 | **Disegarkan W6-A1 (2026-10-06). `apply(ViewSpec)` asinkron, dengan penjaga edit.** Selama `viewBusy`, mengisi, menempel, dan menyimpan perubahan sel ditolak. Saat view terpasang, seleksi dan antrean edit dibuang. | Edit dikunci menurut indeks baris tampilan (`CellKey`). Antara `set_view` selesai di Rust dan hop ke main, indeks itu menunjuk baris lain, dan `WritePlan` membaca nilai asli lewat `row(at:)` untuk klausa `WHERE` pada `UPDATE` dan `DELETE`. Tanpa penjaga, satu edit bisa menulis atau menghapus baris yang salah. |
+| D-28 | **Disegarkan W6-A1 (2026-10-06). Hitungan footer dari `progress` disaring 5 Hz (`footerCountInterval` 0,2 detik); grid dipoll display link paling tinggi 60 Hz; `rowsDidGrow(from:to:)` hanya membatalkan baris baru.** | Mempertahankan kadens 200 ms hari ini untuk SwiftUI tanpa lagi mengganti seluruh hasil, dan menghindari evaluasi `body` per frame. Baris yang sudah ada tidak berubah saat hasil bertambah, jadi `GridRowTextCache` tidak dikosongkan. |
+| D-29 | **Disegarkan W6-A1 (2026-10-06). Plafon 5.000.000 dinaikkan di commit tersendiri sesudah P-1.** Lulus: naik. Gagal: `WindowedRows` masuk lebih dulu. Tidak terukur (izin OS): tetap 200.000. | Aturan `development-plan.md` W6-T1 dan blueprint Fase 5 §5.4 dan §15. Dipisah supaya perpindahan data plane tidak tertahan izin Screen Recording. |
 
 ## 4. Alur data
 
 ```
 Run (Swift, main)
   RustEngine.runIntoStore
-    (sekali, sinkron, sebelum tab pertama dipulihkan) host.configure_result_stores(spill_dir, 256 MiB) -> sapuan
+    (sekali, sinkron, di QueryHiveMain.main sebelum tab dipulihkan, §17.6) host.configure_result_stores(spill_dir, 256 MiB) -> sapuan
     host.create_result_store()                     -> ResultHandle {store_id}   (dibuat sebelum run, D-12)
     [antrean .userInitiated] host.run_with_store(Preview|Explain, settings + RESULT_SINK=store, store, sink, cancel)
       commands::preview -> stream_rows -> pump_result(RowTarget::Store)
@@ -191,8 +249,8 @@ Run (Swift, main)
                                 \-> registry.charge() -> evict LRU -> IPC + SpillCipher.seal -> pwrite (fd sudah di-unlink)
         event: step connect, columns, progress{rows} <= 1 per 16 ms, done
 Grid (main, per frame selama streaming)
-  displayLink -> handle.row_count() (load atomik) -> noteNumberOfRowsChanged
-  draw -> StoreRows.cell(r, c) -> halaman cache --miss--> handle.window(view, first, 128, kolom[<=32], format)
+  displayLink (<= 60 Hz) -> StoreRows.poll() = handle.row_count() (load atomik) -> Coordinator.rowsDidGrow(from:to:)
+  draw -> rowText(r, kolom yang tergambar) -> StoreRows.cell(r, c) -> halaman cache --miss--> handle.window(view, first, 64, kolom[<=32], format)
                                -> render dari array Arrow lewat render::to_text -> Data (QHW1) -> WindowPage
 Sort fallback / filter / search / "off"
   [antrean .userInitiated] handle.set_view(spec) -> qh_rt::view_pool() (rayon) -> permutasi -> view_id baru
@@ -209,9 +267,11 @@ SQL atas hasil / berkas lokal (W13-T8a–c; UI kemudian)
       helper: keluaran -> from_arrow -> ResultChunk (IPC, encoding §5.1) -> app: validasi (§6.3) -> StoreWriter(out_store)
       Done -> sewa kembali; helper crash -> satu event error, sewa kembali, helper dibangun ulang saat dipakai lagi
 Tutup tab
-  RustRun.terminate() -> handle.release() / session.close() -> chunk dilepas, anggaran dikembalikan, fd spill ditutup,
+  closeTab: RustRun.terminate() (process dan previewProcess, §19) -> StoreRows.release() / session.close() -> chunk dilepas, anggaran dikembalikan, fd spill ditutup,
                                                              CloseSession ke helper bila hidup
 ```
+
+**Disegarkan W6-A1 (2026-10-06).** Baris peluncuran, Grid (halaman 64 baris, sementara, D-22), dan Tutup tab disesuaikan dengan §17 dan §19.
 
 ## 5. Pemetaan tipe: `Value` ↔ Arrow
 
@@ -382,6 +442,8 @@ Bitmap `ChunkFlags::numeric` hanya ada untuk `text`, `json`, `tagged`, dan `byte
 - Swift meminta ulang hanya pada batch pertama, saat `fetched` melewati 200, dan saat hasil lengkap. Tidak per frame dan tidak per body.
 - Yang dihitung adalah teks **tersimpan**, bukan teks terformat, sama dengan `value.count` hari ini.
 - Risiko versi Unicode antara `unicode-segmentation` dan runtime Swift dikunci `width.json` (R-11).
+
+- **Disegarkan W6-A1 (2026-10-06).** Sebagaimana dibangun, NULL dihitung 0, bukan 4, dan itu tidak mengubah lebar (TM-8). Komentar `column_widths()` di `store_api.rs` yang menyebut UTF-16 salah: yang dihitung grapheme.
 
 ## 9. `StoreRegistry`, identitas store, anggaran global, dan urutan spill
 
@@ -608,14 +670,18 @@ Flag sel:
 | `UnixTimestamp` | Trim `White_Space`, lalu `swift_double`. Harus finite. Detik = n / 1000 bila \|n\| ≥ 1e11, selain itu n. Pecahan dibuang ke bawah (floor; dikunci fixture untuk nilai negatif). Tanggal lewat `qh_core::render::civil_from_days`, format `yyyy-MM-dd HH:mm:ss` UTC. Tahun < 1 dan > 9999 mengikuti fixture. Bukan bilangan: teks tersimpan. |
 | `Json` | Panjang UTF-16 ≤ 100.000, parse (`serde_json::Value`), lalu cetak meniru `JSONSerialization` `[.prettyPrinted, .fragmentsAllowed, .sortedKeys]`: indentasi dua spasi, `"key" : value`, `/` di-escape menjadi `\/`, non-ASCII apa adanya, urutan kunci dan bentuk bilangan sesuai fixture. Lalu `\n` → spasi. Gagal parse: teks tersimpan. **Urutan kunci ditulis eksplisit oleh printer**, bukan diwarisi dari `serde_json::Map`: workspace menyalakan `serde_json` fitur `preserve_order` (`Cargo.toml:52`), dan feature unification membuat `Map` di crate ini juga menjaga urutan input. |
 
-**Pintu darurat `Json`.** Bila W4-T4 menunjukkan paritas printer JSON belum 100% di korpus, kolom berformat `Json` dikirim dengan teks tersimpan, dan Swift menerapkan `ColumnFormat.render` untuk sel yang terlihat saja. Keputusan itu dicatat di `differential.rs` dan di ADR-0030. Format lain tidak punya pintu darurat. Syarat pintu darurat: tidak boleh ada panggilan FFI per sel di jalur gambar. Jendela untuk kolom itu dikirim tanpa potongan 256 (flag per kolom di permintaan, diputuskan W6-A1), supaya Swift punya teks penuh untuk diformat tanpa `cell_text` per sel.
+**Pintu darurat `Json`, diputuskan W6-A1.** **Disegarkan W6-A1 (2026-10-06).** Syaratnya terpenuhi, dan dengan kuat: W4-T4 tidak menguji paritas format sama sekali (TM-10), jadi printer `Json` di `render.rs` belum terbukti sama dengan `ColumnFormat.render`. Bentuknya, tanpa parameter FFI baru: `StoreRows` menyimpan himpunan `swiftRenderedFormats`, awalnya `{.json}` (D-24). Halaman untuk kolom di himpunan itu dibaca lewat `rows_text` (teks penuh, `CUT` mati, batas 64 MiB; `TooLarge` membagi dua baris sampai satu), dan `ColumnFormat.render` dijalankan di Swift hanya untuk sel yang benar-benar digambar. Jadi tidak ada panggilan FFI per sel dan tidak ada potongan 256 untuk kolom itu; kolom berformat lain tidak terpengaruh. Format `Text`, `Uuid`, dan `UnixTimestamp` tetap di Rust, tetapi W6-T1 menulis tes kembaran (`ArrayRows` acuan lawan `StoreRows` atas korpus setiap format, termasuk awalan heks `\x`, UUID fullwidth, dan detik negatif); format yang selisih di luar divergensi tercatat (§17.2) ikut masuk `swiftRenderedFormats`, kecuali `Raw`, yang tidak pernah pindah. `Json` kembali ke Rust hanya setelah ada fixture `format.json` dua sisi yang lulus (backlog baru B-21, di luar W6-T1). Pengukuran `window-json` (§2.9) tidak mengubah ini: 1,7 ms per jendela 128 × 8 di Rust tidak digate, dan jalur Swift hari ini membayar ongkos parse yang sama per sel yang digambar.
 
 ### 11.5 Batas dan target
 
 - `row_count ≤ 4.096`, `column_count ≤ 1.024`, R × C ≤ 262.144; di luar itu `InvalidArgument`. `rows_text` yang total bytenya > 64 MiB menjadi `TooLarge`, dan Swift memecah permintaannya.
 - Target: jendela tampilan 128 baris × 32 kolom dari chunk resident, p99 ≤ 0,5 ms termasuk UniFFI (NFR-P8), untuk format `Raw`, `Text`, `Uuid`, dan `UnixTimestamp`. Angka probe untuk bagian Rust-nya (tanpa UniFFI dan tanpa format kolom) ada di §2.6. Format `Json` mem-parse dan mencetak ulang setiap sel sampai 100.000 unit, jadi satu jendela bisa jauh di atas 0,5 ms. Ia diukur terpisah (`bench_ffi window-json`) dan dicatat, bukan digate, karena pengguna memilihnya per kolom dan jalur Swift hari ini membayar ongkos yang sama per render. Diukur `bench_ffi window` (Rust) dan `StoreWindowBench` (Swift). Bila meleset, jalurnya eskalasi C ABI Fase 8.
 
+**Disegarkan W6-A1 (2026-10-06).** Hasil W5-T2 (§2.9): jendela 128 × 30 bertipe 0,396–0,449 ms p99 di sisi Rust saja, jadi 0,5 ms termasuk UniFFI hanya mungkin untuk halaman yang lebih kecil dari 128 × 32. Halaman Swift karena itu 64 baris × 32 kolom (D-22, sementara), dan `StoreWindowBench` mengukurnya lewat UniFFI, resident dan tumpah. Bila p99 64 × 32 masih di atas 0,5 ms, jalurnya eskalasi C ABI Fase 8 (W8-T2), bukan halaman yang lebih kecil lagi.
+
 ## 12. Permukaan FFI
+
+**Disegarkan W6-A1 (2026-10-06).** Kode di §12.1–§12.3 cocok dengan `crates/qh-ffi/src/store_api.rs` dan `host.rs` di `465a0c6` (permukaan FFI tidak berubah sejak `bfb9680`), kecuali yang tercantum di §12.4. Nama Swift hasil UniFFI, batas permintaan, dan perilaku yang dibangun ada di §12.4.
 
 ### 12.1 Rekaman, enum, galat (`crates/qh-ffi/src/store_api.rs`)
 
@@ -703,6 +769,26 @@ impl EngineHost {
 - **Tidak ada registry bawaan implisit** (koreksi AR W2-A3). `create_result_store` dan `store_from_rows` sebelum `configure_result_stores` menjadi `InvalidArgument("result stores are not configured")`. Tes dan scene snapshot memanggil `configure_result_stores(None, …)` sendiri (spill mati). Rancangan awal membangun registry bawaan tanpa spill secara diam-diam. Bila app memanggil `configure` di antrean latar dan Run yang dipulihkan sesi lebih dulu membuat store, registry tanpa spill itu menang, `configure` lalu ditolak, dan hasil 5 juta baris gagal di anggaran tanpa sebab yang terlihat. Itu fallback senyap.
 - Bila direktori spill tidak aman, registry tetap hidup dengan spill mati. Ingest yang melewati anggaran lalu gagal dengan pesan yang menyebut alasannya.
 - `run_with_store` dirutekan seperti `preview`/`explain` di `host.run`, yaitu `Pooled(Query)` (fase-2-engine-host.md §3). Jalur sesi dan reset tidak berubah; yang berbeda hanya emitter-nya.
+
+### 12.4 Sebagaimana dibangun W5-T2 dan ditutup W5-C (`df445fd`, `bfb9680`, `1b59154`)
+
+**Disegarkan W6-A1 (2026-10-06).** Selisih dan fakta yang W6-T1 butuhkan, dibaca dari `store_api.rs`, `host.rs`, `commands.rs`, `tests/store_sink.rs`, dan `app/Generated/QueryHiveFFI/qh_ffi.swift`, di `465a0c6`. `claim_run`, pra-taksiran `rows_text` (`too_large`), `spilled_bytes` yang nyata, dan snapshot view tunggal di `row_count()` datang di `1b59154` (W5-C), bukan di `bfb9680`.
+
+**Batas permintaan** (`store_api.rs`): `MAX_WINDOW_ROWS` = 4.096, `MAX_WINDOW_COLUMNS` = 1.024, `MAX_WINDOW_CELLS` = 262.144, `MAX_ROWS_TEXT_BYTES` = 64 MiB. Tiga batas pertama berlaku juga untuk `rows_text` dan `cell_text`, bukan hanya `window`. Jadi Swift memecah salinan besar menurut sel (4.096 baris × 64 kolom adalah satu panggilan penuh), dan `TooLarge` (64 MiB) dibagi dua. Panggilan yang melewati batas menjawab `InvalidArgument`.
+
+**Nama di Swift (UniFFI):** `ResultHandle` dengan `ResultHandleProtocol: AnyObject, Sendable`. Metodenya: `rowCount() -> RowCount` (`fetched`, `visible`, `viewId`, `phase`), `columns() -> [ColumnWire]`, `window(viewId:firstRow:rowCount:columns:formats:) -> Data`, `rowsText(viewId:firstRow:rowCount:columns:) -> Data`, `cellText(viewId:row:column:format:) -> String?`, `columnWidths() -> [UInt32]`, `setView(spec:) -> ViewInfo`, `distinctValues(column:limit:) -> DistinctValues`, dan `release()`. Semuanya `throws StoreFfiError` (`.StaleHandle`, `.StaleView(current:)`, `.Superseded`, `.Streaming`, `.TooLarge(neededBytes:budgetBytes:message:)`, `.Spill(message:)`, `.InvalidArgument(message:)`, `.Corrupt(message:)`, `.Internal(message:)`). `EngineHost`: `configureResultStores(spillDir:budgetBytes:) throws -> StoreSweep`, `createResultStore() throws -> ResultHandle`, `runWithStore(command:settings:store:sink:cancel:)` (tidak melempar), `storeFromRows(columns:rows:) throws -> ResultHandle`, dan `storeStats() throws -> StoreStats`.
+
+**Perilaku** (dibaca dari `host.rs` dan `commands.rs`, dijaga `store_sink.rs`):
+
+- Satu store, satu run. `run_with_store` memakai `claim_run` atomik (`1b59154`; `store_api.rs:307`, dipanggil di `host.rs:524`). Store yang sudah memegang run menjawab event `error` "this result store already holds a run", store yang dilepas menjawab "the result was closed", dan perintah selain `preview` dan `explain` menjawab "a result store takes only preview and explain". Karena itu Swift membuat store baru untuk setiap run (D-12).
+- Bila run berakhir sebelum pump (gagal sebelum baris pertama, atau dihentikan), store yang masih `Empty` atau `Streaming` ditutup `Cancelled` bila dibatalkan dan `Failed` bila tidak, sehingga poll selalu melihat fase terminal. **`phase == .failed` sendiri bukan galat bagi UI**: galat datang dari event `error` dan status keluar.
+- Pernyataan tanpa kolom (tulis) mengirim `columns` kosong lalu `done`, tanpa `writer.begin`; store berakhir `Complete` dengan nol kolom dan nol baris. Swift melepasnya seketika dan tidak menggambar grid.
+- `StoreTarget`: `fetch_size` 200 → 800 → 3.200 → 12.800 → 16.384 (`STORE_FETCH_MAX`), dipotong sisa batas baris; `progress{rows}` paling sering sekali per 16 ms; `pump_result` memotong pada jumlah baris yang diterima; keluaran NDJSON identik byte (G-GOLDEN). `Cursor::next_chunk` belum ada (W7-T1).
+- `rows_text` menaksir ukuran sebelum merender (`1b59154`; `read_window`, `store_api.rs:379`, dengan `limit` yang hanya diberikan `rows_text`: `window` dan `cell_text` tidak diperiksa). Untuk setiap potongan chunk ia menjumlahkan bagian kolom yang diminta dari `get_array_memory_size()` ditambah 8 byte per sel, dan menjawab `TooLarge` lewat `too_large` (`store_api.rs:249`) begitu taksiran melewati `MAX_ROWS_TEXT_BYTES`. Ukuran sebenarnya diperiksa lagi setelah tiap potongan dibangun dan setelah buffer disambung. Permintaan yang pasti terlalu besar gagal sebelum sel pertama dirender, dan Swift tetap membaginya dua baris sampai satu (§17.2).
+- `row_count()` membaca satu snapshot view (`1b59154`, `store_api.rs:581-589`): `visible` dan `view_id` selalu milik view yang sama, dan keduanya milik view **baru** sejak `set_view` memasangnya di Rust, sebelum hop ke main. Karena itu `poll()` tidak boleh memakai hitungan dari view yang `viewId`-nya bukan `viewID` yang sedang digambar (§17.2).
+- `EngineHost::store_synthetic` (Rust saja, tidak diekspor) membangun store sendiri: kolom k bertipe `bigint`, `double`, atau `text` menurut `k % 3`. `StoreStats.spilled_bytes` nyata sejak `1b59154` (TM-9; `host.rs:397` dari `registry.rs:561`). `StoreFfiError` belum punya `AnalyticsUnavailable` (W13-T8b).
+
+**Selisih bernama terhadap §12.1–§12.3:** `column_widths()` menghitung grapheme dengan NULL = 0 (TM-8), dan `view_id` yang tidak cocok menjawab `StaleView { current }`, bukan jendela. Selebihnya §12.1–§12.3 berlaku apa adanya.
 
 ## 13. View di Rust
 
@@ -818,6 +904,8 @@ Filter dan search boleh diterapkan saat streaming; sort tidak. View filter menyi
 ### 13.10 Target
 
 NFR-P8: sort 500k numerik ≤ 100 ms, teks ≤ 300 ms, off-main. Filter dan search 500k × 30 dicatat (sasaran ≤ 300 ms). Semua diukur di `bench_ffi` skenario `view-*`. Angka probe untuk bentuk kunci ini ada di §2.7.
+
+**Disegarkan W6-A1 (2026-10-06).** Angka W5-T2 untuk 1 juta × 30 dengan 4 thread (§2.9): sort bigint 166–221 ms, sort teks natural 153–182 ms, filter 25–27 ms, search semua kolom 768–796 ms. Ekstrapolasi linear ke 500k memberi 83–111, 76–91, 12,5–13,3, dan 384–398 ms: sort numerik di tepi 100 ms, dan search meleset dari sasaran 300 ms. Gate 500k yang nyata ada di W5-T3 dan W6-T2. Search yang meleset dicatat (bukan gate), dan UI menanganinya sebagai kerja asinkron (§17.2).
 
 ## 14. DataFusion: komponen analitik terpisah (W13-T8a–c)
 
@@ -1016,7 +1104,7 @@ Semua yang dibangun W4–W7: store Arrow, spill, `window`, view grid (sort fallb
 `app/Tests/QueryHiveTests/SortFixtureExport.swift` berisi dua tes:
 
 - `testExportGridFixtures`: hanya berjalan bila `QH_EXPORT_FIXTURES=1` (selain itu `XCTSkip`), dengan pola yang sama dengan `LexerFixtureExport` di W3-T2. Ia menjalankan implementasi Swift atas korpus dan menulis JSON ke `crates/qh-result-store/tests/fixtures/grid/`, dengan path diturunkan dari `#filePath`.
-- `testCommittedFixturesStillMatchSwift`: selalu berjalan. Ia membaca fixture yang ter-commit dan memeriksa bahwa implementasi Swift yang **masih ada** menghasilkan hal yang sama. Setelah W6-T1, bagian sort, filter, search, dan distinct dilewati karena implementasinya sudah dihapus; `format`, `openable`, dan `width` tetap diperiksa (D-9).
+- `testCommittedFixturesStillMatchSwift` (di kode bernama `testFixturesMatchTheCommittedFile`): selalu berjalan. Ia membaca fixture yang ter-commit dan memeriksa bahwa implementasi Swift acuan menghasilkan hal yang sama. **Disegarkan W6-A1 (2026-10-06):** setelah W6-T1 implementasi itu pindah ke target tes (`SwiftGridReference`, D-25), bukan dihapus, sehingga tes ini dan eksportir tetap berjalan; yang hilang dari produksi hanya penyedia jalur panas. Rencana lama ("dilewati karena implementasinya sudah dihapus") tidak terkompilasi karena eksportir memanggil implementasi itu (TM-13).
 
 Korpusnya ditulis tangan per kategori, ditambah generator berbenih (SplitMix64, benih tetap di manifest) yang mencampur kelas karakter:
 
@@ -1045,6 +1133,8 @@ Setiap korpus ≤ 2.000 nilai, dan total fixture < 1 MB.
 | `openable.json` | `{"cases":[{"type":"varchar","value":"{\"a\":1}","openable":true}]}` | `GridValue.isOpenable` |
 | `format.json` | `{"cases":[{"format":"uuid","type":"bytea","value":"…","rendered":"…"}]}` | `ColumnFormat.render` |
 | `width.json` | `{"cases":[{"value":"👩‍👩‍👧","count":1}]}` | `String.count` |
+
+**Disegarkan W6-A1 (2026-10-06).** W4-T4 membangun satu berkas, `differential.json` (210 kasus), bukan sembilan berkas di atas. Tabel ini adalah rencana: baris selain sort, filter, dan search belum ada (TM-10), dan paritas format, `openable`, dan lebar dijaga di Swift oleh tes kembaran W6-T1 (D-24, D-25).
 
 ### 15.3 Pemeriksa di Rust
 
@@ -1096,13 +1186,15 @@ async fn pump_result(out, cursor, primed, limit, cancel, target: &mut dyn RowTar
   - selain itu → `NdjsonTarget`.
 - **Galat store:** `CliError::Store(#[from] StoreError)` memetakan `DiskFull`, `SpillUnavailable`, dan `SpillAuth` ke pesan untuk pengguna. `Released` diperlakukan sebagai cancel (tab sudah ditutup), sehingga `done` membawa `cancelled: true` dan tidak ada event `error`.
 
+**Disegarkan W6-A1 (2026-10-06). Sebagaimana dibangun (`commands.rs`, W5-T2).** `RowTarget` memakai `max_batch_rows()` dan `fetch_size(remaining)`, ditambah `abort(&CliError)` yang menutup store `Failed`. `StoreTarget::begin` tidak memanggil `writer.begin` untuk pernyataan tanpa kolom, dan `finish` menelan `Released`. Selebihnya sama dengan di atas.
+
 ### 16.2 Event di mode store
 
 `step connect`, `columns` (payload sama), `progress { rows }` (≤ 1 per 16 ms), lalu `done { rows, truncated, query_id, elapsed_ms, cancelled? }`, bentuknya sama dengan `done` NDJSON. Tidak ada event `rows`. `error` tetap satu event. Tabel event di doc modul `lib.rs` mendapat satu baris untuk mode ini.
 
 ### 16.3 Publikasi dan TTFR S2
 
-Batch pertama (200 baris) langsung disegel dan dipublikasikan (§6.2). Tick `displayLink` berikutnya (≤ 8,3 ms pada 120 Hz) melihat 200 baris, lalu `noteNumberOfRowsChanged`, lalu satu `window` sinkron, lalu gambar. Tidak ada decode JSON di antaranya, sehingga target TTFR S2 p95 ≤ 50 ms tidak bergantung pada cap.
+Batch pertama (200 baris) langsung disegel dan dipublikasikan (§6.2). **Disegarkan W6-A1 (2026-10-06):** event `progress` pertama, yang keluar segera setelah batch itu diterima, membangunkan koordinator untuk satu poll langsung (§17.3); tick display link (dibatasi 60 Hz, paling lama 16,7 ms) hanya jaring pengaman. Poll melihat 200 baris, lalu `rowsDidGrow(from:to:)`, lalu satu `window` sinkron, lalu gambar. Tidak ada decode JSON di antaranya, sehingga target TTFR S2 p95 ≤ 50 ms tidak bergantung pada cap.
 
 ### 16.4 W7-T1: driver menulis array Arrow langsung
 
@@ -1139,117 +1231,187 @@ pub trait Cursor: Send {
 
 ## 17. Sisi Swift
 
-### 17.1 Batas FFI tetap di satu berkas
+**Disegarkan W6-A1 (2026-10-06)** terhadap seam yang dibangun W5-T1 (ADR-0032) dan permukaan yang dibangun W5-T2. Rancangan W2-A3 mengandaikan seam yang belum ada; bagian ini menggantikannya seluruhnya. Diperiksa terhadap `465a0c6`: W5-C sudah ditutup, jadi nomor baris untuk `ResultGrid.swift`, `ResultGridTable.swift`, dan `DatabaseEngine.swift` berlaku di commit itu.
 
-`Models/StoreRows.swift` mendefinisikan protokol Swift `ResultStoreHandle`, yang mencerminkan `ResultHandle` (`rowCount`, `window`, `rowsText`, `cellText`, `columnWidths`, `setView`, `distinctValues`, `release`) dengan tipe Swift sendiri. Kesesuaiannya, `extension ResultHandle: ResultStoreHandle`, ditulis di `Support/RustEngine.swift`. Aturan "RustEngine satu-satunya pengimpor FFI" tetap berlaku, dan `StoreRows` bisa diuji dengan handle palsu.
+### 17.0 Seam yang ada, dan selisihnya terhadap rancangan lama
 
-`DatabaseEngine` mendapat:
+| Hal | Rancangan W2-A3 | Dibangun W5-T1 dan W5-T2 | Keputusan W6-A1 |
+|---|---|---|---|
+| Protokol baris | `StoreRows` dengan `poll()`, `phase`, `viewID`, `apply`, `release`, `columnWidths()`, dan `distinctValues` yang mengembalikan tuple | `ResultRows`: `count`, `fetched`, `columns`, `cell`, `fullValue`, `rows(in:columns:)`, `naturalCharCounts()`, `distinctValues` sinkron; mewarisi `RowReading.row(at:)` tanpa implementasi bawaan; tidak melempar (TM-1) | Protokol tetap. Extension memberi implementasi bawaan untuk `poll()`, `isLive`, `prepare(formats:)`, dan `release()`, sehingga kembaran acuan tidak berubah. `distinctValues` menjadi `async`. `StoreRows` mengimplementasikan `row(at:)` lewat blok baris. Kontrak "tidak melempar" tetap; galat dicatat di `lastFailure` dan muncul sebagai banner, sedangkan jalur salin memakai varian yang melempar (§17.2) |
+| Lebar kolom | `columnWidths()`, hitungan grapheme | `naturalCharCounts()`, hitungan `Character` dengan batas 64 | `StoreRows` mengisinya dari `column_widths()` sebagai `min(n, 64)` (TM-8) |
+| Format sel | format per kolom di permintaan jendela | `cell(...format:)` per panggilan, tanpa protokol invalidasi (D-3 ADR-0032) | Satu halaman memuat 32 kolom, sedangkan `cell` hanya tahu format satu kolom. `prepare(formats:)` memberi format semua kolom dan membuang halaman blok yang formatnya berubah (§17.2); argumen `format` di `cell` hanya diperiksa |
+| Teks sel | teks jendela 256 unit UTF-16 | `CellText.text` = baris pertama, ≤ 1.024 unit, berhenti di batas `Character` | `StoreRows` memakai fungsi baris-pertama yang sama dengan kembaran acuan (`CellText.make`), supaya aturan P-3 hanya punya satu salinan |
+| Flag sel | bit QHW1 | `CellFlags` | Pemetaan eksplisit dengan tes (TM-7) |
+| Pembacaan kolom | per sel, kolom terlihat | semua kolom setiap baris (TM-2) | rentang kolom (D-23) |
+| Hasil bertambah | display link memanggil `noteNumberOfRowsChanged` | `Coordinator.rowsDidGrow()` membatalkan seluruh tampilan | `rowsDidGrow(from:to:)` hanya membatalkan baris baru |
+| `ArrayRows` | dihapus | `QueryTab.result` dan nilai awal `Coordinator.rows` | pindah ke target tes (D-25); produksi memakai `EmptyRows` |
+
+### 17.1 Batas FFI
+
+`Models/StoreRows.swift` mengimpor `QueryHiveFFI` dan menerima `any ResultHandleProtocol`, protokol yang dibangkitkan UniFFI (`ResultHandle: ResultHandleProtocol`). Protokol cermin dengan tipe Swift sendiri, seperti rancangan lama, tidak dibangun: ia menggandakan sekitar sembilan tipe tanpa menambah apa pun yang tidak dimiliki protokol bangkitan, dan impor FFI sudah tidak eksklusif (fakta 11). Tes memakai kelas yang memenuhi `ResultHandleProtocol` (handle palsu yang menjawab `StaleView`, `TooLarge`, `Superseded`, atau jendela buatan) dan handle asli dari host tes.
+
+`Support/DatabaseEngine.swift` tetap bebas FFI; API-nya berbicara dalam `StoreRows`:
 
 ```swift
-func makeResultStore() -> (any ResultStoreHandle)?
+func makeResultStore() throws -> StoreRows          // kosong; kolom menyusul lewat event `columns`
 @discardableResult
-func runIntoStore(_ command: String, env: [String: String], store: any ResultStoreHandle,
+func runIntoStore(_ command: String, env: [String: String], store: StoreRows,
                   onEvent: @escaping (Event) -> Void,
                   onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)?
-func storeFromRows(columns: [Event.Column], rows: [[String?]]) -> (any ResultStoreHandle)?
+func storeFromRows(columns: [Event.Column], rows: [[String?]]) throws -> StoreRows
 ```
 
-`MockEngine` di target tes mengimplementasikannya dengan store palsu, dan invariant #2 tetap seperti adanya.
+`RustEngine` mengimplementasikannya. `makeResultStore` membungkus `host.createResultStore()`. `runIntoStore` meniru `run` (`RustRun`, `Sink`, `runQueue`, `deliversAfterStop`) dan memanggil `host.runWithStore`; hanya `preview` dan `explain` yang diterima (selain itu `onExit(cannotStart, …)`), dan store yang handle-nya bukan `ResultHandle` asli juga `cannotStart`. `storeFromRows` membungkus `host.storeFromRows`. `RustEngine.ensureStoresConfigured(spillDir:budgetBytes:) -> StoreSweep?` bersifat statik dan aman dipanggil berulang: pemanggil pertama menang dan memanggil `host.configureResultStores`, pemanggil berikutnya mendapat `nil`. Ia memakai flag di bawah kunci, bukan pencocokan pesan galat. Pemakainya: `QueryHiveMain.main()` (§17.6), `--bench`, `Snapshot`, dan `TestStores`.
 
-### 17.2 `StoreRows: ResultRows`
+`SilentEngine` sudah ter-commit di `465a0c6` (`DatabaseEngine.swift:80`) dan hari ini hanya mengimplementasikan `run`, `terminateAll`, dan `runBlocking`. W6-T1 menambahkan `makeResultStore` dan `storeFromRows` yang mendelegasikan ke `RustEngine()`, karena membuat store tidak membuka jaringan dan `--snapshot` memerlukannya; `runIntoStore` hanya menerima tanpa menjalankan, seperti `run` hari ini. `MockEngine` memakai host nyata lewat `TestStores`, supaya tes grid memeriksa Rust yang sama dengan produksi. `DatabaseEngine` mewajibkan ketiga metode, jadi `MockEngine` dan `SilentEngine` yang belum diubah tidak akan terkompilasi; itu disengaja.
+
+**Host bersama tidak bisa menumpahkan (koreksi AR B4).** `RustEngine.host` adalah satu-satunya host produksi (`RustEngine.swift:60`), dan anggaran serta direktori spilnya ditetapkan sekali: `ensureStoresConfigured` memberi `nil` kepada pemanggil kedua, dan `configure_result_stores` kedua yang langsung ke host menjawab `InvalidArgument` (`host.rs:319-323`). `TestStores` memanggilnya dengan `(nil, 64 MiB)`, jadi di proses tes host bersama itu tanpa spill (`spill_enabled == false`) dan korpus kecil tidak pernah melewati anggarannya. Proses tes tidak pernah bisa menumpahkan lewat host itu, siapa pun pemanggil pertamanya, dan tes yang membutuhkan galat `.Spill` nyata, chunk yang benar-benar tumpah, atau miss tumpah akan lulus tanpa menumpahkan apa pun atau gagal menurut urutan tes. Tes dan bench semacam itu karena itu tidak memakai host bersama; mereka membangun `EngineHost()` sendiri. Konstruktor UniFFI-nya publik dan registry-nya per instance (`ResultHandleSmokeTests.testTheRegistryIsConfiguredOnceAndNotImplicitly` sudah begitu). Urutannya: `configureResultStores(spillDir: <direktori sementara unik>, budgetBytes: <kecil>)`, `host.storeFromRows(...)`, lalu `StoreRows(handle:)` di atas handle itu (konstruktornya menerima `any ResultHandleProtocol`, §17.2). `storeStats()` dibaca dari host itu sendiri, dan direktorinya dihapus di `tearDown`. `TestStores` menyediakan pembantunya, `spillingHost(budgetBytes:)` (§21.4). Bench spill di luar target tes berjalan lewat `--bench` di proses sendiri, yang mengonfigurasi anggarannya sendiri sebagai pemanggil pertama (§17.6). Selebihnya host bersama dipakai seperti rencana.
+
+### 17.2 `StoreRows`
 
 ```swift
-final class StoreRows: ResultRows {
-    let handle: any ResultStoreHandle
-    let columns: [Event.Column]
-    private(set) var count: Int             // visible (view)
+final class StoreRows: ResultRows, @unchecked Sendable {      // state di bawah NSLock
+    init(handle: any ResultHandleProtocol, columns: [Event.Column] = [])
+    private(set) var columns: [Event.Column]               // dari event `columns`, bukan handle.columns()
+    private(set) var count: Int                            // visible: baris view
     private(set) var fetched: Int
     private(set) var phase: StorePhase
     private(set) var viewID: UInt64
-    func poll() -> Bool                                          // per frame; true bila count berubah
-    func cell(row: Int, column: Int) -> CellText                 // cache halaman; fetch sinkron saat miss
-    func fullValue(row: Int, column: Int, format: ColumnFormat) -> String?   // cell_text (tooltip terformat, pembaca Raw)
-    func rows(in range: Range<Int>, columns: [Int]) -> [[String?]]           // rows_text; off-main bila > 10k sel
-    func apply(_ spec: ViewSpec) async throws -> ViewInfo                    // set_view di antrean .userInitiated
-    func distinctValues(column: Int) async -> (values: [String?], more: Bool)
-    func columnWidths() -> [Int]
-    func release()
+    var isLive: Bool                                          // streaming, atau apply sedang berjalan
+    var lastFailure: StoreFailure?                            // galat yang bukan StaleHandle/StaleView/Superseded
+
+    func setColumns(_ columns: [Event.Column])                // main, dari event `columns`
+    func poll() -> PollResult                                 // main; row_count() = load atomik; `count` hanya mengikuti `viewID` yang sama
+    @discardableResult
+    func prepare(formats: [ColumnFormat]) -> IndexSet         // main; membuang halaman blok yang formatnya berubah; mengembalikan kolom sumber yang berubah
+    func cell(row: Int, column: Int, format: ColumnFormat) -> CellText       // main; halaman; miss sinkron, juga untuk baris di luar halaman pendek
+    func fullValue(row: Int, column: Int, format: ColumnFormat) -> String?   // cell_text
+    func row(at index: Int) -> [String?]?                     // blok baris
+    func rows(in range: Range<Int>, columns: [Int]) -> [[String?]]           // aman-kosong
+    func rowsOrThrow(in range: Range<Int>, columns: [Int]) throws -> [[String?]]
+    func naturalCharCounts() -> [Int]
+    func distinctValues(column: Int) async -> DistinctSample
+    func apply(_ spec: ViewSpec) async throws -> ViewInfo     // memblokir di antrean .userInitiated
+    func applyBlocking(_ spec: ViewSpec) throws -> ViewInfo   // untuk tes
+    func dropPages()                                          // tab ke latar
+    func release()                                            // idempoten; deinit memanggilnya juga
 }
+struct PollResult: Equatable { var grewFrom: Int?; var finished: Bool }
+struct DistinctSample: Equatable { var values: [String?]; var more: Bool }
+final class EmptyRows: ResultRows { /* count 0, fetched 0, columns [] */ }
 ```
 
-- **Halaman:** 128 baris × blok 32 kolom sumber (dalam urutan tampilan). Cache milik satu `StoreRows` (satu handle), dengan kunci `(viewID, pageRow, columnBlock, formatSignature)`. Paling banyak 12 halaman dan ≤ 8 MB; yang dibuang paling jauh dari viewport. Tab yang pindah ke latar membuang semua halamannya, supaya NFR-P3 (anggaran + 64 MB) tidak dimakan cache Swift dari banyak tab. `PAGE_ROWS` dan `COL_BLOCK` adalah konstanta yang disetel dari angka W5-T3.
-- **`WindowPage`** memegang `Data` apa adanya dan mendekode sel secara lazy dengan `String(decoding: slice, as: UTF8.self)`. Cache tampilan per baris milik Fase 5 menyimpan `CellText` yang sudah jadi. Validasi header ada di §11.1.
-- **Miss sinkron** terjadi di main (target p99 ≤ 0,5 ms). **Prefetch:** bila viewport masuk ke halaman terakhir yang di-cache searah scroll, halaman berikutnya diambil di antrean `.userInitiated` dan dipasang di main. Hasil yang basi (`viewID` permintaan berbeda dari view saat dipasang, atau `StoreRows` sudah dilepas) dibuang.
-- **Format** dibaca sekali per kolom (aturan Fase 5) dan dipetakan `ColumnFormat → CellFormat`. Perubahan format meng-invalidasi halaman kolom itu.
-- **Galat:** `StaleHandle` dan `Superseded` diabaikan tanpa pesan (`rust-engine-blueprint.md` §2.6). `StaleView` memuat ulang dengan `viewID` terkini. Galat lain muncul di banner grid.
+`StoreFailure` membungkus `StoreFfiError` bersama nama operasi yang gagal, untuk banner dan log.
 
-### 17.3 Polling selama streaming (`Views/ResultGridTable.swift`)
+- **Halaman.** `PAGE_ROWS` = 64 baris dan `COL_BLOCK` = 32 kolom **sumber** (bukan kolom tampilan), dikunci `(viewID, pageIndex, columnBlock)`. Satu miss adalah satu panggilan `window(viewID, first, 64, kolomBlok, formatBlok)`. Nilai ini **sementara** (D-22), diturunkan dari angka W5-T2 (§2.9): 128 × 30 bertipe 0,396–0,449 ms p99 di sisi Rust berarti 103–117 ns per sel, jadi 128 × 32 = 4.096 sel sekitar 0,42–0,48 ms sebelum UniFFI, tanpa margin terhadap 0,5 ms (R-28). Untuk 64 × 32 = 2.048 sel, ekstrapolasi linear memberi sekitar 0,21–0,24 ms. W5-T3 dan `StoreWindowBench` mengukur 64 × 32 lewat UniFFI, resident dan tumpah, lalu mengonfirmasi atau mengganti: 128 baris bila p99 128 × 32 ≤ 0,4 ms termasuk UniFFI, 32 baris bila p99 64 × 32 > 0,4 ms.
+- **Halaman mencatat jumlah barisnya (koreksi AR B2).** Halaman yang dibaca selagi hasil masih mengalir pendek: dengan 200 baris, halaman 3 (baris 192 sampai 255) hanya memuat 192 sampai 199, yaitu 8 dari 64. View filter yang streaming juga bertambah di bawah `viewID` yang sama (§13.8, hook perluasan di `store.rs`), dan `rowsDidGrow(from:to:)` hanya membatalkan rect, bukan cache. Kunci `(viewID, pageIndex, columnBlock)` tidak berubah, tetapi setiap halaman menyimpan `first` dan `rows`, yaitu `row_count` di header QHW1 (jumlah baris yang benar-benar dikembalikan `window`, dijepit pada `visible`). `cell(row: r, …)` dengan `r < count` dilayani dari halaman hanya bila `r < first + rows`; selain itu **miss**: halaman dibaca ulang dengan satu panggilan `window` dan menggantikan entrinya (kunci sama, jadi cache tidak membengkak). Selama fase belum terminal (`Empty`, `Streaming`) halaman pendek pasti basi, tetapi aturannya memakai jumlah baris halaman, bukan fase: halaman yang direkam saat streaming tetap pendek sesudah fase menjadi terminal, dan perluasan terakhir view filter berjalan di `finish`, sesudah fase terminal (`store.rs`: `finish` memanggil `expand_view_now` setelah mengubah fase). Syarat "fase belum terminal" saja akan meninggalkan baris kosong selamanya. Karena `r < count ≤ visible` dan baris hanya bertambah dalam satu view, pembacaan ulang selalu memuat `r`; bila ternyata tidak, sel dijawab kosong dengan satu baris log (bug), tanpa pembacaan ulang kedua dalam frame yang sama. Baris yang sudah digambar tidak berubah saat hasil bertambah, jadi `GridRowTextCache` tidak perlu dikosongkan (D-28). Blok `row(at:)` `(viewID, blok)` memakai aturan yang sama (di bawah).
+- **Cache.** Paling banyak 24 halaman dan 8 MB, tidak pernah di bawah 8 halaman (satu viewport 40–60 baris dan 1–2 blok kolom memakai 2–4 halaman, dan batas byte saja membuat hasil teks panjang menggilas dirinya sendiri dalam satu frame). Pembuangan menurut pemakaian terakhir. Tab yang pindah ke latar memanggil `dropPages()` (dari `selectTab`), supaya NFR-P3 (anggaran + 64 MB) tidak dimakan cache Swift dari banyak tab.
+- **Tanpa prefetch** (D-22). Satu halaman 64 baris menutupi 1.344–1.920 pt pada baris 21–30 pt, jadi fling 3.000 pt/s melewati sekitar dua halaman per detik: dua miss sinkron per detik sekitar 0,25 ms, kira-kira 0,05% waktu main thread. Prefetch menambah jalur asinkron (basi menurut `viewID`, balapan dengan `apply`) untuk menghemat jumlah itu. Miss pada chunk yang tumpah menambah sekitar 0,4 ms (§2.5) dan diamortisasi cache dekripsi 8 chunk (satu chunk 2 MiB `wide_500k` melayani sekitar 55 halaman). Bila W6-T2 mengukur frame > 1 ms yang disebabkan miss tumpah, prefetch ditambahkan saat itu dengan aturan simpan ≥ 10% yang sama dengan prebuild di D-12 Fase 5.
+- **`WindowPage`.** Memegang `Data` apa adanya, memeriksa magic, versi, panjang total, dan offset monoton ≤ H sebelum membaca (O(RC)), lalu mendekode sel secara lazy dengan `String(decoding:as: UTF8.self)`. Flag QHW1 dipetakan **eksplisit**: NULL → `.null`, EMPTY → `.empty`, OPENABLE (bit 2) → `.openable`, NUMERIC (bit 3) → `.numeric`, TRUNCATED (bit 4) → `.truncated`. Tes: satu sel untuk setiap bit (TM-7). Teks jendela lalu melewati `CellText.make` (baris pertama, 1.024 unit).
+- **Format.** `ColumnFormat` dipetakan ke `CellFormat`: `raw`, `text`, `uuid`, `unixTimestamp`. `swiftRenderedFormats` (awal `[.json]`, D-24) dilayani lewat `rows_text` dan `ColumnFormat.render` seperti §11.4. **`prepare(formats:)` membuang halaman (koreksi AR B2).** Format tidak ada di kunci halaman, jadi pembuangan ini satu-satunya yang menjaga halaman dari teks berformat lama. `prepare(formats:)` membandingkan vektor format dengan yang terakhir diterimanya. Untuk setiap blok kolom yang salah satu formatnya berubah, ia membuang **semua** halaman blok itu (semua `pageIndex`, view mana pun) dan mengembalikan kolom sumber yang berubah; blok yang formatnya tetap tidak disentuh. Koordinator memanggilnya **sebelum** membangun ulang teks, dan baris `GridRowTextCache` yang rentang terbangunnya memuat kolom yang berubah ikut dibuang (`textCache.removeAll()` memenuhi syarat itu, dan itu yang dilakukan `formatChanged` dan `reloadFormats` hari ini). Blok `row(at:)` tidak terpengaruh, karena ia selalu `Raw`. `fullValue(format:)` memakai jalur yang sama dengan `cell` untuk format itu (`cell_text` untuk format Rust, `cell_text(.raw)` lalu `ColumnFormat.render` untuk format Swift), supaya tooltip dan sel tidak berselisih.
+- **Tes kembaran.** `StoreRowsTests` membandingkan sel demi sel `ArrayRows` acuan dengan `StoreRows` (lewat `storeFromRows`) atas korpus kecil untuk setiap format, setiap bentuk flag, dan lebar. Aturan keputusan: selisih yang bukan divergensi tercatat memindahkan format itu ke `swiftRenderedFormats`, kecuali `Raw`. **Divergensi tercatat** (ditulis di berkas tes, bukan kegagalan):
+  1. *Potongan teks dan flag `TRUNCATED` (koreksi AR B5).* `window` memotong teks sel di 256 unit UTF-16 pada batas grapheme dan menyalakan `TRUNCATED` bila terpotong (§11.3, `store_api.rs:609`), sedangkan `ArrayRows` memotong baris pertama di 1.024 `Character` (`ResultRows.swift:134`). Akibatnya setiap format, `Raw` termasuk, berbeda pada sel panjang, di teks maupun flag. Tes membandingkan 256 unit pertama: teks `StoreRows` harus sama dengan baris pertama dari awalan 256 unit (batas grapheme, aturan §11.3) atas teks terender penuh acuan (`ArrayRows.fullValue`), dan `.truncated` dibandingkan hanya dengan aturan Rust (menyala bila teks terender penuh melebihi 256 unit UTF-16), tidak dengan `.truncated` acuan. Sel yang terender penuhnya ≤ 256 unit dibandingkan utuh, teks dan flag. Kolom di `swiftRenderedFormats` dipotong 1.024 oleh jalur Swift yang sama (`CellText.make`), jadi untuknya perbandingan utuh berlaku tanpa divergensi ini.
+  2. *`openable`.* Kembaran lebih longgar (karakter pertama `{` atau `[`) daripada Rust (validasi JSON penuh, §7.1).
+  **`Raw` tidak pernah pindah** ke `swiftRenderedFormats`: ia teks tersimpan apa adanya, dan memindahkannya membuat seluruh jalur jendela tidak dipakai. Selisih `Raw` di luar dua divergensi itu adalah bug di Rust atau di pemetaan jendela, dan **menghentikan tugas** (laporkan; jangan atasi dengan memindahkan format). Format `Text`, `Uuid`, dan `UnixTimestamp` yang selisih di luar divergensi tercatat pindah ke `swiftRenderedFormats`, dan hasilnya dicatat di pesan commit.
+- **Tes koreksi AR untuk B2 dan B3** (handle palsu yang memenuhi `ResultHandleProtocol` dan mencatat setiap panggilan `window`; masing-masing satu tes):
+  - `testAShortPageReadWhileStreamingIsRefetchedWhenRowsArrive` (B2a): handle mulai dengan 200 baris (halaman 3 memuat 8 dari 64) dan `cell(row: 195, …)` mengisi cache. Handle tumbuh ke 400 baris di `viewId` yang sama, lalu `poll()`, lalu `cell(row: 200, …)` mengembalikan teks nyata, bukan sel kosong, dengan tepat satu panggilan `window` tambahan untuk halaman itu. Varian view filter yang `visible`-nya bertambah di `viewId` yang sama, dan `row(at: 200)` untuk blok barisnya, ada di tes yang sama.
+  - `testPrepareFormatsDropsThePagesOfTheBlocksWhoseFormatChanged` (B2b): dua blok kolom; format satu kolom di blok kedua diubah. `prepare(formats:)` mengembalikan kolom itu, `cell` di blok kedua membaca ulang dan mengembalikan teks berformat baru, halaman blok pertama tetap dari cache (jumlah panggilan `window` untuk blok itu tidak bertambah), dan baris `GridRowTextCache` yang memuat kolom itu dibangun ulang (diperiksa lewat `rowText` di koordinator tes).
+  - `testPollIgnoresTheNewViewUntilTheApplyHopInstallsIt` (B3): handle palsu yang `rowCount()`-nya sudah menjawab `viewId` baru dengan `visible` lebih kecil (filter menyusutkan hasil), sementara `window(viewId: lama, …)` masih dilayani. `poll()` memperbarui `fetched` dan `phase` tetapi `count` tetap dan `grewFrom == nil` (jadi tidak ada `rowsDidGrow(from:to:)` dengan `from > to`), dan `cell` tetap menjawab teks view lama. Sesudah `applyBlocking` memasang `viewID` dan `count` baru, `poll()` mengikuti view baru.
+- **`row(at:)`** adalah baris sumber penuh, dibaca lewat blok: `rowBlock = max(1, 4096 / jumlahKolom)` baris per panggilan `rows_text` (sekitar 0,4 ms), paling banyak 8 blok, dikunci `(viewID, blok)`. Blok mencatat `first` dan `rows`, dan `row(at: i)` dengan `i < count` yang jatuh di luar `rows` membaca ulang blok itu (aturan halaman pendek di atas). `CellEdits.fill` dan `paste`, `WritePlan`, dan `UpdateStatements` memanggilnya per sel; tanpa blok, mengisi 10.000 baris adalah 10.000 panggilan yang masing-masing menyusun seluruh baris.
+- **`rows(in:columns:)` dan `rowsOrThrow`** memakai `rows_text`, dipecah menurut batas FFI: paling banyak 4.096 baris dan 262.144 sel per panggilan, dan `TooLarge` (64 MiB) membagi dua baris. Jalur salin (`GridClipboard.text(result:…)`) dan pembangun rencana tulis memakai `rowsOrThrow` dan **menolak hasil parsial**: `StaleHandle` dan `StaleView` membatalkan tanpa pesan, galat lain muncul sebagai banner, dan tidak pernah sebagai sel kosong yang sampai ke papan klip atau ke klausa `WHERE`. `rows(in:columns:)` yang tidak melempar tetap ada untuk pembaca yang aman-kosong dan mencatat galat pertama di `lastFailure`.
+- **`distinctValues(column:) async -> DistinctSample`** memanggil `distinct_values(column, limit: valuePickerLimit + 1)` di antrean `.userInitiated`. Pemilih bisa dipilih bila `!more && values.count <= ColumnFilter.valuePickerLimit`; selain itu kolom pencarian teks. `filterEditor` memuatnya lewat `.task` dengan keadaan "Loading…". Daftar dari Rust terurut (NULL dulu, lalu byte setelah NFC), sama dengan `ColumnFilter.distinctValues(in:column:)` yang lama. Kembaran acuan diperbaiki di 6a (TM-3): urutan itu, himpunan lengkap, dan `more` bila melewati batas.
+- **`naturalCharCounts()`** membaca `column_widths()` saat pertama diminta dan mengulang selama `fetched < 200` dan fase streaming; sesudah `fetched ≥ 200` atau fase terminal hasilnya dibekukan (Rust membekukan statistik di baris ke-200). Hasilnya `min(n, 64)`; NULL = 0 di Rust tidak mengubah lebar (TM-8).
+- **`poll()` dan view yang sedang dipasang (koreksi AR B3).** `isLive` juga menyala selama `apply` berjalan, jadi display link mem-poll tepat saat `set_view` selesai di Rust dan sebelum hop ke main. Sejak `1b59154` `row_count()` membaca satu snapshot view (§12.4): dari saat `set_view` memasang view baru, `visible` dan `view_id` yang dijawabnya milik view **baru**, sedangkan Swift masih menggambar `viewID` lama (nilai awalnya 0 = tanpa view, sama dengan `view_id` Rust bila belum ada view). Aturan: `poll()` selalu memperbarui `fetched` dan `phase`; `count` diperbarui, dan `grewFrom` dikembalikan, **hanya bila `rc.viewId == viewID` dan `rc.visible > count`**. Bila `rc.viewId != viewID`, `count` tetap dan `grewFrom == nil`. Hop `apply` adalah satu-satunya penulis `viewID` dan `count` untuk pergantian view: ia memasang keduanya sekaligus dari `ViewInfo`. Tanpa aturan ini grid memakai hitungan view baru dengan `viewID` lama, setiap miss dijawab `StaleView` dan digambar kosong, dan filter yang menyusutkan hasil menghasilkan `rowsDidGrow(from:to:)` dengan `from > to`. `rc.visible < count` pada `viewID` yang sama tidak mungkin (baris hanya bertambah dalam satu view); `poll()` mengabaikannya, mencatat satu baris log (bug), dan tidak pernah menyusutkan `count`.
+- **`apply`.** `QueryTab.viewSpec` dibangun dari `columnFilters` (kolom sumber; `ColumnFilter.nullToken` menjadi `nil`; `.text(needle)` menjadi `FilterSpec.Text`), `effectiveLocalSearch`, dan `memorySort`. `set_view` memblokir, jadi `apply` berjalan di antrean `.userInitiated` yang konkuren: `set_view` yang lebih baru membatalkan yang lama, yang menjawab `Superseded` dan diabaikan. Selesai → hop ke main, **satu-satunya penulis `viewID` dan `count` untuk pergantian view** (lihat `poll()` di atas): pasang keduanya dari `ViewInfo`, `tab.gridRevision += 1`. Sampai saat itu grid menampilkan view lama. `Streaming` tidak mungkin sampai ke sini (tombol sort mati selama streaming, §17.3); `TooLarge` dan `Spill` menjadi banner.
+- **Galat `window`.** `StaleHandle`: sel kosong. `StaleView`: `apply` baru memasang view dan hop ke main belum tiba, jadi sel kosong tanpa cache untuk satu frame. `InvalidArgument`, `Corrupt`, `Internal`, `Spill`: sel kosong, `lastFailure` terisi, dan banner grid. Tidak pernah `try!`.
+- **Thread.** State di bawah `NSLock`. `cell` dan `fullValue` hanya di main menurut kontrak (`dispatchPrecondition` di build debug). `apply`, `distinctValues`, dan `rowsOrThrow` boleh dipanggil dari luar main.
 
-`NSView.displayLink(target:selector:)` (macOS 14) dipasang di run loop main dengan mode `.common`, supaya tetap berdetak saat tracking scroll. Setiap tick:
+### 17.3 Penggambaran dan polling
 
-1. `if rows.poll() { tableView.noteNumberOfRowsChanged() }`.
-2. Hitungan footer diperbarui paling sering sekali per frame.
-3. Lebar kolom diminta ulang saat `fetched` melewati 200.
+**Rentang kolom (commit 6a, D-23).** `GridTableView.draw` meneruskan rentang kolom yang sudah dihitungnya (`geometry.columns(in:)`, kini dipakai) ke `Coordinator.rowText(_:columns:)` dan `GridRowPainter.paint(columns:)`. `GridRowText` memegang `first: Int` dan teks untuk rentang itu saja. `GridRowTextCache` menyimpan rentang yang sudah dibangun per baris, dan membangun ulang baris itu bila rentang yang diminta keluar darinya; rentang yang dibangun diperluas satu lebar viewport ke kiri dan kanan supaya scroll horizontal pendek tidak membangun ulang. Painter hanya mengecat kolom dalam rentang; stripe, gutter, dan separator tidak berubah, jadi G-VIS tidak bergerak. Pembaca yang membutuhkan kolom lain (AX, tooltip, salin) memakai `fullValue` atau `rows(in:)`, bukan `rowText`. Biaya `GridColumnGeometry.edges(of:)` yang O(n) per kolom ikut turun karena hanya rentang yang dicat; jumlah kumulatif sekali jalan adalah urusan W5-T3.
 
-Display link berhenti saat fase bukan `streaming` (setelah satu poll terakhir) dan saat view keluar dari jendela. Tab di latar tidak mem-poll. Ketika tab kembali ke depan, satu poll langsung dijalankan. Selama streaming, klik header sort dinonaktifkan dan chevron diredupkan (`performance-plan.md` §14 butir 2), baik untuk sort server maupun fallback.
+**Polling (commit 6b).** `GridTableView` membuat `displayLink(target:selector:)` (`NSView`, macOS 14) di `viewDidMoveToWindow`, menambahkannya ke run loop main pada mode `.common` (supaya tetap berdetak saat tracking scroll), dengan `preferredFrameRateRange` paling tinggi 60 Hz dan `isPaused = true` secara bawaan. `Coordinator` menyalakannya saat `rows.isLive`. Setiap tick memanggil `pollRows()`: `rows.poll()` lalu, bila `grewFrom != nil`, `rowsDidGrow(from:to:)`. `poll()` hanya melaporkan pertumbuhan view yang sedang digambar (`rc.viewId == viewID`, §17.2), jadi `from < to` selalu. Link berhenti sesudah satu poll terakhir bila fase terminal, dan saat view keluar dari jendela; tab di latar tidak mem-poll, dan saat tab kembali ke depan satu poll langsung dijalankan. `rowsDidGrow(from:to:)` memanggil `noteNumberOfRowsChanged()` dan membatalkan hanya rect baris `from..<to`. Ia tidak menyentuh `textCache`, geometri, atau pohon AX (kecuali klien AX terpasang, lewat `noteResultChangedForAX`). Perubahan **view** tidak lewat polling: `apply` yang selesai menaikkan `gridRevision`, dan jalur `Coordinator.apply(_:force:)` yang ada menangani refresh penuh. Event `progress` pertama membangunkan koordinator sekali (satu `pollRows()` langsung, mekanisme bebas), supaya TTFR S2 tidak menunggu tick.
+
+**Footer dan SwiftUI (D-28).** `progress` (paling sering satu per 16 ms dari engine) disaring `AppModel` menjadi `tab.fetchedRows` paling sering 5 Hz (`AppModel.footerCountInterval` = 0,2 detik, kadens yang sama dengan `previewPaintInterval` hari ini tetapi hanya untuk satu angka), dan `done` menulis nilai akhir. `ResultGrid.body` membaca `tab.fetchedRows`, sehingga Observation menjalankannya ulang; `StoreRows` sendiri bukan `@Observable`. `naturalCharCounts()` dibaca di `body`, jadi lebar kolom berubah bersama `fetchedRows` saat `fetched` melewati 200 dan saat selesai; `GridInputs.layout` berubah dan refresh penuh terjadi dua sampai tiga kali per hasil, bukan lima kali per detik.
+
+**Header selama streaming.** `GridStyle.sortEnabled = !tab.previewing`, dan chevron diredupkan (`performance-plan.md` §14 butir 2). `sortOnServer` dan `fireServerSearch` sudah menolak saat `previewing`; jalur `applyMemorySort` mendapat penjaga yang sama, karena Rust menjawab `Streaming` untuk sort sebelum semua baris tiba.
+
+**Signpost.** `PerfSignposts.firstRowsEvent()` hari ini dipanggil dari event `rows`, yang tidak ada lagi di mode store. Ia dipindah ke `poll()` pertama yang melihat `fetched > 0`. `firstPaint` tetap dari `draw`. Jalur S2: batch 200 baris disegel → `progress` → poll langsung → `draw`, tanpa decode JSON.
 
 ### 17.4 `AppModel` dan `QueryTab`
 
-- **`runPreview`:** `store = engine.makeResultStore()`, lalu `engine.runIntoStore("preview", …)`. Event `columns` memasang kolom dan membuat `StoreRows`. `progress` memperbarui hitungan footer bila grid tidak terlihat. `done` menyimpan `truncated`, `queryID`, dan `elapsedMS`. Galat atau exit bukan nol melepas store (UX hari ini: grid dikosongkan dan galat ditampilkan). Cancel mempertahankan baris.
-- **`explain`:** jalurnya sama (D-8). Duplikasi loop penumpukan di `explain()` hilang.
-- **`previewEnvironment`:** clamp `LIMIT` naik ke 5.000.000 (O-12), ditambah `SettingsView` dan `RowLimitSettingTests`.
-- **`QueryTab`:** `displayedRows` dan cache-nya diganti `activeResult: StoreRows?` beserta view-nya. `columnFilters`, `gridSearch`, dan sort memory tetap menjadi sumber state di Swift. Setiap perubahan menyusun `ViewSpec` lalu memanggil `apply`. Aturan yang ada tetap: filter atau search menghapus seleksi, edit, dan undo (`QueryTab.swift:542-571`).
+- **`PreviewResult`** kehilangan `rows` dan mendapat `rowCount` yang disimpan (diisi `done`; `summary` memakainya). Pembaca produksi `preview.rows` (TM-5) pindah ke `tab.result.fetched` dan `tab.fetchedRows`; badge `Panels` memakai `tab.fetchedRows`.
+- **`QueryTab`:** `activeResult: StoreRows?`, `baseResult: ResultSlot?` (`ResultSlot` = `PreviewResult` + `StoreRows`), `fetchedRows`, `viewBusy`, dan `viewSpec`. `result` mengembalikan `activeResult ?? EmptyRows`. `displayedRows`, `displayedCache`, `displayedCacheRevision`, `resultCache`, dan `resultCacheRevision` dihapus; `gridRevision` tetap dan kini naik saat view terpasang. `columnFilters`, `gridSearch`, dan `applyMemorySort` tetap membuang seleksi, antrean edit, undo, dan sort memori, dan mengganti `gridRevision += 1` dengan `scheduleViewApply()`.
+- **`runPreview`:** `makeResultStore()` sebelum run (D-12) → `tab.activeResult = store` → `runIntoStore("preview", …)`. Event `columns` → `store.setColumns` dan `tab.preview = PreviewResult(columns:, rowCount: 0, …)`; `columns` kosong (pernyataan tulis) melepas store seketika. `progress` → `fetchedRows` dan pemicu poll. `done` → `PreviewResult` akhir (`truncated`, `queryID`, `elapsedMS`, `stopped`, `rowCount`). `error` atau status keluar ≠ 0 melepas store (UX hari ini: grid dikosongkan dan galat ditampilkan). `phase == .failed` tanpa event `error` bukan galat (§12.4). Cancel mempertahankan baris. Nasib `activeResult` dan `baseResult` saat Run, sort, search, dan "off" ada di §18.
+- **`explain`:** jalur yang sama dengan `runIntoStore("explain", …)` (D-8). Loop penumpukan di `explain()` hilang.
+- **`previewEnvironment`:** plafon di §17.7.
+- **Fixture, Snapshot, BenchMode, dan tes.** `QueryTab.showRows(columns:rows:truncated:queryID:elapsedMS:stopped:)` membuat store lewat `Engine.current.storeFromRows` dan memasangnya seperti `done`. `RustEngine.ensureStoresConfigured(spillDir: nil, budgetBytes: 64 MiB)` dipanggil `Snapshot.seeded`, `BenchMode`, dan `TestStores`. Situs yang berubah (TM-5): `AppModel` 6, `Snapshot` 8 (mutasi di tempat `tab.preview?.rows[i][j] = …` menjadi perubahan array sebelum store dibangun), `BenchMode` 1, dan 21 situs di tes. Untuk `scroll-30x1m` (30 juta sel), `store_from_rows` dipanggil sekali di luar interval ukur dengan anggaran bench 2 GiB (tanpa spill, sebanding dengan Fase 0); waktu dan puncak RSS-nya dicatat (R-38).
+- **Penjaga edit (D-27).** `viewBusy` menyala di `scheduleViewApply()` dan padam saat view terpasang atau gagal. Selama menyala: `typeCellEdit`, `fill`, `paste`, dan commit ditolak dengan catatan "The grid is updating its rows", dan tombol Review dan Save mati. Saat hop "view terpasang" tiba di main, `cellSelection = nil` dan `cellEdits.discard()` dijalankan lagi bila ada isinya, karena edit yang lolos sebelum `viewBusy` menyala menunjuk indeks view lama. Pembangun rencana tulis (`WritePlan.build`, `UpdateStatements.generate`) menolak bila `viewBusy`. Rencana itu menyusun `UPDATE` dan `DELETE` dengan klausa `WHERE` dari nilai asli baris (`UpdateStatements.appendMatch`), jadi baris yang salah berarti pernyataan yang menulis atau menghapus baris yang salah. Baris yang tidak terbaca karena galat (bukan karena di luar rentang) harus menjadi peringatan di rencana; `WritePlan.build` hari ini melewatinya dengan `continue` tanpa suara. Tes: (a) `apply` yang selesai dengan edit yang di-stage membuang antreannya, (b) staging ditolak saat `viewBusy`, (c) pembangun rencana menolak saat `viewBusy`. Jalur ini termasuk yang ditinjau reviewer database (§21.4).
+- **Sesi.** Tab yang dipulihkan dari sesi tidak punya store (`baseResult == nil`); "off" menjalankan ulang SQL dasar (§18).
 
-### 17.5 Yang dihapus di W6-T1
+### 17.5 Yang dihapus, dipindah, dan dipertahankan di W6-T1
 
-| Yang dihapus | Syarat |
-|---|---|
-| `AppModel.previewPaintInterval` dan penumpukan `rows` di `runPreview` | W5-T2 hijau |
-| Penumpukan `rows` di `explain` | sama |
-| `QueryTab.displayedCache`, `displayedCacheRevision`, `displayedRows` (array) | `StoreRows` menjadi sumber |
-| Snapshot "hasil dasar ≤ 10.000 baris sebagai `[[String?]]`" dari W4-T1 | §18 berlaku |
-| `GridSort.order`, `compare`, `value`, `number`, `isPlainNumber`, `isExponent` | `differential.rs` W4-T4 lulus, dan tes integrasi W6-T1 lulus |
-| `ColumnFilter.matches`, `matchesText`, `distinctValues` | sama |
-| `GridSearch.matches` (dan enum `GridSearch` bila kosong) | sama |
-| Pemindaian `naturalWidths` (versi Fase 5) | diganti `columnWidths()` |
-| `isOpenable` dan `ColumnFormat.render` di jalur gambar | diganti flag dan teks jendela; fungsinya tetap untuk sel staged dan pembaca (D-9) |
-| `ArrayRows` untuk preview dan explain | tetap ada hanya sebagai kembaran tes dan tampilan tanpa view; dihapus seluruhnya bila W6-A1 menemukan pemakainya habis |
+| Yang | Nasib | Syarat |
+|---|---|---|
+| `AppModel.previewPaintInterval`, dan penumpukan `rows` di `runPreview` dan `explain` | dihapus; `footerCountInterval` (0,2 detik) menggantikan hanya untuk hitungan footer | `StoreRows` dan `progress` bekerja (W5-T2 hijau) |
+| `QueryTab.displayedCache`, `displayedCacheRevision`, `displayedRows`, `resultCache`, `resultCacheRevision`, `BaseResultCache` | dihapus | `StoreRows` menjadi sumber |
+| `PreviewResult.rows` | dihapus; `rowCount` disimpan | TM-5 selesai |
+| `ArrayRows` | **pindah** ke `app/Tests/QueryHiveTests/ArrayRowsReference.swift` sebagai kembaran acuan; produksi memakai `EmptyRows` | pemakai produksinya habis (hanya penampung "belum ada hasil"). Menjaga sepuluh tes `ResultRowsTests`, dan menjadi jaring paritas format dan flag (D-24, D-25) |
+| `GridSort.order`, `compare`, `value`, `number`, `isPlainNumber`, `isExponent`; `ColumnFilter.matches`, `matchesText`, `distinctValues(in:column:)`; `GridSearch.matches` | **pindah** ke `app/Tests/QueryHiveTests/SwiftGridReference.swift` (enum `SwiftGridReference`), bukan dihapus | `SortFixtureExport` memanggilnya (TM-13); dengan begini eksportir dan `testFixturesMatchTheCommittedFile` tetap berjalan. Dari produksi hilang jalur panasnya |
+| Pemindaian `naturalWidths` | sudah diganti `naturalCharCounts()` di W5-T1 | `StoreRows` mengisinya dari `column_widths()` |
+| `isOpenable` dan `ColumnFormat.render` di jalur gambar | diganti flag dan teks jendela; `ColumnFormat.render` tetap untuk sel staged, pembaca nilai, tooltip format Swift, dan `swiftRenderedFormats` | D-9, D-24 |
+| `import QueryHiveFFI` di `ResultRows.swift`, `CellSelection.swift`, `GridMetrics.swift` | dihapus (tidak memakai tipe FFI, fakta 11) | — |
 
-Yang tetap: `GridSort.Direction` dan `GridSort.next` (siklus klik), enum `ColumnFilter` beserta `isEmpty`, `label`, `nullToken`, dan `valuePickerLimit` (spec dan UI), `SearchStatement`, `ServerSort`, `GridValue` (sel staged dan pembaca), serta `ColumnFormat.render` (sel staged).
+Tetap di produksi: `GridSort` sebagai struct (`Direction`, `next`, `column`), enum `ColumnFilter` (`isEmpty`, `label`, `nullToken`, `valuePickerLimit`), `GridSearch.debounceInterval` dan `searchableTerm`, `SearchStatement`, `ServerSort`, `GridValue`, dan `ColumnFormat.render`.
 
-Tes Swift yang memanggil fungsi yang dihapus (`ResultGridTests.swift:53-83` untuk `GridSort.number` dan `value`; `GridColumnsTests.swift:253-257` untuk `GridSearch.matches`) ditulis ulang terhadap `StoreRows` yang dibangun lewat `storeFromRows`. Hitungan tes tidak turun (NFR-Q).
+Tes Swift yang memanggil fungsi yang dipindah (`ResultGridTests.swift` untuk `GridSort.number` dan `value`; `GridColumnsTests.swift` untuk `GridSearch.matches`) ditulis ulang terhadap `StoreRows` yang dibangun lewat `storeFromRows`: asersinya sama, tetapi kini menguji Rust. Hitungan tes tidak turun (NFR-Q; 603 dengan 5 dilewati pada `465a0c6` menurut ledger).
 
-### 17.6 Startup dan direktori spill
+### 17.6 Startup, direktori spill, dan batas fd
 
-`App.swift`, saat peluncuran, **secara sinkron dan sebelum sesi dipulihkan** (koreksi AR W2-A3), memanggil `host.configureResultStores(spillDir:budgetBytes:)` dengan `spill_dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]/QueryHive/spill` dan anggaran 256 MiB. Ongkosnya satu `mkdir`/`chmod` dan satu `read_dir` atas direktori yang normalnya kosong, jadi di bawah 1 ms dan dicatat oleh skenario `launch`. Urutan ini menjamin sapuan (§9.7) selesai sebelum Run pertama bisa membuat store, tanpa balapan dengan Run yang dipulihkan sesi (§12.3). `--bench` dan `--snapshot` mengonfigurasi anggarannya sendiri. Diagnostik membaca `store_stats()`.
+`QueryHiveMain.main()` memanggil `RustEngine.ensureStoresConfigured(spillDir:budgetBytes:)` **sekali, sinkron, sebelum `QueryHiveApp.main()`**, jadi sebelum `AppModel(persistsSession: true)` memulihkan tab. Argumennya `spillDir` = `~/Library/Caches/QueryHive/spill` (`FileManager.urls(for: .cachesDirectory, …)`) dan anggaran 256 MiB (O-12). Letaknya sesudah cabang `--snapshot` dan `--bench`, yang mengonfigurasi anggarannya sendiri (spill mati atau di direktori scratch) sebelum memanggil fungsi yang sama; karena pemanggil pertama menang, skenario `launch`, yang kembali ke `QueryHiveApp.main()`, tidak terkonfigurasi dua kali. Urutan ini menjamin sapuan (§9.7) selesai sebelum Run pertama membuat store, tanpa balapan dengan Run yang dipulihkan sesi (§12.3). Ongkosnya satu `mkdir` dan `chmod` serta satu `read_dir` atas direktori yang normalnya kosong, di bawah 1 ms, dan dicatat skenario `launch`. `StoreSweep` dicatat ke log; `spillEnabled == false` dicatat dengan alasannya. Diagnostik membaca `store_stats()`.
 
-Sejak W13-T8b, `App.swift` juga memanggil `signal(SIGPIPE, SIG_IGN)` di awal peluncuran, sama dengan `Support/BenchMode.swift:112`. Engine Rust di dalam app tidak melewati `main` Rust, jadi `SIGPIPE` hari ini masih berdisposisi bawaan: menulis ke pipa helper yang sudah mati akan membunuh app. Setelah diabaikan, penulisan itu menjadi `EPIPE` biasa (§14.6). Bila komponen analitik terpasang, `App.swift` lalu memanggil `configure_analytics` (§14.13) di antrean latar; panggilan itu tidak menjalankan helper.
+**Batas fd (D-26, menutup R-19).** `setrlimit(RLIMIT_NOFILE)` menaikkan batas lunak ke min(batas keras, 4.096) bila lebih rendah, di tempat yang sama. Dua alternatif yang disebut R-19 dinilai: *menutup fd store yang menganggur* **tidak bisa**, karena berkas spill di-unlink sebelum byte pertama ditulis (D-5) dan fd-nya adalah satu-satunya pegangan ke data itu; menutupnya membuang chunk yang tumpah. *Menaikkan batas* satu baris dan tidak mengubah perilaku lain. Pengukuran: `launchctl limit maxfiles` di mesin ini 256 lunak dan tak terbatas keras, `kern.maxfilesperproc` 61.440 (TM-12). Penanganan `EMFILE` sebagai disk penuh (§10.4) tetap sebagai jaring terakhir. Bukti dari W6-T1: tes kecil bahwa batas lunak sesudah panggilan ≥ min(batas keras, 4.096), dan skenario `tabs-100-held` (§19) yang mencatat `open_fds_peak` dengan 100 tab yang masing-masing menahan store yang tumpah.
+
+### 17.7 Plafon 5.000.000 dan P-1
+
+`AppModel.productRowLimitCeiling` bernilai 200.000 sampai P-1 (blueprint Fase 5 §5.4 dan §15) terukur lewat tangkapan compositor, yang dijalankan pemilik (izin Screen Recording) atau di sesi bench eksklusif. Commit 6b **tidak** mengubah angka itu. Commit tersendiri sesudahnya, `feat(app): raise the row limit ceiling to 5,000,000`, mengubah konstanta, teks `SettingsView`, dan `RowLimitSettingTests` (D-29):
+
+- P-1 lulus: plafon naik ke 5.000.000.
+- P-1 gagal: `WindowedRows: ResultRows` (blueprint Fase 5 §5.4, ukuran S sampai M, dipetakan lewat `Coordinator.resultRow(forTableRow:)`) masuk lebih dulu di commit yang sama, lalu plafon naik.
+- P-1 tidak terukur (izin OS): plafon tetap 200.000 dan dicatat "tidak diukur (izin OS)".
+
+Catatan aritmetika, bukan keputusan: 2^24 pt dibagi tinggi baris terbesar (30 pt) adalah 559.240 baris, jadi hasil sampai sekitar 500.000 baris tidak pernah melewati 2^24 pt pada tinggi baris mana pun. Bila pemilik ingin plafon antara yang tidak butuh P-1, angka itu aman secara geometri; memori tidak menjadi syarat karena store spill menanggungnya.
 
 ## 18. Batch 7 "off": dua store per tab
 
-`QueryTab` memegang `baseResult: StoreRows?` (hasil Run, dalam urutan server) dan `activeResult: StoreRows?` (yang ditampilkan grid). Invarian: paling banyak dua store per tab, dan `activeResult === baseResult` kecuali sort atau search server sedang aktif.
+**Disegarkan W6-A1 (2026-10-06).** `QueryTab` memegang `baseResult: ResultSlot?` (`ResultSlot` = metadata `PreviewResult` + `StoreRows`; hasil Run dalam urutan server) dan `activeResult: StoreRows?` (yang digambar grid; metadatanya `tab.preview`). Invarian: paling banyak dua store per tab, dan `activeResult === baseResult.rows` kecuali sort atau search server sedang aktif. `BaseResultCache` (aturan 10.000 baris) dihapus: anggaran global dan spill menggantikannya, dan menyimpan base tidak menggandakan memori resident karena base yang menganggur tumpah lebih dulu (§9.5). Hari ini `baseResult` diisi di `applyPreviewDone` bila Run tidak dihentikan; aturan "tidak dihentikan" tetap, supaya "off" tidak memulihkan hasil parsial.
 
 | Aksi | Akibat |
 |---|---|
-| Run atau Explain | Lepas base dan active, buat store baru. `base = active = baru`. |
-| Sort atau search server (`activeSort.origin == .server`) | Buat store baru S. Bila `active !== base`, lepas active. `active = S`. Base tetap utuh untuk "off". |
-| Sort in-memory (fallback O-8: `ServerSort` menolak, atau grid menampilkan plan) | `active.apply(ViewSpec(sort: …))`. Tanpa store baru. |
-| Filter funnel dan search in-memory | `active.apply(…)` (FR-GRID-04, P-26). |
-| "Off" (klik ketiga, atau search dikosongkan) | Bila `active !== base`: lepas active, lalu `active = base` dengan view yang memuat filter funnel dan search in-memory tab saat ini tanpa sort (`apply(ViewSpec(filters: …, search: …))`, identitas bila keduanya kosong; tanpa query). Koreksi AR: `apply(ViewSpec())` akan diam-diam membuang filter yang masih tampil aktif di header. Bila `active === base` dengan view sort: `apply` tanpa sort. Hanya bila base sudah dilepas (tab dipulihkan dari sesi, atau galat), SQL dasar (`previewBaseSQL`) dijalankan ulang. |
+| Run (`runPreview(baseRun: true)`) atau Explain | Lepas `activeResult` dan `baseResult`, buat store baru, `activeResult = baru`. Saat `done` tanpa stop, `baseResult = ResultSlot(baru)`. |
+| Sort atau search server (`activeSort.origin == .server`, `runPreview(baseRun: false)`) | Bila `activeResult !== baseResult?.rows`, lepas `activeResult`. Buat store baru S, `activeResult = S`. Base tetap utuh untuk "off". |
+| Sort in-memory (fallback O-8: `ServerSort` menolak, atau grid menampilkan plan) | `activeResult.apply(viewSpec)`. Tanpa store baru. |
+| Filter funnel dan search in-memory | `activeResult.apply(viewSpec)` (FR-GRID-04, P-26). |
+| "Off" (`clearSort`, `clearSearch`; klik ketiga, atau search dikosongkan) | Bila `activeResult !== baseResult.rows`: lepas `activeResult`, lalu `activeResult = baseResult.rows` dan `tab.preview = baseResult.meta`, dengan view yang memuat filter funnel dan search in-memory tab saat ini tanpa sort (identitas bila keduanya kosong; tanpa query). Koreksi AR tetap berlaku: `apply(ViewSpec())` yang kosong akan diam-diam membuang filter yang masih tampil aktif di header. Bila `activeResult === baseResult.rows` dengan view sort: `apply` tanpa sort. Hanya bila `baseResult == nil` (tab dipulihkan dari sesi, Run dihentikan, atau galat) `rerunBaseSQL` menjalankan ulang SQL dasar. |
 | Tab ditutup | Lepas keduanya (§19). |
 
-Anggaran global membuat base yang menganggur tumpah lebih dulu (§9.5), jadi menyimpan dua store tidak menggandakan memori resident. Penjaga edit Fase 3 tetap berlaku: sort atau search server ditolak bila `cellEdits` tidak kosong.
+Penjaga edit Fase 3 tetap berlaku (sort atau search server ditolak bila `cellEdits` tidak kosong), dan D-27 menambah penolakan selama `viewBusy`.
 
 ## 19. Umur handle dan penutupan tab
 
-1. `closeTab` memanggil `process?.terminate()` (flag cancel) **lalu** `tab.releaseResults()`, yang memanggil `release()` pada base dan active. Keduanya segera.
-2. Rust membebaskan chunk dan anggaran, menutup fd spill, menandai store `Released`, dan membatalkan view yang sedang berjalan (§9.6).
-3. Run yang masih menulis mendapat `Released`, lalu berakhir sebagai cancel. Event-nya sampai di `RustRun` yang sudah berhenti dan dibuang (`RustEngine.swift`, `Sink.onEvent`).
-4. Prefetch atau `apply` yang masih terbang mendapat `StaleHandle`/`Superseded` dan diabaikan.
-5. Objek UniFFI yang akhirnya di-dealloc Swift, dari thread mana pun, menjalankan `Drop`, yang memanggil `release` lagi secara idempoten.
-6. Saat app keluar (`terminateAll`), fd ditutup kernel. Berkas sudah di-unlink, jadi tidak ada yang tersisa.
+**Disegarkan W6-A1 (2026-10-06).** Langkah 1 dikoreksi terhadap kode (TM-4): rancangan lama menyebut `process?.terminate()` seolah itu yang menghentikan Run, padahal `process` hanya dipakai export dan perintah panjang.
 
-G-LEAK (`--bench tabs-100`, 100× buka dan tutup tab dengan store dari `store_from_rows`, 2.000 × 10 seperti hari ini, dan anggaran kecil supaya spill benar-benar terjadi) harus menghasilkan `leaks` nol, direktori spill kosong, dan `store_stats().stores == 0` serta `spilled_bytes == 0` di akhir. Dua syarat terakhir yang bermakna: store yang masih tercatat di registry masih terjangkau, jadi `leaks` tidak melihatnya, dan direktori selalu kosong karena D-5. `development-plan.md` §1 G-LEAK perlu menambahkan pemeriksaan `store_stats` ini (lihat verdict).
+1. `closeTab` menghentikan **`tabs[index].process` dan `tabs[index].previewProcess`** (flag cancel; `previewProcess` memegang `preview` dan `explain`), **lalu** memanggil `tab.releaseResults()`, yang memanggil `release()` pada `activeResult` dan pada `baseResult.rows` dan menjadikan keduanya `nil`. Keduanya segera. `closeOtherTabs`, `closeTabs(after:)`, dan `closeAllTabs` sudah lewat `closeTab`.
+2. Rust membebaskan chunk dan anggaran, menutup fd spill, menandai store `Released`, dan membatalkan view yang sedang berjalan (§9.6).
+3. Run yang masih menulis mendapat `Released`, lalu berakhir sebagai cancel (`closing_the_tab_mid_stream_ends_the_run_cancelled_and_not_failed` dan `closing_the_tab_before_the_first_page_ends_cancelled_and_not_as_an_error` di `store_sink.rs`). Event-nya sampai di `RustRun` yang sudah berhenti (`RustEngine.swift`, `Sink.onEvent`), yang untuk `preview` dan `explain` tetap meneruskan `done{cancelled}`. `releaseResults()` karena itu juga mengganti `previewToken`, supaya event susulan dibuang oleh `guard tab.previewToken == run`.
+4. `apply` atau `distinctValues` yang masih terbang mendapat `StaleHandle` atau `Superseded` dan diabaikan; hop "view terpasang" memeriksa bahwa `StoreRows` belum dilepas. `viewBusy` ikut padam bersama tab.
+5. `StoreRows.deinit` memanggil `release()` lagi secara idempoten, dari thread mana pun, sebagai jaring bila `QueryTab` masih dirujuk closure undo atau sejenisnya.
+6. Tab yang dipindah ke latar memanggil `dropPages()` (§17.2); store-nya tetap, dan tumpah lebih dulu bila anggaran menuntut (§9.5).
+7. Saat app keluar (`terminateAll`), fd ditutup kernel. Berkas sudah di-unlink, jadi tidak ada yang tersisa.
+
+Tes yang ditambahkan ke `TabCloseTests` (TM-4): menutup tab menghentikan `previewProcess` (handle `MockEngine` mencatat `terminate`), melepas kedua store (`store_stats().stores` kembali ke nilai awal), dan tidak meninggalkan `viewBusy` menyala.
+
+**G-LEAK.** `--bench tabs-100` (100× buka dan tutup tab dengan store dari `store_from_rows`, 2.000 × 10 seperti hari ini, dan anggaran kecil supaya spill benar-benar terjadi) harus menghasilkan `leaks` nol dan `store_stats().stores == 0` di akhir. Dua catatan yang berubah. (1) `spilled_bytes` sudah nyata (`1b59154`, TM-9), jadi pemeriksaan `spilled_bytes == 0` di akhir berlaku. Ia dihitung atas store yang masih hidup, sehingga nol di akhir mengikuti `stores == 0`; direktori spill kosong selalu (D-5). (2) Skenario baru `tabs-100-held` menahan 100 tab terbuka bersamaan, masing-masing dengan store yang tumpah (anggaran bench 2 MiB), mencatat jumlah fd proses (`open_fds_peak`, dibaca lewat `proc_pidinfo(PROC_PIDLISTFDS)`) sebelum, puncak, dan sesudah semuanya ditutup; hasil akhir harus kembali ke nilai awal. Ini pengukuran R-19 (§17.6). `development-plan.md` §1 G-LEAK perlu menambahkan pemeriksaan fd ini.
 
 ## 20. Jalur yang tetap NDJSON
 
@@ -1261,7 +1423,7 @@ G-LEAK (`--bench tabs-100`, 100× buka dan tutup tab dengan store dari `store_fr
 | `export`, `to_table`, `import_data`, `apply_changes`, `table_op` | tidak berubah. PR-01: ekspor tidak memakai store. |
 | `count`, `objects`, `catalogs`/`schemas`/`tables`, `test`, perintah lokal | tidak berubah |
 | `host.run(…)` di app untuk `preview`/`explain` tanpa store | NDJSON; dipakai tes, dan tetap berfungsi sebagai jalur lama |
-| App: `preview` `LIMIT 1` yang hanya membaca `columns` (detail objek `AppModel.swift:545`, probe kolom `:2107`) | NDJSON lewat `host.run`, tidak berubah. Keduanya tidak pernah menggambar baris, jadi tidak butuh store. |
+| App: `preview` `LIMIT 1` yang hanya membaca `columns` (detail objek `AppModel.swift:558`, probe kolom impor `loadImportColumns` di `:2175`) | NDJSON lewat `host.run`, tidak berubah. Keduanya tidak pernah menggambar baris, jadi tidak butuh store. |
 | App: Run, sort server, search server, Explain | store (`run_with_store`) |
 | App: SQL atas hasil dan berkas lokal (W13-T8a–c, UI kemudian) | store (`AnalyticsSession::run_sql`, dieksekusi helper). CLI dan MCP tidak mendapatkannya (NFR-C, D-14, D-16). |
 
@@ -1270,6 +1432,8 @@ Tes kesetaraan di W5-T2 menjalankan kasus golden fake-cursor lewat kedua target 
 ## 21. Perubahan per tugas
 
 ### 21.1 W4-T3: inti store Arrow (Rust murni)
+
+**Disegarkan W6-A1 (2026-10-06).** Selesai di `e595877`. Tinjau keamanan putaran 1 menemukan enam temuan blocking yang semuanya diperbaiki; putaran 2 tertunda dan tercatat "pending review" di ledger. `qh-columnar` dan `qh-result-store` dibangun menurut tabel ini. Selisih yang W6-T1 butuhkan ada di §1.3 dan §12.4.
 
 **Dibuat:**
 
@@ -1311,6 +1475,8 @@ Verifikasi: G-RUST, G-DENY, G-GOLDEN (keluaran `render.rs` tidak berubah), tes �
 
 ### 21.2 W4-T4: fixture diferensial
 
+**Disegarkan W6-A1 (2026-10-06).** Selesai di `b1a1838`, tetapi hanya sebagian dari tabel di bawah: satu berkas `differential.json` (210 kasus), bukan sembilan berkas (TM-10).
+
 Tidak berubah dari W2-A3. `differential.rs` membangun store lewat `StoreRegistry::from_text_rows`, jadi semua nilai adalah `Value::Text` dan jalurnya melewati chunk `text` Arrow.
 
 | Berkas | Isi | Prioritas |
@@ -1331,11 +1497,65 @@ Tidak berubah dari W2-A3, kecuali bahwa `qh-ffi` kini menaut gugus arrow store l
 
 Verifikasi: G-RUST, G-FFI, G-SWIFT, G-GOLDEN (tanpa selisih), `cargo run --release -p qh-ffi --example bench_ffi -- window`.
 
+**Disegarkan W6-A1 (2026-10-06).** Selesai di `df445fd` (perbaikan chunk-kolom NULL) dan `bfb9680`. Gate: G-RUST 1074/0/1, G-FFI (`RustEngineTests` 5/0, `ResultHandleSmokeTests` 6/0), G-SWIFT 601/5 dilewati/0, G-GOLDEN 11/22 dengan set klasifikasi tidak berubah. Tinjau satu putaran (rust-reviewer dan security-reviewer, model terkuat) dengan satu temuan blocking yang diperbaiki di `df445fd`. Perilaku dan deviasi ada di §12.4, angka di §2.9, dan backlog W5-C dari tinjauan ada di ledger (baris W5-T2). Backlog itu ditutup W5-C: sisi Rust di `1b59154` (G-RUST 1081/0/1) dan sisi Swift di `465a0c6` (G-SWIFT 603/5 dilewati/0, G-VIS 17/0), tinjau ringan satu putaran APPROVE, menurut ledger (baris W5-C).
+
 ### 21.4 W6-T1: integrasi Swift
 
-**Tidak berubah.** Swift melihat `ResultHandle` dan buffer `QHW1` yang sama, jadi daftar berkas W2-A3 berlaku apa adanya (§17): `Models/StoreRows.swift` (baru), `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), dan perubahan di `Support/RustEngine.swift`, `Support/DatabaseEngine.swift`, `Models/{AppModel,QueryTab,GridSort,GridSearch,WritePlan}.swift`, `Views/{ResultGridTable,ResultGrid,CellValueViewer,SettingsView}.swift`, `App.swift`, `Support/{Snapshot,BenchMode}.swift`, serta tes `{ResultGridTests,GridColumnsTests,Batch7Tests,TabCloseTests,MockEngine,RowLimitSettingTests}.swift`.
+**Disegarkan W6-A1 (2026-10-06).** Versi lama menulis "tidak berubah" dan mewariskan daftar berkas W2-A3; itu tidak cocok dengan seam yang dibangun W5-T1 dan permukaan yang dibangun W5-T2. Ini rencana kerja yang presisi. Ukuran L. Pelaksana: **sonnet** (O-20 menggantikan GP-o di `development-plan.md` §5 dan §6). Tinjau: risiko tinggi (rewrite grid dan data plane, penggunaan FFI, jalur edit yang menulis ke database), jadi model terkuat, **satu putaran** (O-20), dengan reviewer database untuk penjaga edit dan jalur `WritePlan` (§17.4). Temuan blocking diperbaiki, diverifikasi dengan gate, di-commit, dan dicatat "pending review" di ledger.
 
-Verifikasi: G-SWIFT, G-VIS (terhadap baseline Fase 5), tes diferensial W4-T4, G-LEAK, G-BENCH(1 S2, 2, 3) dan `window`.
+**Tiga commit**, mengikuti preseden W5-T1 dan pelajaran I-1 di ledger (setiap commit harus lolos `swift build` dan tesnya sendiri):
+
+| Commit | Isi | Gate |
+|---|---|---|
+| **6a** `refactor(grid): build only the columns on screen, and give the distinct list its real contract` | D-23 (rentang kolom di `rowText`, painter, dan `GridRowTextCache`), `rowsDidGrow(from:to:)` (belum ada pemanggil), extension bawaan `ResultRows`, `prepare(formats:)`, `distinctValues` `async` dengan `DistinctSample`, perbaikan TM-3 di `ArrayRows`, tes baru. Semuanya di atas `ArrayRows`; engine dan Rust tidak disentuh. | G-SWIFT, G-VIS 17/0 tanpa rekam ulang, `GridParityTests`, `GridAccessibilityTests`, `GridMetricsTests` |
+| **6b** `perf(app): results live in the Rust store, and the grid reads windows` | sisanya (tabel di bawah) | G-SWIFT, G-VIS 17/0 terhadap baseline Fase 5, `cargo test -p qh-result-store --test differential` dan `swift test --filter SortFixtureExport`, G-FFI (`app/Generated/` tidak boleh berubah; bila berubah, berhenti dan tanyakan), G-APP, G-LEAK, G-BENCH(1 S2, 2, 3), dan `StoreWindowBench` |
+| **6c** `feat(app): raise the row limit ceiling to 5,000,000` | §17.7, bersyarat P-1 | G-SWIFT, `RowLimitSettingTests`, bukti P-1 |
+
+**Dibuat (6b):**
+
+| File | Isi | Prioritas |
+|---|---|---|
+| `app/Sources/QueryHive/Models/StoreRows.swift` | `StoreRows`, `WindowPage` (dekode QHW1 dan pemetaan flag), `PollResult`, `DistinctSample`, `StoreFailure`, `EmptyRows`, dan `CellText.make` bila belum ada di `ResultRows.swift` | P0 |
+| `app/Tests/QueryHiveTests/StoreRowsTests.swift` | handle palsu (`StaleView`, `Superseded`, `TooLarge`, jendela buatan); kembaran `ArrayRows` lawan `StoreRows` (setiap format, bentuk flag, lebar, dengan divergensi tercatat dan aturan `Raw` di §17.2); setiap bit flag QHW1; `row(at:)` per blok; `rows(in:)` terpecah dan `rowsOrThrow`; `apply` dan penjaga edit; view basi; tiga tes handle palsu koreksi AR (halaman pendek saat streaming, `prepare(formats:)`, `poll()` saat `apply` berjalan; §17.2); tes yang membutuhkan `Spill` nyata memakai `EngineHost()` sendiri (§17.1) | P0 |
+| `app/Tests/QueryHiveTests/Bench/StoreWindowBench.swift` | `window` 64 × 32 dan 128 × 32 lewat UniFFI, resident (host bersama `TestStores`) dan tumpah (`EngineHost()` sendiri dengan direktori spill sementara dan anggaran kecil: host bersama tidak punya spill dan tidak bisa dikonfigurasi ulang, §17.1), p50/p95/p99; `rows_text`; ongkos `Data` | P0 |
+| `app/Tests/QueryHiveTests/TestStores.swift` | host tes satu proses: `ensureStoresConfigured(nil, 64 MiB)` (spill mati, dan tidak bisa dikonfigurasi ulang), `makeStore(columns:rows:)`, dan pemeriksaan bahwa `stores` kembali ke nilai awal setelah tiap tes; pembantu `spillingHost(budgetBytes:)` yang membangun `EngineHost()` baru dengan direktori spill sementara (dihapus di `tearDown`) untuk tes dan bench yang membutuhkan spill nyata (§17.1, R-39) | P0 |
+| `app/Tests/QueryHiveTests/ArrayRowsReference.swift` (pindahan) | `ArrayRows` acuan | P0 |
+| `app/Tests/QueryHiveTests/SwiftGridReference.swift` (pindahan) | `GridSort.order` dan kawan-kawannya, `ColumnFilter.matches`, `matchesText`, `distinctValues(in:column:)`, dan `GridSearch.matches` | P0 |
+
+**Diubah:**
+
+| File | Perubahan | Commit |
+|---|---|---|
+| `Models/ResultRows.swift` | extension bawaan, `distinctValues` async, `CellText.make`; `ArrayRows` keluar; impor FFI sisa dibuang | 6a, lalu 6b |
+| `Views/GridRowView.swift` | `GridRowText.first`, `GridRowPainter.paint(columns:)`, `GridRowTextCache` per rentang | 6a |
+| `Views/GridTableView.swift` | `draw` meneruskan rentang; display link | 6a (rentang), 6b (link) |
+| `Views/ResultGridTable.swift` | `rowText(_:columns:)`, `rowsDidGrow(from:to:)`, `pollRows`, `prepare(formats:)` di `reloadFormats` dan `formatChanged`, salin lewat `rowsOrThrow` | 6a, 6b |
+| `Views/ResultGrid.swift` | `summaryText`, `filterEditor` (`.task`), banner galat, `preview.rows` menjadi `tab.result` dan `fetchedRows` | 6a, 6b |
+| `Views/CellValueViewer.swift`, `Views/Panels.swift`, `Views/SettingsView.swift` | pembaca nilai lewat `fullValue`; badge memakai `fetchedRows`; teks plafon | 6b, 6c |
+| `Models/CellSelection.swift` | `GridClipboard.text(result:…)` memakai `rowsOrThrow`; impor FFI sisa dibuang | 6b |
+| `Models/QueryTab.swift`, `Models/AppModel.swift` | §17.4, §18, §19: `PreviewResult`, `activeResult` dan `baseResult`, `viewSpec`, `viewBusy`, `runPreview`, `explain`, `closeTab`, `selectTab`, `clearSort`, `clearSearch`, `footerCountInterval` | 6b |
+| `Models/GridSort.swift`, `Models/GridSearch.swift` | implementasi acuan keluar (§17.5) | 6b |
+| `Models/WritePlan.swift` | tanpa perubahan tanda tangan (`RowReading`); baris yang gagal dibaca menjadi peringatan, bukan `continue` diam-diam (`WritePlanTests` ditambah); `row(at:)`, yang kini bisa mahal, tidak dipanggil di loop yang panas | 6b |
+| `Support/DatabaseEngine.swift`, `Support/RustEngine.swift` | §17.1 | 6b |
+| `Support/Snapshot.swift`, `Support/BenchMode.swift` | `showRows` dan `ensureStoresConfigured`; `scroll-30x1m` lewat `store_from_rows`; `tabs-100-held`; hitungan fd | 6b |
+| `Support/PerfSignposts.swift` | `firstRowsEvent` dari `poll()` pertama | 6b |
+| `App.swift` | §17.6: konfigurasi store, sapuan, `RLIMIT_NOFILE` | 6b |
+
+Tes yang berubah: `ResultRowsTests`, `GridTestSupport`, `SortFixtureExport`, `Bench/GridBenchTests` (digantikan `StoreWindowBench`), `VisualParityTests` (dua pembacaan `displayedRows`, di sekitar baris 603 dan 668, menjadi `tab.result.rows(in:columns:)`; **berkas ini tidak ada di daftar `development-plan.md` W6-T1**), `Batch7Tests`, `GridColumnsTests`, `ResultGridTests`, `CellEditUndoTests`, `FilterPresetTests`, `PanelDefaultTests`, `StoppedRunTests`, `TabCloseTests`, `MockEngine`, `EngineContract`, dan `RowLimitSettingTests` (6c). Itu mencakup 21 situs `PreviewResult(` di 8 berkas (TM-5).
+
+**Urutan kerja:**
+
+1. Catat baseline: jumlah tes Swift (603 dengan 5 dilewati pada `465a0c6` menurut ledger) dan G-VIS 17/0 pada HEAD.
+2. **6a.** Tes dulu: `rowText` atas hasil 500 kolom memanggil `cell` hanya untuk rentang yang diminta; piksel painter berentang sama dengan painter penuh pada dirty rect yang sama; `distinctValues` untuk 11 nilai unik menjawab `more`. Lalu perubahan. G-VIS harus hijau tanpa rekam ulang sebelum lanjut. Commit.
+3. **6b**, dalam urutan ini: `TestStores` dan `ensureStoresConfigured`; `StoreRows` dan `StoreRowsTests` (handle palsu dan host nyata); metode `DatabaseEngine` dan `RustEngine`; `QueryTab` dan `AppModel` (`runPreview`, `explain`, `viewSpec`, penjaga edit, `closeTab`); `Snapshot`, `BenchMode`, dan `App.swift`; display link; **penghapusan kode lama paling akhir** (§17.5) bersama penulisan ulang tes.
+4. Tes kembaran format: korpus per format. Format yang selisih di luar divergensi tercatat (§17.2) masuk `swiftRenderedFormats`, dan hasilnya dicatat di pesan commit. `Raw` tidak pernah pindah: selisih `Raw` di luar divergensi tercatat adalah bug dan menghentikan tugas.
+5. `StoreWindowBench`: 64 × 32 dan 128 × 32, resident dan tumpah (yang tumpah lewat `EngineHost()` sendiri, §17.1). Angkanya dicatat dan menjadi masukan W5-T3 untuk `PAGE_ROWS` (D-22).
+6. G-LEAK (termasuk `tabs-100-held`), G-BENCH(1 S2, 2, 3), `scroll-30x1m` dan `scroll-500x10k` terhadap angka Fase 5. Bila `store_from_rows` untuk `scroll-30x1m` melewati 60 detik atau 8 GiB RSS, berhenti dan laporkan (R-38).
+7. **6c** menunggu P-1. Bila belum terukur, W6-T1 selesai tanpa 6c dan dilaporkan sebagai "tertunda: P-1".
+
+**Kriteria selesai** (AGENTS.md): berkas sesuai daftar kepemilikan (tambahan di atas dicatat di ledger), setiap gate yang disebut hijau, tinjau satu putaran terpenuhi, dan di-commit di `work/perf-parity`. Yang tertunda (P-1, 6c, angka W5-T3) dilaporkan terpisah dari yang selesai.
+
+**Di luar W6-T1:** prefetch (D-22), `WindowedRows` (bersyarat P-1), `Json` kembali ke Rust (B-21), ekspor `store_synthetic` (R-38), jumlah kumulatif untuk `edges(of:)`, dan CLI, MCP, serta golden, yang tidak tersentuh.
 
 ### 21.5 W7-T1: driver menulis array Arrow (§16.4)
 
@@ -1409,12 +1629,12 @@ Harus selesai sebelum W13-T7 (lokalisasi, serial dan terakhir), supaya string ba
 
 ## 22. Urutan build
 
-1. **W4-T3a, `qh-columnar`:** encoding, builder, codec bertag (dengan perbaikan B-5), `value_at`, tes round trip. Gate: G-RUST, G-DENY.
-2. **W4-T3b, store dan spill:** `chunk.rs`, `store.rs`, `registry.rs`, `spill.rs` (rekaman `QHP1`), tes NFR-S3. Gate: G-RUST, SEC.
-3. **W4-T3c, render, view, logis:** `qh-core` `write_text` (golden hijau lebih dulu), `collate.rs`, `render.rs`, `view.rs`, `logical.rs`, `qh-rt::view_pool`, tes window, view, dan skema logis. Gate: G-RUST, G-GOLDEN.
-4. **W4-T4, fixture:** ekspor dari Swift (implementasi Swift masih ada), pemeriksa Rust, divergensi didaftar.
-5. **W5-T2, integrasi engine:** `events.rs`, lalu `commands.rs` (golden hijau **sebelum** `StoreTarget`), lalu `store_api.rs` dan `host.rs`, regenerasi `app/Generated`, smoke Swift, `bench_ffi window` dan `view-*`.
-6. **W6-A1** (penyegaran seam Fase 5), lalu **W6-T1** (UI; penghapusan kode Swift paling akhir).
+1. **W4-T3a, `qh-columnar`:** encoding, builder, codec bertag (dengan perbaikan B-5), `value_at`, tes round trip. Gate: G-RUST, G-DENY. (selesai, `e595877`)
+2. **W4-T3b, store dan spill:** `chunk.rs`, `store.rs`, `registry.rs`, `spill.rs` (rekaman `QHP1`), tes NFR-S3. Gate: G-RUST, SEC. (selesai, `e595877`)
+3. **W4-T3c, render, view, logis:** `qh-core` `write_text` (golden hijau lebih dulu), `collate.rs`, `render.rs`, `view.rs`, `logical.rs`, `qh-rt::view_pool`, tes window, view, dan skema logis. Gate: G-RUST, G-GOLDEN. (selesai, `e595877`)
+4. **W4-T4, fixture:** ekspor dari Swift (implementasi Swift masih ada), pemeriksa Rust, divergensi didaftar. (selesai, `b1a1838`; hanya `differential.json`, §21.2)
+5. **W5-T2, integrasi engine:** `events.rs`, lalu `commands.rs` (golden hijau **sebelum** `StoreTarget`), lalu `store_api.rs` dan `host.rs`, regenerasi `app/Generated`, smoke Swift, `bench_ffi window` dan `view-*`. (selesai, `df445fd` dan `bfb9680`; backlog tinjauannya ditutup W5-C di `1b59154` dan `465a0c6`)
+6. **Disegarkan W6-A1 (2026-10-06).** **W6-A1** (penyegaran seam Fase 5; selesai, dokumen ini), lalu **W6-T1** dalam tiga commit (§21.4): 6a (refactor grid di atas `ArrayRows`), 6b (store dan penghapusan kode lama paling akhir), dan 6c (plafon 5.000.000, bersyarat P-1).
 7. **W7-T1:** `next_chunk` di `qh-driver`, lalu PostgreSQL, MySQL, Trino, masing-masing dengan tes paritas chunk, lalu `StoreTarget`.
 8. **W13-T8a,** setelah W13-T4 dan di lajur Rust sendiri: `qh-analytics-proto`, `from_arrow`, workspace helper (server, pool, spill, tabel jarak jauh, sesi, berkas, UDF, keluaran), tes kurungan, G-ANALYTICS.
 9. **W13-T8b,** di lajur FFI setelah W13-T4 dan W13-T8a: klien, sewa, `analytics_api.rs`, regenerasi, `AnalyticsComponent.swift`, `App.swift`, `build.sh`, `release.sh`, tes.
@@ -1428,8 +1648,8 @@ Harus selesai sebelum W13-T7 (lokalisasi, serial dan terakhir), supaya string ba
 | 0008 store kolumnar kustom | **Digantikan** oleh 0030 | Store kustom tidak dibangun. Alasan 0008 dijawab satu per satu: (1) jendela acak dilayani `partition_point` + indeks array, (2) spill kita tulis sendiri dan dienkripsi, dan IPC menggantikan layout buatan sendiri, (3) `Decimal128` memetakan `i128 + scale` tanpa konversi per halaman untuk skala seragam, (4) dependensinya terukur (§2.2). Arrow C Data Interface ke Swift tetap tidak dipakai (D-6). |
 | 0013 throughput terikat JSON | **Digantikan** oleh 0030 | Tidak berubah dari rencana: klaim 99,6% diganti profil W1-T8. |
 | 0004 UniFFI control plane | Diamandemen oleh 0030 | Tidak berubah dari rencana: data plane = `ResultHandle` + buffer `QHW1`. Ditambah `AnalyticsSession` (W13-T8b) sebagai objek UniFFI kedua di data plane; DataFusion sendiri di proses lain (0045). |
-| 0030 data plane app | Dibuat (W6-D), isinya berubah | Store = `RecordBatch` Arrow per chunk dengan encoding per chunk-kolom (D-1, D-2), `window()` terender (D-6), Explain di store (D-8), `RESULT_SINK` (D-11), handle sebelum run (D-12), amandemen D-1 Fase 2 (metode store yang melempar galat), dan crate `qh-columnar` (D-15). |
-| 0034 view in-memory di Rust | Dibuat (W6-D), isinya berubah | View grid = rayon atas array Arrow, dan tidak bergantung pada helper (D-8, O-18). Satu fungsi kunci natural memcmp-able, juga dipakai UDF `qh_natural` di helper. Baris "DataFusion ditolak" diganti "DataFusion untuk SQL di helper opsional, bukan untuk view grid", dengan angka §2.7 **dan catatan jumlah threadnya**. Daftar divergensi O-9 ditambah divergensi SQL (D-18). |
+| 0030 data plane app | Dibuat (W6-D), isinya berubah | Store = `RecordBatch` Arrow per chunk dengan encoding per chunk-kolom (D-1, D-2), `window()` terender (D-6), Explain di store (D-8), `RESULT_SINK` (D-11), handle sebelum run (D-12), amandemen D-1 Fase 2 (metode store yang melempar galat), dan crate `qh-columnar` (D-15). **Disegarkan W6-A1 (2026-10-06):** ditambah D-22 sampai D-29 (halaman jendela, rentang kolom, pintu darurat format, kembaran acuan, batas fd, penjaga edit, kadens footer, plafon) dan angka §2.9. |
+| 0034 view in-memory di Rust | Dibuat (W6-D), isinya berubah | View grid = rayon atas array Arrow, dan tidak bergantung pada helper (D-8, O-18). Satu fungsi kunci natural memcmp-able, juga dipakai UDF `qh_natural` di helper. Baris "DataFusion ditolak" diganti "DataFusion untuk SQL di helper opsional, bukan untuk view grid", dengan angka §2.7 **dan catatan jumlah threadnya**. Daftar divergensi O-9 ditambah divergensi SQL (D-18). **Disegarkan W6-A1 (2026-10-06):** ditambah angka view W5-T2 (§2.9) dan D-27 (view asinkron dengan penjaga edit). |
 | 0037 spill terenkripsi | Dibuat (W4-D), diperluas | D-5 dan §10 apa adanya, ditambah plaintext `QHP1` (IPC + flag), tag domain AAD `QHS2`/`QHD1`, aturan "satu kunci per proses yang menulis spill; kunci tidak pernah menyeberang proses", dan spill operator helper lewat `DiskManagerMode::Custom` (§14.8). Mode `OsTmpDirectory` dilarang. |
 | 0045 DataFusion sebagai komponen analitik terpisah | **Baru** (W13-D) | Keputusan pemilik O-15 dan O-18. Letak (workspace dan proses terpisah, D-16), pengiriman dan verifikasi (D-19, §14.2), protokol dan serah terima data (D-20, §14.3–§14.4), sewa anggaran (§14.5), cancel dan crash (§14.6), SQL yang dikunci (§14.7), kurungan dan jalur migrasi ke App Sandbox (D-21, §14.9), fitur minimal dan lisensi (§14.1, §24), angka build dan ukuran (§2.2), MSRV 1.94 hanya di workspace helper (F-2). Nomor 0045 adalah nomor kosong berikutnya setelah 0044 (`development-plan.md`, jadwal ADR). |
 | 0007 tanpa App Sandbox | Adendum (W13-D) | App tetap tanpa sandbox. Helper analitik dikurung `sandbox-exec` (D-21). |
@@ -1465,9 +1685,9 @@ Sejak O-18, graf helper adalah bagian dari graf probe DataFusion §14.1 (tanpa `
 |---|---|---|
 | R-1 | Kunci natural berbeda dari `localizedStandardCompare` | O-9 menerimanya. Fixture dan `KNOWN_DIVERGENCES` membuatnya eksplisit, lalu masuk ADR-0034. |
 | R-2 | Comparator yang tidak total membuat sort Rust panic (≥ 1.81) | Desain leksikografis dengan pemutus byte dan baris, tes totalitas berbenih, dan `guarded()` sebagai jaring terakhir |
-| R-3 | Miss sinkron atas chunk yang tumpah (dekripsi ≤ 2 MiB di main) menyebabkan hitch | Batas 2 MiB per chunk, prefetch searah scroll, cache dekripsi 8 chunk, dan angka W5-T3. Bila gagal, halaman berikutnya dimuat async dan sel sementara kosong (keputusan W6-A1). |
+| R-3 | Miss sinkron atas chunk yang tumpah (dekripsi ≤ 2 MiB di main) menyebabkan hitch | **Diputuskan W6-A1 (2026-10-06):** tetap sinkron di main, tanpa prefetch dan tanpa sel kosong sementara (D-22). Batas 2 MiB per chunk, cache dekripsi 8 chunk, dan satu chunk `wide_500k` yang melayani sekitar 55 halaman membuat miss tumpah jarang dan murah (sekitar 0,4 ms). Bila W6-T2 mengukur frame > 1 ms karena itu, prefetch ditambahkan dengan aturan simpan ≥ 10%. |
 | R-4 | Akuntansi memori meleset (chunk yang disemat, builder terbuka, kapasitas buffer Arrow) | Chunk dengan `strong_count > 1` tidak di-evict. Builder ≤ 2 MiB per store aktif dinyatakan di doc. `shrink_to_fit` sebelum segel (probe menunjukkan kapasitas builder menambah sekitar 12% tanpa itu, §2.4), dan `get_array_memory_size` menghitung kapasitas, bukan panjang. Tes "resident ≤ anggaran + satu chunk" dan G-BENCH(3). |
-| R-5 | Ongkos UniFFI per jendela > 0,5 ms | Halaman 128 × 32, satu `Data` per panggilan. Bila p99 masih > 0,5 ms, eskalasi C ABI Fase 8 (W8-T2). |
+| R-5 | Ongkos UniFFI per jendela > 0,5 ms | **Disegarkan W6-A1 (2026-10-06):** sisi Rust 128 × 30 sudah 0,396–0,449 ms p99 (§2.9). Halaman 64 × 32 (D-22) sekitar 0,22–0,24 ms, dan `StoreWindowBench` mengukur penyeberangan UniFFI. Bila p99 64 × 32 > 0,5 ms, eskalasi C ABI Fase 8 (W8-T2). |
 | R-6 | Balapan antara publikasi chunk dan perluasan view saat streaming | `Release`/`Acquire` pada `rows`, indeks append-only, satu tugas perluasan dalam satu waktu, tes penulis konkuren |
 | R-7 | Handle dilepas saat `set_view`, prefetch, ingest, atau permintaan chunk helper masih berjalan | Fase atomik, cancel view saat release, `Released` → cancel di pump, "the result was closed" untuk helper, galat basi diabaikan Swift. Tes di `view.rs`, `store_sink.rs`, dan `analytics_api.rs`. |
 | R-8 | Berkas yang di-unlink tidak terlihat di `du` atau Finder | `store_stats()` di diagnostik, dan pesan disk penuh yang eksplisit |
@@ -1476,12 +1696,12 @@ Sejak O-18, graf helper adalah bagian dari graf probe DataFusion §14.1 (tanpa `
 | R-11 | Hitungan grapheme berbeda versi Unicode antara `unicode-segmentation` dan Swift | `width.json`. Selisih pada rangkaian langka hanya menggeser lebar kolom, dan batasnya 320 pt. |
 | R-12 | Paritas validator JSON dan printer format `Json` | Fixture dua sisi. Pintu darurat `Json` (§11.4) diputuskan di W4-T4. |
 | R-13 | Explain lewat store menyimpang dari `performance-plan.md` §10 butir 5 | Dicatat di D-8 dan ADR-0030. Golden `explain` dijaga G-GOLDEN. |
-| R-14 | Blueprint Fase 2 dan Fase 5 belum ada; nama `EngineHost`, `ResultRows`, `CellText` bisa berbeda | W6-A1 menyegarkan §12.3 dan §17 terhadap kode nyata. Inti W4-T3 tidak bergantung pada keduanya. |
+| R-14 | Blueprint Fase 2 dan Fase 5 belum ada; nama `EngineHost`, `ResultRows`, `CellText` bisa berbeda | **Teratasi W6-A1 (2026-10-06):** kedua blueprint ada dan sudah dibangun (W3-T1, W5-T1); §12 dan §17 disegarkan terhadap kode nyata (§1.3, §12.4, §17.0). |
 | R-15 | Daftar berkas di `development-plan.md` belum memuat `qh-columnar`, `logical.rs`, tes kontrak skema logis, W7-T1 versi Arrow, dan W13-T8a–c | Orkestrator memperbarui `development-plan.md` sebelum W4-T3 mulai. Daftarnya di §26. |
 | R-16 | `Decimal` Swift 38 digit berbeda dengan desimal eksak | `NumKey` meniru 38 digit, dan aturan pembulatannya dikunci `number.json` |
 | R-17 | Rayon view bersaing CPU dengan ingest di P-core | View hanya fallback dan jarang. Pool terpisah dari runtime tokio. Diukur di sesi bench W6-T2. |
 | R-18 | Disk penuh di tengah streaming | Event `error`, store lain utuh, tanpa crash (tes W4-T3 dan W5-T2) |
-| R-19 | Satu fd per store yang tumpah; banyak tab di latar mendekati batas lunak 256 fd app GUI | `EMFILE` menjadi galat seperti disk penuh, chunk tetap resident, store lain utuh (§10.4). Bila terukur di G-LEAK atau bench, W6-A1 memutuskan antara menaikkan `RLIMIT_NOFILE` saat peluncuran atau menutup fd store yang menganggur. |
+| R-19 | Satu fd per store yang tumpah; banyak tab di latar mendekati batas lunak 256 fd app GUI | **Diputuskan W6-A1 (2026-10-06), D-26:** naikkan `RLIMIT_NOFILE` lunak ke min(batas keras, 4.096) saat peluncuran. Menutup fd store yang menganggur tidak mungkin, karena berkas di-unlink (D-5). `EMFILE` tetap menjadi galat seperti disk penuh: chunk tetap resident, store lain utuh (§10.4). `tabs-100-held` mengukur puncak fd (§19). |
 | R-20 | Ukuran binari app naik (§2.2) | O-18: DataFusion tidak masuk bundel. App hanya menambah gugus arrow (≤ 7,35 MB stripped, batas atas), dicatat di W5-T2 terhadap §2.2. |
 | R-21 | Waktu build, relink, dan disk naik (§2.2) | DataFusion hanya di workspace helper; G-RUST, G-FFI, dan G-SWIFT tidak membangunnya. G-ANALYTICS hanya di W13-T8a–b dan gate W13–W14, dengan debuginfo `line-tables-only`. |
 | R-22 | API DataFusion berubah di setiap major, majornya sering, dan `TempFileFactory` masih baru | Versi dipatok `55.1` dan dinaikkan bersama `arrow`/`parquet` sebagai satu tugas. Churn API terkurung di helper; yang dilihat app hanya protokol `QHA1` dan IPC Arrow. Tes helper (§14.15) gagal keras bila antarmukanya berubah. |
@@ -1490,21 +1710,38 @@ Sejak O-18, graf helper adalah bagian dari graf probe DataFusion §14.1 (tanpa `
 | R-25 | Unifikasi fitur `parquet` membawa codec dan C (`zstd-sys`) ke graf helper (F-3) | Hanya di workspace helper; `.cargo/config.toml` (invariant #4) tetap mematok `MACOSX_DEPLOYMENT_TARGET` untuk objek C. |
 | R-26 | Chunk-kolom bertag membuat SQL melihat teks, bukan tipe (satu `'NaN'` di kolom `numeric` hanya membuat satu chunk bertag, tetapi skema logis kolom itu menjadi `Utf8`) | Disengaja: tidak ada data yang diubah diam-diam (§5.4). `TableInfo` memberi tahu UI tipe logis tiap kolom, dan pengguna bisa `TRY_CAST`. |
 | R-27 | Kunci natural memcmp-able memakan memori (sekitar 50 byte per baris untuk `row-N-c01`) | Dicadangkan lewat `reserve`, dengan jalur prefiks 20 byte per baris saat cadangan tidak cukup. Hasilnya identik dan dijaga tes. |
-| R-28 | Jendela bertipe mendekati NFR-P8: 128 × 30 penuh tipe 442 µs p99 di sisi Rust sebelum UniFFI dan format kolom (§2.6) | `write_text` tanpa alokasi di W4-T3 (D-6), dengan target lokal ≤ 250 µs. Hex hanya untuk prefiks yang tampil (§11.2). Bila W5-T3 masih melihat p99 > 0,5 ms, W6-A1 memilih halaman 64 baris untuk hasil yang lebarnya penuh tipe, sebelum eskalasi C ABI Fase 8. |
+| R-28 | Jendela bertipe mendekati NFR-P8: 128 × 30 penuh tipe 442 µs p99 di sisi Rust sebelum UniFFI dan format kolom (§2.6) | `write_text` tanpa alokasi di W4-T3 (D-6), dengan target lokal ≤ 250 µs. Hex hanya untuk prefiks yang tampil (§11.2). **Diputuskan W6-A1 (2026-10-06):** target lokal ≤ 250 µs meleset (0,396–0,449 ms, §2.9), jadi halaman 64 baris dipilih (D-22), sementara sampai W5-T3 mengonfirmasi; eskalasi C ABI Fase 8 bila p99 64 × 32 masih > 0,5 ms. |
 | R-29 | `wide_500k` ≈ 250 MiB di Arrow setelah `shrink_to_fit`, di tepi anggaran 256 MiB (§2.4) | Spill memang dirancang untuk ini. G-BENCH(3) mencatat `spilled_bytes` di samping memori, supaya hasil 500k yang tumpah atau tidak tidak dibaca sebagai regresi. |
 | R-30 | Unduhan helper gagal atau tidak mungkin (tanpa jaringan, jaringan tertutup, GitHub tidak terjangkau) | "Pasang dari berkas…" dengan verifikasi yang sama (§14.2). Semua fungsi di luar analitik tidak terpengaruh (§14.14). |
 | R-31 | `sandbox-exec` usang dan bisa hilang di macOS mendatang | Tanpa kurungan, helper tidak dijalankan, dengan alasan yang terlihat (§14.9). Jalur App Sandbox dicatat di ADR-0045. Tes kurungan gagal keras di macOS yang mengubah perilakunya. |
 | R-32 | Throughput pipa macOS terlalu rendah untuk scan besar | Target ≥ 1 GB/s diukur di W13-T8b. Pengganti `UnixStream::pair()` tidak mengubah protokol (§14.4). |
 | R-33 | App tanpa `SIGPIPE` diabaikan mati saat helper crash | `signal(SIGPIPE, SIG_IGN)` di `App.swift` (§17.6), dan tes "helper dibunuh di tengah query" di `analytics_api.rs` dan smoke Swift |
 | R-34 | Helper dan app berbeda versi | SHA-256 dipatok per build dan diperiksa ulang sebelum setiap spawn, ditambah handshake `protocol` + `build` (§14.2, §14.3) |
+| R-35 | **Disegarkan W6-A1 (2026-10-06).** Edit menunjuk baris yang salah setelah `set_view` terpasang (D-27): `CellKey` memakai indeks baris tampilan, dan `WritePlan` membaca nilai asli untuk klausa `WHERE` | `viewBusy` menolak staging, pembangun rencana menolak saat sibuk, seleksi dan antrean dibuang saat view terpasang, dan tes untuk ketiganya (§17.4). Reviewer database memeriksa jalur ini |
+| R-36 | **Disegarkan W6-A1 (2026-10-06).** Bit flag QHW1 salah dipetakan ke `CellFlags` (TM-7): `openable` dan `truncated` tertukar tanpa galat kompilasi | Pemetaan eksplisit di `WindowPage` dan tes satu sel per bit |
+| R-37 | **Disegarkan W6-A1 (2026-10-06).** Paritas format di Rust belum teruji (TM-10): printer `Json` dan format `Text`, `Uuid`, `UnixTimestamp` bisa berbeda dari `ColumnFormat.render` | `swiftRenderedFormats` (awal `{.json}`), tes kembaran di W6-T1, dan B-21 untuk fixture dua sisi (D-24) |
+| R-38 | **Disegarkan W6-A1 (2026-10-06).** `scroll-30x1m` membangun 30 juta sel lewat `store_from_rows` (TM-14): marshalling UniFFI satu kali dan `Vec<Vec<Option<String>>>` di Rust, beberapa GB sementara | Dibangun di luar interval ukur dengan anggaran bench 2 GiB; waktu dan puncak RSS dicatat. Bila lebih dari 60 detik atau 8 GiB, `store_synthetic` diekspor lewat UniFFI sebagai metode khusus bench (perubahan kecil di lajur FFI, bukan keputusan arsitektur baru) |
+| R-39 | **Disegarkan W6-A1 (2026-10-06).** Tes bergantung pada host nyata: registry dikonfigurasi sekali per host dan tidak bisa dikonfigurasi ulang (`host.rs:319-323`), jadi host bersama proses tes tidak pernah bisa menumpahkan (spill mati, 64 MiB). Tes spill yang memakainya lulus tanpa menumpahkan apa pun, atau gagal menurut urutan tes | `TestStores` satu kali untuk semua yang resident, `ensureStoresConfigured` idempoten, tiap tes membuat dan melepas storenya sendiri dan memeriksa `stores` kembali ke awal. Tes dan bench yang butuh spill nyata (galat `.Spill`, miss chunk tumpah, `StoreWindowBench` tumpah) membangun `EngineHost()` sendiri dengan direktori spill sementara dan anggaran kecil (§17.1), atau berjalan lewat `--bench` |
+| R-40 | **Disegarkan W6-A1 (2026-10-06).** Query tetap berjalan di server setelah tab ditutup (TM-4) | `closeTab` menghentikan `previewProcess` (§19), dengan tes di `TabCloseTests` |
+| R-41 | **Disegarkan W6-A1 (2026-10-06).** `StoreFfiError.Spill`, `Corrupt`, atau `Internal` muncul di tengah scroll (disk penuh sesudah spill, rekaman rusak) | `lastFailure` menjadi banner grid dan sel kosong, tidak pernah crash atau `try!`; dites dengan handle palsu (§17.2) |
 
 ## 26. Yang disegarkan di W6-A1, dan catatan untuk orkestrator
 
-- **Verdict AR** atas revisi ini ada di bagian berikut. `security-reviewer` tetap wajib untuk §10 di W4-T3, dan untuk §14.2, §14.8, dan §14.9 di W13-T8a–b.
-- **W6-A1** tetap mencocokkan §12.3 dan §17 dengan `host.rs` dan seam Fase 5, memutuskan nasib `ArrayRows`, menetapkan `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan memastikan pintu darurat `Json` (§11.4). Revisi Arrow dan O-18 tidak menambah pekerjaan W6-A1, karena Swift di W6 tidak berubah.
-- **Daftar edit dokumen rencana** (PRD, `performance-plan.md`, `development-plan.md`) ada di verdict, bagian "Edit yang wajib dibuat orkestrator".
+**Disegarkan W6-A1 (2026-10-06).** W6-A1 selesai: dokumen ini disegarkan terhadap seam Fase 5 (W5-T1) dan permukaan engine (W5-T2). Tinjau architect-reviewer atas penyegaran ini menemukan lima koreksi blocking, B1 sampai B5, yang sudah diterapkan (bullet pertama di bawah); verdict akhir belum ada (pemeriksa menurut `development-plan.md` W6-A1: `architect-reviewer`).
+
+- **Koreksi blocking dari tinjau architect-reviewer atas penyegaran ini (2026-10-06).** B1 baseline: dokumen diperiksa ulang terhadap `465a0c6`, setelah `1b59154` dan `465a0c6` masuk (§1.3 TM-2 sampai TM-9, nomor baris di fakta 10, §12.4, §17 dan §17.1, §19 G-LEAK, §20, §21.3, §26). B2: halaman `StoreRows` dan blok `row(at:)` mencatat jumlah barisnya, dan `prepare(formats:)` membuang halaman blok yang formatnya berubah (§17.2). B3: `poll()` hanya mengikuti `viewID` yang sama, dan hop `apply` satu-satunya penulis `viewID` dan `count` (§17.2, §17.3). B4: host bersama tidak bisa menumpahkan, jadi tes dan bench spill membangun `EngineHost()` sendiri atau lewat `--bench` (§17.1, §21.4, R-39). B5: potongan 256 dan `TRUNCATED` milik `window` adalah divergensi tercatat, dan `Raw` tidak pernah pindah (D-24, §17.2).
+- **Verdict AR** atas revisi Arrow dan O-18 ada di bagian berikut. `security-reviewer` tetap wajib untuk §10 di W4-T3 (selesai, putaran 2 tertunda), dan untuk §14.2, §14.8, dan §14.9 di W13-T8a–b.
+- **Yang ditutup W6-A1:** pintu darurat `Json` (D-24, §11.4), nasib `ArrayRows` (D-25), `PAGE_ROWS` dan `COL_BLOCK` sementara (D-22), mitigasi R-19 (D-26), bentuk `StoreRows` (§17.2), dan plafon (D-29). Daftar yang dulu terbuka di verdict dan di `development-plan.md` §11 butir 7 kini terjawab; yang menunggu hanya angka halaman dari W5-T3.
+- **Temuan yang tidak diminta tetapi mengubah rencana:** TM-2 (tabel membangun semua kolom), TM-3 (regresi pemilih nilai unik), TM-4 (`closeTab` tidak menghentikan Run), TM-7 (bit flag), TM-10 (tidak ada fixture paritas format), dan D-27 (balapan antara edit dan view).
+- **Edit yang diminta dari orkestrator** (W6-A1 hanya menyentuh berkas ini):
+  - `development-plan.md` §11 butir 7: tandai terjawab (D-22, D-24, D-25, D-26).
+  - `development-plan.md` §5 W6-T1: pelaksana **sonnet** (O-20); tiga commit (6a, 6b, 6c); tambahkan ke berkas yang dimiliki `Views/GridTableView.swift`, `Views/GridRowView.swift`, `Models/ResultRows.swift`, `Models/CellSelection.swift`, serta tes `VisualParityTests.swift`, `ResultRowsTests.swift`, `SortFixtureExport.swift`, `GridTestSupport.swift`, `StoppedRunTests.swift`, `CellEditUndoTests.swift`, `FilterPresetTests.swift`, `PanelDefaultTests.swift`, `EngineContract.swift`, dan berkas baru §21.4; tinjau: model terkuat satu putaran ditambah reviewer database.
+  - `development-plan.md` §7 (rantai kepemilikan): tambahkan `Views/GridTableView.swift` ke rantai `ResultGridTable`, `GridRowView`, `GridHeaderView`, dan `GridAccessibility` (W5-T1 → W6-T1 → W10-T1 …; `GridRowView` sudah ada di rantai tetapi tidak di daftar berkas W6-T1), dan `VisualParityTests.swift` ikut W6-T1.
+  - `development-plan.md` §1 G-LEAK: tambahkan `open_fds_peak` dan `tabs-100-held`; `spilled_bytes` sudah nyata (`1b59154`), jadi pemeriksaan `spilled_bytes == 0` berlaku apa adanya.
+  - Ledger: B-21 (fixture `format.json` dua sisi; `Json` kembali ke Rust), cacat TM-3 dan TM-4 sebagai backlog yang ditutup W6-T1, dan TM-8 (komentar `column_widths()`, `store_api.rs:685`) sebagai backlog ledger: W5-C sudah ditutup tanpa memperbaikinya, dan daftar yang W5-C teruskan ke W6-C tidak memuatnya, jadi ia belum punya gelombang pemilik.
+  - ADR-0030 dan 0034 (W6-D): masukkan D-22 sampai D-29 dan tabel §2.9.
 - **Ledger:** B-5 (Unknown `raw`, sapuan, penimpaan spill) tetap milik W4-T3, sekarang lewat `qh-columnar/tagged.rs` dan `spill.rs`. B-12 (pemberitahuan pihak ketiga) kini mencakup helper.
-- **Keputusan yang diserahkan ke pemilik lewat laporan akhir:** D-8 (view grid tanpa DataFusion), D-16 dan O-18 (DataFusion baru ada di W13-T8a–b, sebagai helper terpisah), D-19 (unduhan saat pertama dipakai; ukurannya diukur di W13-T8a), D-21 (kurungan `sandbox-exec`, dan fitur mati bila kurungan tidak tersedia), anggaran 256 MiB yang kini di tepi untuk `wide_500k` (R-29), serta dua keputusan W2-A3 yang tetap (Explain lewat store, unlink segera).
+- **Keputusan yang diserahkan ke pemilik lewat laporan akhir:** D-8 (view grid tanpa DataFusion), D-16 dan O-18 (DataFusion baru ada di W13-T8a–b, sebagai helper terpisah), D-19 (unduhan saat pertama dipakai; ukurannya diukur di W13-T8a), D-21 (kurungan `sandbox-exec`, dan fitur mati bila kurungan tidak tersedia), anggaran 256 MiB yang kini di tepi untuk `wide_500k` (R-29), serta dua keputusan W2-A3 yang tetap (Explain lewat store, unlink segera). Satu hal baru dari W6-A1: P-1 (izin Screen Recording atau sesi eksklusif) sebelum plafon 5.000.000 (D-29).
 
 ## Verdict architect-reviewer (Arrow/DataFusion)
 
@@ -1570,7 +1807,7 @@ Sejak O-18, graf helper adalah bagian dari graf probe DataFusion §14.1 (tanpa `
 - Ukuran unduhan helper terkompresi (W13-T8a), throughput pipa (W13-T8b, target ≥ 1 GB/s), dan ambang NFR-P3 untuk SQL (gate W13).
 - Sort natural rayon dengan `view_pool` 4 thread (W5-T2, `bench_ffi view-*`).
 - Perilaku profil `sandbox-exec` di macOS 26, dibuktikan `confinement.rs`; jalur App Sandbox menunggu sertifikat Developer ID.
-- Dari W2-A3: bentuk pintu darurat `Json`, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK`, dan mitigasi R-19.
+- Dari W2-A3: bentuk pintu darurat `Json`, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK`, dan mitigasi R-19. **Diselesaikan W6-A1 (2026-10-06):** D-22, D-24, D-25, dan D-26 (§3); angka `PAGE_ROWS` dan `COL_BLOCK` bersifat sementara sampai W5-T3.
 
 ### Edit yang wajib dibuat orkestrator
 
@@ -1672,4 +1909,4 @@ Verdict AR atas rancangan lama disimpan apa adanya di bawah. Nomor bagian di dal
 
 #### Yang tetap terbuka untuk W6-A1
 
-Bentuk pintu darurat `Json` di permintaan jendela, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan mitigasi R-19 bila batas fd terukur.
+Bentuk pintu darurat `Json` di permintaan jendela, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan mitigasi R-19 bila batas fd terukur. **Diselesaikan W6-A1 (2026-10-06):** lihat §3 D-22, D-24, D-25, dan D-26.
