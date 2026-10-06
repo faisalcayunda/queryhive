@@ -84,6 +84,23 @@ Peak RSS is per child process, read from `/usr/bin/time -l`. A run also records
 the machine's load average, because a number taken while four other builds are
 running describes the machine, not the engine.
 
+Gated scenarios run the plan's own SQL
+--------------------------------------
+Axes 1 to 3 are graded on ``SELECT * FROM wide_500k`` (and Trino's
+``tpch.sf1.lineitem``), the statements the plan names. The scenarios that run a
+server-side generator (``ttfr-s1-1k``, ``rows-wide-500k``...) measure the
+server's compute as well, so they stay as an informational regression guard. Every
+database sample says which it ran in its notes, as ``sql_kind=table`` or
+``sql_kind=generated``, and a gated row whose record says anything else is
+``[belum diukur]``.
+
+Axis 2 compares with a same-day ceiling only when the record says what the
+ceiling is: ``ceiling_kind=same-sql-copy`` (``bench_ceiling.py pg``: a psql COPY
+of the exact SQL the app ran) or ``ceiling_kind=nexturi-drain``
+(``bench_ceiling.py trino``). A ceiling of any other kind, or none, is ignored and
+the absolute 575,000 rows/s applies. MySQL has no valid ceiling (the ``mysql``
+CLI is slower than the app), so its row is always absolute.
+
 One schema for every axis
 -------------------------
 The records of the other axes (`deploy/dev/bench_app.py`) share this file and
@@ -102,6 +119,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import statistics
 import subprocess
 import sys
@@ -343,6 +361,9 @@ def measure(kind: str, sql: str, limit: int, label: str,
         "app": "queryhive",
         "app_rev": app_revision(),
         "competitor_rev": None,
+        # The default workload is the plan's own SQL against the table; an override is not.
+        "sql_kind": "table" if is_default else "custom",
+        "notes": f"sql_kind={'table' if is_default else 'custom'}",
     })
     record.update(host_facts())
     return record
@@ -471,50 +492,84 @@ AXES = {
 # (metric, stat, op, threshold); `rel` is the target against TablePro as
 # (metric, stat, op, ratio) on QueryHive / TablePro, or None when the plan gives
 # no TablePro number. Metric names carry their unit as a suffix: _ms, _bytes,
-# _rows_per_s, _ms_per_s, _count.
+# _rows_per_s, _ms_per_s, _count, _ratio.
+#
+# A threshold of INFO is a number the cell shows and the verdict never grades: the
+# informational rows (the generated-SQL scenarios, kept as a regression guard) and
+# the numbers that explain a graded one.
+INFO = "info"
+
+_S1_TARGET = (("ttfr_ms", "median", "<=", 25), ("ttfr_ms", "p95", "<=", 40))
+_TTFR_INFO = (("ttfr_ms", "median", "<=", INFO), ("ttfr_ms", "p95", "<=", INFO))
+_THROUGHPUT = (("rows_per_s", "median", ">=", 575_000),)
+_THROUGHPUT_TEXT = "≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah"
+_THROUGHPUT_REL = ("rows_per_s", "median", ">=", 1.5)
+_MEMORY = (("peak_footprint_delta_bytes", "max", "<=", None),)
+_FRAME = (("hitch_ms_per_s", "median", "<=", 1), ("frame_cost_p99_ms", "median", "<=", 8.3),
+          ("frame_p99_ms", "median", "<=", 8.3))
+_FRAME_TEXT = ("hitch ≤ 1 ms/s; biaya main thread per frame p99 ≤ 8,3 ms; "
+               "waktu frame p99 ≤ 8,3 ms (hanya di panel ≥ 120 Hz)")
+
 AXIS_ROWS = (
-    (1, "ttfr-s1-1k", "S1 hangat, cap 1.000",
-     (("ttfr_ms", "median", "<=", 25), ("ttfr_ms", "p95", "<=", 40)),
-     "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
-    (1, "ttfr-s1-10k", "S1 hangat, cap 10.000",
-     (("ttfr_ms", "median", "<=", 25), ("ttfr_ms", "p95", "<=", 40)),
-     "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
-    (1, "ttfr-s2-500k", "S2 cap 500.000",
+    (1, "ttfr-s1t-1k", "S1 hangat, cap 1.000, `SELECT * FROM wide_500k`",
+     _S1_TARGET, "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
+    (1, "ttfr-s1t-10k", "S1 hangat, cap 10.000, `SELECT * FROM wide_500k`",
+     _S1_TARGET, "p50 ≤ 25 ms, p95 ≤ 40 ms", ("ttfr_ms", "median", "<=", 0.5), "≤ 0,5×"),
+    (1, "ttfr-s2t-500k", "S2 hangat, cap 500.000, `SELECT * FROM wide_500k`",
      (("ttfr_ms", "p95", "<=", 50),),
      "p95 ≤ 50 ms (progresif)", ("ttfr_ms", "median", "<=", 0.1), "≤ 0,1×"),
-    (1, "ttfr-s3-rtt30", "S3 RTT 30 ms (toxiproxy)",
+    (1, "ttfr-s3-rtt30", "S3 RTT 30 ms (toxiproxy), cap 1.000",
      (("ttfr_ms", "median", "<=", 50),),
      "hangat ≤ 1 RTT + 20 ms (50 ms)", ("ttfr_ms", "median", "<=", 1.0), "≤ 1,0×"),
-    (1, "ttfr-s4-first-run", "S4 Run pertama setelah app dibuka",
-     (), "—", ("ttfr_ms", "median", "<=", 1.0), "≤ 1,0×"),
-    (2, "rows-wide-500k", "`wide_500k` tanpa cap",
-     (("rows_per_s", "median", ">=", 575_000),),
-     "≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah",
-     ("rows_per_s", "median", ">=", 1.5), "≥ 1,5×"),
+    (1, "ttfr-s4-first-run", "S4 Run pertama setelah app dibuka, cap 1.000",
+     (("ttfr_ms", "median", "<=", INFO),), "—", ("ttfr_ms", "median", "<=", 1.0), "≤ 1,0×"),
+    (1, "rerun-capped-rtt30", "Run ulang setelah cap, lewat toxiproxy (pemicu E4)",
+     (("rerun_exceeds_rtt_ratio", "median", "<=", 0.49), ("rerun_penalty_ms", "median", "<=", INFO),
+      ("rerun_penalty_capped_ms", "median", "<=", INFO), ("rerun_sort_ttfr_ms", "median", "<=", INFO)),
+     "E4 dipicu bila Run kedua lebih lambat dari 1 RTT pada separuh sampel atau lebih", None, "—"),
+    (1, "rerun-capped", "Run ulang setelah cap, langsung ke server",
+     (("rerun_penalty_ms", "median", "<=", INFO), ("rerun_sort_ttfr_ms", "median", "<=", INFO)),
+     "informasional", None, "—"),
+    (1, "ttfr-s1-1k", "S1 dengan SQL buatan, cap 1.000 (penjaga regresi G-BENCHQ)",
+     _TTFR_INFO, "informasional", None, "—"),
+    (1, "ttfr-s1-10k", "S1 dengan SQL buatan, cap 10.000 (penjaga regresi G-BENCHQ)",
+     _TTFR_INFO, "informasional", None, "—"),
+    (2, "rows-pg-table-500k", "PG `SELECT * FROM wide_500k`, tanpa cap",
+     _THROUGHPUT, _THROUGHPUT_TEXT + " (plafon: COPY SQL yang sama)", _THROUGHPUT_REL, "≥ 1,5×"),
+    (2, "rows-mysql-500k", "MySQL `SELECT * FROM wide_500k`, tanpa cap",
+     _THROUGHPUT, "≥ 575.000 baris/s (MySQL tidak punya plafon yang sah)", _THROUGHPUT_REL, "≥ 1,5×"),
     (2, "rows-lineitem-1m", "Trino `tpch.sf1.lineitem`, cap 1M",
-     (("rows_per_s", "median", ">=", 575_000),),
-     "≥ 575.000 baris/s, atau ≥ 80% plafon bila lebih rendah",
-     ("rows_per_s", "median", ">=", 1.5), "≥ 1,5×"),
+     _THROUGHPUT, _THROUGHPUT_TEXT + " (plafon: drain `nextUri` dari host)", _THROUGHPUT_REL, "≥ 1,5×"),
+    (2, "rows-trino-500k", "Trino `tpch.sf1.lineitem`, cap 500.000 (skenario A/B)",
+     _THROUGHPUT, _THROUGHPUT_TEXT + " (plafon: drain `nextUri` dari host)", None, "—"),
+    (2, "rows-wide-500k", "`wide_500k` lewat `generate_series` (terikat server; penjaga regresi G-BENCHQ)",
+     (("rows_per_s", "median", ">=", INFO),), "informasional: terikat komputasi server", None, "—"),
     (3, "mem-500k", "500k × 30",
-     (("footprint_delta_bytes", "median", "<=", None),),
-     "≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
+     _MEMORY, "puncak ≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
+    (3, "mem-mysql-500k", "MySQL 500k × 30",
+     _MEMORY, "puncak ≤ anggaran store + 64 MB", None, "—"),
     (3, "mem-5m", "5M baris",
-     (("footprint_delta_bytes", "median", "<=", None),),
-     "≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
+     _MEMORY, "puncak ≤ anggaran store + 64 MB", ("footprint_delta_bytes", "median", "<=", 0.5), "≤ 0,5×"),
     (4, "scroll-30x1m", "30 kolom × 1M baris, fling vertikal",
-     (("hitch_ms_per_s", "median", "<=", 1), ("frame_p99_ms", "median", "<=", 8.3)),
-     "hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms", ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
+     _FRAME, _FRAME_TEXT, ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
+    (4, "scroll-30x1m-spilled", "30 kolom × 1M baris, store tumpah ke disk",
+     (("hitch_ms_per_s", "median", "<=", 1), ("frame_cost_p99_ms", "median", "<=", INFO)),
+     "hitch ≤ 1 ms/s (di atasnya, prefetch R-3 dipicu)", None, "—"),
     (4, "scroll-500x10k", "500 kolom × 10k baris, horizontal + vertikal",
-     (("hitch_ms_per_s", "median", "<=", 1), ("frame_p99_ms", "median", "<=", 8.3),
-      ("render_ms", "median", "<=", 30)),
-     "hitch ≤ 1 ms/s; p99 frame ≤ 8,3 ms; tergambar ≤ 30 ms",
-     ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
-    (5, "type-10k", "berkas 10k baris, mengetik di tengah",
+     _FRAME, _FRAME_TEXT, ("hitch_ms_per_s", "median", "<=", 1.0), "hitch ≤ 1,0×"),
+    (4, "open-500x10k", "500 kolom × 10k baris, dibuka hangat (median)",
+     (("render_ms", "median", "<=", 30), ("render_ms", "p95", "<=", INFO), ("render_cold_ms", "median", "<=", INFO)),
+     "tergambar ≤ 30 ms (median pembukaan hangat); p95 dan pembukaan dingin dilaporkan terpisah", None, "—"),
+    (5, "type-10k-plan", "berkas 10k baris (~400k karakter), baris baru tiap ulangan, mengetik di tengah",
      (("keystroke_main_p99_ms", "median", "<=", 4),),
      "main thread p99 ≤ 4 ms", ("input_to_photon_ms", "p95", "<=", 1.0), "photon p95 ≤ 1,0×"),
-    (5, "type-2m", "berkas 2M karakter, mengetik di tengah",
+    (5, "type-2m", "berkas 2M karakter (di bawah plafon), mengetik di tengah",
      (("keystroke_main_p99_ms", "median", "<=", 8),),
-     "main thread p99 ≤ 8 ms", ("input_to_photon_ms", "p95", "<=", 1.0), "photon p95 ≤ 1,0×"),
+     "main thread p99 ≤ 8 ms, dengan warna menyala", ("input_to_photon_ms", "p95", "<=", 1.0), "photon p95 ≤ 1,0×"),
+    (5, "type-10k", "berkas padat 10k baris (~960k karakter) (penjaga regresi G-BENCHQ)",
+     (("keystroke_main_p99_ms", "median", "<=", INFO),), "informasional", None, "—"),
+    (5, "type-coloured-195k", "berkas 195k karakter, SQL berwarna",
+     (("keystroke_main_p99_ms", "median", "<=", INFO),), "informasional", None, "—"),
     (6, "cancel-pg-sleep", "`pg_sleep(30)`",
      (("cancel_ms", "p95", "<=", 100),), "p95 ≤ 100 ms", ("cancel_ms", "p95", "<=", 1.0), "≤ 1,0×"),
     (6, "cancel-mysql-sleep", "`SLEEP(30)`",
@@ -536,6 +591,46 @@ AXIS_ROWS = (
     ("ffi-leak", "ffi-leak", "100× buka/tutup tab, `leaks`",
      (("leak_count", "median", "<=", 0),), "nol leak", None, "—"),
 )
+
+# Gate rows whose number only counts when the run was the plan's own SQL against a table.
+TABLE_SQL = frozenset({
+    "ttfr-s1t-1k", "ttfr-s1t-10k", "ttfr-s2t-500k", "ttfr-s3-rtt30", "ttfr-s4-first-run",
+    "rows-pg-table-500k", "rows-mysql-500k", "rows-lineitem-1m", "rows-trino-500k",
+})
+
+# Records from before the notes carried `sql_kind`. These two scenarios always ran a stored table
+# (`deploy/dev` MySQL and Trino); every other gated scenario's old records cannot say.
+LEGACY_SQL_KIND = {"rows-mysql-500k": "table", "rows-trino-500k": "table"}
+
+# Axis 2: the kind of same-day ceiling a row accepts. MySQL has none, so it is absent.
+CEILING_KIND = {
+    "rows-pg-table-500k": "same-sql-copy",
+    "rows-wide-500k": "same-sql-copy",
+    "rows-lineitem-1m": "nexturi-drain",
+    "rows-trino-500k": "nexturi-drain",
+}
+
+# Rows that mean nothing unless the run measured what its name says: (metric, stat, op, limit).
+# A typing run that crossed the editor's colouring ceiling measured the uncoloured path.
+VALIDITY = {
+    "type-10k-plan": ("uncoloured_turns_count", "max", "<=", 0),
+    "type-2m": ("uncoloured_turns_count", "max", "<=", 0),
+}
+
+# A record of these kept no `uncoloured_turns_count` because the fixture was cut to exactly the
+# ceiling: the first keystroke crossed it and the rest measured the uncoloured path (W8-T2, row 9b).
+OVER_CEILING_ARTEFACT = frozenset({"type-2m"})
+
+# Checks that only mean something on a fast enough panel: metric -> minimum display_hz. On a 60 Hz
+# panel no frame can take longer than one 16.7 ms interval, so a p99 against 8.3 ms says nothing.
+NEEDS_HZ = {"frame_p99_ms": 120}
+
+# TablePro was recorded (as a status, `tidak diukur (izin OS)`) under the names the scenarios had
+# before the plan's SQL got its own; it runs the plan's SQL, so those records answer the new rows.
+TABLEPRO_NAME = {
+    "ttfr-s1t-1k": "ttfr-s1-1k", "ttfr-s1t-10k": "ttfr-s1-10k", "ttfr-s2t-500k": "ttfr-s2-500k",
+    "rows-pg-table-500k": "rows-wide-500k", "type-10k-plan": "type-10k",
+}
 
 # The "Perbandingan dengan target section 6" rows that were "[belum diukur]": the
 # label as the report prints it, the scenario that answers it, and its target.
@@ -646,6 +741,25 @@ def latest_app_record(results: list[dict], scenario: str, app: str) -> dict | No
     return match
 
 
+def competitor_record(results: list[dict], scenario: str) -> dict | None:
+    """TablePro's record for a row: under its own name, else under the name it had before."""
+    return (latest_app_record(results, scenario, "tablepro")
+            or latest_app_record(results, TABLEPRO_NAME.get(scenario, ""), "tablepro"))
+
+
+NOTE_PAIR = re.compile(r"(?:^|;\s*)([a-z_]+)=([^;\s]+)")
+
+
+def note_value(record: dict | None, key: str) -> str | None:
+    """`key=value` out of a record's notes. The apps and `bench_ceiling.py` write what the report
+    needs to know about a run there (`sql_kind`, `ceiling_kind`, `via`, `rtt_ms`), because
+    `bench_app.py` keeps one free-text field of a sample and nothing else."""
+    for found, value in NOTE_PAIR.findall((record or {}).get("notes") or ""):
+        if found == key:
+            return value
+    return None
+
+
 def fmt_metric(name: str, value: float) -> str:
     """A number with the unit its metric name carries."""
     if name.endswith("_bytes"):
@@ -690,16 +804,37 @@ def side_cell(record: dict | None, checks) -> str:
     return status if status in STATUSES else UNMEASURED
 
 
-def _threshold(record: dict, metric: str, op: str, threshold, axis) -> float | None:
+def provenance(row, record: dict | None) -> str:
+    """What the record says about how it was measured: the SQL, and the ceiling it was held to."""
+    if not record or not record.get("metrics"):
+        return ""
+    axis, scenario = row[0], row[1]
+    parts = []
+    kind = note_value(record, "sql_kind") or LEGACY_SQL_KIND.get(scenario)
+    if kind:
+        parts.append(f"sql_kind={kind}")
+    ceiling = metric_stat(record, "ceiling_rows_per_s", "median")
+    if axis == 2 and ceiling is not None:
+        parts.append(f"plafon {note_value(record, 'ceiling_kind') or 'tanpa ceiling_kind'} "
+                     f"{fmt_metric('ceiling_rows_per_s', ceiling)}")
+    return "; ".join(parts)
+
+
+def _threshold(record: dict, metric: str, op: str, threshold, axis, scenario: str = "") -> float | None:
     """The absolute threshold, where it depends on something the record carries."""
+    if threshold == INFO:
+        return INFO
     if axis == 2:
-        # Plan section 2: the target is 575k rows/s, or 80% of the same-day COPY
-        # ceiling when that ceiling is lower, i.e. when ceiling < 575k / 0.8.
+        # Plan section 2: the target is 575k rows/s, or 80% of the same-day ceiling when that
+        # ceiling is lower, i.e. when ceiling < 575k / 0.8. Only a ceiling of the kind the row
+        # names counts (CEILING_KIND): a COPY of a different SQL is not this scenario's ceiling.
         ceiling = metric_stat(record, "ceiling_rows_per_s", "median")
-        if ceiling is not None and ceiling < threshold / 0.8:
+        accepted = CEILING_KIND.get(scenario)
+        if (ceiling is not None and accepted and note_value(record, "ceiling_kind") == accepted
+                and ceiling < threshold / 0.8):
             return 0.8 * ceiling
         return threshold
-    if metric == "footprint_delta_bytes" and threshold is None:
+    if metric.endswith("footprint_delta_bytes") and threshold is None:
         budget = metric_stat(record, "budget_bytes", "median")
         return budget + 64 * 1024 * 1024 if budget is not None else None
     return threshold
@@ -716,19 +851,53 @@ def shown_checks(row) -> tuple:
     return shown
 
 
+def unmeasured_reason(row, qh: dict | None) -> str | None:
+    """Why a record cannot be graded against this row at all, or None when it can."""
+    _axis, scenario, *_rest = row
+    if scenario in TABLE_SQL:
+        kind = note_value(qh, "sql_kind") or LEGACY_SQL_KIND.get(scenario)
+        if kind != "table":
+            return f"sql_kind={kind or 'tidak tercatat'}, bukan SQL rencana (tabel)"
+    valid = VALIDITY.get(scenario)
+    if valid:
+        metric, stat, op, limit = valid
+        value = metric_stat(qh, metric, stat)
+        if value is None:
+            return ("rekaman lama: artefak di atas plafon (over-ceiling artefact), "
+                    f"{metric} tidak tercatat" if scenario in OVER_CEILING_ARTEFACT
+                    else f"{metric} tidak tercatat, warna tidak terbukti menyala")
+        if not _holds(op, value, limit):
+            return (f"{value:,.0f} giliran ketikan tanpa warna ({metric} {stat}): "
+                    "yang terukur jalur tanpa warna")
+    return None
+
+
 def axis_verdict(row, qh: dict | None, tp: dict | None) -> str:
-    axis, _scenario, _label, checks, _target, rel, _rel_text = row
+    axis, scenario, _label, checks, _target, rel, _rel_text = row
     if not any(metric_stat(qh, c[0], c[1]) is not None for c in shown_checks(row)):
         return UNMEASURED
+    reason = unmeasured_reason(row, qh)
+    if reason:
+        return f"{UNMEASURED} — {reason}"
     parts = []
     if checks:
-        problems, missing, ungraded = [], [], False
+        problems, missing, notes = [], [], []
+        ungraded = graded = False
+        hz = (qh or {}).get("display_hz")
         for metric, stat, op, threshold in checks:
+            if metric in NEEDS_HZ and (hz is None or hz < NEEDS_HZ[metric]):
+                if metric_stat(qh, metric, stat) is not None:
+                    notes.append(f"{metric} tidak dinilai (panel {hz or '?'} Hz < {NEEDS_HZ[metric]} Hz)")
+                continue
             value = metric_stat(qh, metric, stat)
             if value is None:
-                missing.append(metric)
+                if threshold != INFO:
+                    missing.append(metric)
                 continue
-            limit = _threshold(qh, metric, op, threshold, axis)
+            limit = _threshold(qh, metric, op, threshold, axis, scenario)
+            if limit == INFO:
+                continue
+            graded = True
             if limit is None:
                 ungraded = True
             elif not _holds(op, value, limit):
@@ -744,8 +913,17 @@ def axis_verdict(row, qh: dict | None, tp: dict | None) -> str:
             parts.append(f"Sebagian terukur — {', '.join(missing)} {UNMEASURED}")
         elif ungraded:
             parts.append("Terukur — anggaran store belum dicatat (`budget_bytes`)")
-        else:
+        elif graded:
             parts.append("Memenuhi target absolut")
+        else:
+            parts.append("Terukur — informasional, tidak menggerbang")
+        parts += notes
+    if axis == 2 and metric_stat(qh, "ceiling_rows_per_s", "median") is not None:
+        accepted = CEILING_KIND.get(scenario)
+        got = note_value(qh, "ceiling_kind")
+        if got != accepted:
+            parts.append(f"plafon diabaikan (ceiling_kind={got or 'tidak tercatat'}, "
+                         f"baris ini menerima {accepted or 'tidak ada'})")
     if rel:
         metric, stat, op, ratio = rel
         mine, theirs = metric_stat(qh, metric, stat), metric_stat(tp, metric, stat)
@@ -768,14 +946,15 @@ def axis_sections(results: list[dict]) -> list[str]:
         for row in (r for r in AXIS_ROWS if r[0] == axis):
             _axis, scenario, label, _checks, target, rel, rel_text = row
             qh = latest_app_record(results, scenario, "queryhive")
-            tp = latest_app_record(results, scenario, "tablepro")
+            tp = competitor_record(results, scenario)
             full_target = "; ".join(
                 part for part in (target if target != "—" else "",
                                   f"vs TablePro {rel_text}" if rel else "") if part) or "—"
             cells = shown_checks(row)
             tp_cell = side_cell(tp, cells) if rel else "—"
+            qh_cell = "; ".join(part for part in (side_cell(qh, cells), provenance(row, qh)) if part)
             lines.append(
-                f"| `{scenario}` — {label} | {full_target} | {side_cell(qh, cells)} "
+                f"| `{scenario}` — {label} | {full_target} | {qh_cell} "
                 f"| {tp_cell} | {axis_verdict(row, qh, tp)} |"
             )
         lines.append("")

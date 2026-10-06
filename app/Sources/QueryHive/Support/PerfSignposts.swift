@@ -3,9 +3,10 @@ import Foundation
 import os
 
 /// Signposts for the five intervals the performance plan (§4, item 0.4) measures, plus a small
-/// stamp table that `--bench` reads. Nothing here changes what the app does: a signpost that no
-/// one is recording costs a check inside `os`, and the stamp table is only written while
-/// `recording` is on, which only `BenchMode` turns on.
+/// stamp table that `--bench` reads: the named stages of a Run (`Stage`) and the sub-intervals of a
+/// keystroke (`part`). Nothing here changes what the app does: a signpost that no one is recording
+/// costs a check inside `os`, and the stamp and part tables are only written while `recording` is
+/// on, which only `BenchMode` turns on.
 ///
 /// Read them in Instruments (Points of Interest is not needed; the category is `perf`):
 ///
@@ -56,6 +57,135 @@ enum PerfSignposts {
         lock.unlock()
     }
 
+    // MARK: Stages
+
+    /// The stamps one Run leaves, in the order it passes them (W8-T2 decision §3). `--bench` reads
+    /// them and prints every offset from `run` and the four deltas the hypotheses H1 to H5 name.
+    /// A call site only has to say `PerfSignposts.stamp(.gridAttached)`; the bench does the rest.
+    ///
+    /// The `engine.*` ones are stamped on the FFI thread by `engineEvent`; every other stage is
+    /// main-thread state. A stage nobody stamps is left out of the line, so a lane that has not
+    /// landed its call site yet does not break the others.
+    enum Stage: String, CaseIterable {
+        case run
+        case engineColumns = "engine.columns"
+        case engineProgress = "engine.progress"
+        /// The `columns` event handled on the main queue (AppModel+Run).
+        case columns
+        /// The grid's table view attached to a window (`GridTableView.viewDidMoveToWindow`).
+        case gridAttached
+        /// The first batch of rows seen by the store's poll (`StoreRows`, via `firstRowsEvent`).
+        case firstRows
+        /// The first `draw` that has rows to paint, before the flush.
+        case firstDraw
+        case engineDone = "engine.done"
+        case runDone
+        case firstPaint
+
+        /// The name a metric uses: `engine.done` -> `engine_done`, `gridAttached` -> `grid_attached`.
+        var metric: String { PerfSignposts.snakeCase(rawValue) }
+    }
+
+    static func stamp(_ stage: Stage, onlyFirst: Bool = false) { stamp(stage.rawValue, onlyFirst: onlyFirst) }
+
+    static func time(of stage: Stage) -> CFAbsoluteTime? { time(of: stage.rawValue) }
+
+    /// Forgets every stage stamp, the engine's included. `runBegin` does it for each Run, and a
+    /// bench repeat does it again before it presses Run, so an `onlyFirst` stamp can never be the
+    /// last repeat's.
+    static func clearStages() {
+        lock.lock()
+        stamps = stamps.filter { name, _ in !name.hasPrefix("engine.") && Stage(rawValue: name) == nil }
+        lock.unlock()
+    }
+
+    /// A copy of the stamp table, for the bench to turn into metrics.
+    static func stampSnapshot() -> [String: CFAbsoluteTime] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stamps
+    }
+
+    /// `gridAttached` -> `grid_attached`, `engine.done` -> `engine_done`, `apply.layout` ->
+    /// `apply_layout`: a metric name is lower-case words joined by `_`.
+    static func snakeCase(_ name: String) -> String {
+        var out = ""
+        var separator = false
+        var previous: Character?
+        for character in name {
+            guard character.isLetter || character.isNumber else { separator = true; continue }
+            let wordBreak = character.isUppercase && previous.map { $0.isLowercase || $0.isNumber } == true
+            if !out.isEmpty, separator || wordBreak { out.append("_") }
+            out.append(contentsOf: character.lowercased())
+            separator = false
+            previous = character
+        }
+        return out
+    }
+
+    // MARK: Parts
+
+    /// The sub-intervals inside one keystroke or apply turn (W8-F3's attribution): how long each
+    /// named part took, summed over the turn, and how many times it ran. Free-form names are
+    /// fine; these are the ones the decision lists, so two call sites cannot spell one differently.
+    ///
+    ///     PerfSignposts.part(PerfSignposts.Part.layout) { layoutManager.ensureLayout(forCharacterRange: r) }
+    ///     PerfSignposts.count(PerfSignposts.Part.tempAttrAdd)
+    ///
+    /// A call is a plain `recording` check unless `--bench` is on. `--bench type-*` resets the table
+    /// before each key and prints `part_<name>_p50_ms`, `_p99_ms` and the mean `_count` per key.
+    enum Part {
+        static let replaceAndRuler = "replaceAndRuler"
+        static let inherit = "inherit"
+        static let layout = "layout"
+        static let draw = "draw"
+        static let outlineApply = "outlineApply"
+        static let tempAttrAdd = "tempAttrAdd"
+        static let tempAttrRemove = "tempAttrRemove"
+    }
+
+    struct PartTotal: Equatable {
+        var ms = 0.0
+        var count = 0
+    }
+
+    private static var parts: [String: PartTotal] = [:]
+
+    private static func addPart(_ name: String, ms: Double, count: Int) {
+        lock.lock()
+        var total = parts[name] ?? PartTotal()
+        total.ms += ms
+        total.count += count
+        parts[name] = total
+        lock.unlock()
+    }
+
+    /// Times `body` into the part `name`. Main-thread or not, the table is locked.
+    static func part<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
+        guard recording else { return try body() }
+        let started = CFAbsoluteTimeGetCurrent()
+        defer { addPart(name, ms: (CFAbsoluteTimeGetCurrent() - started) * 1000, count: 1) }
+        return try body()
+    }
+
+    /// Counts `by` occurrences of `name` without timing them, such as temporary attributes written.
+    static func count(_ name: String, by amount: Int = 1) {
+        guard recording else { return }
+        addPart(name, ms: 0, count: amount)
+    }
+
+    static func partsReset() {
+        lock.lock()
+        parts = [:]
+        lock.unlock()
+    }
+
+    static func partsSnapshot() -> [String: PartTotal] {
+        lock.lock()
+        defer { lock.unlock() }
+        return parts
+    }
+
     // MARK: run -> firstRowsEvent -> firstPaint
 
     private static var runState: OSSignpostIntervalState?
@@ -63,7 +193,7 @@ enum PerfSignposts {
 
     static func runBegin() {
         if let state = runState { signposter.endInterval("run", state, "superseded") }
-        clear("firstRows", "firstPaint", "runDone")
+        clearStages()
         paintQueued = false
         stamp("run")
         runState = signposter.beginInterval("run", id: signposter.makeSignpostID())
