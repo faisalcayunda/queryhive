@@ -5,7 +5,7 @@ import XCTest
 @testable import QueryHive
 
 /// The cost of one page read through UniFFI (blueprint D-22, §21.4): a `window` of 64 x 32 and of
-/// 128 x 32 cells, resident on the shared host and spilled on a host of its own, plus `rows_text`
+/// 128 x 32 cells, resident on a host of its own with a large budget and spilled on a host of its own, plus `rows_text`
 /// and the price of the `Data` the buffer arrives in. The numbers decide `StoreRows.pageRows`:
 /// 128 rows if p99 of 128 x 32 is within 0.4 ms including UniFFI, 32 rows if p99 of 64 x 32 is
 /// over 0.4 ms.
@@ -56,10 +56,13 @@ final class StoreWindowBench: BenchCase {
     }
 
     func testWindowResident64And128() throws {
-        let store = try TestStores.makeStore(columns: columns(), rows: rows())
+        // Own host: the 100k x 32 fixture is over the shared 64 MiB host's budget (TooLarge).
+        let (host, directory) = try TestStores.spillingHost(budgetBytes: 1 << 30)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = try TestStores.makeStore(on: host, columns: columns(), rows: rows())
         defer { store.release() }
-        try read(store, height: 64, name: "bench-window-64x32-resident", notes: "window 64 x 32 through UniFFI, resident, shared host")
-        try read(store, height: 128, name: "bench-window-128x32-resident", notes: "window 128 x 32 through UniFFI, resident, shared host")
+        try read(store, height: 64, name: "bench-window-64x32-resident", notes: "window 64 x 32 through UniFFI, resident, own host, 1 GiB budget")
+        try read(store, height: 128, name: "bench-window-128x32-resident", notes: "window 128 x 32 through UniFFI, resident, own host, 1 GiB budget")
     }
 
     /// A host of its own with a real spill directory and a budget a tenth of the data, so most pages
@@ -77,7 +80,9 @@ final class StoreWindowBench: BenchCase {
 
     /// `rows_text` of 64 x 32, and what the copy out of the FFI buffer into `Data` and into strings costs.
     func testRowsTextAndDecode() throws {
-        let store = try TestStores.makeStore(columns: columns(), rows: rows())
+        let (host, directory) = try TestStores.spillingHost(budgetBytes: 1 << 30)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = try TestStores.makeStore(on: host, columns: columns(), rows: rows())
         defer { store.release() }
         let all = Array(0..<UInt32(columnCount))
         var data = Data()

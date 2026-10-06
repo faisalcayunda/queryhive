@@ -34,7 +34,7 @@ import SwiftUI
 enum BenchMode {
     static let synthetic = ["scroll-30x1m", "scroll-500x10k", "open-500x10k", "type-10k", "type-2m", "type-coloured-195k",
                             "tabs-100", "tabs-100-held", "launch-warm", "launch-cold"]
-    static let database = ["ttfr-s1-1k", "ttfr-s1-10k", "rows-wide-500k", "mem-500k", "cancel-pg-sleep"]
+    static let database = ["ttfr-s1-1k", "ttfr-s1-10k", "rows-wide-500k", "mem-500k", "rows-mysql-500k", "rows-trino-500k", "cancel-pg-sleep"]
     /// The names development-plan.md uses, mapped to the ones the report grades.
     static let aliases = ["scroll-1m": "scroll-30x1m", "scroll-500c": "scroll-500x10k",
                           "open-500c": "open-500x10k", "ttfr-pg": "ttfr-s1-1k", "launch": "launch-warm"]
@@ -799,6 +799,7 @@ enum BenchMode {
         case "ttfr-s1-10k": (rows, columns) = (10_000, 3)
         case "rows-wide-500k": (rows, columns) = (500_000, 30)
         case "mem-500k": (rows, columns) = (500_000, 30)
+        case "rows-mysql-500k", "rows-trino-500k": (rows, columns) = (500_000, 0)
         default: (rows, columns) = (1, 1)
         }
         let sql: String
@@ -807,6 +808,13 @@ enum BenchMode {
                 return emitStatus(scenario, "tidak mendukung", "pg_sleep needs PostgreSQL")
             }
             sql = "SELECT pg_sleep(30)"
+        } else if scenario == "rows-mysql-500k" || scenario == "rows-trino-500k" {
+            // Fixed tables from deploy/dev (MySQL 53306, Trino 58080), not a generator.
+            let wanted: ConnectionKind = scenario == "rows-mysql-500k" ? .mysql : .trino
+            guard connection.kind == wanted else {
+                return emitStatus(scenario, "tidak mendukung", "\(scenario) needs QH_BENCH_KIND=\(wanted.rawValue)")
+            }
+            sql = wanted == .mysql ? "SELECT * FROM wide_500k" : "SELECT * FROM tpch.sf1.lineitem LIMIT 500000"
         } else if let generated = generatedSQL(connection.kind, rows: rows, columns: columns) {
             sql = generated
         } else {
@@ -863,6 +871,10 @@ enum BenchMode {
                                              "peak_footprint_delta_bytes": Double(Int64(peak) - Int64(baseline))]
             if let painted = PerfSignposts.time(of: "firstPaint") { metrics["ttfr_ms"] = (painted - started) * 1000 }
             metrics["rows_per_s"] = Double(tab.preview?.rowCount ?? 0) / max(done - started, 0.001)
+            // R-29: what the store holds and what it spilled, next to the footprint.
+            let stats = RustEngine.storeStats()
+            metrics["spilled_bytes"] = Double(stats?.spilledBytes ?? 0)
+            metrics["budget_bytes"] = Double(stats?.budgetBytes ?? 0)
             emit(scenario, metrics, extra: ["display_hz": hz, "row_limit_cap": AppModel.rowLimitCeiling])
         }
     }
