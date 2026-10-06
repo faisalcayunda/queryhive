@@ -121,7 +121,7 @@ impl DbfWriter {
             });
         }
 
-        let mut out = BufWriter::new(File::create(path)?);
+        let mut out = BufWriter::new(crate::create_new(path)?);
         let header_len = 32 + 32 * fields.len() + 1;
         out.write_all(&header(header_len, record_len, codec.language_driver()))?;
         for field in &fields {

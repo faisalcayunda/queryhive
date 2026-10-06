@@ -33,6 +33,25 @@
 //! end — a partially written CSV with a torn last line would be a worse outcome than
 //! the cancel itself.
 //!
+//! # Staging: a file is either complete or not there
+//!
+//! Every part is written to a hidden `.<name>.qhpart` file in the destination
+//! directory (same volume, so the final step is a rename and not a copy) and only
+//! [`Exporter::finish`] moves the parts to their names. Success and a Stop both commit,
+//! because a stopped export is a valid file of the rows that arrived; an error, or an
+//! [`Exporter`] dropped without finishing, deletes the staged files. Until then a file
+//! that was already at the target name is untouched, which is the whole point: the old
+//! `File::create` truncated it the moment the export started, so a failed export of a
+//! file the user had asked to replace left them neither the old file nor a new one.
+//!
+//! The staged name is deterministic (`.report.csv.qhpart`) while it is free, so the app
+//! can point Finder at it; if another export (or a crash) holds that name, a suffix with
+//! the process id and a counter is added and the app simply does not follow that one.
+//!
+//! A split export never replaces a part: `report_part01.csv` already on disk is an error
+//! raised when the second part is opened, before the rows that would be lost are written.
+//! A single-file export replaces its target, as it always did.
+//!
 //! # What is not reproduced
 //!
 //! The Python engine has a second path that formats rows on worker threads
@@ -46,6 +65,7 @@
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use qh_core::{ColumnMeta, Value};
 
@@ -65,6 +85,92 @@ pub fn part_path(out_dir: &Path, basename: &str, extension: &str, index: usize) 
         out_dir.join(format!("{basename}.{extension}"))
     } else {
         out_dir.join(format!("{basename}_part{:02}.{extension}", index + 1))
+    }
+}
+
+/// The name `final_path` is written under until it is complete.
+///
+/// A dot file next to the target, so the rename that finishes it never crosses a
+/// volume. The first choice is deterministic so that a caller can find it; a name that
+/// is already taken (a concurrent export, or the leftover of a killed process) gets the
+/// process id and a counter instead, and is never reused or overwritten.
+pub fn staging_path(final_path: &Path) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = final_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let plain = final_path.with_file_name(format!(".{name}.qhpart"));
+    if fs::symlink_metadata(&plain).is_err() {
+        return plain;
+    }
+    loop {
+        let unique = final_path.with_file_name(format!(
+            ".{name}.{}-{}.qhpart",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::symlink_metadata(&unique).is_err() {
+            return unique;
+        }
+    }
+}
+
+/// Move a finished staged file onto `final_path`, keeping what the file there had.
+///
+/// A plain rename gives the new file the default mode, so a report the user locked down to
+/// 0600 would come back world-readable, and a symlink would be replaced by a regular file
+/// while the file it points at went stale. So: an existing regular file lends its
+/// permissions to the staged one first; a symlink is followed and the file it names is
+/// the one replaced, the link stays.
+/// ponytail: mode only (no owner, ACLs or xattrs), and a link into another volume fails
+/// the rename (EXDEV) instead of copying; a hard link to the old file is still broken.
+pub(crate) fn place(staging: &Path, final_path: &Path) -> Result<(), ExportError> {
+    let target = match fs::symlink_metadata(final_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            fs::canonicalize(final_path).map_err(|_| ExportError::Usage {
+                message: format!(
+                    "{} is a symbolic link that points nowhere. Remove it or choose another name.",
+                    final_path.display()
+                ),
+            })?
+        }
+        _ => final_path.to_path_buf(),
+    };
+    if let Ok(old) = fs::metadata(&target) {
+        if old.is_file() {
+            fs::set_permissions(staging, old.permissions())?;
+        }
+    }
+    fs::rename(staging, &target)?;
+    Ok(())
+}
+
+/// Refuse to put a part where a file already is.
+///
+/// Checked when a part is opened and again just before the commit. ponytail: a
+/// check-then-rename, so a file that appears in the instant between the two is still
+/// replaced; a hard link would close that and does not exist on every volume the app
+/// writes to.
+fn require_free(path: &Path) -> Result<(), ExportError> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(ExportError::Usage {
+            message: format!(
+                "{} already exists, and a split export does not replace a part. Move or delete \
+                 it, or choose another name.",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// What a writer's `truncated()` count means, per format, for the warning.
+fn truncation_note(format: Format) -> &'static str {
+    match format {
+        Format::Xls | Format::Xlsx => "cell(s) cut to the 32,767-character limit of an Excel cell",
+        // The sentence the Python engine shows; `dbf` is the only other writer that cuts.
+        _ => "value(s) truncated to the dbf field width",
     }
 }
 
@@ -142,6 +248,9 @@ pub struct Exporter {
     /// Every file this export has produced or will produce, in part order. Lazy:
     /// only the parts opened so far are here.
     files: Vec<PathBuf>,
+    /// Where each part of `files` is until the commit, same order. Empty once the parts
+    /// have been renamed (or deleted): that is what [`Drop`] checks.
+    staging: Vec<PathBuf>,
     rows: u64,
     warnings: Vec<String>,
     cancelled: bool,
@@ -169,6 +278,7 @@ impl Exporter {
             in_part: 0,
             writer: None,
             files: Vec::new(),
+            staging: Vec::new(),
             rows: 0,
             warnings: Vec::new(),
             cancelled: false,
@@ -183,9 +293,15 @@ impl Exporter {
         self.format
     }
 
-    /// Every file written so far, in part order.
+    /// Every file written so far, in part order, under the names they will have once
+    /// [`Exporter::finish`] has committed them.
     pub fn files(&self) -> &[PathBuf] {
         &self.files
+    }
+
+    /// Where those files are until then, same order: what the app can follow for progress.
+    pub fn staging_files(&self) -> &[PathBuf] {
+        &self.staging
     }
 
     /// Data rows written across all parts. The header is not a row.
@@ -256,15 +372,55 @@ impl Exporter {
         progress(self.rows);
     }
 
-    /// Close the current part. Safe to call twice.
+    /// Close the current part and commit every part to its name. Safe to call twice.
     ///
-    /// Nothing opens a new part afterwards, so this is the end of the export.
+    /// Nothing opens a new part afterwards, so this is the end of the export. A cancelled
+    /// export commits too: what arrived before the Stop is a valid file. A failure
+    /// anywhere in here deletes what was staged and leaves any file already at the target
+    /// names alone.
     pub fn finish(&mut self) -> Result<(), ExportError> {
         if self.finished {
             return Ok(());
         }
         self.finished = true;
-        self.close_part()
+        let result = self.close_part().and_then(|()| self.commit());
+        if result.is_err() {
+            self.abort();
+        }
+        result
+    }
+
+    /// Throw the export away: close the open part and delete every staged file.
+    ///
+    /// For a caller that hit an error of its own mid-export. [`Drop`] does the same, so
+    /// an early `?` cannot leave a half-written file behind either.
+    pub fn abort(&mut self) {
+        self.finished = true;
+        self.writer = None;
+        for path in self.staging.drain(..) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    /// Rename every staged part to its name, all or nothing as far as the checks go.
+    fn commit(&mut self) -> Result<(), ExportError> {
+        if self.files.len() > 1 {
+            for path in &self.files {
+                require_free(path)?;
+            }
+        }
+        let staged = std::mem::take(&mut self.staging);
+        for (index, staging) in staged.iter().enumerate() {
+            if let Err(error) = place(staging, &self.files[index]) {
+                // The parts not yet renamed go; the ones already in place stay, because
+                // they are complete files at names that were free a moment ago.
+                for rest in &staged[index..] {
+                    let _ = fs::remove_file(rest);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Close the part that is open and record anything the writer wants the user to know.
@@ -273,38 +429,41 @@ impl Exporter {
             return Ok(());
         };
         writer.finish()?;
+        // The same sentence the Python engine shows, naming the file it happened
+        // in, because a warning that does not say where to look is not a warning.
+        let name = self
+            .files
+            .last()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.basename.clone());
         let truncated = writer.truncated();
         if truncated > 0 {
-            // The same sentence the Python engine shows, naming the file it happened
-            // in, because a warning that does not say where to look is not a warning.
-            let name = self
-                .files
-                .last()
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.basename.clone());
             self.warnings.push(format!(
-                "{name}: {truncated} value(s) truncated to the dbf field width"
+                "{name}: {truncated} {}",
+                truncation_note(self.format)
             ));
+        }
+        for note in writer.warnings() {
+            self.warnings.push(format!("{name}: {note}"));
         }
         Ok(())
     }
 
-    /// Close the full part and start the next, renaming the first on the way.
+    /// Close the full part and start the next, naming the first on the way.
     fn roll_over(&mut self) -> Result<(), ExportError> {
-        // Closed before it is renamed: a rename over an open handle is fine on Unix
-        // and not fine on Windows, and this crate does not get to assume which.
-        self.close_part()?;
         if self.part == 0 {
-            let renamed = part_path(&self.out_dir, &self.basename, self.format.extension(), 1)
-                .with_file_name(format!(
-                    "{}_part01.{}",
-                    self.basename,
-                    self.format.extension()
-                ));
-            fs::rename(&self.files[0], &renamed)?;
+            // The first part is only called `_part01` now that a second exists. The rename
+            // is of the list; the file on disk is still staged and is renamed at the commit.
+            let renamed = self.out_dir.join(format!(
+                "{}_part01.{}",
+                self.basename,
+                self.format.extension()
+            ));
+            require_free(&renamed)?;
             self.files[0] = renamed;
         }
+        self.close_part()?;
         self.part += 1;
         self.in_part = 0;
         self.open_part(self.part)
@@ -317,9 +476,22 @@ impl Exporter {
             self.format.extension(),
             index,
         );
-        let writer = open(self.format, &path, &self.columns, &self.options)?;
+        if index > 0 {
+            require_free(&path)?;
+        }
+        let staging = staging_path(&path);
+        // The writers that name their content after the file (an HTML title, a SQL table)
+        // would otherwise name it after the staged file.
+        let stem = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned());
+        let mut options = self.options.clone();
+        options.title = options.title.or_else(|| stem.clone());
+        options.sql_table = options.sql_table.or(stem);
+        let writer = open(self.format, &staging, &self.columns, &options)?;
         self.writer = Some(writer);
         self.files.push(path);
+        self.staging.push(staging);
         Ok(())
     }
 
@@ -329,14 +501,21 @@ impl Exporter {
     /// `export` command takes its rows from a cursor — and that caller needs the same
     /// report [`export_rows`] returns. [`Exporter::finish`] must have been called
     /// first; a part still open is closed by nothing here.
-    pub fn into_outcome(self) -> ExportOutcome {
+    pub fn into_outcome(mut self) -> ExportOutcome {
         ExportOutcome {
-            files: self.files,
+            files: std::mem::take(&mut self.files),
             rows: self.rows,
-            columns: self.columns,
-            warnings: self.warnings,
+            columns: std::mem::take(&mut self.columns),
+            warnings: std::mem::take(&mut self.warnings),
             cancelled: self.cancelled,
         }
+    }
+}
+
+/// An export that is dropped unfinished deletes what it staged.
+impl Drop for Exporter {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
 
@@ -374,8 +553,8 @@ pub struct ExportOutcome {
 /// Write rows into one or more files, finishing them however that goes.
 ///
 /// `rows` yields one row at a time and may fail partway — a query that dies after
-/// 900,000 rows leaves a finished part holding 900,000 rows and returns the error,
-/// rather than a file whose trailer was never written.
+/// 900,000 rows returns the error and leaves nothing at the target names: the staged
+/// parts are deleted, and a file that was already there is untouched.
 ///
 /// `cancel` is asked before each row is taken, and a `true` ends the export with
 /// [`ExportOutcome::cancelled`] set and the rows so far kept.
@@ -390,12 +569,10 @@ where
     E: Error + Send + Sync + 'static,
 {
     let mut exporter = Exporter::new(spec)?;
-    let written = feed(&mut exporter, rows, progress, cancel);
-    let finished = exporter.finish();
-    // A close that failed is the more urgent error: the loop's error has already
-    // stopped the export, and this one means the file on disk is not complete.
-    finished?;
-    written?;
+    // An error from the row loop deletes the staged parts (`Drop`); only a loop that
+    // ended, finished or stopped, is committed.
+    feed(&mut exporter, rows, progress, cancel)?;
+    exporter.finish()?;
     Ok(exporter.into_outcome())
 }
 
@@ -708,11 +885,30 @@ mod tests {
         );
     }
 
+    /// Every name in `dir`, so a leftover staged file shows up as a failure.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn a_source_that_dies_mid_stream_still_leaves_a_finished_file() {
-        // A torn file is the failure mode worth a test: the rows that did arrive have
-        // to be readable, and the error still has to come back.
+    fn a_source_that_dies_mid_stream_leaves_nothing_and_spares_the_old_file() {
+        // The old behaviour kept the rows that arrived. That was a file the user could
+        // mistake for the whole result, and `File::create` had already truncated whatever
+        // they were replacing. Now the error comes back, the staged part is deleted, and
+        // the file that was there is the file that is still there.
         let dir = temp_dir("source-error");
+        fs::write(dir.join("report.csv"), "the previous export").expect("old file");
         let rows: Vec<Result<Vec<Value>, std::io::Error>> = vec![
             Ok(row(1)),
             Ok(row(2)),
@@ -732,11 +928,210 @@ mod tests {
 
         let error = outcome.expect_err("the failure must come back, not be swallowed");
         assert!(error.to_string().contains("connection reset"), "{error}");
-        // The rows before the failure, and the file closed properly behind them.
+        assert_eq!(read(&dir.join("report.csv")), "the previous export");
+        assert_eq!(listing(&dir), ["report.csv"], "no staged file may be left");
+    }
+
+    #[test]
+    fn the_old_file_is_untouched_until_the_export_finishes_and_a_stop_commits() {
+        let dir = temp_dir("staged");
+        fs::write(dir.join("report.csv"), "the previous export").expect("old file");
+        let mut exporter = Exporter::new(spec(&dir, "report")).expect("open");
+        for id in 1..=3 {
+            exporter.write_row(&row(id)).expect("row");
+        }
+        // Mid-export: the target is still the old file, and the new one is staged beside it.
+        assert_eq!(read(&dir.join("report.csv")), "the previous export");
+        assert_eq!(exporter.staging_files().len(), 1);
+        assert!(exporter.staging_files()[0].exists());
+        assert_eq!(
+            exporter.staging_files()[0].file_name().expect("name"),
+            ".report.csv.qhpart"
+        );
+
+        // Stop: what arrived is a valid file and takes the name.
+        exporter.mark_cancelled();
+        exporter.finish().expect("finish");
+        assert_eq!(
+            read(&dir.join("report.csv")),
+            "id,name\r\n1,row1\r\n2,row2\r\n3,row3\r\n"
+        );
+        assert_eq!(listing(&dir), ["report.csv"]);
+        assert!(exporter.into_outcome().cancelled);
+    }
+
+    #[test]
+    fn an_exporter_dropped_unfinished_deletes_what_it_staged() {
+        // The early `?` in the engine's row loop: nothing calls `finish`.
+        let dir = temp_dir("dropped");
+        {
+            let mut exporter = Exporter::new(spec(&dir, "report")).expect("open");
+            exporter.write_row(&row(1)).expect("row");
+            assert_eq!(listing(&dir), [".report.csv.qhpart"]);
+        }
+        assert!(listing(&dir).is_empty(), "{:?}", listing(&dir));
+    }
+
+    #[test]
+    fn two_exports_to_one_name_do_not_share_a_staged_file() {
+        let dir = temp_dir("concurrent");
+        let mut first = Exporter::new(spec(&dir, "report")).expect("first");
+        let mut second = Exporter::new(spec(&dir, "report")).expect("second");
+        assert_ne!(first.staging_files(), second.staging_files());
+        first.write_row(&row(1)).expect("row");
+        second.write_row(&row(2)).expect("row");
+        first.finish().expect("first finish");
+        second.finish().expect("second finish");
+        // The later finish wins the name, whole.
+        assert_eq!(read(&dir.join("report.csv")), "id,name\r\n2,row2\r\n");
+        assert_eq!(listing(&dir), ["report.csv"]);
+    }
+
+    #[test]
+    fn a_split_never_replaces_a_part_that_is_already_there() {
+        let dir = temp_dir("part-collision");
+        fs::write(dir.join("report_part01.csv"), "someone else's file").expect("old part");
+        let error = export_rows(
+            ExportSpec {
+                rows_per_file: Some(2),
+                ..spec(&dir, "report")
+            },
+            (1..=5).map(|id| Ok::<_, std::io::Error>(row(id))),
+            None,
+            None,
+        )
+        .expect_err("the collision must stop the export");
+        assert!(error.to_string().contains("report_part01.csv"), "{error}");
+        // Refused when the second part was opened, and nothing of ours is left.
+        assert_eq!(read(&dir.join("report_part01.csv")), "someone else's file");
+        assert_eq!(listing(&dir), ["report_part01.csv"]);
+    }
+
+    #[test]
+    fn a_later_part_that_is_already_there_stops_the_export_too() {
+        let dir = temp_dir("part-collision-late");
+        fs::write(dir.join("report_part03.csv"), "someone else's file").expect("old part");
+        let error = export_rows(
+            ExportSpec {
+                rows_per_file: Some(2),
+                ..spec(&dir, "report")
+            },
+            (1..=5).map(|id| Ok::<_, std::io::Error>(row(id))),
+            None,
+            None,
+        )
+        .expect_err("the collision must stop the export");
+        assert!(error.to_string().contains("report_part03.csv"), "{error}");
+        assert_eq!(listing(&dir), ["report_part03.csv"]);
+    }
+
+    #[test]
+    fn a_single_file_export_still_replaces_its_target() {
+        let dir = temp_dir("replace");
+        fs::write(dir.join("report.csv"), "old").expect("old file");
+        export_rows(
+            spec(&dir, "report"),
+            (1..=2).map(|id| Ok::<_, std::io::Error>(row(id))),
+            None,
+            None,
+        )
+        .expect("export");
         assert_eq!(
             read(&dir.join("report.csv")),
             "id,name\r\n1,row1\r\n2,row2\r\n"
         );
+        assert_eq!(listing(&dir), ["report.csv"]);
+    }
+
+    #[cfg(unix)]
+    fn export_two_rows(dir: &Path, name: &str) {
+        export_rows(
+            spec(dir, name),
+            (1..=2).map(|id| Ok::<_, std::io::Error>(row(id))),
+            None,
+            None,
+        )
+        .expect("export");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("keep-mode");
+        let target = dir.join("report.csv");
+        fs::write(&target, "old").expect("old file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod");
+        export_two_rows(&dir, "report");
+        assert!(read(&target).starts_with("id,name"));
+        let mode = fs::metadata(&target).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_zip_bundle_keeps_the_permissions_of_the_archive_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("keep-mode-zip");
+        let part = dir.join("a.csv");
+        fs::write(&part, "x").expect("part");
+        let zip = dir.join("out.zip");
+        fs::write(&zip, "old").expect("old zip");
+        fs::set_permissions(&zip, fs::Permissions::from_mode(0o600)).expect("chmod");
+        crate::zip::bundle(&[part], &zip).expect("bundle");
+        assert_ne!(fs::read(&zip).expect("zip"), b"old");
+        assert_eq!(
+            fs::metadata(&zip).expect("meta").permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exporting_through_a_symlink_writes_the_file_it_names_and_keeps_the_link() {
+        let dir = temp_dir("symlink");
+        let real = dir.join("real.csv");
+        fs::write(&real, "old").expect("old file");
+        let link = dir.join("report.csv");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        export_two_rows(&dir, "report");
+        assert!(fs::symlink_metadata(&link)
+            .expect("link")
+            .file_type()
+            .is_symlink());
+        assert_eq!(read(&real), "id,name\r\n1,row1\r\n2,row2\r\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_target_is_refused_and_nothing_is_left_staged() {
+        let dir = temp_dir("dangling");
+        let link = dir.join("report.csv");
+        std::os::unix::fs::symlink(dir.join("missing.csv"), &link).expect("symlink");
+        let result = export_rows(
+            spec(&dir, "report"),
+            (1..=2).map(|id| Ok::<_, std::io::Error>(row(id))),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(listing(&dir), ["report.csv"]);
+    }
+
+    #[test]
+    fn a_csv_is_written_as_is_with_no_formula_wrapper_and_no_error_comment() {
+        // PF-21. A cell that looks like a number or a formula is data, written as itself;
+        // and a failure is an error return, never text appended to the file.
+        let dir = temp_dir("csv-plain");
+        let rows = vec![vec![Value::Text("007".into()), Value::Text("=1+1".into())]];
+        export_rows(
+            spec(&dir, "report"),
+            rows.into_iter().map(Ok::<_, std::io::Error>),
+            None,
+            None,
+        )
+        .expect("export");
+        assert_eq!(read(&dir.join("report.csv")), "id,name\r\n007,=1+1\r\n");
     }
 
     #[test]

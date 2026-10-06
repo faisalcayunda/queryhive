@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 qh-core.workspace = true
+# Identifier quoting and the dialect enum, so the SQL export quotes the way the import and
+# the drivers do and says which database it is writing for.
+qh-sql.workspace = true
 # The JSON writer's own formatting, so that the array form and the render path share
 # one implementation of Python's layout rather than two that drift.
 serde_json = { version = "1", features = ["preserve_order"] }

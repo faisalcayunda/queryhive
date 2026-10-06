@@ -79,6 +79,7 @@ mod xls;
 mod xlsx;
 mod zip;
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
@@ -269,7 +270,10 @@ pub struct ExportOptions {
     pub xml_record: String,
     /// HTML title. `None` falls back to the file's stem.
     pub title: Option<String>,
-    pub sql_ident_quote: char,
+    /// The database the script is for: its identifier quote, its string escapes, how it
+    /// spells a binary literal and whether it can hold NaN. The caller defaults this to
+    /// the connection's own dialect and lets the user override it. `Generic` is ANSI.
+    pub sql_dialect: qh_sql::Dialect,
     pub sql_rows_per_insert: usize,
     /// SQL table name. `None` falls back to the file's stem.
     pub sql_table: Option<String>,
@@ -301,7 +305,7 @@ impl Default for ExportOptions {
             xml_root: "RECORDS".to_owned(),
             xml_record: "RECORD".to_owned(),
             title: None,
-            sql_ident_quote: '"',
+            sql_dialect: qh_sql::Dialect::Generic,
             // 200, from the Python engine: several rows per statement keeps a replay
             // fast without building one enormous statement.
             sql_rows_per_insert: 200,
@@ -348,6 +352,15 @@ impl ExportError {
     }
 }
 
+/// Create the file a writer writes to, refusing one that already exists.
+///
+/// Every writer opens its file through here, and the planner always hands it a fresh
+/// staging name, so a path that exists is another export's file and not ours to
+/// truncate. There is no other `File::create` in this crate on purpose.
+pub(crate) fn create_new(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 /// One writer, open on a file.
 pub trait Writer: Send {
     /// Write one row. `row` is as wide as the columns the writer was opened with.
@@ -363,6 +376,12 @@ pub trait Writer: Send {
     /// `getattr(writer, "truncated", 0)` does.
     fn truncated(&self) -> usize {
         0
+    }
+
+    /// Other things the user should be told about this file, each a whole sentence
+    /// without the file name (the planner adds it). Empty when the writer changed nothing.
+    fn warnings(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 

@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use qh_core::{to_text, ColumnMeta, Value};
 
+use crate::xlsx::{cap_cell_text, loses_digits_as_number};
 use crate::{ExportError, ExportOptions, Writer};
 
 /// BIFF8's row ceiling, header included. From the Python source's `XLS_MAX_ROWS`.
@@ -51,9 +52,6 @@ const MAX_ROWS: usize = 65_536;
 
 /// BIFF8's column ceiling.
 const MAX_COLUMNS: usize = 256;
-
-/// A cell's text, which the format caps at this.
-const MAX_CELL_TEXT: usize = 32_767;
 
 /// The start of the Workbook stream's padding: the size at which a stream stops needing
 /// the mini allocation table.
@@ -99,6 +97,8 @@ pub struct XlsWriter {
     rows: Vec<Vec<Cell>>,
     strings: Vec<String>,
     indexes: HashMap<String, usize>,
+    /// Cells cut to Excel's 32,767-unit cap.
+    truncated: usize,
 }
 
 impl XlsWriter {
@@ -138,6 +138,7 @@ impl XlsWriter {
             rows: Vec::new(),
             strings: Vec::new(),
             indexes: HashMap::new(),
+            truncated: 0,
         };
 
         if options.header {
@@ -166,19 +167,25 @@ impl XlsWriter {
         index
     }
 
-    /// A cell's text, capped and with the characters the format cannot carry removed.
+    /// A cell's text, capped at Excel's 32,767 UTF-16 units (without splitting a surrogate
+    /// pair) and counted when it was cut.
     ///
-    /// The cap is applied after the filtering, which is the order the Python engine uses
-    /// and the only one that yields the documented 32,767.
-    fn cell_text(&self, value: &Value) -> String {
-        to_text(value)
-            .unwrap_or_default()
-            .chars()
-            .take(MAX_CELL_TEXT)
-            .collect()
+    /// Nothing is stripped, unlike `xlsx`: the string table is UTF-16 and carries a control
+    /// character as it is. Only XML, which has no way to write one, has to lose them.
+    fn cell_text(&mut self, value: &Value) -> String {
+        let (text, cut) = cap_cell_text(to_text(value).unwrap_or_default());
+        if cut {
+            self.truncated += 1;
+        }
+        text
     }
 
     fn cell_for(&mut self, value: &Value) -> Cell {
+        if loses_digits_as_number(value) {
+            // More than 15 significant digits: a text cell keeps all of them.
+            let text = self.cell_text(value);
+            return Cell::Text(self.intern(&text));
+        }
         match value {
             Value::Null => Cell::Blank,
             Value::Bool(flag) => Cell::Bool(*flag),
@@ -194,8 +201,8 @@ impl XlsWriter {
                 value: *number,
                 style: XF_PLAIN,
             },
-            // Excel holds only doubles, so the digits beyond one are lost here and in
-            // every other Excel format. The Python engine does `float(value)` too.
+            // Excel holds only doubles, but a value with more than 15 significant digits
+            // is text (the check at the top), so nothing a double cannot hold gets here.
             Value::Decimal { unscaled, scale } => Cell::Number {
                 value: *unscaled as f64 / 10f64.powi(i32::from(*scale)),
                 style: XF_PLAIN,
@@ -236,6 +243,10 @@ impl XlsWriter {
 }
 
 impl Writer for XlsWriter {
+    fn truncated(&self) -> usize {
+        self.truncated
+    }
+
     fn write_row(&mut self, row: &[Value]) -> Result<(), ExportError> {
         if self.rows.len() >= MAX_ROWS {
             return Err(ExportError::Usage {
@@ -267,7 +278,7 @@ impl Writer for XlsWriter {
     fn finish(&mut self) -> Result<(), ExportError> {
         let stream = self.workbook_stream()?;
         let document = ole2(&stream);
-        let mut file = std::fs::File::create(&self.path)?;
+        let mut file = crate::create_new(&self.path)?;
         file.write_all(&document)?;
         file.flush()?;
         Ok(())
@@ -1226,5 +1237,60 @@ mod tests {
             "four column names, three hundred distinct row labels, and two long strings",
         );
         assert!(strings.iter().any(|text| text.len() == 9_000));
+    }
+
+    #[test]
+    fn a_value_with_more_than_15_digits_is_text_in_xls_too() {
+        let path = path_for("long-digits");
+        let mut writer =
+            XlsWriter::new(&path, &columns(), &ExportOptions::default()).expect("open");
+        writer
+            .write_row(&[
+                Value::Int(3_174_010_101_900_001),
+                Value::Null,
+                Value::Null,
+                Value::Int(999_999_999_999_999),
+            ])
+            .expect("row");
+        writer.finish().expect("finish");
+        let stream = workbook_stream(&std::fs::read(&path).expect("read back"));
+        let has = |needle: &[u8]| stream.windows(needle.len()).any(|window| window == needle);
+        // The 16-digit one is in the string table, whole; the 15-digit one is not.
+        assert!(has(b"3174010101900001"));
+        assert!(!has(b"999999999999999"));
+    }
+
+    #[test]
+    fn a_cell_over_the_limit_is_cut_in_utf16_units_and_counted_in_xls() {
+        let long = format!("{}😀tail", "a".repeat(32_766));
+        let path = path_for("long-text");
+        let mut writer =
+            XlsWriter::new(&path, &columns(), &ExportOptions::default()).expect("open");
+        writer
+            .write_row(&[
+                Value::Null,
+                Value::Text(long.into()),
+                Value::Null,
+                Value::Null,
+            ])
+            .expect("row");
+        writer
+            .write_row(&[
+                Value::Null,
+                Value::Text("b".repeat(32_767).into()),
+                Value::Null,
+                Value::Null,
+            ])
+            .expect("row");
+        assert_eq!(writer.truncated(), 1);
+        assert_eq!(
+            writer
+                .strings
+                .iter()
+                .map(|s| s.encode_utf16().count())
+                .max(),
+            Some(32_767)
+        );
+        assert!(writer.strings.iter().all(|s| !s.contains('😀')));
     }
 }

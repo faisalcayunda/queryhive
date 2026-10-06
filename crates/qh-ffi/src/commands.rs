@@ -674,6 +674,7 @@ fn format_opts(settings: &Settings, name: &str) -> Result<ExportOptions, CliErro
     options.null_text = settings.raw("NULL_TEXT", "");
     options.jsonl = settings.flag("JSONL", false);
     options.sql_table = optional(settings.raw("SQL_TABLE", ""));
+    options.sql_dialect = sql_dialect(settings)?;
     options.sheet = Some(settings.raw("SHEET", "Sheet1"));
     options.dbf_char_width = usize::try_from(settings.number("DBF_CHAR_WIDTH", 254)?)
         .map_err(|_| CliError::Usage("DBF_CHAR_WIDTH must be a positive number".to_owned()))?;
@@ -692,6 +693,22 @@ fn format_opts(settings: &Settings, name: &str) -> Result<ExportOptions, CliErro
         options.dbf_encoding = dbf_encoding;
     }
     Ok(options)
+}
+
+/// The dialect a SQL export is written for: `SQL_DIALECT` when the user chose one, otherwise
+/// the connection's own, which is what a script exported to be replayed against it needs.
+fn sql_dialect(settings: &Settings) -> Result<Dialect, CliError> {
+    let name = settings.text("SQL_DIALECT", "").to_ascii_lowercase();
+    match name.as_str() {
+        "" => Ok(dialect(settings)),
+        "postgres" | "postgresql" => Ok(Dialect::Postgres),
+        "mysql" | "mariadb" => Ok(Dialect::Mysql),
+        "trino" => Ok(Dialect::Trino),
+        "generic" | "ansi" => Ok(Dialect::Generic),
+        other => Err(CliError::Usage(format!(
+            "unknown SQL_DIALECT '{other}'; expected postgres, mysql, trino or generic"
+        ))),
+    }
 }
 
 fn optional(value: String) -> Option<String> {
@@ -2621,5 +2638,51 @@ mod stop_cause_tests {
             3
         );
         assert!(sentences.iter().all(|s| !s.contains(host)));
+    }
+}
+
+#[cfg(test)]
+mod export_dialect_tests {
+    use super::*;
+
+    fn settings(pairs: &[(&str, &str)]) -> Settings {
+        Settings::from_pairs(pairs.iter().map(|(key, value)| (*key, *value)))
+    }
+
+    #[test]
+    fn a_sql_export_defaults_to_the_connections_dialect_and_the_user_can_override_it() {
+        let mysql = [("DB_KIND", "mysql"), ("DB_HOST", "db")];
+        assert_eq!(sql_dialect(&settings(&mysql)).unwrap(), Dialect::Mysql);
+
+        let mut overridden = mysql.to_vec();
+        overridden.push(("SQL_DIALECT", "Postgres"));
+        assert_eq!(
+            sql_dialect(&settings(&overridden)).unwrap(),
+            Dialect::Postgres
+        );
+
+        let trino = [("DB_KIND", "trino"), ("DB_HOST", "coordinator")];
+        assert_eq!(sql_dialect(&settings(&trino)).unwrap(), Dialect::Trino);
+    }
+
+    #[test]
+    fn an_unknown_sql_dialect_is_refused_by_name() {
+        let error = sql_dialect(&settings(&[("SQL_DIALECT", "oracle")])).unwrap_err();
+        assert!(error.to_string().contains("oracle"), "{error}");
+    }
+
+    #[test]
+    fn format_opts_carries_the_dialect_to_the_writer() {
+        let options = format_opts(
+            &settings(&[
+                ("DB_KIND", "mysql"),
+                ("DB_HOST", "db"),
+                ("SQL_TABLE", "shop.people"),
+            ]),
+            "people",
+        )
+        .unwrap();
+        assert_eq!(options.sql_dialect, Dialect::Mysql);
+        assert_eq!(options.sql_table.as_deref(), Some("shop.people"));
     }
 }

@@ -43,8 +43,47 @@ use crate::{escape, ExportError, ExportOptions, Writer};
 /// Excel's sheet limit, header included.
 const MAX_ROWS: usize = 1_048_576;
 
-/// A cell's text is capped at this by the format.
-const MAX_CELL_TEXT: usize = 32_767;
+/// A cell's text is capped at this by the format, counted in UTF-16 units the way Excel
+/// counts a character.
+pub(crate) const MAX_CELL_TEXT: usize = 32_767;
+
+/// Excel holds a number as a double, which keeps 15 significant decimal digits.
+const MAX_EXACT_DIGITS: usize = 15;
+
+/// Whether a number would lose digits as an Excel number: a BIGINT id, a 16-digit NIK,
+/// a `NUMERIC(38,x)`. Such a value is written as a text cell instead, which shows
+/// every digit and is what an identifier is anyway. Shared with the `xls` writer.
+///
+/// An integer counts all its digits, because a 16-digit one is not safe even where a
+/// double happens to hold it. A decimal's trailing zeros are not significant.
+pub(crate) fn loses_digits_as_number(value: &Value) -> bool {
+    let digits = |n: u128| n.checked_ilog10().map_or(1, |log| log as usize + 1);
+    match value {
+        Value::Int(n) => digits(u128::from(n.unsigned_abs())) > MAX_EXACT_DIGITS,
+        Value::UInt(n) => digits(u128::from(*n)) > MAX_EXACT_DIGITS,
+        Value::Decimal { unscaled, .. } => {
+            let mut n = unscaled.unsigned_abs();
+            while n != 0 && n % 10 == 0 {
+                n /= 10;
+            }
+            digits(n) > MAX_EXACT_DIGITS
+        }
+        _ => false,
+    }
+}
+
+/// `text` cut to [`MAX_CELL_TEXT`] UTF-16 units, without splitting a surrogate pair,
+/// and whether anything was cut. Shared with the `xls` writer.
+pub(crate) fn cap_cell_text(text: String) -> (String, bool) {
+    let mut units = 0usize;
+    for (at, character) in text.char_indices() {
+        units += character.len_utf16();
+        if units > MAX_CELL_TEXT {
+            return (text[..at].to_owned(), true);
+        }
+    }
+    (text, false)
+}
 
 /// The serial number for 1970-01-01 in Excel's 1900 date system.
 ///
@@ -66,6 +105,9 @@ pub struct XlsxWriter {
     sheet_entry: usize,
     crc: Crc32,
     sheet_bytes: u64,
+    /// Cells cut to the 32,767-unit cap, and cells that had control characters removed.
+    truncated: usize,
+    stripped: usize,
 }
 
 impl XlsxWriter {
@@ -114,6 +156,8 @@ impl XlsxWriter {
             sheet_entry,
             crc: Crc32::new(),
             sheet_bytes: 0,
+            truncated: 0,
+            stripped: 0,
         };
 
         let prologue = SHEET_PROLOGUE;
@@ -168,6 +212,20 @@ impl Writer for XlsxWriter {
         Ok(())
     }
 
+    fn truncated(&self) -> usize {
+        self.truncated
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        if self.stripped == 0 {
+            return Vec::new();
+        }
+        vec![format!(
+            "{} cell(s) had control characters removed, which an XLSX file cannot carry",
+            self.stripped
+        )]
+    }
+
     fn finish(&mut self) -> Result<(), ExportError> {
         self.write_sheet(SHEET_EPILOGUE.as_bytes())?;
         let (crc, bytes) = (self.crc.value(), self.sheet_bytes);
@@ -189,8 +247,13 @@ impl XlsxWriter {
     /// Python's `_excel_value`, and the fall-through is the interesting part: anything
     /// Excel has no native type for becomes text, with the characters XML forbids
     /// removed first — not escaped, because XML 1.0 has no escape for them.
-    fn cell(&self, index: usize, value: &Value) -> Option<String> {
+    fn cell(&mut self, index: usize, value: &Value) -> Option<String> {
         let reference = format!("{}{}", column_letter(index), self.row);
+        if loses_digits_as_number(value) {
+            // Every digit survives as text; as a number the 16th would not.
+            let text = to_text(value).unwrap_or_default();
+            return Some(inline_string(&reference, &text));
+        }
         let number = |style: u8, text: String| {
             if style == STYLE_PLAIN {
                 Some(format!("<c r=\"{reference}\"><v>{text}</v></c>"))
@@ -214,8 +277,9 @@ impl XlsxWriter {
             // Excel holds only doubles. `format_float` spells a whole number `1.0`,
             // which Excel parses as a number, and it is not Python-specific here.
             Value::Float(value) => number(STYLE_PLAIN, qh_core::render::format_float(*value)),
-            // `float(value)` in the Python engine: Excel has no exact decimal, so the
-            // digits beyond a double's reach are lost in this format and no other.
+            // Excel has no exact decimal, but a value with more than 15 significant digits
+            // never gets here (it is text, see `loses_digits_as_number`), so the double
+            // holds everything that is left.
             Value::Decimal { unscaled, scale } => {
                 let divisor = 10f64.powi(i32::from(*scale));
                 number(
@@ -240,13 +304,21 @@ impl XlsxWriter {
 
     /// The text form, with the characters XML cannot carry removed and the length
     /// capped — in that order, which is what the Python engine does and the only order
-    /// that gives the documented 32,767.
-    fn text_of(&self, value: &Value) -> String {
+    /// that gives the documented 32,767. Both are counted for the warning.
+    fn text_of(&mut self, value: &Value) -> String {
         let text = to_text(value).unwrap_or_default();
-        text.chars()
+        let kept: String = text
+            .chars()
             .filter(|character| !is_xml_control(*character))
-            .take(MAX_CELL_TEXT)
-            .collect()
+            .collect();
+        if kept.len() != text.len() {
+            self.stripped += 1;
+        }
+        let (kept, cut) = cap_cell_text(kept);
+        if cut {
+            self.truncated += 1;
+        }
+        kept
     }
 }
 
@@ -677,9 +749,9 @@ mod tests {
     }
 
     #[test]
-    fn a_decimal_loses_its_extra_digits_here_and_nowhere_else() {
-        // Excel holds only doubles. The Python engine does `float(value)` here too, so
-        // this is parity rather than a limitation this crate introduces.
+    fn a_decimal_that_a_double_holds_is_a_number() {
+        // 15 significant digits or fewer round-trip through a double, so the cell stays a
+        // number a spreadsheet can add up.
         let path = path_for("decimal");
         write(
             &path,
@@ -696,6 +768,113 @@ mod tests {
         let entries = read_zip(&std::fs::read(&path).expect("read back"));
         let sheet = part(&entries, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("<c r=\"A2\"><v>1.5</v></c>"), "{sheet}");
+    }
+
+    #[test]
+    fn a_value_with_more_than_15_digits_is_text_so_no_digit_is_lost() {
+        // A 16-digit NIK, a BIGINT id and a NUMERIC(38,x) are identifiers and exact
+        // quantities; as doubles they would end in zeros or in a rounded digit.
+        let path = path_for("long-digits");
+        write(
+            &path,
+            &ExportOptions::default(),
+            &[vec![
+                Value::Int(3_174_010_101_900_001),
+                Value::Int(i64::MAX),
+                Value::Decimal {
+                    unscaled: 12_345_678_901_234_567_890_123_456_789_012_345_678,
+                    scale: 10,
+                },
+            ]],
+        );
+        let entries = read_zip(&std::fs::read(&path).expect("read back"));
+        let sheet = part(&entries, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains("<c r=\"A2\" t=\"inlineStr\"><is><t>3174010101900001</t></is></c>"),
+            "{sheet}"
+        );
+        assert!(sheet.contains("<t>9223372036854775807</t>"), "{sheet}");
+        assert!(
+            sheet.contains("<t>1234567890123456789012345678.9012345678</t>"),
+            "{sheet}"
+        );
+    }
+
+    #[test]
+    fn fifteen_digits_and_a_decimal_with_trailing_zeros_stay_numbers() {
+        let path = path_for("fifteen-digits");
+        write(
+            &path,
+            &ExportOptions::default(),
+            &[vec![
+                Value::Int(999_999_999_999_999),
+                Value::Int(-123_456_789_012_345),
+                // 20 digits, but 2 significant: 1.5 stored with 19 zeros of scale.
+                Value::Decimal {
+                    unscaled: 15_000_000_000_000_000_000,
+                    scale: 19,
+                },
+            ]],
+        );
+        let entries = read_zip(&std::fs::read(&path).expect("read back"));
+        let sheet = part(&entries, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains("<c r=\"A2\"><v>999999999999999</v></c>"),
+            "{sheet}"
+        );
+        assert!(
+            sheet.contains("<c r=\"B2\"><v>-123456789012345</v></c>"),
+            "{sheet}"
+        );
+        assert!(sheet.contains("<c r=\"C2\"><v>1.5</v></c>"), "{sheet}");
+    }
+
+    #[test]
+    fn a_cell_over_the_limit_is_cut_in_utf16_units_and_counted() {
+        // 32,766 ASCII units plus a 2-unit emoji is 32,768: the emoji must go whole, not
+        // be split into a lone surrogate (which is not valid UTF-8 and so cannot be made).
+        let long = format!("{}😀tail", "a".repeat(MAX_CELL_TEXT - 1));
+        let exact = "b".repeat(MAX_CELL_TEXT);
+        let path = path_for("long-text");
+        let mut writer =
+            XlsxWriter::new(&path, &columns(), &ExportOptions::default()).expect("open");
+        writer
+            .write_row(&[Value::Null, Value::Null, Value::Text(long.into())])
+            .expect("row");
+        writer
+            .write_row(&[Value::Null, Value::Null, Value::Text(exact.clone().into())])
+            .expect("row");
+        // Cut once: the exact-length cell is whole.
+        assert_eq!(writer.truncated(), 1);
+        writer.finish().expect("finish");
+        let entries = read_zip(&std::fs::read(&path).expect("read back"));
+        let sheet = part(&entries, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains(&format!("<t>{}</t>", "a".repeat(MAX_CELL_TEXT - 1))),
+            "cut before the emoji"
+        );
+        assert!(!sheet.contains('😀'));
+        assert!(sheet.contains(&exact));
+    }
+
+    #[test]
+    fn stripped_control_characters_are_counted_and_reported() {
+        let path = path_for("controls");
+        let mut writer =
+            XlsxWriter::new(&path, &columns(), &ExportOptions::default()).expect("open");
+        writer
+            .write_row(&[Value::Null, Value::Null, Value::Text("a\u{1}b".into())])
+            .expect("row");
+        writer
+            .write_row(&[Value::Null, Value::Null, Value::Text("clean".into())])
+            .expect("row");
+        assert_eq!(writer.truncated(), 0);
+        let warnings = writer.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("1 cell(s) had control characters removed"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

@@ -344,6 +344,25 @@ Klasifikasinya **bukan regresi**, dan tiga hal yang dicek sebelum mengklasifikas
 Rekaman ini hanya bisa diperbarui dengan `live_cases.py --record --force <id>`, dan perubahan teks
 DDL atau `kinds` di salah satunya adalah keputusan, bukan efek samping.
 
+### D-12 — Ekspor yang jujur: berkas bertahap, angka panjang, pemotongan terlapor, SQL per dialek · **Perbaikan disengaja**
+
+W12-T8 (EXPORT-2; DBX-9, DBX-33, DBX-34, DBX-35, PF-21). Tidak ada kasus golden yang berubah:
+`export_csv`, `postgres_export_live`, dan `mysql_export_live` hanya memakai CSV dan satu berkas, dan
+bytes serta urutan peristiwanya identik. Yang berubah ada di luar jangkauan golden, dan tes
+`crates/qh-export` yang mengunci masing-masing:
+
+| Perilaku lama (mesin Python dan Rust sebelum W12-T8) | Perilaku baru | Alasan |
+|---|---|---|
+| Berkas tujuan dibuat (dipotong) sejak ekspor mulai | Setiap bagian ditulis ke `.<nama>.<ext>.qhpart` di direktori tujuan, di-rename saat selesai atau saat Stop, dihapus saat galat | Ekspor yang gagal tidak lagi meninggalkan berkas setengah jadi atau menghapus berkas lama yang mau diganti |
+| Sumber baris yang gagal di tengah meninggalkan berkas berisi baris yang sempat tiba | Galat dikembalikan dan tidak ada berkas (berkas lama utuh) | Berkas parsial mudah dikira hasil lengkap. Stop oleh pengguna tetap menyimpan baris yang sempat tiba |
+| `_part01` yang sudah ada ditimpa diam-diam saat ekspor terbagi | Galat penggunaan sebelum baris yang akan hilang ditulis, untuk `_part01` maupun bagian berikutnya | Ekspor yang terbagi tidak pernah mengganti berkas milik orang lain. Ekspor satu berkas tetap mengganti targetnya |
+| XLSX dan XLS menulis BIGINT, NIK 16 digit, dan NUMERIC(38,x) sebagai double | Nilai dengan lebih dari 15 digit signifikan menjadi sel teks | Digit ke-16 dan seterusnya hilang diam-diam sebagai angka |
+| Sel di atas 32.767 karakter dipotong tanpa kabar (dihitung per code point), karakter kontrol XLSX dibuang tanpa kabar | Dihitung dalam unit UTF-16 tanpa memecah pasangan surrogat, dan dilaporkan di `warnings` dengan teks per format | Pemotongan yang tidak terlapor adalah cara data hilang tanpa ketahuan |
+| Ekspor SQL selalu memakai `"`, mengutip `schema.tabel` sebagai satu nama, tidak menggandakan backslash MySQL, menulis bytea sebagai `X'..'`, dan `nan` telanjang untuk float tak hingga | Mengikuti dialek koneksi (setelan `SQL_DIALECT` menimpanya): kutip dialek, nama berkualifikasi dipecah sebelum dikutip, backslash MySQL digandakan, bytea PostgreSQL lewat `decode('..','hex')`, NaN dan tak hingga dikutip untuk PostgreSQL dan NULL dengan peringatan untuk dialek lain | Skrip yang diekspor harus bisa diputar ulang di server asalnya |
+
+PF-21 (tanpa pembungkus `="..."` pada CSV, tanpa galat yang ditulis sebagai komentar di dalam berkas)
+sudah terpenuhi oleh penulis CSV saat ini dan sekarang dikunci tes.
+
 ## Temuan yang sudah ditutup
 
 ### T-1 — Dua aturan berbeda untuk `timestamptz` · **Ditutup 22 Sep 2026**

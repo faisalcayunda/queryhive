@@ -160,7 +160,7 @@ impl ParquetWriter {
             .set_compression(Compression::UNCOMPRESSED)
             .set_created_by("QueryHive".to_owned())
             .build();
-        let file = File::create(path)?;
+        let file = crate::create_new(path)?;
         let writer = SerializedFileWriter::new(BufWriter::new(file), schema, Arc::new(properties))?;
         Ok(Self {
             writer,

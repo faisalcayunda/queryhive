@@ -9,6 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use qh_core::{to_text, ColumnMeta, Value};
+use qh_sql::{quote_ident, Dialect, IdentStyle};
 use serde_json::Value as Json;
 
 use crate::{escape, Codec, ExportError, ExportOptions, Format, Writer};
@@ -49,7 +50,7 @@ impl DelimitedWriter {
         // Resolved before the file exists: an unknown name must not leave an empty file
         // behind for the caller to wonder about.
         let codec = Codec::resolve("ENCODING", &options.encoding)?;
-        let mut out = BufWriter::new(File::create(path)?);
+        let mut out = BufWriter::new(crate::create_new(path)?);
 
         // Written before anything else so that Excel reads the file as UTF-8, which is
         // what the Python engine's `bom` option did — and only when the file really is
@@ -206,7 +207,7 @@ impl JsonWriter {
         columns: &[ColumnMeta],
         options: &ExportOptions,
     ) -> Result<Self, ExportError> {
-        let mut out = BufWriter::new(File::create(path)?);
+        let mut out = BufWriter::new(crate::create_new(path)?);
         let lines = options.jsonl;
         if !lines {
             out.write_all(b"[\n")?;
@@ -366,7 +367,7 @@ impl XmlWriter {
         columns: &[ColumnMeta],
         options: &ExportOptions,
     ) -> Result<Self, ExportError> {
-        let mut out = BufWriter::new(File::create(path)?);
+        let mut out = BufWriter::new(crate::create_new(path)?);
         let root = options.xml_root.clone();
         let record = options.xml_record.clone();
         out.write_all(
@@ -515,7 +516,7 @@ impl HtmlWriter {
             .map(|column| format!("<th>{}</th>", escape(&column.name)))
             .collect();
 
-        let mut out = BufWriter::new(File::create(path)?);
+        let mut out = BufWriter::new(crate::create_new(path)?);
         out.write_all(
             HTML_HEAD
                 .replace("{title}", &title)
@@ -575,6 +576,50 @@ pub struct SqlWriter {
     prefix: String,
     rows_per_insert: usize,
     buffer: Vec<String>,
+    dialect: Dialect,
+    /// NaN and infinity written as NULL because the dialect has no literal for them.
+    non_finite: usize,
+}
+
+/// The identifier quoting a dialect uses.
+fn style_of(dialect: Dialect) -> IdentStyle {
+    match dialect {
+        Dialect::Mysql => IdentStyle::Mysql,
+        _ => IdentStyle::Ansi,
+    }
+}
+
+/// `schema.table` as the quoted, dotted name it is, each part quoted on its own.
+///
+/// The text is split at every dot that is not inside a quote the user already wrote
+/// (`"my.schema".t` is two parts), so `public.people` is `"public"."people"` and not one
+/// table called `public.people`. ponytail: a table whose own name holds a dot has to be
+/// given quoted; there is no other way to tell it from a qualifier.
+fn qualified_name(name: &str, style: IdentStyle) -> String {
+    let mut parts = Vec::new();
+    let mut part = String::new();
+    let mut open: Option<char> = None;
+    let mut characters = name.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (open, character) {
+            // A doubled quote inside quotes is the quote itself.
+            (Some(quote), c) if c == quote && characters.peek() == Some(&quote) => {
+                part.push(quote);
+                characters.next();
+            }
+            (Some(quote), c) if c == quote => open = None,
+            (Some(_), c) => part.push(c),
+            (None, '"' | '`') if part.is_empty() => open = Some(character),
+            (None, '.') => parts.push(std::mem::take(&mut part)),
+            (None, c) => part.push(c),
+        }
+    }
+    parts.push(part);
+    parts
+        .iter()
+        .map(|part| quote_ident(style, part))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 impl SqlWriter {
@@ -583,7 +628,7 @@ impl SqlWriter {
         columns: &[ColumnMeta],
         options: &ExportOptions,
     ) -> Result<Self, ExportError> {
-        let quote = options.sql_ident_quote;
+        let style = style_of(options.sql_dialect);
         let table = match &options.sql_table {
             Some(table) => table.clone(),
             None => path
@@ -593,22 +638,20 @@ impl SqlWriter {
         };
         let cols: Vec<String> = columns
             .iter()
-            .map(|column| {
-                format!(
-                    "{quote}{}{quote}",
-                    column.name.replace(quote, &quote.to_string().repeat(2))
-                )
-            })
+            .map(|column| quote_ident(style, &column.name))
             .collect();
 
         Ok(Self {
-            out: BufWriter::new(File::create(path)?),
+            out: BufWriter::new(crate::create_new(path)?),
             prefix: format!(
-                "INSERT INTO {quote}{table}{quote} ({}) VALUES\n",
+                "INSERT INTO {} ({}) VALUES\n",
+                qualified_name(&table, style),
                 cols.join(", ")
             ),
             rows_per_insert: options.sql_rows_per_insert.max(1),
             buffer: Vec::new(),
+            dialect: options.sql_dialect,
+            non_finite: 0,
         })
     }
 
@@ -625,12 +668,25 @@ impl SqlWriter {
 
 impl Writer for SqlWriter {
     fn write_row(&mut self, row: &[Value]) -> Result<(), ExportError> {
-        let cells: Vec<String> = row.iter().map(literal).collect();
+        let cells: Vec<String> = row
+            .iter()
+            .map(|value| literal(value, self.dialect, &mut self.non_finite))
+            .collect();
         self.buffer.push(format!("({})", cells.join(", ")));
         if self.buffer.len() >= self.rows_per_insert {
             self.flush()?;
         }
         Ok(())
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        if self.non_finite == 0 {
+            return Vec::new();
+        }
+        vec![format!(
+            "{} NaN or infinite float(s) written as NULL: this SQL dialect has no literal for them",
+            self.non_finite
+        )]
     }
 
     fn finish(&mut self) -> Result<(), ExportError> {
@@ -640,12 +696,18 @@ impl Writer for SqlWriter {
     }
 }
 
-/// One SQL literal.
+/// One SQL literal, in `dialect`.
 ///
 /// The order of the checks is the Python engine's and it matters: `bool` is a
 /// subclass of `int` in Python, so the boolean check has to come first or `true`
 /// becomes `1`.
-pub(crate) fn literal(value: &Value) -> String {
+///
+/// What differs by dialect, and nothing else does: MySQL reads a backslash in a string as
+/// an escape, so a backslash that is data is doubled; PostgreSQL has no `X'..'` for a
+/// `bytea` column (that is a bit string there), so bytes go through `decode(..., 'hex')`;
+/// and only PostgreSQL has a quoted spelling of NaN and infinity, so the others get NULL,
+/// counted in `non_finite` for the warning.
+pub(crate) fn literal(value: &Value, dialect: Dialect, non_finite: &mut usize) -> String {
     match value {
         Value::Null => "NULL".to_owned(),
         Value::Bool(flag) => if *flag { "TRUE" } else { "FALSE" }.to_owned(),
@@ -653,15 +715,41 @@ pub(crate) fn literal(value: &Value) -> String {
         // database that reads this back.
         Value::Int(number) => number.to_string(),
         Value::UInt(number) => number.to_string(),
+        Value::Float(number) if !number.is_finite() => match dialect {
+            Dialect::Postgres => {
+                let text = if number.is_nan() {
+                    "NaN"
+                } else if *number > 0.0 {
+                    "Infinity"
+                } else {
+                    "-Infinity"
+                };
+                format!("'{text}'")
+            }
+            _ => {
+                *non_finite += 1;
+                "NULL".to_owned()
+            }
+        },
         Value::Float(number) => qh_core::render::format_float(*number),
         Value::Decimal { unscaled, scale } => qh_core::render::format_decimal(*unscaled, *scale),
-        // Hex bytes, the same form SQL itself uses for a binary literal.
-        Value::Bytes(bytes) => format!("X'{}'", qh_core::render::hex_encode(bytes)),
+        Value::Bytes(bytes) => {
+            let hex = qh_core::render::hex_encode(bytes);
+            match dialect {
+                Dialect::Postgres => format!("decode('{hex}', 'hex')"),
+                _ => format!("X'{hex}'"),
+            }
+        }
         // Everything else is a string: a timestamp written as a quoted ISO text is
         // what every dialect will parse back, and a doubled quote is SQL's own
         // escaping.
         other => {
             let text = to_text(other).unwrap_or_default();
+            let text = if dialect == Dialect::Mysql {
+                text.replace('\\', "\\\\")
+            } else {
+                text
+            };
             format!("'{}'", text.replace('\'', "''"))
         }
     }
@@ -1128,5 +1216,109 @@ mod tests {
             chunked.push_str(&render_html(chunk));
         }
         assert_eq!(chunked, render_html(&rows));
+    }
+
+    /// A SQL export of one row in `dialect`, to read the quoting and the literals back.
+    fn sql_in(dialect: Dialect, table: &str, row: Vec<Value>) -> String {
+        let options = ExportOptions {
+            sql_dialect: dialect,
+            sql_table: Some(table.to_owned()),
+            ..ExportOptions::default()
+        };
+        write_text(Format::Sql, &columns(&["a`b", "c\"d"]), &options, &[row])
+    }
+
+    #[test]
+    fn the_sql_export_quotes_the_way_the_dialect_does() {
+        let row = || vec![Value::Int(1), Value::Int(2)];
+        assert_eq!(
+            sql_in(Dialect::Postgres, "t", row()),
+            "INSERT INTO \"t\" (\"a`b\", \"c\"\"d\") VALUES\n(1, 2);\n"
+        );
+        assert_eq!(
+            sql_in(Dialect::Mysql, "t", row()),
+            "INSERT INTO `t` (`a``b`, `c\"d`) VALUES\n(1, 2);\n"
+        );
+    }
+
+    #[test]
+    fn a_qualified_table_is_split_before_it_is_quoted() {
+        let row = || vec![Value::Int(1), Value::Int(2)];
+        let head = |dialect, table: &str| {
+            sql_in(dialect, table, row())
+                .lines()
+                .next()
+                .expect("a line")
+                .split(" (")
+                .next()
+                .expect("a head")
+                .to_owned()
+        };
+        assert_eq!(
+            head(Dialect::Postgres, "public.people"),
+            "INSERT INTO \"public\".\"people\""
+        );
+        assert_eq!(
+            head(Dialect::Mysql, "shop.people"),
+            "INSERT INTO `shop`.`people`"
+        );
+        assert_eq!(
+            head(Dialect::Trino, "hive.sales.people"),
+            "INSERT INTO \"hive\".\"sales\".\"people\""
+        );
+        // Quoted by the user: a dot inside quotes is part of the name, and the other
+        // dialect's quote is just a character.
+        assert_eq!(
+            head(Dialect::Postgres, "\"my.schema\".t"),
+            "INSERT INTO \"my.schema\".\"t\""
+        );
+        assert_eq!(
+            head(Dialect::Postgres, "a\"\"b.c"),
+            "INSERT INTO \"a\"\"\"\"b\".\"c\""
+        );
+    }
+
+    #[test]
+    fn mysql_doubles_a_backslash_and_the_others_do_not() {
+        let row = || vec![Value::Text("C:\\temp\\it's".into()), Value::Null];
+        assert!(sql_in(Dialect::Mysql, "t", row()).contains("('C:\\\\temp\\\\it''s', NULL)"));
+        assert!(sql_in(Dialect::Postgres, "t", row()).contains("('C:\\temp\\it''s', NULL)"));
+        assert!(sql_in(Dialect::Generic, "t", row()).contains("('C:\\temp\\it''s', NULL)"));
+    }
+
+    #[test]
+    fn postgres_bytea_goes_through_decode_and_the_others_keep_x_quote() {
+        let row = || vec![Value::Bytes(vec![0xde, 0xad]), Value::Null];
+        assert!(sql_in(Dialect::Postgres, "t", row()).contains("(decode('dead', 'hex'), NULL)"));
+        assert!(sql_in(Dialect::Mysql, "t", row()).contains("(X'dead', NULL)"));
+        assert!(sql_in(Dialect::Trino, "t", row()).contains("(X'dead', NULL)"));
+    }
+
+    #[test]
+    fn a_non_finite_float_is_quoted_for_postgres_and_null_with_a_warning_elsewhere() {
+        let row = || vec![Value::Float(f64::NAN), Value::Float(f64::NEG_INFINITY)];
+        assert!(sql_in(Dialect::Postgres, "t", row()).contains("('NaN', '-Infinity')"));
+        assert!(sql_in(Dialect::Mysql, "t", row()).contains("(NULL, NULL)"));
+
+        let path = std::env::temp_dir().join(format!("qh-sql-nan-{}.sql", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let options = ExportOptions {
+            sql_dialect: Dialect::Mysql,
+            ..ExportOptions::default()
+        };
+        let mut writer =
+            crate::open(Format::Sql, &path, &columns(&["a", "b"]), &options).expect("open");
+        writer.write_row(&row()).expect("row");
+        writer
+            .write_row(&[Value::Float(f64::INFINITY), Value::Float(1.5)])
+            .expect("row");
+        writer.finish().expect("finish");
+        let warnings = writer.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("3 NaN or infinite float(s) written as NULL"),
+            "{warnings:?}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

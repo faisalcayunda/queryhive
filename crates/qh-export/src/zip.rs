@@ -66,7 +66,7 @@ struct CentralEntry {
 impl Zip {
     pub(crate) fn create(path: &Path) -> Result<Self, ExportError> {
         Ok(Self {
-            out: BufWriter::new(File::create(path)?),
+            out: BufWriter::new(crate::create_new(path)?),
             offset: 0,
             entries: Vec::new(),
         })
@@ -237,18 +237,30 @@ impl<W: Write> Write for Counted<W> {
 /// A file that cannot be read is an error, not a partial archive: half a bundle looks
 /// exactly like a complete one until it is opened.
 pub fn bundle(files: &[PathBuf], zip_path: &Path) -> Result<PathBuf, ExportError> {
-    let mut zip = Zip::create(zip_path)?;
-    for path in files {
-        let name = path
+    // Staged like an export part: a bundle that fails halfway is deleted, and an archive
+    // already at `zip_path` is replaced only by a complete one.
+    let staging = crate::plan::staging_path(zip_path);
+    let built = write_bundle(files, &staging);
+    let placed = built.and_then(|()| crate::plan::place(&staging, zip_path));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    placed?;
+    Ok(zip_path.to_path_buf())
+}
+
+fn write_bundle(files: &[PathBuf], path: &Path) -> Result<(), ExportError> {
+    let mut zip = Zip::create(path)?;
+    for file in files {
+        let name = file
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .ok_or_else(|| ExportError::Usage {
-                message: format!("cannot bundle {}: it has no file name", path.display()),
+                message: format!("cannot bundle {}: it has no file name", file.display()),
             })?;
-        zip.add_file(&name, path)?;
+        zip.add_file(&name, file)?;
     }
-    zip.finish()?;
-    Ok(zip_path.to_path_buf())
+    zip.finish()
 }
 
 fn local_header(
