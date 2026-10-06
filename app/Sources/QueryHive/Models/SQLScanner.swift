@@ -37,7 +37,16 @@ struct SQLScanner {
         return parameters.compactMap { seen.insert($0.name).inserted ? $0.name : nil }
     }
 
-    static func scan(_ sql: String) -> SQLScanner {
+    /// Scans `sql` for the driver that will run it. Only PostgreSQL has a slice, so only there does a
+    /// bracket change what a colon means; the default is PostgreSQL's, the conservative reading.
+    ///
+    /// A `[` opens either a subscript or an array constructor. A colon at a subscript's own paren
+    /// depth is a slice bound (`arr[lo:hi]`, `arr[:n]`) and not a parameter; a constructor
+    /// (`ARRAY[...]`, or a `[` nested straight in one) and anything deeper in parentheses
+    /// (`arr[f(:i):3]`) stay parameter-aware. MySQL and Trino ignore brackets. The same rule, with
+    /// the same case table (`crates/qh-editor/tests/fixtures/params/cases.tsv`), is in
+    /// `crates/qh-editor/src/classify.rs`.
+    static func scan(_ sql: String, driver: ConnectionKind = .postgres) -> SQLScanner {
         let units = Array(sql.utf16)
         let length = units.count
         var opaque: [NSRange] = []
@@ -55,13 +64,37 @@ struct SQLScanner {
         }
 
         var index = 0
-        // Bracket depth, so `arr[lo:hi]` is a slice and not a parameter named `hi`.
-        var depth = 0
+        let slices = driver == .postgres
+        var parens = 0
+        // Open brackets, nearest last: whether it is a constructor, and the paren depth it opened at.
+        var brackets: [(constructor: Bool, parens: Int)] = []
+
+        /// Whether a `[` at `index` opens an array constructor rather than a subscript.
+        func opensConstructor(at index: Int) -> Bool {
+            var end = index
+            while end > 0, units[end - 1] == space || units[end - 1] == tab || units[end - 1] == newline
+                    || units[end - 1] == carriage { end -= 1 }
+            guard end > 0 else { return false }
+            if (units[end - 1] == openBracket || units[end - 1] == comma),
+               brackets.last?.constructor == true { return true }
+            var start = end
+            while start > 0, isNameBody(units[start - 1]) { start -= 1 }
+            return String(utf16CodeUnits: Array(units[start..<end]), count: end - start)
+                .lowercased() == "array"
+        }
+
         while index < length {
             let unit = units[index]
 
-            if unit == openBracket { depth += 1; index += 1; continue }
-            if unit == closeBracket { depth = max(0, depth - 1); index += 1; continue }
+            if slices {
+                switch unit {
+                case openParen: parens += 1
+                case closeParen: parens = max(0, parens - 1)
+                case openBracket: brackets.append((opensConstructor(at: index), parens))
+                case closeBracket: _ = brackets.popLast()
+                default: break
+                }
+            }
 
             // A line comment: to the end of the line.
             if unit == dash, index + 1 < length, units[index + 1] == dash {
@@ -111,7 +144,8 @@ struct SQLScanner {
 
             // `:name`, in code and not after another colon: `a::text` is a cast, and `:=` is an
             // assignment, and neither is a parameter.
-            if unit == colon, depth == 0, index + 1 < length,
+            if unit == colon, index + 1 < length,
+               !(slices && brackets.last.map { !$0.constructor && $0.parens == parens } == true),
                !(index > 0 && units[index - 1] == colon),
                isNameStart(units[index + 1]) {
                 var end = index + 2
@@ -164,6 +198,12 @@ struct SQLScanner {
     private static let star = unichar(42)
     private static let colon = unichar(58)
     private static let underscore = unichar(95)
+    private static let space = unichar(32)
+    private static let tab = unichar(9)
+    private static let carriage = unichar(13)
+    private static let comma = unichar(44)
+    private static let openParen = unichar(40)
+    private static let closeParen = unichar(41)
     private static let openBracket = unichar(91)
     private static let closeBracket = unichar(93)
 }

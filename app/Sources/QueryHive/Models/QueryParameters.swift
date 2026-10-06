@@ -7,8 +7,13 @@ import Foundation
 /// spells the same way.
 enum ParameterKind: String, CaseIterable, Identifiable {
     case text, number, boolean, date, timestamp, null
+    /// Several values for `id IN (:ids)`; the entry's `element` says what each one is.
+    case list
 
     var id: String { rawValue }
+
+    /// What a list's elements can be: any single value that is not itself NULL or a list.
+    static let elements: [ParameterKind] = [.text, .number, .boolean, .date, .timestamp]
 
     var title: String {
         switch self {
@@ -18,6 +23,7 @@ enum ParameterKind: String, CaseIterable, Identifiable {
         case .date: "Date"
         case .timestamp: "Timestamp"
         case .null: "NULL"
+        case .list: "List"
         }
     }
 }
@@ -26,6 +32,8 @@ enum ParameterKind: String, CaseIterable, Identifiable {
 struct ParameterEntry: Equatable {
     var kind: ParameterKind = .text
     var text: String = ""
+    /// What each element of a `.list` is. Unused by every other kind.
+    var element: ParameterKind = .text
 
     /// The value a fresh prompt starts with, so the common case needs no thought.
     static let empty = ParameterEntry(kind: .text, text: "")
@@ -48,7 +56,7 @@ struct ParameterPrompt: Identifiable {
     /// A prompt for this statement, or `nil` when it has no parameters.
     static func request(tab: QueryTab, source: QuerySource, sql: String,
                         kind: ConnectionKind) -> ParameterPrompt? {
-        let scan = SQLScanner.scan(sql)
+        let scan = SQLScanner.scan(sql, driver: kind)
         guard !scan.parameters.isEmpty else { return nil }
         let names = scan.parameterNames
         var initial: [String: ParameterEntry] = [:]
@@ -81,6 +89,10 @@ enum ParameterRender {
         switch entry.kind {
         case .null:
             return "NULL"
+
+        // A list is not one literal; `list` writes it, one `literal` per element.
+        case .list:
+            return nil
 
         case .boolean:
             switch entry.text.trimmingCharacters(in: .whitespaces).lowercased() {
@@ -133,7 +145,7 @@ enum ParameterRender {
     static func statement(_ template: String,
                           entries: [String: ParameterEntry],
                           driver: ConnectionKind) -> Result<String, ParameterError> {
-        let scan = SQLScanner.scan(template)
+        let scan = SQLScanner.scan(template, driver: driver)
         guard !scan.parameters.isEmpty else { return .success(template) }
 
         let text = template as NSString
@@ -141,7 +153,15 @@ enum ParameterRender {
         var cursor = 0
         for parameter in scan.parameters {
             let entry = entries[parameter.name] ?? .empty
-            guard let literal = literal(entry, driver: driver) else {
+            let literal: String
+            if entry.kind == .list {
+                switch list(parameter.name, entry: entry, driver: driver) {
+                case .success(let written): literal = written
+                case .failure(let error): return .failure(error)
+                }
+            } else if let written = self.literal(entry, driver: driver) {
+                literal = written
+            } else {
                 return .failure(reason(parameter.name, entry: entry, driver: driver))
             }
             out += text.substring(with: NSRange(location: cursor,
@@ -151,6 +171,84 @@ enum ParameterRender {
         }
         out += text.substring(from: cursor)
         return .success(out)
+    }
+
+    /// The most elements one list takes: a longer one is a pasted table, not a parameter.
+    static let listLimit = 10_000
+
+    /// A list's elements written as `a, b, c`, to sit inside the statement's own parentheses.
+    ///
+    /// Elements are separated by commas or new lines. One that holds a comma or a quote is written
+    /// `'like, this'` with `''` for a quote inside. Every element goes through [`literal`], so a list
+    /// is exactly as safe as its elements. An empty list, a malformed one (an empty element, an
+    /// unclosed quote, text after a closing quote) and a failing element are errors: `IN ()` is a
+    /// syntax error on every server here, and `IN (NULL)` would run and quietly match nothing.
+    static func list(_ name: String, entry: ParameterEntry,
+                     driver: ConnectionKind) -> Result<String, ParameterError> {
+        func fail(_ why: String) -> Result<String, ParameterError> {
+            .failure(ParameterError(message: "\(name) \(why)"))
+        }
+        guard ParameterKind.elements.contains(entry.element) else {
+            return fail("is a list of a type that cannot be an element.")
+        }
+        var elements: [String] = []
+        let chars = Array(entry.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        var index = 0
+        while index < chars.count {
+            while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+            var element = ""
+            if index < chars.count, chars[index] == "'" {
+                index += 1
+                var closed = false
+                while index < chars.count {
+                    if chars[index] == "'" {
+                        if index + 1 < chars.count, chars[index + 1] == "'" {
+                            element.append("'")
+                            index += 2
+                            continue
+                        }
+                        closed = true
+                        index += 1
+                        break
+                    }
+                    element.append(chars[index])
+                    index += 1
+                }
+                guard closed else { return fail("has a quote that is never closed.") }
+                while index < chars.count, chars[index] == " " || chars[index] == "\t" { index += 1 }
+                guard index == chars.count || chars[index] == "," || chars[index].isNewline else {
+                    return fail("has text after a closing quote. Separate elements with commas.")
+                }
+            } else {
+                while index < chars.count, chars[index] != ",", !chars[index].isNewline {
+                    element.append(chars[index])
+                    index += 1
+                }
+                element = element.trimmingCharacters(in: .whitespaces)
+                guard !element.isEmpty else { return fail("has an empty element.") }
+            }
+            elements.append(element)
+            if index < chars.count {
+                // A comma with nothing after it is an empty last element.
+                if index + 1 == chars.count { return fail("has an empty element.") }
+                index += 1
+            }
+        }
+        guard !elements.isEmpty else { return fail("is an empty list. Give it at least one value.") }
+        guard elements.count <= listLimit else {
+            return fail("has \(elements.count) elements; the most a list takes is \(listLimit).")
+        }
+        var written: [String] = []
+        for (position, element) in elements.enumerated() {
+            let single = ParameterEntry(kind: entry.element, text: element)
+            guard let text = literal(single, driver: driver) else {
+                let which = "element \(position + 1) (\(element))"
+                return .failure(ParameterError(
+                    message: "\(name): " + reason(which, entry: single, driver: driver).message))
+            }
+            written.append(text)
+        }
+        return .success(written.joined(separator: ", "))
     }
 
     /// Why a value could not be written.
@@ -180,6 +278,8 @@ enum ParameterRender {
             return ParameterError(message: "\(name) cannot be written as a literal.")
         case .null:
             return ParameterError(message: "\(name) is NULL, which cannot be written as a literal.")
+        case .list:
+            return ParameterError(message: "\(name) is a list, which is written element by element.")
         }
     }
 

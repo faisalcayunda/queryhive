@@ -1,0 +1,23 @@
+pg	select arr[1:2] from t	
+pg	select arr[lo:hi] from t	
+pg	select arr[:n] from t	
+pg	select arr[n:] from t	
+pg	select arr[1:2] from t where id = :id	id
+pg	select arr[1:2][3:4] from t where id = :id	id
+pg	select ARRAY[:a, :b]	a,b
+pg	select array [:a]	a
+pg	select array[[:a, :b], [:c, :d]]	a,b,c,d
+pg	select arr[f(:i):3] from t	i
+pg	select arr[(:i)] from t	i
+pg	select (ARRAY[1,2])[:n]	
+pg	select arr[array[:i][1]:hi]	i
+pg	select x::int[] from t where id = :id	id
+pg	select 1 where a = ANY(ARRAY[:a]) and b = :b	a,b
+pg	select a::text, :id	id
+pg	select 'x'[1], :id	id
+generic	select arr[lo:hi]	
+generic	select ARRAY[:a]	a
+mysql	select [:a, :b]	a,b
+mysql	select a from t where id in (:a, :b)	a,b
+trino	select ARRAY[:a, :b]	a,b
+trino	select x[:i]	i
