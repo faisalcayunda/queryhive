@@ -121,6 +121,9 @@ final class AppModel {
 
     var panelCollapsed = false
 
+    /// Low-frequency navigation state; the type lives with the navigation code in `+Focus`.
+    var navigation = NavigationState()
+
     /// The panel holding the whole workspace with the editor hidden behind it. This is what opening
     /// a table gives you -- rows, not a form you have to dismiss -- and the panel's minimise control
     /// is what puts the editor back. Unlike `panelCollapsed` it is not persisted: it is a view of the

@@ -10,9 +10,11 @@ struct RootView: View {
         VStack(spacing: 0) {
             TitleStrip()
             HStack(spacing: 0) {
-                SidebarTree()
-                    .frame(width: model.sidebarWidth)
-                SidebarResizer()
+                if !model.navigation.sidebarHidden {
+                    SidebarTree()
+                        .frame(width: model.sidebarWidth)
+                    SidebarResizer()
+                }
                 Workspace()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

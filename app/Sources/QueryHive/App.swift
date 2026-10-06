@@ -54,6 +54,7 @@ struct QueryHiveApp: App {
                 // clipping. Measured with --snapshot --scene table --width 1120.
                 .frame(minWidth: 1120, minHeight: 700)
                 .preferredColorScheme(appearance.mode.colorScheme)
+                .onAppear { delegate.installTabKeys(for: model) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -77,53 +78,30 @@ struct QueryHiveApp: App {
                 Button("Check for Updates…") { updater.checkForUpdates() }
                     .disabled(!updater.canCheckForUpdates)
             }
-            CommandGroup(replacing: .newItem) {
-                Button("New Query") { model.newTab() }
-                    .keyboardShortcut(model.shortcut(for: .newQuery))
-                Button("Close Query") { model.closeSelectedTab() }
-                    .keyboardShortcut(model.shortcut(for: .closeTab))
-            }
+            // Items and keys come from `AppMenu`, so the menu, the conflict test and Settings read
+            // one list. A `nil` shortcut leaves the item with no key at all.
+            CommandGroup(replacing: .newItem) { items(.file, limit: 2) }
             // Kept off a key shortcut on purpose: importing writes to the Keychain and to the
             // connections file, so it should not be one keystroke away from an unrelated edit.
             CommandGroup(after: .newItem) {
-                // Moved here from the editor's header row, which no longer exists. The shortcut
-                // came with it: the button was the only thing holding ⌘O, and deleting the row
-                // without re-homing it would have quietly removed the feature.
-                Button("Load SQL File…") { model.selectedTab?.loadSQLFromFile() }
-                    .keyboardShortcut(model.shortcut(for: .openFile))
-                    .disabled(model.selectedTab == nil)
-                // Where a user looks for it, next to the other opener: ⇧⌘O, and the palette does
-                // the rest. Always available, because the tree and the saved queries exist even
-                // with no connection open.
-                Button("Open Quickly…") { model.openQuickly() }
-                    .keyboardShortcut(model.shortcut(for: .openQuickly))
+                items(.file, skip: 2)
                 Button("Import Data from File…") { model.presentImport() }
                     .disabled(model.connections.isEmpty)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
             }
-            // Every binding here comes from the current scheme, so switching scheme in Settings
-            // moves the menu entries too. A `nil` leaves the item with no key at all rather than
-            // silently keeping a stale one.
-            CommandMenu("Query") {
-                Button("Run") { model.runSelectedTab() }
-                    .keyboardShortcut(model.shortcut(for: .run))
-                    .disabled(model.selectedTab?.previewing == true)
-                Button("Run Script") { model.selectedTab.map { model.run($0, from: .all) } }
-                    .keyboardShortcut(model.shortcut(for: .runScript))
-                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
-                Button("Explain") { model.selectedTab.map { model.explain($0) } }
-                    .keyboardShortcut(model.shortcut(for: .explain))
-                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
-                Button("Export") { model.selectedTab.map { model.run($0) } }
-                    .keyboardShortcut(model.shortcut(for: .exportData))
-                    .disabled(model.selectedTab.map { model.runBlockedReason(for: $0) != nil } ?? true)
-                Button("Stop") { model.stopSelectedTab() }
-                    .keyboardShortcut(model.shortcut(for: .stop))
-                    .disabled(model.selectedTab?.stage != .running)
-                Divider()
-                Button("Reveal Output in Finder") { model.selectedTab?.revealFiles() }
-                    .disabled(model.selectedTab?.files.isEmpty != false)
-            }
+            CommandMenu("Query") { items(.query) }
+            CommandGroup(after: .sidebar) { items(.view) }
+            CommandGroup(after: .windowArrangement) { items(.tab) }
+        }
+    }
+
+    @ViewBuilder
+    private func items(_ group: MenuGroup, limit: Int = .max, skip: Int = 0) -> some View {
+        let specs = AppMenu.specs(for: model.shortcutScheme).filter { $0.group == group }
+        ForEach(Array(specs.dropFirst(skip).prefix(limit)), id: \.id) { spec in
+            Button(spec.title) { AppMenu.perform(spec, in: model) }
+                .keyboardShortcut(spec.shortcut?.keyboard)
+                .disabled(!AppMenu.isEnabled(spec, in: model))
         }
     }
 }
@@ -143,6 +121,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appearanceObservation = app.observe(\.effectiveAppearance, options: [.new]) { _, change in
             guard let appearance = change.newValue else { return }
             MainActor.assumeIsolated { ThemeStore.shared.systemIsDark = appearance.isDark }
+        }
+    }
+
+    private var tabKeyMonitor: Any?
+
+    /// ⌃Tab and ⌃⇧Tab, the aliases SwiftUI's one-key menu items cannot carry. Only when the main
+    /// window is key with no sheet over it, so Settings and the sheets keep their own Tab.
+    @MainActor
+    func installTabKeys(for model: AppModel) {
+        guard tabKeyMonitor == nil else { return }
+        tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags
+            guard let action = TabKeyRouter.route(keyCode: event.keyCode, control: flags.contains(.control),
+                                                  shift: flags.contains(.shift), command: flags.contains(.command),
+                                                  option: flags.contains(.option)),
+                  let window = NSApp.keyWindow, window.title == "QueryHive", window.attachedSheet == nil
+            else { return event }
+            MainActor.assumeIsolated { model.selectTab(offset: action == .next ? 1 : -1) }
+            return nil
         }
     }
 

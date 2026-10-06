@@ -1,7 +1,78 @@
 import AppKit
 import SwiftUI
 
+enum FocusRegion: String { case sidebar, editor, results }
+
+/// Low-frequency navigation state, one stored property on `AppModel` (blueprint D-2).
+struct NavigationState: Equatable {
+    var sidebarHidden = false
+}
+
 extension AppModel {
+    /// Moves the key window's first responder to a region, found by view type so the owners of
+    /// the editor, grid and tree need not register. A region with nothing to focus says so.
+    func focus(_ region: FocusRegion) {
+        if region == .sidebar, navigation.sidebarHidden { navigation.sidebarHidden = false }
+        let window = NSApplication.shared.keyWindow
+        let root = window?.contentView
+        let target: NSView? = root.flatMap {
+            switch region {
+            case .sidebar: Self.firstDescendant(NSOutlineView.self, in: $0)
+            case .editor: Self.firstDescendant(SQLTextView.self, in: $0)
+            case .results: Self.firstDescendant(GridTableView.self, in: $0)
+            }
+        }
+        guard let target, window?.makeFirstResponder(target) == true else {
+            Announcer.post(region == .results ? "No results to focus" : "Nothing to focus")
+            return
+        }
+        Announcer.post("\(region.rawValue.capitalized) focused")
+    }
+
+    /// Which region holds the first responder, asked on demand rather than observed.
+    var currentRegion: FocusRegion? {
+        var view = NSApplication.shared.keyWindow?.firstResponder as? NSView
+        while let current = view {
+            if current is SQLTextView { return .editor }
+            if current is GridTableView { return .results }
+            if current is NSOutlineView { return .sidebar }
+            view = current.superview
+        }
+        return nil
+    }
+
+    private static func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+        if let match = view as? T { return match }
+        for sub in view.subviews { if let match = firstDescendant(type, in: sub) { return match } }
+        return nil
+    }
+
+    func toggleSidebar() {
+        navigation.sidebarHidden.toggle()
+        Announcer.post(navigation.sidebarHidden ? "Sidebar hidden" : "Sidebar shown")
+    }
+
+    func toggleResultPanel() {
+        panelCollapsed.toggle()
+        Announcer.post(panelCollapsed ? "Results hidden" : "Results shown")
+    }
+
+    /// Wraps around, so the last tab's next is the first.
+    func selectTab(offset: Int) {
+        guard tabs.count > 1, let index = tabs.firstIndex(where: { $0.id == selectedTabID }) else { return }
+        let tab = tabs[(index + offset + tabs.count) % tabs.count]
+        selectTab(tab.id)
+        Announcer.post(tab.title)
+    }
+
+    /// 1-based, ⌘1…⌘9; anything past the last tab (⌘9 included) is the last tab.
+    func selectTab(position: Int) {
+        guard let last = tabs.indices.last, position >= 1 else { return }
+        let tab = tabs[position >= 9 ? last : min(position - 1, last)]
+        selectTab(tab.id)
+        Announcer.post(tab.title)
+    }
+
     func newTab(connectionID: UUID? = nil) {
         tabCounter += 1
         let tab = QueryTab(title: "Query \(tabCounter)")

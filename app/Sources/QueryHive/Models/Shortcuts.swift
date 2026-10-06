@@ -19,6 +19,36 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case format
     case closeTab
     case openQuickly
+    case revealOutput
+    case toggleSidebar
+    case focusSidebar
+    case focusEditor
+    case focusResults
+    case nextTab
+    case previousTab
+
+    /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
+    enum Scope { case scheme, platform }
+
+    var scope: Scope {
+        switch self {
+        case .run, .runScript, .explain, .countRows, .newQuery, .openFile, .toggleResultPanel,
+             .exportData, .commentLine, .format:
+            .scheme
+        default:
+            .platform
+        }
+    }
+
+    /// False for an action that has a key reserved but nothing to run yet, so no menu item exists
+    /// and nothing may claim to bind it. `saveFile` waits for W10-T3 and W12-T2; the other two for
+    /// W12-T2.
+    var isAvailable: Bool {
+        switch self {
+        case .saveFile, .commentLine, .format: false
+        default: true
+        }
+    }
 
     var id: String { rawValue }
 
@@ -38,6 +68,13 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .format: "Format SQL"
         case .closeTab: "Close Tab"
         case .openQuickly: "Open Quickly"
+        case .revealOutput: "Reveal Output in Finder"
+        case .toggleSidebar: "Toggle Sidebar"
+        case .focusSidebar: "Focus Sidebar"
+        case .focusEditor: "Focus Editor"
+        case .focusResults: "Focus Results"
+        case .nextTab: "Show Next Tab"
+        case .previousTab: "Show Previous Tab"
         }
     }
 }
@@ -108,11 +145,31 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
     /// without a key of their own — `cancel.query`, `run.count` and `export.data` are declared in
     /// the same file with no `<key>` element — so this scheme does not invent one for them.
     func shortcut(for action: ShortcutAction) -> Shortcut? {
-        switch self {
+        if action.scope == .platform { return Self.platformTable[action] }
+        return switch self {
         case .dbeaver: Self.dbeaverTable[action]
         case .queryhive: Self.queryhiveTable[action]
         }
     }
+
+    /// The macOS and Xcode conventions, the same in both schemes: where DBeaver declares no key
+    /// (Stop, Close Tab, Open Quickly) a scheme that left it unbound would leave the default user
+    /// with no key for it.
+    static let platformTable: [ShortcutAction: Shortcut] = [
+        .stop: Shortcut(".", .command),
+        .saveFile: Shortcut("s", .command),
+        .closeTab: Shortcut("w", .command),
+        // ⇧⌘O, one shift away from Open File (⌘O).
+        .openQuickly: Shortcut("o", [.command, .shift]),
+        .revealOutput: Shortcut("r", [.command, .shift]),
+        .toggleSidebar: Shortcut("s", [.control, .command]),
+        // Left, middle, bottom; ⌘1…⌘9 already belong to the tabs.
+        .focusSidebar: Shortcut("1", [.command, .option]),
+        .focusEditor: Shortcut("2", [.command, .option]),
+        .focusResults: Shortcut("3", [.command, .option]),
+        .nextTab: Shortcut("]", [.command, .shift]),
+        .previousTab: Shortcut("[", [.command, .shift]),
+    ]
 
     private static let dbeaverTable: [ShortcutAction: Shortcut] = [
         // COMMAND+Enter on cocoa for ui.editors.sql.run.statement.
@@ -140,15 +197,26 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         // No `runScript`: the app never bound one, and ⌘⇧R is already Reveal in Finder.
         .explain: Shortcut("e", .command),
         .countRows: Shortcut("k", [.command, .shift]),
-        .stop: Shortcut(".", .command),
         .newQuery: Shortcut("t", .command),
         .openFile: Shortcut("o", .command),
-        .saveFile: Shortcut("s", .command),
-        .exportData: Shortcut("e", .command),
-        .closeTab: Shortcut("w", .command),
-        // ⇧⌘O, one shift away from Open File: it opens something, and the file opener is the
-        // command a user already knows at ⌘O.
-        .openQuickly: Shortcut("o", [.command, .shift]),
+        // ⌘E has run Explain since before schemes existed, so Export moved (⇧⌘E), not Explain.
+        .exportData: Shortcut("e", [.command, .shift]),
+        // ⇧⌘Y is Xcode's binding for the bottom area.
+        .toggleResultPanel: Shortcut("y", [.command, .shift]),
         .commentLine: Shortcut("/", .command),
     ]
+}
+
+/// What a Control-Tab style key press asks for. Pure, so it is tested without an `NSEvent`.
+enum TabKeyAction: Equatable { case next, previous }
+
+enum TabKeyRouter {
+    static let tabKeyCode: UInt16 = 48
+
+    /// ⌃Tab and ⌃⇧Tab alias the menu's ⇧⌘] and ⇧⌘[, which SwiftUI cannot bind a second key to.
+    /// A bare Tab (a text field, the editor's indent) never routes.
+    static func route(keyCode: UInt16, control: Bool, shift: Bool, command: Bool, option: Bool) -> TabKeyAction? {
+        guard keyCode == tabKeyCode, control, !command, !option else { return nil }
+        return shift ? .previous : .next
+    }
 }

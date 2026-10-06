@@ -1199,5 +1199,6 @@ struct ErrorBanner: View {
         .padding(.vertical, 8)
         .background(Tone.coral.opacity(0.10))
         .accessibilityElement(children: .contain)
+        .task(id: message) { Announcer.post("Query failed: \(message.prefix(160))", priority: .high) }
     }
 }
