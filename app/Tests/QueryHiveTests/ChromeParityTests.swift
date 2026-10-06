@@ -38,9 +38,20 @@ import XCTest
 // identifiers in a dark ink, as the `editor-*-dark` baselines do (the text view's `labelColor` is
 // resolved outside the window's appearance in a test process).
 //
-// Not capturable by `cacheDisplay`, and therefore not here: the window's native toolbar and title
-// bar, tooltips, menus, popovers, and a sheet presented over the window. The connection sheet is
-// drawn directly for that reason, the way the grid gate draws the cell reader.
+// The shell is drawn the way the app has it (W9-T8, V-7): the hosting view hands its toolbar and title
+// to the window (`sceneBridgingOptions`), the window is `.titled` with the content under the title
+// bar, and the picture is the window's frame view, which holds the title bar and the toolbar. So the
+// breadcrumb, the badges, the Run group, the title and the subtitle are in every shell baseline, and
+// the three `cascade-*` baselines differ from one another. The window is `Shell.minWidth` wide.
+//
+// Not capturable by `cacheDisplay`, and therefore not here: tooltips, menus, popovers, and a sheet
+// presented over the window. The connection sheet is drawn directly for that reason, the way the
+// grid gate draws the cell reader.
+//
+// The editor's statement band and the gutter's run markers come from an idle pass that lands 0.5 s
+// after the text is set (`SQLEditor.Coordinator.idleDelay`), which is later than the 0.18 s of
+// stillness `settle` waits for, so a picture could be taken just before it. `settle` therefore runs
+// that pass itself (`convergeEditors`) and the picture does not depend on the clock.
 
 @MainActor
 final class ChromeParityTests: XCTestCase {
@@ -53,7 +64,7 @@ final class ChromeParityTests: XCTestCase {
     }
 
     private enum Surface {
-        /// The whole window, as `--snapshot` draws it.
+        /// The whole window, as `--snapshot` draws it: title bar and toolbar included.
         case shell
         case settings(SettingsView.Pane)
         /// The connection sheet on its own: a sheet is a window of its own and `cacheDisplay` cannot see it.
@@ -61,7 +72,7 @@ final class ChromeParityTests: XCTestCase {
 
         var size: CGSize {
             switch self {
-            case .shell: CGSize(width: 1240, height: 800)
+            case .shell: CGSize(width: Shell.minWidth, height: 800)
             case .settings: CGSize(width: 560, height: 640)
             case .connectionSheet: CGSize(width: 620, height: 660)
             }
@@ -238,26 +249,41 @@ final class ChromeParityTests: XCTestCase {
 
     // MARK: Rendering (copied from VisualParityTests, where they are private)
 
-    private func host(_ content: some View, size: CGSize, look: Look) -> NSHostingView<AnyView> {
-        let root = AnyView(content
-            .frame(width: size.width, height: size.height)
-            .background(Tone.canvas)
-            .preferredColorScheme(look.scheme))
+    /// Returns the view the picture is taken of. For the shell that is the window's frame view (the one
+    /// that holds the title bar and the toolbar, as `Snapshot.capture` does); for everything else it
+    /// is the hosting view.
+    private func host(_ content: some View, size: CGSize, look: Look, bridged: Bool = false) throws -> NSView {
+        let framed = content.frame(width: size.width, height: size.height)
+        // The shell paints its own canvas, as in `Snapshot.run`; the bare surfaces are given one.
+        let root = bridged ? AnyView(framed.preferredColorScheme(look.scheme))
+                           : AnyView(framed.background(Tone.canvas).preferredColorScheme(look.scheme))
         let host = NSHostingView(rootView: root)
         host.frame = CGRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered,
-                              defer: false)
+        if bridged { host.sceneBridgingOptions = [.toolbars, .title] }
+        let window = NSWindow(contentRect: host.frame,
+                              styleMask: bridged ? [.titled, .closable, .resizable, .fullSizeContentView] : [.titled],
+                              backing: .buffered, defer: false)
         window.appearance = look.appearance
         window.contentView = host
         windows.append(window)
-        settle(host)
-        return host
+        let captured = bridged ? try XCTUnwrap(host.superview, "the window has no frame view") : host
+        settle(captured)
+        return captured
     }
 
     /// The scroller style is a per-machine setting, and a legacy one takes width out of the layout.
     private static func forceOverlayScrollers(_ view: NSView) {
         if let scroll = view as? NSScrollView, scroll.scrollerStyle != .overlay { scroll.scrollerStyle = .overlay }
         for subview in view.subviews { forceOverlayScrollers(subview) }
+    }
+
+    /// Run the editors' idle pass now: their statements, and with them the statement band and the
+    /// gutter's run markers (see the header). Idempotent, so the pass that lands later changes nothing.
+    private static func convergeEditors(in view: NSView) {
+        for coordinator in SQLEditor.Coordinator.live.allObjects {
+            guard let textView = coordinator.textView, textView.isDescendant(of: view) else { continue }
+            try? coordinator.syncAnalysisForTesting()
+        }
     }
 
     /// Wait until the drawn picture is identical for six turns in a row (0.18 s). There is no fixed
@@ -270,6 +296,7 @@ final class ChromeParityTests: XCTestCase {
             Self.forceOverlayScrollers(host)
             RunLoop.current.run(until: Date().addingTimeInterval(0.03))
             host.layoutSubtreeIfNeeded()
+            Self.convergeEditors(in: host)
             guard let rep = try? bitmap(of: host) else { break }
             let bytes = rep.bitmapData.map { Data(bytes: $0, count: rep.bytesPerRow * rep.pixelsHigh) }
             stable = bytes == previous ? stable + 1 : 0
@@ -318,7 +345,9 @@ final class ChromeParityTests: XCTestCase {
             content = AnyView(ConnectionEditorSheet(target: target).environment(model))
         }
         let seededSaved = model.savedQueries
-        let view = host(content, size: scene.surface.size, look: look)
+        var isShell = false
+        if case .shell = scene.surface { isShell = true }
+        let view = try host(content, size: scene.surface.size, look: look, bridged: isShell)
         if !seededSaved.isEmpty {
             // The sidebar asks the local engine for the saved queries when it appears, and the
             // answer (none, in an empty store) replaces the scene's. Wait for it, then put the
@@ -333,13 +362,65 @@ final class ChromeParityTests: XCTestCase {
         }
         let data = try png(of: view)
         let pixels = try XCTUnwrap(Pixels(png: data))
-        XCTAssertEqual([pixels.width, pixels.height], [Int(scene.surface.size.width), Int(scene.surface.size.height)],
-                       "\(scene.name): the window is not the size the scene asks for")
+        // The shell's picture is the window, which is the content plus the title bar; the others are the content.
+        let asked = scene.surface.size
+        XCTAssertEqual(pixels.width, Int(asked.width), "\(scene.name): the window is not the width the scene asks for")
+        if isShell { XCTAssertGreaterThanOrEqual(pixels.height, Int(asked.height), "\(scene.name): the window is shorter than asked") }
+        else { XCTAssertEqual(pixels.height, Int(asked.height), "\(scene.name): the window is not the height the scene asks for") }
         return Capture(png: data, sidecar: Sidecar(
             scene: "chrome-\(scene.name)-\(look.rawValue)", pixelSize: [pixels.width, pixels.height],
             facts: ["scene": scene.seed, "look": look.rawValue, "reduceMotion": "true",
                     "size": "\(pixels.width)x\(pixels.height)"],
             metrics: [:], samples: []))
+    }
+
+    // MARK: What the harness itself has to hold
+
+    /// A lone editor is still after about 0.2 s, long before the 0.5 s idle pass that gives it its
+    /// statements. The picture of it must already carry the statement band and the gutter's run
+    /// markers, or a baseline is a coin that lands on the clock (the flake `settle` used to have).
+    func testAnEditorHasItsStatementsWhenTheSceneSettlesNotWhenTheIdlePassIsDue() throws {
+        applyState(.light)
+        let text = "SELECT 1\nFROM t;\nSELECT 2"
+        let editor = SQLEditor(text: .constant(text), focused: .constant(false), caret: .constant(0),
+                               selection: .constant(NSRange(location: 0, length: 0)),
+                               completion: EditorCompletion(), candidates: { _, _ in [] },
+                               layout: .standard, onRunStatement: nil)
+        // The first editor of a process pays for fonts and TextKit and settles late, after its idle
+        // pass; the second is the one that settles early, so it is the one looked at.
+        _ = try host(editor, size: CGSize(width: 600, height: 200), look: .light)
+        closeWindows()
+        let view = try host(editor, size: CGSize(width: 600, height: 200), look: .light)
+        let coordinators = SQLEditor.Coordinator.live.allObjects.filter { $0.textView?.isDescendant(of: view) == true }
+        let coordinator = try XCTUnwrap(coordinators.first, "no editor in the scene")
+        XCTAssertEqual(coordinator.ruler?.runMarks.count, 2, "one run marker per statement")
+        XCTAssertEqual(coordinator.textView?.highlightRanges.count, 2, "the statement's band and the line's")
+    }
+
+    /// The shell's picture holds the title bar and the toolbar, so what the breadcrumb says is in it:
+    /// the three cascade scenes differ from one another there. (Hosted without the bridge they were
+    /// byte-identical, three baselines of one picture of the editor.)
+    func testTheShellPictureHoldsTheToolbar() throws {
+        applyState(.light)
+        var pictures: [Pixels] = []
+        for name in ["cascade-long", "cascade-postgres", "cascade-mysql"] {
+            let scene = try XCTUnwrap(Self.scenes.first { $0.name == name })
+            pictures.append(try XCTUnwrap(Pixels(png: draw(scene, look: .light).png)))
+            closeWindows()
+        }
+        // The band above the content: the window is the content plus the title bar.
+        let band = pictures[0].height - Int(Surface.shell.size.height)
+        XCTAssertGreaterThan(band, 0, "the picture is the content alone, without the title bar")
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            var differing = 0
+            for y in 0..<band {
+                for x in 0..<pictures[a].width
+                where (0..<3).contains(where: { abs(pictures[a].channel(x, y, $0) - pictures[b].channel(x, y, $0)) > 16 }) {
+                    differing += 1
+                }
+            }
+            XCTAssertGreaterThan(differing, 100, "cascade scenes \(a) and \(b) look the same in the toolbar")
+        }
     }
 
     // MARK: Record / compare

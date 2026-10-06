@@ -17,8 +17,10 @@ enum QueryHiveMain {
             AppIconRenderer.run(path: path, compact: AppIconRenderer.requestedCompact())
         }
         if let path = Snapshot.requestedPath() {
+            // The window cannot be narrower than `Shell.minWidth`, so a picture of it is not either
+            // unless `--width` asks (which is how the minimum itself is measured).
             Snapshot.run(path: path, scene: Snapshot.requestedScene(),
-                         width: Snapshot.requestedWidth() ?? 1240)
+                         width: Snapshot.requestedWidth() ?? Shell.minWidth)
         }
         // `--bench <scenario>` runs a measurement and exits; only `launch` comes back, to let the
         // real app start and report its own first frame.
@@ -49,14 +51,17 @@ struct QueryHiveApp: App {
         Window("QueryHive", id: "main") {
             RootView()
                 .environment(model)
-                // 1120 is where the widest toolbar (the table destination: connection, the
-                // destination switch, catalog, schema, table name and mode) still fits without
-                // clipping. Measured with --snapshot --scene table --width 1120.
-                .frame(minWidth: 1120, minHeight: 700)
+                // The window's toolbar is the query toolbar now, so the minimum is the width at
+                // which its widest content (a three-level breadcrumb, both badges and the Run
+                // group) still fits without moving items into the overflow menu. Measured with
+                // --snapshot --scene shell-narrow; see `Shell.minWidth`.
+                .frame(minWidth: Shell.minWidth, minHeight: Shell.minHeight)
                 .preferredColorScheme(appearance.mode.colorScheme)
                 .onAppear { delegate.installTabKeys(for: model) }
         }
-        .windowStyle(.hiddenTitleBar)
+        // A native title bar and unified toolbar: the title is the open tab, and the toolbar holds
+        // the breadcrumb and the Run group (`QueryToolbarContent`).
+        .windowToolbarStyle(.unified(showsTitle: true))
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1320, height: 880)
 
@@ -132,14 +137,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func installTabKeys(for model: AppModel) {
         guard tabKeyMonitor == nil else { return }
         tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags
-            guard let action = TabKeyRouter.route(keyCode: event.keyCode, control: flags.contains(.control),
-                                                  shift: flags.contains(.shift), command: flags.contains(.command),
-                                                  option: flags.contains(.option)),
-                  let window = NSApp.keyWindow, window.title == "QueryHive", window.attachedSheet == nil
-            else { return event }
-            MainActor.assumeIsolated { model.selectTab(offset: action == .next ? 1 : -1) }
-            return nil
+            MainActor.assumeIsolated {
+                let flags = event.modifierFlags
+                // The window is told apart by the view in it (`MainWindow`), not by its title: the
+                // title is the open tab's name now.
+                guard let action = TabKeyRouter.route(keyCode: event.keyCode, control: flags.contains(.control),
+                                                      shift: flags.contains(.shift), command: flags.contains(.command),
+                                                      option: flags.contains(.option)),
+                      let window = NSApp.keyWindow, MainWindow.isMain(window), window.attachedSheet == nil
+                else { return event }
+                model.selectTab(offset: action == .next ? 1 : -1)
+                return nil
+            }
         }
     }
 

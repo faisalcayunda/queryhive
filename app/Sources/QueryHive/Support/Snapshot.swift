@@ -24,8 +24,9 @@ enum Snapshot {
         return arguments[index + 1]
     }
 
-    /// `--width <pt>`: render at a specific window width. Used to check the toolbar at the
-    /// window's minimum, which is where a row of controls actually breaks.
+    /// `--width <pt>`: render at a specific window width (the default is the window's minimum,
+    /// `Shell.minWidth`). Used to measure the toolbar below it, which is where its items start to
+    /// move into the overflow menu: `--scene shell-narrow --width 1376` shows the first to go.
     static func requestedWidth() -> CGFloat? {
         let arguments = CommandLine.arguments
         guard let index = arguments.firstIndex(of: "--width"), index + 1 < arguments.count,
@@ -71,7 +72,7 @@ enum Snapshot {
     }
 
     @MainActor
-    static func run(path: String, scene: String, width: CGFloat = 1240, height: CGFloat = 800) -> Never {
+    static func run(path: String, scene: String, width: CGFloat = Shell.minWidth, height: CGFloat = 800) -> Never {
         let requested = requestedAppearance()
         // A snapshot has no window to inherit an appearance from, so the scheme it draws in is
         // decided here: the requested mode when there is one, otherwise the user's stored mode.
@@ -144,11 +145,19 @@ enum Snapshot {
                 ? NSRect(x: 0, y: 0, width: 592, height: 460)
                 : NSRect(x: 0, y: 0, width: width, height: height)
 
+        // The shell has a native title bar and toolbar (blueprint W9 §11.2): the hosting view hands
+        // them to the window, and the capture is of the window's frame so they are in the picture.
+        // The other scenes (Settings, the cell reader, the parameter sheet) are bare content.
+        let isShell = !(scene.hasPrefix("settings") || scene == "parameters" || scene == "grid-json")
+        if isShell { hosting.sceneBridgingOptions = [.toolbars, .title] }
         let window = NSWindow(contentRect: hosting.frame,
-                              styleMask: [.titled, .fullSizeContentView],
+                              styleMask: isShell ? [.titled, .closable, .resizable, .fullSizeContentView]
+                                                 : [.titled, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+        if !isShell {
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+        }
         // The window's own appearance decides what `.ultraThinMaterial` samples and how every
         // dynamic colour resolves, so it has to match the scheme being drawn.
         window.appearance = NSAppearance(named: scheme == .light ? .aqua : .darkAqua)
@@ -188,7 +197,9 @@ enum Snapshot {
 
     @MainActor
     private static func capture(window: NSWindow, to path: String, over background: Color? = nil) {
-        guard let view = window.contentView,
+        // A window with a toolbar is captured by its frame view, which is the one that holds the
+        // title bar and the toolbar; `contentView` stops under them.
+        guard let view = window.toolbar != nil ? window.contentView?.superview : window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             FileHandle.standardError.write(Data("snapshot: no drawable content view\n".utf8))
             return
@@ -768,6 +779,20 @@ enum Snapshot {
             model.selectTab(tab.id)
             model.selectedNodeID = nil
             tab.sql = "DELETE FROM wilayah WHERE aktif = false"
+        case "shell-narrow":
+            // The widest toolbar the app can draw, for measuring the window's minimum width
+            // (`Shell.minWidth`, blueprint W9 P-8c): a Trino connection, so the breadcrumb has all
+            // three levels, with long names in each, and both badges with their words.
+            let wide = Connection(id: UUID(), name: "datawarehouse-main-pusdatin-masked", color: .blue,
+                                  kind: .trino, host: "trino.internal", port: 8443, scheme: "https",
+                                  user: "faisal", database: "hive", schema: "analytics", verify: true,
+                                  safeMode: .confirm, environment: .prod)
+            model.connections.insert(wide, at: 0)
+            model.rebuildTree()
+            tab.connectionID = wide.id
+            tab.contextDatabase = "aktivitas-produksi-harian"
+            tab.contextSchema = "sandbox"
+            tab.sql = "SELECT * FROM wilayah"
         case "syntax":
             // Every class the colourer knows, in SQL that reads like the real thing.
             tab.sql = """

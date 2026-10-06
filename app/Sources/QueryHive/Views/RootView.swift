@@ -1,28 +1,66 @@
+import AppKit
 import SwiftUI
 
-/// The window shell, Navicat's shape with CleanMyMac's surfaces: a title strip, the object tree
-/// on the left, the tabbed workspace on the right, and a status bar across the bottom.
+/// The numbers the window shell is built from, in one place so the window, the harness and the
+/// tests read the same ones.
+enum Shell {
+    /// The object tree's column: the divider can be dragged between these, and a new window opens at
+    /// `ideal`. They are the numbers the old hand-made `SidebarResizer` clamped to.
+    static let sidebarMin: CGFloat = 190
+    static let sidebarIdeal: CGFloat = 264
+    static let sidebarMax: CGFloat = 460
+
+    /// The smallest content size of the window (blueprint W9 P-8c). Measured with the widest
+    /// breadcrumb the app can draw (three fixed 200 pt levels) and both badges, with the sidebar at
+    /// its ideal width: below this width the toolbar's items start to move into the overflow menu.
+    static let minWidth: CGFloat = 1400
+    static let minHeight: CGFloat = 700
+}
+
+/// The window shell: a native split view with the object tree on the left and, on the right, the
+/// tabbed workspace over the status bar. The window's own toolbar carries what used to be the
+/// query toolbar row (the breadcrumb, the badges and the Run group), and its title is the tab.
+///
+/// Navicat's shape with CleanMyMac's surfaces, now on the system's split view and toolbar: the
+/// divider, the sidebar toggle, Full Keyboard Access and the traffic lights are AppKit's.
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
+    /// The sidebar's visibility, owned by the model (`NavigationState.sidebarHidden`) so the menu,
+    /// the focus move and the toolbar's own toggle all say the same thing.
+    private var columnVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { model.navigation.sidebarHidden ? .detailOnly : .all },
+            set: { visibility in
+                let hidden = visibility == .detailOnly
+                guard hidden != model.navigation.sidebarHidden else { return }
+                model.navigation.sidebarHidden = hidden
+                Announcer.post(hidden ? "Sidebar hidden" : "Sidebar shown")
+            })
+    }
+
     var body: some View {
         @Bindable var model = model
-        VStack(spacing: 0) {
-            TitleStrip()
-            HStack(spacing: 0) {
-                if !model.navigation.sidebarHidden {
-                    SidebarTree()
-                        .frame(width: model.sidebarWidth)
-                    SidebarResizer()
-                }
+        let windowTitle = WindowTitle.make(model: model)
+        NavigationSplitView(columnVisibility: columnVisibility) {
+            SidebarTree()
+                .navigationSplitViewColumnWidth(min: Shell.sidebarMin, ideal: Shell.sidebarIdeal,
+                                                max: Shell.sidebarMax)
+        } detail: {
+            VStack(spacing: 0) {
                 Workspace()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                StatusBar()
             }
-            StatusBar()
+            // The canvas runs up under the title bar and the toolbar, so the glass has something
+            // of ours to sit on; only the background ignores the safe area, never the content.
+            .background { Tone.canvas.ignoresSafeArea() }
+            .toolbar { QueryToolbarContent(model: model) }
+            .navigationTitle(windowTitle.title)
+            .navigationSubtitle(windowTitle.subtitle)
         }
+        .background(MainWindowTag())
         .foregroundStyle(Tone.ink)
-        .background(Tone.canvas)
-        .ignoresSafeArea()
         .sheet(item: $model.editingConnection) { target in
             ConnectionEditorSheet(target: target)
                 .environment(model)
@@ -105,24 +143,51 @@ struct RootView: View {
     }
 }
 
-/// The strip the traffic lights live in.
-///
-/// It carries nothing at all, and that is the point. A mark placed just after the window controls
-/// sat closer to them than to its own wordmark, so the two read as one object and the lights
-/// looked crowded; the app's identity moved to the sidebar header, which is a panel and can give
-/// it room.
-///
-/// The connection chip that used to sit at the right end is gone too. It restated the connection
-/// the toolbar's breadcrumb already names, on every tab, in the one strip that has no other job —
-/// and the row it lived in read as a toolbar with a single control in it. Nothing became
-/// unreachable: the editor it opened is on the connection picker's own menu, on the tree's
-/// context menu, and on a double-click of any row under the connection.
-///
-/// What is left is a drag area for the window, at the height the traffic lights need.
-struct TitleStrip: View {
-    var body: some View {
-        Color.clear.frame(height: Metrics.titleStrip)
+/// What the window's title bar says: the tab's name, and under it the connection and where the
+/// query lands. Values so a test can read them without a window.
+struct WindowTitle: Equatable {
+    let title: String
+    let subtitle: String
+
+    static let app = "QueryHive"
+
+    @MainActor
+    static func make(model: AppModel) -> WindowTitle {
+        guard let tab = model.selectedTab else { return WindowTitle(title: app, subtitle: "") }
+        guard let connection = model.connection(for: tab) else { return WindowTitle(title: tab.title, subtitle: "") }
+        // Where a bare table name resolves: `catalog.schema`, `database` or `schema` by driver.
+        let target = [model.database(for: tab), model.schema(for: tab)].filter { !$0.isEmpty }.joined(separator: ".")
+        // The limits are part of the connection's name, said in words because a title has no colour.
+        let badges = BadgeSpec.badges(for: connection, in: .breadcrumb).map(\.label)
+        return WindowTitle(title: tab.title,
+                           subtitle: ([connection.name, target].filter { !$0.isEmpty } + badges).joined(separator: " · "))
     }
+}
+
+/// The window this app's main view lives in, found by the view rather than by its title: the title
+/// is the open tab's name now, so `window.title == "QueryHive"` no longer says which window it is.
+@MainActor
+enum MainWindow {
+    private(set) static weak var window: NSWindow?
+
+    static func isMain(_ candidate: NSWindow?) -> Bool { candidate != nil && candidate === window }
+
+    fileprivate static func adopt(_ candidate: NSWindow?) {
+        if let candidate { window = candidate }
+    }
+}
+
+/// A zero-size view that tells `MainWindow` which window it landed in.
+struct MainWindowTag: NSViewRepresentable {
+    final class Tagger: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            MainActor.assumeIsolated { MainWindow.adopt(window) }
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { Tagger() }
+    func updateNSView(_ view: NSView, context: Context) {}
 }
 
 struct StatusBar: View {
@@ -153,7 +218,7 @@ struct StatusBar: View {
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.statusBar)
         .background(Tone.recess.opacity(0.30))
-        .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+        .overlay(alignment: .top) { Rectangle().fill(Tone.hairline).frame(height: 1) }
     }
 
     private var dot: Color {
@@ -170,33 +235,5 @@ struct StatusBar: View {
         case .idle: return Tone.gray.opacity(0.6)
         case .disconnected: return Tone.coral
         }
-    }
-}
-
-/// Drag handle between the tree and the workspace. A 7pt band with a 1pt line down its middle,
-/// so the hit area is comfortable without the seam looking thick.
-struct SidebarResizer: View {
-    @Environment(AppModel.self) private var model
-    @State private var startWidth: CGFloat?
-
-    var body: some View {
-        ZStack {
-            Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
-            Color.clear.contentShape(Rectangle())
-        }
-        .frame(width: 7)
-        .onHover { $0 ? NSCursor.resizeLeftRight.set() : NSCursor.arrow.set() }
-        .gesture(
-            // `.global`, not the default local space. Same reason as the panel seam: this handle
-            // moves as the drag resizes the sidebar, so a local coordinate space measures the
-            // translation against an origin that is itself moving.
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { value in
-                    if startWidth == nil { startWidth = model.sidebarWidth }
-                    let base = startWidth ?? model.sidebarWidth
-                    model.sidebarWidth = min(460, max(190, base + value.translation.width))
-                }
-                .onEnded { _ in startWidth = nil }
-        )
     }
 }

@@ -104,9 +104,6 @@ final class AppModel {
 
     // MARK: Layout
 
-
-    var sidebarWidth: CGFloat = 264
-
     /// Taller than it was. Run now puts rows in the panel rather than writing a file, so the
     /// panel is the main event instead of a message strip — 232pt showed four rows of it.
     /// The panel is the result grid now, so it starts at a bit over half the window and the editor

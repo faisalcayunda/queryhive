@@ -37,11 +37,15 @@ struct SidebarTree: View {
                 SchemaOutline(visible: visibleIDs)
             }
         }
+        // The same surface the tree has always had, laid over the app's canvas so the column keeps
+        // its theme instead of the system sidebar's grey; it runs up under the title bar because the
+        // split view's sidebar is as tall as the window. The divider on its right is the split
+        // view's own.
         .background {
-            Rectangle().fill(.thinMaterial)
-            Rectangle().fill(Tone.recess.opacity(0.18))
+            Tone.canvas.ignoresSafeArea()
+            Rectangle().fill(.thinMaterial).ignoresSafeArea()
+            Rectangle().fill(Tone.recess.opacity(0.18)).ignoresSafeArea()
         }
-        .overlay(alignment: .trailing) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1) }
         // The sidebar shows favourites and the panel that reads them is not part of the launch path,
         // so the sidebar is what asks for them. Without this the section stays empty until the user
         // visits Saved, which is the opposite of within reach.
@@ -113,14 +117,14 @@ struct SidebarTree: View {
         .padding(.horizontal, Metrics.gutter)
         .padding(.top, 12)
         .padding(.bottom, 9)
-        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.hairline).frame(height: 1) }
     }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("No connections yet.")
                 .font(.ui(12, weight: .semibold))
-            Text("Add a Trino coordinator to browse its catalogs.")
+            Text("Add a connection to browse its catalogs, schemas and tables.")
                 .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)

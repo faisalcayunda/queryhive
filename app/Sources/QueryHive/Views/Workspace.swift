@@ -29,7 +29,7 @@ struct Workspace: View {
                     // strip.
                     BottomPanel(tab: tab, ceiling: workspaceHeight, fills: true)
                 } else {
-                    QueryToolbar(tab: tab)
+                    // The query toolbar is the window's own (`QueryToolbarContent`), not a row here.
                     // Keyed by tab: sharing one editor across tabs would carry the previous
                     // query's undo stack and scroll position into the next one.
                     EditorPane(tab: tab).id(tab.id)
@@ -258,36 +258,48 @@ struct TabChip: View {
 
 // MARK: Toolbar
 
-struct QueryToolbar: View {
+/// The window toolbar's items for the open query tab: the breadcrumb on the leading side, and the
+/// badges and the Run group on the trailing one. It used to be a 46 pt row inside the workspace.
+///
+/// There is none on an object tab (it holds no query to run, and the toolbar's destination controls
+/// would be switches for something that does not exist there) and none while the panel fills the
+/// window, because the editor those controls belong to is hidden behind it.
+struct QueryToolbarContent: ToolbarContent {
+    let model: AppModel
+
+    var body: some ToolbarContent {
+        if let tab = model.selectedTab, !tab.isObjects, !model.panelExpanded {
+            // Connection, then the driver's own levels: Navicat's breadcrumb, so a bare
+            // `SELECT * FROM wilayah` has somewhere to resolve.
+            ToolbarItem(placement: .navigation) {
+                ContextCascade(tab: tab).fixedSize()
+            }
+            // Run holds the trailing corner, so it is in the same place on every tab regardless of
+            // how long the names in the breadcrumb are, which is what the fixed widths buy.
+            ToolbarItem(placement: .primaryAction) {
+                QueryActions(tab: tab)
+            }
+        }
+    }
+}
+
+/// The trailing group of the toolbar: badges, then Run with its variants, Stop and Explain.
+struct QueryActions: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
 
     var body: some View {
         HStack(spacing: 8) {
-            // Connection, then the driver's own levels: Navicat's breadcrumb, so a bare
-            // `SELECT * FROM wilayah` has somewhere to resolve.
-            ContextCascade(tab: tab)
-
-            Spacer(minLength: 12)
-
             BreadcrumbBadges(tab: tab)
 
-            // Run holds the trailing corner, so it is in the same place on every tab regardless of
-            // how long the names in the breadcrumb are — which is what the fixed widths above buy.
-            //
-            // A little more inset than the bar's own gutter, because the Run capsule draws a
-            // coloured glow: at a symmetric 12pt the halo ran into the window edge and the group
-            // read as clipped even though its frame was not.
             actionButton
-                .padding(.trailing, 6)
 
             // A zero-size popover anchor, so it costs the row nothing.
             DestinationPopover(tab: tab)
         }
-        .padding(.horizontal, Metrics.gutter)
-        .frame(height: Metrics.toolbar)
-        .background(Tone.ink.opacity(0.03))
-        .overlay(alignment: .bottom) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
+        // At its ideal size, never squeezed: a toolbar that is short of room moves a whole item
+        // into its overflow menu, but left to compress, Run's label becomes "R…".
+        .fixedSize()
         .onChange(of: tab.destination) { _, destination in
             if destination == .table { model.prepareTableDestination(tab) }
         }
@@ -511,18 +523,42 @@ struct EditorPane: View {
     }
 }
 
-/// Drag handle between the editor and the panel below it.
+/// Drag handle between the editor and the panel below it. It is also an adjustable control for
+/// VoiceOver and Full Keyboard Access: increment makes the panel `step` points taller.
 struct PanelResizer: View {
     @Environment(AppModel.self) private var model
     @State private var startHeight: CGFloat?
 
+    static let minHeight: CGFloat = 96
+    static let maxHeight: CGFloat = 560
+    static let step: CGFloat = 24
+
+    /// The height after one adjustment, kept inside the range the drag gesture keeps it in.
+    static func adjusted(_ height: CGFloat, _ direction: AccessibilityAdjustmentDirection) -> CGFloat {
+        switch direction {
+        case .increment: min(maxHeight, height + step)
+        case .decrement: max(minHeight, height - step)
+        @unknown default: height
+        }
+    }
+
+    /// What the accessibility action does: opens a collapsed panel, as dragging the seam does, then steps it.
+    static func adjust(_ model: AppModel, _ direction: AccessibilityAdjustmentDirection) {
+        model.panelCollapsed = false
+        model.panelHeight = adjusted(model.panelHeight, direction)
+    }
+
     var body: some View {
         ZStack {
-            Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1)
+            Rectangle().fill(Tone.hairline).frame(height: 1)
             Color.clear.contentShape(Rectangle())
         }
         .frame(height: 7)
         .onHover { $0 ? NSCursor.resizeUpDown.set() : NSCursor.arrow.set() }
+        .accessibilityElement()
+        .accessibilityLabel("Result panel height")
+        .accessibilityValue("\(Int(model.panelHeight)) points")
+        .accessibilityAdjustableAction { direction in Self.adjust(model, direction) }
         .gesture(
             // `.global`, not the default local space. This handle moves as the pane it borders
             // resizes — that is what dragging it does — so a local coordinate space measures the
@@ -536,7 +572,7 @@ struct PanelResizer: View {
                     }
                     let base = startHeight ?? model.panelHeight
                     // Dragging the seam down makes the panel shorter.
-                    model.panelHeight = min(560, max(96, base - value.translation.height))
+                    model.panelHeight = min(Self.maxHeight, max(Self.minHeight, base - value.translation.height))
                 }
                 .onEnded { _ in startHeight = nil }
         )
