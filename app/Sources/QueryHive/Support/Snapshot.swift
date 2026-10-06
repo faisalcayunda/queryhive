@@ -748,6 +748,26 @@ enum Snapshot {
                 tab.connectionID = connection.id
             }
             tab.sql = "SELECT * FROM wilayah"
+        case "badges":
+            // One connection that is production and asks before writes, one that is dev and
+            // unrestricted: the status bar names both levels either way, the tab and breadcrumb
+            // only the first.
+            let prod = Connection(id: UUID(), name: "Warehouse prod", color: .violet, kind: .postgres,
+                                  host: "pg.internal", port: 5432, sslmode: "prefer",
+                                  user: "analyst", database: "warehouse", schema: "public", verify: true,
+                                  safeMode: .confirm, environment: .prod)
+            let dev = Connection(id: UUID(), name: "Warehouse dev", color: .amber, kind: .postgres,
+                                 host: "localhost", port: 5432, sslmode: "prefer",
+                                 user: "analyst", database: "warehouse", schema: "public", verify: true,
+                                 safeMode: .full, environment: .dev)
+            model.connections = [prod, dev, primary]
+            model.rebuildTree()
+            tab.connectionID = prod.id
+            model.newTab(connectionID: dev.id)
+            model.selectedTab?.title = "scratch"
+            model.selectTab(tab.id)
+            model.selectedNodeID = nil
+            tab.sql = "DELETE FROM wilayah WHERE aktif = false"
         case "syntax":
             // Every class the colourer knows, in SQL that reads like the real thing.
             tab.sql = """

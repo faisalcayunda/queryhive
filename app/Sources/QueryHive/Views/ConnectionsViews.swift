@@ -44,7 +44,13 @@ struct ConnectionPickerButton: View {
     var body: some View {
         Menu {
             ForEach(model.connections) { connection in
-                Button("\(connection.name) — \(connection.displayTarget)") { selection = connection.id }
+                // The tag and any Safe Mode limit ride on the item, so choosing the connection to
+                // run against is never done without seeing which one is production.
+                let marks = BadgeSpec.badges(for: connection, in: .breadcrumb).map(\.label)
+                Button("\(connection.name) — \(connection.displayTarget)"
+                       + (marks.isEmpty ? "" : "  [\(marks.joined(separator: " · "))]")) {
+                    selection = connection.id
+                }
             }
             Divider()
             Button("Edit Connections…") { model.presentConnectionEditor(selection) }
@@ -140,6 +146,8 @@ struct ConnectionEditorSheet: View {
     /// What the engine refuses on this connection. Chosen here, enforced there: the picker
     /// only records the level, and `AppModel.connectionEnvironment` sends it as `SAFE_MODE`.
     @State private var safeMode = ConnectionSafeMode.full
+    /// A label shown in the tab, breadcrumb and status bar. It changes nothing else.
+    @State private var environment: ConnectionEnvironment?
     @State private var confirmDelete = false
     @State private var testState = TestState.idle
     @State private var testProcess: (any EngineRun)?
@@ -162,6 +170,7 @@ struct ConnectionEditorSheet: View {
             || scheme != original.scheme || sslmode != original.sslmode
             || user != original.user || database != original.database || schema != original.schema
             || verifyTLS != original.verify || safeMode != original.safeMode
+            || environment != original.environment
     }
 
     /// Name, host and user are what the engine cannot invent, and Postgres cannot open a
@@ -513,6 +522,19 @@ struct ConnectionEditorSheet: View {
             }
             .help("Refused by the engine, not by this window: a `read_only` connection refuses a write "
                   + "even when the statement comes from the command line or an MCP client.")
+
+            LabeledField("Environment") {
+                VStack(alignment: .leading, spacing: 5) {
+                    Segmented(selection: $environment,
+                              options: [ConnectionEnvironment?.none] + ConnectionEnvironment.allCases.map { Optional($0) }) {
+                        $0?.title ?? "None"
+                    }
+                    Text("A label only. It does not change what Safe Mode allows.")
+                        .font(.ui(11))
+                        .foregroundStyle(Tone.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -660,6 +682,7 @@ struct ConnectionEditorSheet: View {
         showAllSchemas = connection.showAllSchemas
         showAllDatabases = connection.showAllDatabases
         safeMode = connection.safeMode
+        environment = connection.environment
     }
 
     private func save() {
@@ -680,7 +703,8 @@ struct ConnectionEditorSheet: View {
                                      verify: verifyTLS,
                                      showAllSchemas: showAllSchemas,
                                      showAllDatabases: showAllDatabases,
-                                     safeMode: safeMode)
+                                     safeMode: safeMode,
+                                     environment: environment)
         // Keychain first: if it throws, the JSON never claims a password exists that isn't there.
         do {
             if !credential.isEmpty {

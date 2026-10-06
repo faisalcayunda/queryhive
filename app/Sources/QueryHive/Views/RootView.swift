@@ -136,6 +136,9 @@ struct StatusBar: View {
                 .foregroundStyle(Tone.secondary)
                 .lineLimit(1)
                 .layoutPriority(1)
+            // Always both, `Full` included: in the one place that is always visible, "no limit"
+            // has to be said rather than implied by an empty slot.
+            ConnectionBadges(specs: BadgeSpec.badges(for: model.statusConnectionTarget, in: .statusBar))
             Spacer(minLength: 12)
             if let tab = model.selectedTab {
                 if tab.stage == .running {

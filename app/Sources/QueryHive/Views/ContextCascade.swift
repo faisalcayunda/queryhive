@@ -141,3 +141,116 @@ struct ContextCascade: View {
         .help(showing ? "\(label): \(value)" : "Choose a \(label.lowercased()) for this query")
     }
 }
+
+// MARK: Badges
+
+/// One badge as a value: what it draws, what it says, and what VoiceOver reads, so a test can
+/// check all of it without a window.
+///
+/// Information, not decoration: the glyph and the words tell the badges apart, and the hue only
+/// strengthens them (colour alone fails contrast on the light canvas).
+struct BadgeSpec: Equatable, Identifiable {
+    enum Hue: Equatable { case ink, mint, amber, coral }
+    /// Where the badge is drawn. The status bar always shows both; the breadcrumb and the tab
+    /// chip stay quiet for an unrestricted connection with no tag, because no badge means no limit.
+    enum Place { case statusBar, breadcrumb, tabChip }
+
+    let glyph: String
+    let label: String
+    let hue: Hue
+    /// What VoiceOver reads: "Environment: production", "Safe Mode: Confirm".
+    let accessibility: String
+    /// The consequence, as a hint. Empty for an environment, which has none.
+    let detail: String
+
+    var id: String { accessibility }
+
+    static func environment(_ environment: ConnectionEnvironment) -> BadgeSpec {
+        switch environment {
+        case .dev: BadgeSpec(glyph: "hammer", label: "DEV", hue: .mint,
+                             accessibility: "Environment: development", detail: "")
+        case .staging: BadgeSpec(glyph: "testtube.2", label: "STAGING", hue: .amber,
+                                 accessibility: "Environment: staging", detail: "")
+        case .prod: BadgeSpec(glyph: "exclamationmark.octagon.fill", label: "PROD", hue: .coral,
+                              accessibility: "Environment: production", detail: "")
+        }
+    }
+
+    static func safeMode(_ mode: ConnectionSafeMode) -> BadgeSpec {
+        let glyph = switch mode {
+        case .full: "lock.open"
+        case .noDDL: "lock.shield"
+        case .confirm: "shield.lefthalf.filled"
+        case .readOnly: "lock.fill"
+        }
+        return BadgeSpec(glyph: glyph, label: mode.title, hue: .ink,
+                         accessibility: "Safe Mode: \(mode.title)", detail: mode.detail)
+    }
+
+    /// The badges for a connection at one place, environment first.
+    static func badges(for connection: Connection?, in place: Place) -> [BadgeSpec] {
+        guard let connection else { return [] }
+        var specs: [BadgeSpec] = []
+        if let environment = connection.environment { specs.append(.environment(environment)) }
+        if place == .statusBar || connection.safeMode != .full {
+            specs.append(.safeMode(connection.safeMode))
+        }
+        return specs
+    }
+}
+
+/// The badges of one connection at one place. With `glyphOnly` the words go and the glyph stays,
+/// with the full label still read aloud and shown as a tooltip.
+struct ConnectionBadges: View {
+    let specs: [BadgeSpec]
+    var glyphOnly = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(specs) { spec in
+                let tint = Self.tint(spec.hue)
+                HStack(spacing: 4) {
+                    Image(systemName: spec.glyph).font(.system(size: 10, weight: .semibold))
+                    if !glyphOnly {
+                        Text(spec.label).font(.code(11, weight: .semibold)).lineLimit(1)
+                    }
+                }
+                .foregroundStyle(spec.hue == .ink ? Tone.ink.opacity(0.85) : tint)
+                .padding(.horizontal, glyphOnly ? 6 : 8)
+                .padding(.vertical, 3)
+                .background(tint.opacity(0.14), in: Capsule())
+                .fixedSize()
+                .help(spec.detail.isEmpty ? spec.accessibility : "\(spec.accessibility). \(spec.detail)")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(spec.accessibility)
+                .accessibilityHint(spec.detail)
+            }
+        }
+    }
+
+    private static func tint(_ hue: BadgeSpec.Hue) -> Color {
+        switch hue {
+        case .ink: Tone.ink
+        case .mint: Tone.markMint
+        case .amber: Tone.markAmber
+        case .coral: Tone.markCoral
+        }
+    }
+}
+
+/// The breadcrumb's badges, between the levels and the Run group. They drop their words before
+/// they would push anything, so the three fixed-width levels never move from tab to tab.
+struct BreadcrumbBadges: View {
+    @Environment(AppModel.self) private var model
+    let tab: QueryTab
+
+    var body: some View {
+        let specs = BadgeSpec.badges(for: model.connection(for: tab), in: .breadcrumb)
+        if !specs.isEmpty {
+            ViewThatFits(in: .horizontal) {
+                ConnectionBadges(specs: specs)
+                ConnectionBadges(specs: specs, glyphOnly: true)
+            }
+        }
+    }
+}

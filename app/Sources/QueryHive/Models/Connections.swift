@@ -173,6 +173,34 @@ enum ConnectionSafeMode: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// What a connection is for, as a label: nothing in the app or the engine changes with it.
+///
+/// It exists so the person writing a query can see, in the tab, the breadcrumb and the status bar,
+/// whether this is the production server. It never reaches the engine and never changes Safe
+/// Mode; that is `ConnectionSafeMode`'s job.
+enum ConnectionEnvironment: String, CaseIterable, Codable, Identifiable {
+    case dev, staging, prod
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .dev: "Dev"
+        case .staging: "Staging"
+        case .prod: "Prod"
+        }
+    }
+
+    /// The word VoiceOver reads after "Environment:".
+    var spoken: String {
+        switch self {
+        case .dev: "development"
+        case .staging: "staging"
+        case .prod: "production"
+        }
+    }
+}
+
 /// Trino's transport, as its picker spells it: the two scheme words, plus the one outcome
 /// neither of them can express.
 ///
@@ -286,12 +314,16 @@ struct Connection: Identifiable, Codable, Equatable {
     /// the same thing in both. Decoded with `decodeIfPresent`, so a file written before
     /// this existed loads as `full` — the behaviour it had.
     var safeMode: ConnectionSafeMode
+    /// A label only: dev, staging or prod, or none. Decoded softly (a missing key, or a word a
+    /// later build wrote, is `nil` and does not make the file unreadable), and never sent to the
+    /// engine.
+    var environment: ConnectionEnvironment?
 
     init(id: UUID, name: String, color: ConnectionColor, kind: ConnectionKind = .trino,
          host: String, port: Int, scheme: String = "https", sslmode: String = "",
          user: String, database: String, schema: String, verify: Bool,
          showAllSchemas: Bool = false, showAllDatabases: Bool = false, group: UUID? = nil,
-         safeMode: ConnectionSafeMode = .full) {
+         safeMode: ConnectionSafeMode = .full, environment: ConnectionEnvironment? = nil) {
         self.id = id
         self.name = name
         self.color = color
@@ -308,11 +340,12 @@ struct Connection: Identifiable, Codable, Equatable {
         self.showAllDatabases = showAllDatabases
         self.group = group
         self.safeMode = safeMode
+        self.environment = environment
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, kind, host, port, scheme, sslmode, user, database, schema, verify
-        case showAllSchemas, showAllDatabases, group, safeMode
+        case showAllSchemas, showAllDatabases, group, safeMode, environment
     }
 
     /// The names this file used before QueryHive spoke to more than Trino. Read and never
@@ -349,6 +382,9 @@ struct Connection: Identifiable, Codable, Equatable {
         // Absent on a file written before Safe Mode existed: `full`, which is what that
         // connection was already doing.
         safeMode = try container.decodeIfPresent(ConnectionSafeMode.self, forKey: .safeMode) ?? .full
+        // `try?`: a value this build does not know must not move the whole file aside as corrupt.
+        let word = try? container.decodeIfPresent(String.self, forKey: .environment)
+        environment = word.flatMap { ConnectionEnvironment(rawValue: $0) }
     }
 
     /// One-line identity for the sidebar and the picker: `host:port/database.schema`.

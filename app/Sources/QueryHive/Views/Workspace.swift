@@ -142,16 +142,22 @@ struct TabChipSpec: Equatable {
     let glyph: Glyph
     let actions: [String]
 
-    init(title: String, stage: QueryTab.Stage, isSelected: Bool) {
+    init(title: String, stage: QueryTab.Stage, isSelected: Bool, badges: [BadgeSpec] = []) {
         label = title
         self.isSelected = isSelected
         actions = ["Close"]
+        let stageWord: String?
         switch stage {
-        case .idle: value = nil; glyph = .none
-        case .running: value = "running"; glyph = .spinner
-        case .done: value = "finished"; glyph = .checkmark
-        case .failed: value = "failed"; glyph = .exclamation
+        case .idle: stageWord = nil; glyph = .none
+        case .running: stageWord = "running"; glyph = .spinner
+        case .done: stageWord = "finished"; glyph = .checkmark
+        case .failed: stageWord = "failed"; glyph = .exclamation
         }
+        // The connection's limits are part of what the tab is, so they are read with it:
+        // "running. Environment: production. Safe Mode: Confirm."
+        value = badges.isEmpty
+            ? stageWord
+            : ([stageWord].compactMap { $0 } + badges.map(\.accessibility)).joined(separator: ". ") + "."
     }
 }
 
@@ -162,7 +168,10 @@ struct TabChip: View {
     @State private var hovering = false
 
     private var selected: Bool { model.selectedTabID == tab.id }
-    private var spec: TabChipSpec { TabChipSpec(title: tab.title, stage: tab.stage, isSelected: selected) }
+    private var badges: [BadgeSpec] { BadgeSpec.badges(for: model.connection(for: tab), in: .tabChip) }
+    private var spec: TabChipSpec {
+        TabChipSpec(title: tab.title, stage: tab.stage, isSelected: selected, badges: badges)
+    }
     private var closeVisible: Bool { hovering || selected }
 
     var body: some View {
@@ -175,6 +184,8 @@ struct TabChip: View {
                         .font(.ui(12, weight: selected ? .semibold : .regular))
                         .lineLimit(1)
                         .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
+                    ConnectionBadges(specs: badges)
+                        .accessibilityHidden(true)
                 }
                 .contentShape(Rectangle())
             }
@@ -258,6 +269,8 @@ struct QueryToolbar: View {
             ContextCascade(tab: tab)
 
             Spacer(minLength: 12)
+
+            BreadcrumbBadges(tab: tab)
 
             // Run holds the trailing corner, so it is in the same place on every tab regardless of
             // how long the names in the breadcrumb are — which is what the fixed widths above buy.
