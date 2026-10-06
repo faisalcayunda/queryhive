@@ -3,16 +3,22 @@ import SwiftUI
 
 /// The tabbed query workspace: the tab strip, the query toolbar, the SQL editor, and the panel
 /// under it. Navicat's query window, dressed in the CleanMyMac palette.
+///
+/// It runs up under the window's title bar (`RootView` ignores the top safe area): the tab strip is
+/// the title bar's own row, the one the traffic lights are in, and `titlebar` is that row's height.
 struct Workspace: View {
     @Environment(AppModel.self) private var model
+    /// The title bar's height, which is the tab strip's. Zero until the first layout pass reports it.
+    var titlebar: CGFloat = 0
     /// The workspace's own height, published by the background reader below. `nil` until the first
     /// layout pass, which is why the ceiling is optional rather than a number.
     @State private var workspaceHeight: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
+            // Always there, even with no tab open: it is the window's drag area as well.
+            TabStrip(height: max(titlebar, Metrics.tabStrip))
             if let tab = model.selectedTab {
-                TabStrip()
                 if tab.isObjects {
                     // No toolbar and no editor: an object tab holds no query to run, and the
                     // toolbar's destination controls would be switches for something that does
@@ -29,7 +35,7 @@ struct Workspace: View {
                     // strip.
                     BottomPanel(tab: tab, ceiling: workspaceHeight, fills: true)
                 } else {
-                    // The query toolbar is the window's own (`QueryToolbarContent`), not a row here.
+                    QueryToolbar(tab: tab)
                     // Keyed by tab: sharing one editor across tabs would carry the previous
                     // query's undo stack and scroll position into the next one.
                     EditorPane(tab: tab).id(tab.id)
@@ -98,35 +104,104 @@ struct EmptyWorkspace: View {
 
 // MARK: Tab strip
 
+/// The tab strip is the window's title bar: it is as tall as the bar, so the tabs sit in the row
+/// the traffic lights are in, and empty space in it drags the window like any title bar.
 struct TabStrip: View {
     @Environment(AppModel.self) private var model
+    /// The title bar's height (`Workspace.titlebar`).
+    let height: CGFloat
 
     var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(model.tabs) { tab in
-                        TabChip(tab: tab)
-                    }
-                    // Inside the scroller, right after the last tab: a "+" pinned to the far
-                    // edge reads as belonging to the window, not to the tab strip.
-                    Button { model.newTab() } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Tone.secondary)
-                            .frame(width: 24, height: 24)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(EmptyCopy.help("New Query", .newQuery, scheme: model.shortcutScheme))
+        // The drag area under the tabs, not a background of them: a background takes no clicks.
+        ZStack {
+            WindowDragArea()
+            HStack(spacing: 0) {
+                // Hugs the tabs while they fit, so what is left over is empty and falls through to
+                // the drag area; a scroller takes the whole width, and nothing in it would.
+                ViewThatFits(in: .horizontal) {
+                    tabs
+                    ScrollView(.horizontal, showsIndicators: false) { tabs }
                 }
-                .padding(.horizontal, Metrics.gutter)
-                .padding(.vertical, 4)
+                Spacer(minLength: 0)
             }
+            // With the sidebar hidden the traffic lights and the sidebar toggle are over this column.
+            .padding(.leading, model.navigation.sidebarHidden ? Shell.windowControlsWidth : 0)
         }
-        .frame(height: Metrics.tabStrip)
-        .background(Tone.recess.opacity(0.22))
+        .frame(height: height)
+        .background(FrameMarker(name: "tab-strip"))
+        // No fill: the strip is the workspace's own surface (the theme's canvas and its glow) run
+        // up to the top of the window, so there is no band between it and the title bar's area,
+        // and no theme in which it is a different colour from what is under it.
         .overlay(alignment: .bottom) { Rectangle().fill(Tone.hairline).frame(height: 1) }
+    }
+
+    private var tabs: some View {
+        HStack(spacing: 2) {
+            ForEach(model.tabs) { tab in
+                TabChip(tab: tab)
+            }
+            // Right after the last tab: a "+" pinned to the far edge reads as belonging to the
+            // window, not to the tab strip.
+            Button { model.newTab() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Tone.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(EmptyCopy.help("New Query", .newQuery, scheme: model.shortcutScheme))
+        }
+        .padding(.horizontal, Metrics.gutter)
+        .padding(.vertical, 4)
+        .background(FrameMarker(name: "tab-strip.tabs"))
+    }
+}
+
+/// What a double-click on a title bar does, as System Settings > Desktop & Dock sets it.
+enum TitleBarDoubleClick: Equatable {
+    case zoom, minimise, nothing
+
+    /// `AppleActionOnDoubleClick` from the global domain: "Maximize" (also what an unset key means),
+    /// "Minimize" or "None".
+    init(_ setting: String?) {
+        switch setting {
+        case "Minimize": self = .minimise
+        case "None": self = .nothing
+        default: self = .zoom
+        }
+    }
+
+    static var current: TitleBarDoubleClick { .init(UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick")) }
+
+    @MainActor
+    func perform(on window: NSWindow) {
+        switch self {
+        case .zoom: window.performZoom(nil)
+        case .minimise: window.performMiniaturize(nil)
+        case .nothing: break
+        }
+    }
+}
+
+/// Empty space that moves the window and answers a double-click the way a title bar does. The
+/// title bar is transparent and the content runs under it, so nothing of the system's is there to
+/// do either. A gesture rather than an `NSView` under the tabs: the hosting view takes every click
+/// itself (a hit test in the strip answers with it, whatever `NSView` sits under the tabs), and only
+/// SwiftUI's own hit test knows which parts of the strip are empty.
+struct WindowDragArea: View {
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .background(FrameMarker(name: "tab-strip.drag"))
+            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                // The press, once: `performDrag` runs until the button is up, so the gesture never
+                // sees the release and goes on reporting moves.
+                guard let event = NSApp.currentEvent, event.type == .leftMouseDown, let window = event.window
+                else { return }
+                guard event.clickCount > 1 else { return window.performDrag(with: event) }
+                TitleBarDoubleClick.current.perform(on: window)
+            })
     }
 }
 
@@ -258,32 +333,40 @@ struct TabChip: View {
 
 // MARK: Toolbar
 
-/// The window toolbar's items for the open query tab: the breadcrumb on the leading side, and the
-/// badges and the Run group on the trailing one. It used to be a 46 pt row inside the workspace.
-///
-/// There is none on an object tab (it holds no query to run, and the toolbar's destination controls
-/// would be switches for something that does not exist there) and none while the panel fills the
-/// window, because the editor those controls belong to is hidden behind it.
-struct QueryToolbarContent: ToolbarContent {
-    let model: AppModel
+/// The row under the tab strip: the breadcrumb on the leading side, and the badges and the Run
+/// group on the trailing one. There is none on an object tab (it holds no query to run) and none
+/// while the panel fills the window, because the editor those controls belong to is hidden behind it.
+struct QueryToolbar: View {
+    @Environment(AppModel.self) private var model
+    @Bindable var tab: QueryTab
 
-    var body: some ToolbarContent {
-        if let tab = model.selectedTab, !tab.isObjects, !model.panelExpanded {
+    var body: some View {
+        HStack(spacing: 8) {
             // Connection, then the driver's own levels: Navicat's breadcrumb, so a bare
             // `SELECT * FROM wilayah` has somewhere to resolve.
-            ToolbarItem(placement: .navigation) {
-                ContextCascade(tab: tab).fixedSize()
-            }
+            ContextCascade(tab: tab)
+                .background(FrameMarker(name: "query-toolbar.cascade"))
+            Spacer(minLength: 12)
             // Run holds the trailing corner, so it is in the same place on every tab regardless of
-            // how long the names in the breadcrumb are, which is what the fixed widths buy.
-            ToolbarItem(placement: .primaryAction) {
-                QueryActions(tab: tab)
-            }
+            // how long the names in the breadcrumb are, which is what the fixed widths buy. A
+            // little more inset than the gutter, because the Run capsule draws a coloured glow
+            // that runs into the window edge at a symmetric 12 pt.
+            QueryActions(tab: tab)
+                .background(FrameMarker(name: "query-toolbar.actions"))
+                .padding(.trailing, 6)
         }
+        .padding(.horizontal, Metrics.gutter)
+        .frame(height: Metrics.toolbar)
+        .background(FrameMarker(name: "query-toolbar"))
+        // No fill, as with the strip above it: the top three rows (title bar, tabs, context) are
+        // the workspace's own surface, so no theme has a band in it. (A fill here is a hazard as
+        // well as a tint: a `.background(Color)` ignores the safe area by default, ran up through
+        // the strip into the title bar's area and tinted it, in every theme.)
+        .overlay(alignment: .bottom) { Rectangle().fill(Tone.hairline).frame(height: 1) }
     }
 }
 
-/// The trailing group of the toolbar: badges, then Run with its variants, Stop and Explain.
+/// The trailing group of the query toolbar: badges, then Run with its variants, Stop and Explain.
 struct QueryActions: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
@@ -297,8 +380,7 @@ struct QueryActions: View {
             // A zero-size popover anchor, so it costs the row nothing.
             DestinationPopover(tab: tab)
         }
-        // At its ideal size, never squeezed: a toolbar that is short of room moves a whole item
-        // into its overflow menu, but left to compress, Run's label becomes "R…".
+        // At its ideal size, never squeezed: left to compress, Run's label becomes "R…".
         .fixedSize()
         .onChange(of: tab.destination) { _, destination in
             if destination == .table { model.prepareTableDestination(tab) }

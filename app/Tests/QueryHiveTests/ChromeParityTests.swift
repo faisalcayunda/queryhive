@@ -40,9 +40,10 @@ import XCTest
 //
 // The shell is drawn the way the app has it (W9-T8, V-7): the hosting view hands its toolbar and title
 // to the window (`sceneBridgingOptions`), the window is `.titled` with the content under the title
-// bar, and the picture is the window's frame view, which holds the title bar and the toolbar. So the
-// breadcrumb, the badges, the Run group, the title and the subtitle are in every shell baseline, and
-// the three `cascade-*` baselines differ from one another. The window is `Shell.minWidth` wide.
+// bar, and the picture is the window's frame view, which holds the title bar. The tab strip is the
+// title bar's row and the breadcrumb, the badges and the Run group are the row under it, so the three
+// `cascade-*` baselines differ from one another there; the title is set and not drawn. The window is
+// `Shell.minWidth` wide.
 //
 // Not capturable by `cacheDisplay`, and therefore not here: tooltips, menus, popovers, and a sheet
 // presented over the window. The connection sheet is drawn directly for that reason, the way the
@@ -397,10 +398,11 @@ final class ChromeParityTests: XCTestCase {
         XCTAssertEqual(coordinator.textView?.highlightRanges.count, 2, "the statement's band and the line's")
     }
 
-    /// The shell's picture holds the title bar and the toolbar, so what the breadcrumb says is in it:
-    /// the three cascade scenes differ from one another there. (Hosted without the bridge they were
-    /// byte-identical, three baselines of one picture of the editor.)
-    func testTheShellPictureHoldsTheToolbar() throws {
+    /// The shell's picture holds the query row (the breadcrumb and the Run group, under the tab strip
+    /// that is the title bar's row), so what the breadcrumb says is in it: the three cascade scenes
+    /// differ from one another there. (Hosted without the bridge they were byte-identical, three
+    /// baselines of one picture of the editor.)
+    func testTheShellPictureHoldsTheQueryRow() throws {
         applyState(.light)
         var pictures: [Pixels] = []
         for name in ["cascade-long", "cascade-postgres", "cascade-mysql"] {
@@ -408,18 +410,20 @@ final class ChromeParityTests: XCTestCase {
             pictures.append(try XCTUnwrap(Pixels(png: draw(scene, look: .light).png)))
             closeWindows()
         }
-        // The band above the content: the window is the content plus the title bar.
+        // The title bar's row above the content: the window is the content plus the title bar, and
+        // the query row is the first `Metrics.toolbar` points under it.
         let band = pictures[0].height - Int(Surface.shell.size.height)
         XCTAssertGreaterThan(band, 0, "the picture is the content alone, without the title bar")
+        let row = band..<(band + Int(Metrics.toolbar))
         for (a, b) in [(0, 1), (0, 2), (1, 2)] {
             var differing = 0
-            for y in 0..<band {
+            for y in row {
                 for x in 0..<pictures[a].width
                 where (0..<3).contains(where: { abs(pictures[a].channel(x, y, $0) - pictures[b].channel(x, y, $0)) > 16 }) {
                     differing += 1
                 }
             }
-            XCTAssertGreaterThan(differing, 100, "cascade scenes \(a) and \(b) look the same in the toolbar")
+            XCTAssertGreaterThan(differing, 100, "cascade scenes \(a) and \(b) look the same in the query row")
         }
     }
 

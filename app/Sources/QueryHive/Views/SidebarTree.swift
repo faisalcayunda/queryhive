@@ -37,14 +37,13 @@ struct SidebarTree: View {
                 SchemaOutline(visible: visibleIDs)
             }
         }
-        // The same surface the tree has always had, laid over the app's canvas so the column keeps
-        // its theme instead of the system sidebar's grey; it runs up under the title bar because the
-        // split view's sidebar is as tall as the window. The divider on its right is the split
-        // view's own.
+        // The theme's canvas and a wash of it, and no system material: a material resolves to the
+        // same grey in every theme. It runs up under the title bar (the traffic lights' row is
+        // this surface) because the split view's sidebar is as tall as the window. The divider on
+        // its right is the split view's own.
         .background {
             Tone.canvas.ignoresSafeArea()
-            Rectangle().fill(.thinMaterial).ignoresSafeArea()
-            Rectangle().fill(Tone.recess.opacity(0.18)).ignoresSafeArea()
+            Rectangle().fill(Tone.ink.opacity(Tone.sidebarWash)).ignoresSafeArea()
         }
         // The sidebar shows favourites and the panel that reads them is not part of the launch path,
         // so the sidebar is what asks for them. Without this the section stays empty until the user

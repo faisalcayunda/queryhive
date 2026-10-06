@@ -12,14 +12,22 @@ enum Shell {
 
     /// The smallest content size of the window (blueprint W9 P-8c). Measured with the widest
     /// breadcrumb the app can draw (three fixed 200 pt levels) and both badges, with the sidebar at
-    /// its ideal width: below this width the toolbar's items start to move into the overflow menu.
+    /// its ideal width, when they were the window's toolbar and moved into its overflow menu below
+    /// this width. They are the query row under the tabs now, which fits with 170 pt to spare
+    /// (`ShellTests.testTheQueryRowFitsAtTheMinimumWidth`); the number is a product decision and stays.
     static let minWidth: CGFloat = 1400
     static let minHeight: CGFloat = 700
+
+    /// How far the tab strip starts from the window's leading edge while the sidebar is hidden:
+    /// the traffic lights (they end at 79 pt) and the sidebar toggle after them (to about 132 pt).
+    /// With the sidebar shown both are over the sidebar's own column.
+    static let windowControlsWidth: CGFloat = 140
 }
 
 /// The window shell: a native split view with the object tree on the left and, on the right, the
-/// tabbed workspace over the status bar. The window's own toolbar carries what used to be the
-/// query toolbar row (the breadcrumb, the badges and the Run group), and its title is the tab.
+/// tabbed workspace over the status bar. The title bar is transparent and has no drawn title (the
+/// window's title is still the tab, for the Window menu and VoiceOver): the workspace runs up under
+/// it, and its tab strip is the title bar's row.
 ///
 /// Navicat's shape with CleanMyMac's surfaces, now on the system's split view and toolbar: the
 /// divider, the sidebar toggle, Full Keyboard Access and the traffic lights are AppKit's.
@@ -47,19 +55,24 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: Shell.sidebarMin, ideal: Shell.sidebarIdeal,
                                                 max: Shell.sidebarMax)
         } detail: {
-            VStack(spacing: 0) {
-                Workspace()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                StatusBar()
+            // The reader is outside the ignored region: inside it the top inset is zero, and it is
+            // the title bar's height, which is what the tab strip is as tall as.
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    Workspace(titlebar: geometry.safeAreaInsets.top)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    StatusBar()
+                }
+                .ignoresSafeArea(.container, edges: .top)
             }
-            // The canvas runs up under the title bar and the toolbar, so the glass has something
-            // of ours to sit on; only the background ignores the safe area, never the content.
             .background { Tone.canvas.ignoresSafeArea() }
-            .toolbar { QueryToolbarContent(model: model) }
+            .modifier(BareTitlebar())
             .navigationTitle(windowTitle.title)
             .navigationSubtitle(windowTitle.subtitle)
         }
-        .background(MainWindowTag())
+        // Read here so a change of theme or of appearance re-runs `updateNSView` and the window's
+        // own background follows the canvas.
+        .background(MainWindowTag(canvas: NSColor(Tone.canvas)))
         .foregroundStyle(Tone.ink)
         .sheet(item: $model.editingConnection) { target in
             ConnectionEditorSheet(target: target)
@@ -143,6 +156,24 @@ struct RootView: View {
     }
 }
 
+/// The title bar the shell wants: the title is set (the Window menu, Mission Control and VoiceOver
+/// read it) and not drawn, and the system's toolbar paints no background of its own, so the only
+/// thing in the top row is the theme's surface and what the app puts on it. A view modifier rather
+/// than a scene one, so it holds in the harness and the tests as well, where a scene modifier has
+/// no scene to act on and SwiftUI puts the title back on every update.
+private struct BareTitlebar: ViewModifier {
+    func body(content: Content) -> some View {
+        let bare = content.toolbarBackground(.hidden, for: .windowToolbar)
+        if #available(macOS 26, *) {
+            bare.scrollEdgeEffectHidden(true, for: .top).toolbar(removing: .title)
+        } else if #available(macOS 15, *) {
+            bare.toolbar(removing: .title)
+        } else {
+            bare
+        }
+    }
+}
+
 /// What the window's title bar says: the tab's name, and under it the connection and where the
 /// query lands. Values so a test can read them without a window.
 struct WindowTitle: Equatable {
@@ -177,16 +208,57 @@ enum MainWindow {
     }
 }
 
-/// A zero-size view that tells `MainWindow` which window it landed in.
+/// A zero-size view that tells `MainWindow` which window it landed in, and gives that window the
+/// look of the shell: a transparent title bar with no separator under it, on a window whose own
+/// background is the theme's canvas, so that nothing the system draws in the top row (a gap while
+/// the window resizes, the toolbar's fade) is the system's grey. It is here, rather than in a scene
+/// modifier, so the harness and the tests (which host `RootView` in a bare window) get the same
+/// window the app does.
 struct MainWindowTag: NSViewRepresentable {
+    let canvas: NSColor
+
     final class Tagger: NSView {
+        var canvas = NSColor.windowBackgroundColor
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            dress()
+        }
+
+        func dress() {
+            guard let window else { return }
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            window.backgroundColor = canvas
             MainActor.assumeIsolated { MainWindow.adopt(window) }
         }
     }
 
-    func makeNSView(context: Context) -> NSView { Tagger() }
+    func makeNSView(context: Context) -> NSView {
+        let tagger = Tagger()
+        tagger.canvas = canvas
+        return tagger
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard let tagger = view as? Tagger else { return }
+        tagger.canvas = canvas
+        tagger.dress()
+    }
+}
+
+/// A background that is an `NSView` with the frame of the view it sits behind, named by its
+/// `identifier`. SwiftUI says nothing about where it put a view, and a test of the shell has to
+/// know where the tab strip landed in the window.
+struct FrameMarker: NSViewRepresentable {
+    let name: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.identifier = NSUserInterfaceItemIdentifier(name)
+        return view
+    }
+
     func updateNSView(_ view: NSView, context: Context) {}
 }
 

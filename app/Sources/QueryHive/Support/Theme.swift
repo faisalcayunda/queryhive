@@ -95,6 +95,14 @@ enum Tone {
     /// rather than on top of it — `Tone.recess.opacity(0.30)` today.
     static var recess: Color { Color(nsColor: NSColor(name: nil) { $0.isDark ? .black : .white }) }
 
+    /// How far the sidebar's surface is pushed from the canvas, toward `ink` (a little lighter on a
+    /// dark theme, a little darker on a light one, about 10 levels of 255 in all seven). The
+    /// sidebar is the canvas plus this wash and nothing else: it used to lay a system material over
+    /// the canvas as well, and that material resolved to the same neutral grey in every theme
+    /// (`F7F7F7` under Daylight, Cloud and Paper alike, `141414` under Ink), so the sidebar, and the
+    /// traffic-lights row at its top, ignored the theme the window was in.
+    static let sidebarWash: Double = 0.04
+
     /// Secondary body text: the chrome's ink at 68%, which is what `Tone.secondary` has always been.
     static var secondary: Color { ink.opacity(ThemeStore.shared.surface.enhanced ? 0.85 : 0.68) }
 

@@ -51,17 +51,16 @@ struct QueryHiveApp: App {
         Window("QueryHive", id: "main") {
             RootView()
                 .environment(model)
-                // The window's toolbar is the query toolbar now, so the minimum is the width at
-                // which its widest content (a three-level breadcrumb, both badges and the Run
-                // group) still fits without moving items into the overflow menu. Measured with
-                // --snapshot --scene shell-narrow; see `Shell.minWidth`.
+                // Measured when the breadcrumb and the Run group were the window's toolbar (below
+                // it they moved into the overflow menu); they are a row under the tabs now and
+                // fit with 170 pt to spare, and the minimum stays. See `Shell.minWidth`.
                 .frame(minWidth: Shell.minWidth, minHeight: Shell.minHeight)
                 .preferredColorScheme(appearance.mode.colorScheme)
                 .onAppear { delegate.installTabKeys(for: model) }
         }
-        // A native title bar and unified toolbar: the title is the open tab, and the toolbar holds
-        // the breadcrumb and the Run group (`QueryToolbarContent`).
-        .windowToolbarStyle(.unified(showsTitle: true))
+        // A native title bar and toolbar (the sidebar toggle's), with no title drawn: the tab strip
+        // is the title bar's row, and the window's title (the open tab) is for the Window menu.
+        .windowToolbarStyle(.unified(showsTitle: false))
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1320, height: 880)
 
