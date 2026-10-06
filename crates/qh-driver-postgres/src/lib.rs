@@ -71,7 +71,8 @@
 //!   end can trigger is what an attacker on the network does, and a session that
 //!   silently became readable is worse than one that failed.
 //! - `Require` is TLS with the certificate verified against the platform's own
-//!   root store.
+//!   root store, or, when the connection names a CA file, against that bundle and
+//!   nothing else ([`tls::roots_from`]). The host name is checked either way.
 //! - `RequireNoVerify` is TLS with verification turned off, which is what an
 //!   attacker on the network needs in order to read everything on the
 //!   connection. It is reachable only by asking for it on one connection, and
@@ -83,6 +84,11 @@
 //! copy of it. [`tls::verifier_with_roots`] is the same path with a root store
 //! named by the caller, which is how the tests prove both halves of verification
 //! without a CA in the machine's store.
+//!
+//! Through an SSH tunnel the driver is handed `127.0.0.1` and the tunnel's port, while the
+//! certificate names the database. `ConnectionConfig::tls_server_name` carries that name,
+//! and the connection then uses it as `host` (what is verified) and the loopback address as
+//! `hostaddr` (where the socket goes).
 
 #![forbid(unsafe_code)]
 
@@ -91,6 +97,7 @@ pub mod normalize;
 pub mod tls;
 
 use std::error::Error as _;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -179,10 +186,14 @@ impl Driver for PostgresDriver {
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
         // A real connection verifies against the platform's own root store, which
         // is the Keychain on macOS — that is what makes a corporate CA the user
-        // installed work. Tests come in through `connect_with_verifier` below,
-        // because no test can put a CA in that store.
-        self.connect_with_verifier(config, tls::platform_verifier()?)
-            .await
+        // installed work. A connection that names its own CA file trusts that bundle
+        // and nothing else (FR-CON-08). Tests come in through `connect_with_verifier`
+        // below, because no test can put a CA in the platform store.
+        let verifier = match config.ca_for_verifying_mode()? {
+            Some(ca) => tls::verifier_with_roots(tls::roots_from(ca)?)?,
+            None => tls::platform_verifier()?,
+        };
+        self.connect_with_verifier(config, verifier).await
     }
 }
 
@@ -204,8 +215,25 @@ impl PostgresDriver {
         verifier: Arc<dyn ServerCertVerifier>,
     ) -> Result<Box<dyn Session>, EngineError> {
         let mut pg = tokio_postgres::Config::new();
-        pg.host(&config.host)
-            .port(config.port)
+        match &config.tls_server_name {
+            // Through a tunnel `host` is the tunnel's loopback address, and the
+            // certificate was issued for the database's own name. `tokio-postgres` uses
+            // `host` for the name it verifies and `hostaddr` for where it connects, which
+            // is exactly the split needed: the name is checked, the socket goes to the
+            // tunnel. (Without this, every verifying mode fails against `127.0.0.1`.)
+            Some(name) => {
+                let address: IpAddr = config.host.parse().map_err(|_| EngineError::Usage {
+                    message: "a TLS server name needs the connection address to be an IP \
+                              address (the tunnel's loopback endpoint)"
+                        .to_owned(),
+                })?;
+                pg.host(name).hostaddr(address);
+            }
+            None => {
+                pg.host(&config.host);
+            }
+        }
+        pg.port(config.port)
             .user(&config.user)
             .application_name("QueryHive")
             // A pooled session can idle behind a NAT that forgets it; a probe every minute keeps

@@ -26,6 +26,9 @@ pub mod render;
 mod value;
 
 pub use batch::{BatchError, ColumnBatch, ColumnMeta};
-pub use error::{offset_of_line, offset_of_line_column, EngineError, FailureKind};
+pub use error::{
+    offset_of_line, offset_of_line_column, EngineError, FailureKind, HostKeyFailure, HostKeyState,
+    RecordedHostKey,
+};
 pub use render::{to_json_value, to_text};
 pub use value::{unsupported, IntervalValue, Value};

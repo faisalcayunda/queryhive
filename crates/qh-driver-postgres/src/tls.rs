@@ -40,7 +40,7 @@
 use std::sync::Arc;
 
 use qh_core::{EngineError, FailureKind};
-use qh_driver::TlsMode;
+use qh_driver::{TlsCa, TlsMode};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::{ring, CryptoProvider};
@@ -80,6 +80,28 @@ pub fn verifier_with_roots(
             kind: FailureKind::Permanent,
         })?;
     Ok(verifier)
+}
+
+/// The roots a connection's own CA file makes: exactly its certificates, and no system
+/// store beside them (FR-CON-08).
+///
+/// The bundle was validated when it was read, so a failure here is not the user's file but
+/// a certificate `rustls` rejects after `webpki` accepted it, which is reported rather than
+/// skipped: a smaller store than the one chosen would be a silent change of what is trusted.
+pub fn roots_from(ca: &TlsCa) -> Result<RootCertStore, EngineError> {
+    let mut roots = RootCertStore::empty();
+    for der in ca.der() {
+        roots
+            .add(CertificateDer::from(der.clone()))
+            .map_err(|error| EngineError::Connect {
+                message: format!(
+                    "the CA file {} holds a certificate TLS cannot use: {error}",
+                    ca.path().display()
+                ),
+                kind: FailureKind::Permanent,
+            })?;
+    }
+    Ok(roots)
 }
 
 /// The rustls configuration for the two modes that verify a certificate.
@@ -209,6 +231,20 @@ mod tests {
         // an empty store. If this ever starts succeeding, every refusal test would
         // silently become a test of nothing.
         assert!(verifier_with_roots(RootCertStore::empty()).is_err());
+    }
+
+    #[test]
+    fn a_ca_file_becomes_a_store_of_exactly_its_certificates() {
+        let key = rcgen::KeyPair::generate().expect("a key pair");
+        let mut params = rcgen::CertificateParams::new(Vec::new()).expect("parameters");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let issuer = rcgen::CertifiedIssuer::self_signed(params, key).expect("a CA");
+        let ca = TlsCa::from_pem("/tmp/ca.pem", issuer.pem().as_bytes()).expect("a bundle");
+
+        let roots = roots_from(&ca).expect("a store");
+        assert_eq!(roots.roots.len(), 1);
+        // And a store built that way is usable: the verifier accepts it.
+        assert!(verifier_with_roots(roots).is_ok());
     }
 
     #[test]

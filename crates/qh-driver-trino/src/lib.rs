@@ -40,8 +40,32 @@
 //!
 //! So the header is not decoration: a request path that forgets it silently gets a
 //! downgraded answer back, with no error to notice. It is applied in one private
-//! helper, `with_shared_headers`, that every statement-protocol request goes
-//! through.
+//! helper, `authorized`, that every statement-protocol request goes through, and
+//! that is also the one place a credential is attached (next section).
+//!
+//! ## A credential goes to one address, and only that one
+//!
+//! Two of the three URLs a statement uses are chosen by the *server*: the `nextUri`
+//! of every page poll, and the `DELETE` that cancels. A coordinator behind a
+//! TLS-terminating load balancer that does not forward the scheme answers with
+//! `http://` there, and one that names another host or port sends the poll there.
+//! Attaching `Authorization` to whatever URL arrives would put a password or a
+//! token on the wire in clear, or hand it to another host.
+//!
+//! So `authorized` compares the URL's scheme, host and port with the address the
+//! session was opened on **before** it builds the request, and refuses (a
+//! permanent, named error that shows both addresses and no credential) when they
+//! differ. A bearer token additionally needs `https`. A session with no password
+//! and no token is not checked: nothing could leak, and an unauthenticated
+//! coordinator that announces another address keeps working.
+//!
+//! A client that holds a secret also does not follow redirects. reqwest drops
+//! `Authorization` on a redirect only when the host or the port changes, never when
+//! only the scheme does, so an `https` to `http` redirect on the same authority
+//! would carry the secret into clear text. The 3xx comes back as the error it is.
+//! And a `Prefer` connection with a secret never falls back to `http`: the one
+//! signal that allows the fallback (a coordinator that is not speaking TLS) is
+//! exactly the one where a password would be sent in clear.
 //!
 //! ## TLS
 //!
@@ -52,12 +76,20 @@
 //! |---|---|---|
 //! | `Disable` | `http` | — |
 //! | `Prefer` | `https`, with `http` only when the coordinator does not speak TLS | not checked |
-//! | `Require` | `https` | platform trust store |
+//! | `Require` | `https` | platform trust store, or the connection's own CA file |
 //! | `RequireNoVerify` | `https` | not checked |
 //!
 //! The trust store is the platform's — on macOS the Keychain, through
 //! `rustls-platform-verifier` — which is what makes a corporate CA the user
-//! installed work without the app having to carry a CA file.
+//! installed work without the app having to carry a CA file. A connection that
+//! does name a CA file trusts that bundle and nothing else, host name still
+//! checked; it is refused in any mode that would not use it.
+//!
+//! Through an SSH tunnel the driver is handed the tunnel's loopback address while
+//! the certificate names the database, so `ConnectionConfig::tls_server_name`
+//! becomes the host of the session's URLs and is resolved to the loopback address
+//! (`ClientBuilder::resolve`). The TLS name, the SNI and the `Host` header are then
+//! the database's own, and the socket still goes to the tunnel.
 //!
 //! **`Prefer` encrypts but does not verify**, which is a decision and not a
 //! leftover. The Python engine's `prefer` (psycopg, pymysql) encrypted and did not
@@ -82,6 +114,7 @@ mod decode;
 pub mod metadata;
 
 use std::collections::VecDeque;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,7 +122,7 @@ use async_trait::async_trait;
 use qh_core::{offset_of_line_column, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    MetadataSql, ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
+    MetadataSql, ObjectPath, ObjectsPage, Parameter, Session, TlsCa, TlsMode,
 };
 use qh_sql::{strip_terminator_dialect, Dialect};
 use serde::Deserialize;
@@ -269,9 +302,44 @@ pub fn client_for(
     tls: TlsMode,
     roots: Option<RootCertStore>,
 ) -> Result<reqwest::Client, EngineError> {
+    build_client(tls, roots, false, None)
+}
+
+/// [`client_for`], for a session that holds a password or a token: the same client that
+/// follows no redirect.
+///
+/// reqwest's default follows up to ten, and drops `Authorization` only when the host or
+/// the port changes. A redirect from `https` to `http` on the same authority keeps the
+/// header, so the credential would leave in clear text. A 3xx is returned as it is and
+/// surfaces as the failure it is.
+pub fn client_for_secret(
+    tls: TlsMode,
+    roots: Option<RootCertStore>,
+) -> Result<reqwest::Client, EngineError> {
+    build_client(tls, roots, true, None)
+}
+
+/// The one place a client is built, so the plain, the secret-holding and the tunnelled
+/// variants cannot drift apart.
+///
+/// `resolve` maps a DNS name to an address without asking DNS: the tunnel case, where the
+/// URLs carry the database's own name and the socket has to go to the loopback endpoint.
+/// reqwest takes the port from the URL, not from this address.
+fn build_client(
+    tls: TlsMode,
+    roots: Option<RootCertStore>,
+    no_redirects: bool,
+    resolve: Option<(&str, IpAddr)>,
+) -> Result<reqwest::Client, EngineError> {
     // The connect bound is set on every mode, because a port that does not answer is
     // not a TLS question: it drops the SYN before any scheme is chosen.
-    let builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    if no_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    if let Some((name, address)) = resolve {
+        builder = builder.resolve(name, SocketAddr::new(address, 0));
+    }
     let built = match tls {
         TlsMode::Disable => builder.build(),
         // `verify: false` in the app's own vocabulary for `RequireNoVerify`, and the
@@ -307,6 +375,25 @@ pub fn client_for(
         },
     };
     built.map_err(|error| client_error(format!("could not build the HTTP client: {error}")))
+}
+
+/// The roots a connection's own CA file makes: exactly its certificates, with no platform
+/// store beside them. The bundle was validated when it was read, so a failure here is a
+/// certificate `rustls` rejects after `webpki` accepted it, reported and not skipped (a
+/// smaller store than the one chosen would silently change what is trusted).
+pub fn roots_from(ca: &TlsCa) -> Result<RootCertStore, EngineError> {
+    let mut roots = RootCertStore::empty();
+    for der in ca.der() {
+        roots
+            .add(rustls::pki_types::CertificateDer::from(der.clone()))
+            .map_err(|error| {
+                client_error(format!(
+                    "the CA file {} holds a certificate TLS cannot use: {error}",
+                    ca.path().display()
+                ))
+            })?;
+    }
+    Ok(roots)
 }
 
 /// The start of every verifying configuration.
@@ -463,26 +550,68 @@ impl Driver for TrinoDriver {
         // the server knows about, and the driver still reports
         // `persistent_connection = false`. The client is built once per session,
         // here, from the mode — never per request.
-        let client = client_for(config.tls, None)?;
+        let roots = config
+            .ca_for_verifying_mode()?
+            .map(roots_from)
+            .transpose()?;
+        let secret = config.password.is_some() || config.bearer.is_some();
+        if config.bearer.is_some() {
+            if config.password.is_some() {
+                return Err(EngineError::Usage {
+                    message: "a connection sends a password or a bearer token, not both".to_owned(),
+                });
+            }
+            // A token that could travel in clear is a leaked token. `Prefer` is refused
+            // too, because it is the mode that may end up on `http`.
+            if !matches!(config.tls, TlsMode::Require | TlsMode::RequireNoVerify) {
+                return Err(EngineError::Usage {
+                    message: "a bearer token is only sent over verified or unverified TLS, never \
+                              over http or a mode that may fall back to it"
+                        .to_owned(),
+                });
+            }
+        }
+        // Through a tunnel the URLs carry the database's own name, resolved to the
+        // loopback endpoint the driver was handed as `host`.
+        let name = config.tls_server_name.as_deref();
+        let resolve = match name {
+            Some(name) => Some((name, loopback_of(&config.host)?)),
+            None => None,
+        };
+        let base = format!(
+            "{}://{}",
+            scheme_for(config.tls),
+            authority(name.unwrap_or(&config.host), config.port)
+        );
+
+        let client = build_client(config.tls, roots, secret, resolve)?;
         // `Prefer` starts on HTTPS and keeps the plaintext client in reserve for
         // the one case it is allowed to use it. Every other mode has nothing to
-        // fall back to, which is what makes "require" mean required.
-        let fallback = if config.tls == TlsMode::Prefer {
-            Some(client_for(TlsMode::Disable, None)?)
+        // fall back to, which is what makes "require" mean required. And a session
+        // with a password or a token has no reserve at all: the one signal that
+        // allows the fallback, a coordinator that is not speaking TLS, is exactly
+        // the one where a secret would go out in clear.
+        let fallback = if config.tls == TlsMode::Prefer && !secret {
+            Some(build_client(TlsMode::Disable, None, false, resolve)?)
         } else {
             None
         };
 
+        let mut credentials = Credentials::new(&config.user, config.password.clone());
+        credentials.bearer = config.bearer.clone();
+        if secret {
+            credentials.origin = Some(Origin::of(&base).map_err(|why| {
+                client_error(format!(
+                    "the coordinator address {base} is not usable: {why}"
+                ))
+            })?);
+        }
+
         Ok(Box::new(TrinoSession {
             client,
             fallback,
-            base: format!(
-                "{}://{}:{}",
-                scheme_for(config.tls),
-                config.host,
-                config.port
-            ),
-            credentials: Credentials::new(&config.user, config.password.clone()),
+            base,
+            credentials,
             catalog: config.database.clone().unwrap_or_default(),
             schema: config.schema.clone().unwrap_or_default(),
             running: Arc::new(Mutex::new(None)),
@@ -500,6 +629,28 @@ fn scheme_for(tls: TlsMode) -> &'static str {
         TlsMode::Disable => "http",
         TlsMode::Prefer | TlsMode::Require | TlsMode::RequireNoVerify => "https",
     }
+}
+
+/// `host:port` as a URL spells it: an IPv6 literal needs its brackets.
+fn authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The address a TLS server name is resolved to: the connection's own `host`, which a
+/// tunnel sets to its loopback endpoint. A name needs somewhere to go, so a host that is
+/// not an address is refused, not looked up.
+fn loopback_of(host: &str) -> Result<IpAddr, EngineError> {
+    host.trim_matches(['[', ']'])
+        .parse()
+        .map_err(|_| EngineError::Usage {
+            message: "a TLS server name needs the connection address to be an IP address \
+                      (the tunnel's loopback endpoint)"
+                .to_owned(),
+        })
 }
 
 /// The same authority under a different scheme, which is all a `Prefer` downgrade
@@ -524,13 +675,23 @@ fn non_empty(text: &str) -> Option<String> {
 ///
 /// Trino's statement protocol keeps no session, so there is nothing that can be
 /// authenticated once and reused. The identity travels on the request itself, and
-/// `password` is `Some` exactly when the connection has one. Both halves go out
-/// together, which is why they are passed as one value rather than as two
+/// `password` or `bearer` is `Some` exactly when the connection has one. All of it
+/// goes out together, which is why it is passed as one value rather than as separate
 /// arguments a call site could get half right.
+///
+/// It also carries the one address the secret may be sent to (`origin`), because a
+/// credential that knows where it may go cannot be attached to a URL somewhere else.
+/// [`Credentials::new`] leaves the address unset, and a secret with no address on record
+/// is never sent: the driver's `connect` fills it in from the session's base.
 #[derive(Clone)]
 pub struct Credentials {
     pub user: String,
     pub password: Option<String>,
+    /// A bearer token, sent as `Authorization: Bearer` **instead of** Basic.
+    pub bearer: Option<String>,
+    /// The scheme, host and port of the session's address. `None` with a secret fails
+    /// closed: nothing is sent.
+    origin: Option<Origin>,
 }
 
 impl Credentials {
@@ -543,37 +704,135 @@ impl Credentials {
         Self {
             user: non_empty(user).unwrap_or_else(|| DEFAULT_USER.to_owned()),
             password,
+            bearer: None,
+            origin: None,
         }
+    }
+
+    fn has_secret(&self) -> bool {
+        self.password.is_some() || self.bearer.is_some()
+    }
+
+    /// Why a request to `url` must not carry the secret, or `None` when it may.
+    ///
+    /// The message names both addresses (never a path, a query or a credential) and is
+    /// the one a person reads, so it says what to check.
+    fn refusal_for(&self, url: &str) -> Option<String> {
+        if !self.has_secret() {
+            return None;
+        }
+        let Some(session) = &self.origin else {
+            return Some(
+                "these credentials have no session address on record, so they were not sent"
+                    .to_owned(),
+            );
+        };
+        let Ok(target) = Origin::of(url) else {
+            return Some(
+                "the coordinator sent a URL that could not be read, so the credentials were \
+                 not sent"
+                    .to_owned(),
+            );
+        };
+        if &target != session {
+            return Some(format!(
+                "the coordinator sent a page URL on {target}, not on {session} (the address \
+                 this connection uses), so the credentials were not sent. Check the \
+                 coordinator's external address and its forwarded-header handling."
+            ));
+        }
+        if self.bearer.is_some() && session.scheme != "https" {
+            return Some(format!(
+                "a bearer token is only sent over https, and this connection uses {session}"
+            ));
+        }
+        None
     }
 }
 
-/// Never prints the password.
+/// Never prints the password or the token.
 ///
 /// A `{:?}` on anything holding credentials is the shortest path from a support
 /// request to a secret in a log, so the derived form is replaced with one that
 /// reports only whether one is present — the same rule `ConnectionConfig` follows.
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let present = |value: bool| if value { "present" } else { "none" };
         write!(
             formatter,
-            "Credentials(user: {:?}, password: {})",
+            "Credentials(user: {:?}, password: {}, bearer: {})",
             self.user,
-            if self.password.is_some() {
-                "present"
-            } else {
-                "none"
-            }
+            present(self.password.is_some()),
+            present(self.bearer.is_some()),
         )
+    }
+}
+
+/// Where a URL is: scheme, host and port, compared the way a browser's same-origin rule
+/// compares them. `https://h` and `https://h:443` are one origin; `http://h:443` and
+/// `https://h:443` are two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Origin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    fn of(url: &str) -> Result<Self, &'static str> {
+        let url = reqwest::Url::parse(url).map_err(|_| "it is not a URL")?;
+        match (url.host_str(), url.port_or_known_default()) {
+            (Some(host), Some(port)) if matches!(url.scheme(), "http" | "https") => Ok(Self {
+                scheme: url.scheme().to_owned(),
+                // The parser has already lower-cased a domain, and an IPv6 literal keeps
+                // its brackets, so two spellings of one host compare equal.
+                host: host.to_owned(),
+                port,
+            }),
+            _ => Err("it has no host, port or http scheme"),
+        }
+    }
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}://{}:{}", self.scheme, self.host, self.port)
     }
 }
 
 /// The name a connection runs as when it names no user.
 pub const DEFAULT_USER: &str = "queryhive";
 
-/// The headers every request to the coordinator carries.
+/// A request that was not built, because its URL is not where the credentials may go.
+struct Refused(String);
+
+impl Refused {
+    /// As the failure of the statement's `POST`.
+    fn connect(self) -> EngineError {
+        EngineError::Connect {
+            message: self.0,
+            // The same URL would be refused again, so a retry only repeats it.
+            kind: FailureKind::Permanent,
+        }
+    }
+
+    /// As the failure of a page poll or a cancel.
+    fn query(self) -> EngineError {
+        EngineError::Query {
+            message: self.0,
+            code: None,
+            position: None,
+            kind: FailureKind::Permanent,
+        }
+    }
+}
+
+/// Build a request to the coordinator: the headers every one carries, and the credential,
+/// **if** `url` is where the credential may go.
 ///
-/// One function because two different omissions are invisible from the outside,
-/// and one of them costs the request outright.
+/// The one function that attaches a secret (a test counts, so a new request path cannot
+/// quietly build its own), and the one that checks the destination first. Two omissions are
+/// invisible from the outside, and one of them costs the request outright.
 ///
 /// [`CLIENT_CAPABILITIES`] is the quiet one: a request without it is answered with
 /// the same types and values downgraded to milliseconds, and nothing reports an
@@ -594,17 +853,24 @@ pub const DEFAULT_USER: &str = "queryhive";
 /// statement is created. It is sent anyway — the header is part of what this client
 /// is, the reference client sends it on every request, and a coordinator that read
 /// it per response would otherwise downgrade the middle of a result set.
-fn with_shared_headers(
-    request: reqwest::RequestBuilder,
+fn authorized(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
     credentials: &Credentials,
-) -> reqwest::RequestBuilder {
-    let request = request
+) -> Result<reqwest::RequestBuilder, Refused> {
+    if let Some(reason) = credentials.refusal_for(url) {
+        return Err(Refused(reason));
+    }
+    let request = client
+        .request(method, url)
         .header("X-Trino-User", &credentials.user)
         .header(CLIENT_CAPABILITIES_HEADER, CLIENT_CAPABILITIES);
-    match &credentials.password {
-        Some(password) => request.basic_auth(&credentials.user, Some(password)),
-        None => request,
-    }
+    Ok(match (&credentials.bearer, &credentials.password) {
+        (Some(token), _) => request.bearer_auth(token),
+        (None, Some(password)) => request.basic_auth(&credentials.user, Some(password)),
+        (None, None) => request,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -658,15 +924,25 @@ impl TrinoSession {
         } else {
             running.next_uri
         };
-        let response = with_shared_headers(self.client.delete(&target), &self.credentials)
-            .send()
-            .await
-            .map_err(|error| EngineError::Query {
-                message: format!("could not send the cancel: {error}"),
-                code: None,
-                kind: FailureKind::Transient,
-                position: None,
-            })?;
+        // The URL is the one the coordinator gave for this query, so it is checked like
+        // any other before the credential goes with it; a refused cancel sends nothing
+        // and does not fall back to a URL derived from the base, which is not the one
+        // the server named.
+        let response = authorized(
+            &self.client,
+            reqwest::Method::DELETE,
+            &target,
+            &self.credentials,
+        )
+        .map_err(Refused::query)?
+        .send()
+        .await
+        .map_err(|error| EngineError::Query {
+            message: format!("could not send the cancel: {error}"),
+            code: None,
+            kind: FailureKind::Transient,
+            position: None,
+        })?;
 
         if response.status().is_success() || response.status().as_u16() == 404 {
             *self.running.lock().expect("running state") = None;
@@ -699,7 +975,7 @@ impl TrinoSession {
         (catalog, schema)
     }
 
-    /// Send the statement over whatever client and scheme the session currently
+    /// The statement's request, over whatever client and scheme the session currently
     /// holds, with no fallback of its own.
     ///
     /// Split out so `post` can try it once, decide, and try again if — and only
@@ -707,15 +983,18 @@ impl TrinoSession {
     /// `X-Trino-Session` value that carries the statement's own bound, when it has
     /// one; it belongs on the POST and nowhere else, because a session property is
     /// read when the query is created.
-    async fn send_post(
+    fn post_request(
         &self,
         sql: &str,
         session: Option<&str>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        let mut request = with_shared_headers(
-            self.client.post(format!("{}/v1/statement", self.base)),
+    ) -> Result<reqwest::RequestBuilder, EngineError> {
+        let mut request = authorized(
+            &self.client,
+            reqwest::Method::POST,
+            &format!("{}/v1/statement", self.base),
             &self.credentials,
         )
+        .map_err(Refused::connect)?
         .header("Content-Type", "text/plain");
         if let Some(session) = session {
             request = request.header("X-Trino-Session", session);
@@ -726,7 +1005,7 @@ impl TrinoSession {
         if !self.schema.is_empty() {
             request = request.header("X-Trino-Schema", &self.schema);
         }
-        request.body(sql.to_owned()).send().await
+        Ok(request.body(sql.to_owned()))
     }
 
     /// POST one statement and return its first page.
@@ -736,7 +1015,7 @@ impl TrinoSession {
     /// after it.
     async fn post(&mut self, sql: &str, timeout: Option<Duration>) -> Result<Page, EngineError> {
         let session = session_header(timeout);
-        let response = match self.send_post(sql, session.as_deref()).await {
+        let response = match self.post_request(sql, session.as_deref())?.send().await {
             Ok(response) => response,
             // The one downgrade that is allowed, and only with a plaintext client
             // still in reserve: the coordinator answered the handshake with
@@ -745,15 +1024,31 @@ impl TrinoSession {
                 // Taking the fallback is what makes this a decision taken once:
                 // after this there is no plaintext client left to reach for, so a
                 // later poll has nothing to downgrade to.
-                self.fallback = None;
-                self.client = client_for(TlsMode::Disable, None)?;
+                if let Some(plain) = self.fallback.take() {
+                    self.client = plain;
+                }
                 self.base = with_scheme("http", &self.base);
-                self.send_post(sql, session.as_deref())
+                self.post_request(sql, session.as_deref())?
+                    .send()
                     .await
                     .map_err(|error| EngineError::Connect {
                         message: format!("could not reach {}: {error}", self.base),
                         kind: FailureKind::Transient,
                     })?
+            }
+            // A connection with a password or a token has no plaintext reserve, so a
+            // coordinator that is not speaking TLS is a refusal, and says why: the
+            // user chose `prefer` expecting a fallback, and a bare handshake error
+            // would not tell them the secret is the reason there is none.
+            Err(failure) if self.credentials.has_secret() && not_a_tls_server(&failure) => {
+                return Err(EngineError::Connect {
+                    message: format!(
+                        "{} does not speak TLS, and a connection with a password or a token \
+                         never falls back to plain http. Turn TLS on at the coordinator.",
+                        self.base
+                    ),
+                    kind: FailureKind::Permanent,
+                })
             }
             Err(error) => {
                 return Err(EngineError::Connect {
@@ -1126,21 +1421,18 @@ impl TrinoCursor {
             return Ok(());
         };
 
-        let response = with_shared_headers(
-            self.client
-                .get(&uri)
-                .header("X-Trino-Catalog", &self.catalog)
-                .header("X-Trino-Schema", &self.schema),
-            &self.credentials,
-        )
-        .send()
-        .await
-        .map_err(|error| EngineError::Query {
-            message: format!("could not fetch the next page: {error}"),
-            code: None,
-            kind: FailureKind::Transient,
-            position: None,
-        })?;
+        let response = authorized(&self.client, reqwest::Method::GET, &uri, &self.credentials)
+            .map_err(Refused::query)?
+            .header("X-Trino-Catalog", &self.catalog)
+            .header("X-Trino-Schema", &self.schema)
+            .send()
+            .await
+            .map_err(|error| EngineError::Query {
+                message: format!("could not fetch the next page: {error}"),
+                code: None,
+                kind: FailureKind::Transient,
+                position: None,
+            })?;
 
         let status = response.status();
         let text = response.text().await.map_err(|error| EngineError::Query {
@@ -1837,6 +2129,244 @@ mod tests {
         );
     }
 
+    fn origin(url: &str) -> Origin {
+        Origin::of(url).unwrap_or_else(|why| panic!("{url}: {why}"))
+    }
+
+    #[test]
+    fn an_origin_is_scheme_host_and_port_and_nothing_else() {
+        // Case does not make a different host.
+        assert_eq!(
+            origin("https://Trino.Corp/v1/x"),
+            origin("https://trino.corp/v1/y")
+        );
+        // The scheme's own port is the same as no port at all.
+        assert_eq!(origin("https://h"), origin("https://h:443/p?q=1"));
+        assert_eq!(origin("http://h"), origin("http://h:80"));
+        // A port is part of the identity, and so is the scheme: `http://h:443` is
+        // not `https://h:443`, which is the whole point of the check.
+        assert_ne!(origin("https://h:443"), origin("https://h:8443"));
+        assert_ne!(origin("http://h:443"), origin("https://h:443"));
+        // `localhost` and `127.0.0.1` are two hosts as far as a credential goes.
+        assert_ne!(origin("https://localhost:1"), origin("https://127.0.0.1:1"));
+        // IPv6 keeps its brackets, so it is one host in any spelling.
+        assert_eq!(
+            origin("https://[::1]:8443/x"),
+            origin("https://[0:0:0:0:0:0:0:1]:8443")
+        );
+        assert_eq!(origin("https://h:8443/x").to_string(), "https://h:8443");
+        // What is not an http(s) URL with a host has no origin.
+        for bad in [
+            "",
+            "not a url",
+            "/v1/statement/x",
+            "ftp://h/x",
+            "https://:443",
+        ] {
+            assert!(Origin::of(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    fn credentials_for(session: &str, password: Option<&str>, bearer: Option<&str>) -> Credentials {
+        let mut credentials = Credentials::new("u", password.map(str::to_owned));
+        credentials.bearer = bearer.map(str::to_owned);
+        credentials.origin = Some(origin(session));
+        credentials
+    }
+
+    #[test]
+    fn a_secret_is_only_sent_to_the_address_the_session_uses() {
+        let basic = credentials_for("https://trino.corp:443", Some("pw"), None);
+        assert_eq!(
+            basic.refusal_for("https://trino.corp/v1/statement/q/1"),
+            None
+        );
+        // The scheme, the host and the port each refuse on their own.
+        for foreign in [
+            "http://trino.corp:443/v1/statement/q/1",
+            "https://other.corp/v1/statement/q/1",
+            "https://trino.corp:8443/v1/statement/q/1",
+            "not a url",
+        ] {
+            assert!(basic.refusal_for(foreign).is_some(), "{foreign}");
+        }
+        // The message names both addresses, and carries neither a path nor a secret.
+        let message = basic
+            .refusal_for("http://trino.corp:8080/v1/statement/q/1?token=abc")
+            .expect("refused");
+        assert!(message.contains("http://trino.corp:8080"), "{message}");
+        assert!(message.contains("https://trino.corp:443"), "{message}");
+        assert!(!message.contains("/v1/statement"), "{message}");
+        assert!(
+            !message.contains("abc") && !message.contains("pw"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_secret_without_an_address_on_record_is_not_sent_anywhere() {
+        let mut credentials = Credentials::new("u", Some("pw".to_owned()));
+        assert!(credentials.refusal_for("https://h/x").is_some());
+        credentials.password = None;
+        credentials.bearer = Some("tok".to_owned());
+        assert!(credentials.refusal_for("https://h/x").is_some());
+    }
+
+    #[test]
+    fn a_session_with_no_secret_is_not_checked_at_all() {
+        // Nothing can leak, and a coordinator without authentication that announces
+        // another address works today, so it keeps working.
+        let open = Credentials::new("u", None);
+        assert_eq!(open.refusal_for("http://anywhere:1/x"), None);
+        assert_eq!(open.refusal_for("not even a url"), None);
+    }
+
+    #[test]
+    fn a_bearer_token_needs_https_even_to_its_own_address() {
+        let over_http = credentials_for("http://trino.corp:8080", None, Some("tok"));
+        let message = over_http
+            .refusal_for("http://trino.corp:8080/v1/statement")
+            .expect("a token never goes over http");
+        assert!(message.contains("only sent over https"), "{message}");
+        // A password over http is the existing, config-guarded behaviour, unchanged.
+        let basic = credentials_for("http://trino.corp:8080", Some("pw"), None);
+        assert_eq!(
+            basic.refusal_for("http://trino.corp:8080/v1/statement"),
+            None
+        );
+        let over_https = credentials_for("https://trino.corp:443", None, Some("tok"));
+        assert_eq!(
+            over_https.refusal_for("https://trino.corp/v1/statement"),
+            None
+        );
+    }
+
+    #[test]
+    fn credentials_never_print_a_secret() {
+        let both = credentials_for("https://h", Some("hunter2"), Some("SENTINEL-TOKEN"));
+        let shown = format!("{both:?}");
+        assert!(
+            !shown.contains("hunter2") && !shown.contains("SENTINEL"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("password: present") && shown.contains("bearer: present"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_refused_request_is_permanent_and_is_not_built() {
+        let client = client_for(TlsMode::Disable, None).expect("client");
+        let credentials = credentials_for("https://trino.corp:443", Some("pw"), None);
+        let refused = authorized(
+            &client,
+            reqwest::Method::GET,
+            "http://trino.corp:80/x",
+            &credentials,
+        )
+        .expect_err("refused");
+        // As a poll or a cancel it is a query failure, as the statement it is a
+        // connect failure; neither is ever retried.
+        assert!(matches!(
+            Refused(refused.0.clone()).query(),
+            EngineError::Query {
+                code: None,
+                kind: FailureKind::Permanent,
+                ..
+            }
+        ));
+        assert!(matches!(
+            refused.connect(),
+            EngineError::Connect {
+                kind: FailureKind::Permanent,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn only_authorized_attaches_a_credential() {
+        // The promise in the module note is that one function decides where a secret
+        // goes. Counting makes it true for the next request path someone adds: it
+        // would have to build its own `basic_auth`, and this test would see it.
+        let source = include_str!("lib.rs");
+        let code = source.split("#[cfg(test)]").next().expect("the code half");
+        let code: String = code
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body_start = code.find("fn authorized(").expect("authorized exists");
+        let body_end = body_start + code[body_start..].find("\n}\n").expect("its end");
+        let outside = format!("{}{}", &code[..body_start], &code[body_end..]);
+        // Not vacuous: the two calls exist, inside the function.
+        assert!(code.contains(".basic_auth(") && code.contains(".bearer_auth("));
+        for needle in [
+            ".basic_auth(",
+            ".bearer_auth(",
+            "\"Authorization\"",
+            "AUTHORIZATION",
+        ] {
+            assert!(
+                !outside.contains(needle),
+                "{needle} is used outside `authorized`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ipv6_literal_is_bracketed_in_a_url() {
+        assert_eq!(authority("coordinator.corp", 443), "coordinator.corp:443");
+        assert_eq!(authority("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(authority("::1", 8080), "[::1]:8080");
+        assert_eq!(authority("[::1]", 8080), "[::1]:8080");
+        // And the address a TLS name resolves to is read through the brackets.
+        assert_eq!(
+            loopback_of("[::1]").expect("an address"),
+            "::1".parse::<IpAddr>().unwrap()
+        );
+        assert!(loopback_of("db.internal").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_token_is_refused_at_connect_when_it_could_travel_in_clear() {
+        let base = ConnectionConfig::new(DriverKind::Trino, "trino.corp", 443, "qh");
+        for mode in [TlsMode::Disable, TlsMode::Prefer] {
+            let error = TrinoDriver::new()
+                .connect(&base.clone().bearer("tok").tls(mode))
+                .await
+                .err()
+                .expect("a token needs a mode that is always TLS");
+            assert!(
+                matches!(error, EngineError::Usage { .. }),
+                "{mode:?}: {error:?}"
+            );
+        }
+        let error = TrinoDriver::new()
+            .connect(
+                &base
+                    .clone()
+                    .bearer("tok")
+                    .password("pw")
+                    .tls(TlsMode::RequireNoVerify),
+            )
+            .await
+            .err()
+            .expect("one or the other");
+        assert!(matches!(error, EngineError::Usage { .. }), "{error:?}");
+        // The two modes that are always TLS connect (nothing is sent until a statement).
+        for mode in [TlsMode::Require, TlsMode::RequireNoVerify] {
+            assert!(
+                TrinoDriver::new()
+                    .connect(&base.clone().bearer("tok").tls(mode))
+                    .await
+                    .is_ok(),
+                "{mode:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_mode_can_build_its_client() {
         // The client is built once per session from the mode, so a mode that cannot
@@ -1851,6 +2381,10 @@ mod tests {
             assert!(
                 client_for(mode, None).is_ok(),
                 "{mode:?} should build a client"
+            );
+            assert!(
+                client_for_secret(mode, None).is_ok(),
+                "{mode:?} should build a client that holds a secret"
             );
         }
     }

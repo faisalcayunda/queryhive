@@ -10,9 +10,18 @@ repository.workspace = true
 [dependencies]
 async-trait = "0.1"
 qh-core.workspace = true
+# The CA bundle a connection can name (`ca.rs`): the PEM is read with
+# `rustls-pki-types`, and `rustls-webpki` is asked whether each certificate is a
+# usable trust anchor, so a bad one is refused by name instead of being dropped by
+# the root store later. Both are already in the graph through `rustls`; neither pulls
+# a crypto provider here (webpki's `ring` feature stays off, nothing is verified).
+rustls-pki-types = { version = "1", default-features = false, features = ["std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std"] }
 thiserror.workspace = true
 
 [dev-dependencies]
+# Certificates for the CA file tests, generated rather than checked in.
+rcgen = "0.14"
 # Only for `#[tokio::test]`: the traits are async, so exercising them needs a
 # runtime. Minimal features, so this does not pull the whole of tokio into a
 # crate that otherwise has no runtime dependency at all.

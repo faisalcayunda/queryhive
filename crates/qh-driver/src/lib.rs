@@ -34,8 +34,11 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
 use thiserror::Error;
 
+mod ca;
 mod metadata;
 mod tunnel;
+
+pub use ca::{CaError, TlsCa, MAX_CA_CERTIFICATES, MAX_CA_FILE_BYTES};
 
 pub use metadata::{
     required_part, ColumnInfo, DdlRecipe, MetadataSql, ObjectDdl, ObjectKind, Rows, Step,
@@ -335,6 +338,20 @@ pub struct ConnectionConfig {
     /// `host`/`port`. A driver that saw the bastion would have to know SSH, which
     /// is exactly what keeping the field at this level avoids.
     pub tunnel: Option<TunnelConfig>,
+    /// A CA bundle this connection trusts **instead of** the platform store
+    /// (PostgreSQL and Trino, and only in [`TlsMode::Require`]). Already read and
+    /// validated, so there is nothing left to fail at connect time and nothing to swap
+    /// between the check and the use. See [`ConnectionConfig::ca_for_verifying_mode`].
+    pub tls_ca: Option<TlsCa>,
+    /// A bearer token (Trino). Opaque to the engine: it is not decoded, and an expired
+    /// one shows up as the coordinator's 401. Exclusive with `password`. Never printed.
+    pub bearer: Option<String>,
+    /// The name the server certificate is checked against, when that is not `host`.
+    ///
+    /// Set when the engine points `host` at a tunnel's loopback endpoint: the connection
+    /// goes to `127.0.0.1`, but the certificate was issued for the database's own name,
+    /// and verifying it against `127.0.0.1` would fail every verifying mode.
+    pub tls_server_name: Option<String>,
 }
 
 impl ConnectionConfig {
@@ -355,6 +372,9 @@ impl ConnectionConfig {
             tls: TlsMode::Prefer,
             insecure: false,
             tunnel: None,
+            tls_ca: None,
+            bearer: None,
+            tls_server_name: None,
         }
     }
 
@@ -378,6 +398,49 @@ impl ConnectionConfig {
         self
     }
 
+    pub fn bearer(mut self, token: impl Into<String>) -> Self {
+        self.bearer = Some(token.into());
+        self
+    }
+
+    pub fn tls_ca(mut self, ca: TlsCa) -> Self {
+        self.tls_ca = Some(ca);
+        self
+    }
+
+    pub fn tls_server_name(mut self, name: impl Into<String>) -> Self {
+        self.tls_server_name = Some(name.into());
+        self
+    }
+
+    /// The CA bundle to verify against, or an error when one was named where it would be
+    /// ignored.
+    ///
+    /// A bundle only means something in the one mode that verifies. In any other it would
+    /// be silently unused, and the person who chose it would believe the connection was
+    /// pinned to their CA when it is not, which is worse than a refusal. So `Prefer`,
+    /// `Disable`, `RequireNoVerify` and `insecure` all refuse it, by name, before a socket
+    /// is opened. Both PostgreSQL and Trino call this first.
+    pub fn ca_for_verifying_mode(&self) -> Result<Option<&TlsCa>, EngineError> {
+        match &self.tls_ca {
+            Some(ca) if self.tls != TlsMode::Require || self.insecure => Err(EngineError::Usage {
+                message: format!(
+                    "a CA file ({}) only applies when the certificate is verified, and this \
+                     connection is {}: it would be ignored and the connection would not be \
+                     pinned to that CA. Use verify-ca or verify-full, or remove the CA file",
+                    ca.path().display(),
+                    match (self.tls, self.insecure) {
+                        (TlsMode::Disable, _) => "not encrypted",
+                        (TlsMode::Prefer, _) => "prefer, which does not verify",
+                        (_, true) => "set to skip certificate verification",
+                        _ => "require without verification",
+                    }
+                ),
+            }),
+            ca => Ok(ca.as_ref()),
+        }
+    }
+
     /// A rendering safe to put in a log or an error message.
     pub fn redacted(&self) -> String {
         format!(
@@ -398,16 +461,18 @@ impl fmt::Debug for ConnectionConfig {
     /// what a support conversation needs; its value is not, and a `{:?}` on a
     /// config is the easiest way to write a live credential into a log file.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secret = |present: bool| if present { "<redacted>" } else { "none" };
         write!(
             formatter,
-            "ConnectionConfig({}, tls: {:?}, password: {})",
+            "ConnectionConfig({}, tls: {:?}, password: {}, bearer: {}, ca: {}, server_name: {:?})",
             self.redacted(),
             self.tls,
-            if self.password.is_some() {
-                "<redacted>"
-            } else {
-                "none"
-            }
+            secret(self.password.is_some()),
+            secret(self.bearer.is_some()),
+            self.tls_ca
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), |ca| format!("{ca:?}")),
+            self.tls_server_name,
         )
     }
 }
@@ -1032,6 +1097,85 @@ mod tests {
 
         let without = ConnectionConfig::new(DriverKind::Postgres, "db.internal", 5432, "qh");
         assert!(format!("{without:?}").contains("password: none"));
+    }
+
+    #[test]
+    fn a_bearer_token_never_prints() {
+        let config = ConnectionConfig::new(DriverKind::Trino, "trino.internal", 443, "qh")
+            .bearer("eyJhbGciOi.SENTINEL.signature");
+        let debugged = format!("{config:?}");
+        assert!(!debugged.contains("SENTINEL"), "{debugged}");
+        assert!(debugged.contains("bearer: <redacted>"), "{debugged}");
+        let without = ConnectionConfig::new(DriverKind::Trino, "trino.internal", 443, "qh");
+        assert!(format!("{without:?}").contains("bearer: none"));
+    }
+
+    fn a_ca() -> TlsCa {
+        let key = rcgen::KeyPair::generate().expect("a key pair");
+        let mut params = rcgen::CertificateParams::new(Vec::new()).expect("parameters");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(params, key).expect("a CA");
+        TlsCa::from_pem("/etc/corp-ca.pem", ca.pem().as_bytes()).expect("a valid bundle")
+    }
+
+    #[test]
+    fn a_ca_file_is_only_taken_in_the_one_mode_that_verifies() {
+        let base = ConnectionConfig::new(DriverKind::Postgres, "db.internal", 5432, "qh");
+        // No CA named: nothing to check, in any mode.
+        for mode in [
+            TlsMode::Disable,
+            TlsMode::Prefer,
+            TlsMode::Require,
+            TlsMode::RequireNoVerify,
+        ] {
+            assert!(base
+                .clone()
+                .tls(mode)
+                .ca_for_verifying_mode()
+                .unwrap()
+                .is_none());
+        }
+        // Verifying: the bundle is handed back.
+        let verifying = base.clone().tls(TlsMode::Require).tls_ca(a_ca());
+        assert!(verifying.ca_for_verifying_mode().unwrap().is_some());
+        // Anywhere else it would be ignored, so it is refused, naming the file.
+        for mode in [TlsMode::Disable, TlsMode::Prefer, TlsMode::RequireNoVerify] {
+            let error = base
+                .clone()
+                .tls(mode)
+                .tls_ca(a_ca())
+                .ca_for_verifying_mode()
+                .expect_err("a CA outside the verifying mode must be refused");
+            assert!(
+                matches!(error, EngineError::Usage { .. }),
+                "{mode:?}: {error:?}"
+            );
+            assert!(
+                error.message().contains("/etc/corp-ca.pem"),
+                "{}",
+                error.message()
+            );
+        }
+        let mut insecure = verifying;
+        insecure.insecure = true;
+        assert!(insecure.ca_for_verifying_mode().is_err());
+    }
+
+    #[test]
+    fn a_config_with_a_ca_prints_the_path_not_the_certificates() {
+        let config = ConnectionConfig::new(DriverKind::Postgres, "db.internal", 5432, "qh")
+            .tls(TlsMode::Require)
+            .tls_ca(a_ca())
+            .tls_server_name("db.internal");
+        let debugged = format!("{config:?}");
+        assert!(
+            debugged.contains("ca: TlsCa(/etc/corp-ca.pem, 1 certificate)"),
+            "{debugged}"
+        );
+        assert!(
+            debugged.contains("server_name: Some(\"db.internal\")"),
+            "{debugged}"
+        );
     }
 
     #[test]

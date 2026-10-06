@@ -100,6 +100,15 @@ pub enum EngineError {
         limit_ms: Option<u64>,
     },
 
+    /// The SSH bastion's host key was not accepted (blueprint W11 §5.8).
+    ///
+    /// Its own variant, and boxed, because the app has to put a decision in front of a
+    /// person (the fingerprint, what is on record, which file) and a message alone cannot
+    /// carry that. Boxed so the common errors stay small. Always [`FailureKind::Permanent`]:
+    /// retrying presents the same key to the same refusal.
+    #[error("{}", .0.message)]
+    HostKey(Box<HostKeyFailure>),
+
     /// A bug in this program, including a caught panic at the FFI boundary.
     ///
     /// Never caused by server data. It is separated from the variants above
@@ -109,12 +118,92 @@ pub enum EngineError {
     Internal { message: String },
 }
 
+/// Where a host key stands, as the `state` of the `host_key` object on an `error` event.
+///
+/// Exactly the states a person can be shown. A bastion connection that was merely not
+/// host-key verified is an internal fault, not a prompt, so it has no state here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyState {
+    /// Not on record anywhere: the trust-on-first-use case.
+    Unknown,
+    /// A different key is on record. Never resolved by a prompt.
+    Changed,
+    /// A `@revoked` line matches.
+    Revoked,
+    /// The server offered a host certificate, which this build cannot verify.
+    Certificate,
+    /// A `@cert-authority` line covers the host, which presented a plain key.
+    CertificateExpected,
+    /// The fingerprint the caller pinned is not the one the server presented.
+    PinMismatch,
+    /// The key was pinned and matched but could not be written to the app's file.
+    RecordFailed,
+    /// The app's own `known_hosts` is a symlink, someone else's, or writable by others.
+    StoreUnsafe,
+}
+
+impl HostKeyState {
+    /// The spelling on the wire (`snake_case`, like every other event key).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HostKeyState::Unknown => "unknown",
+            HostKeyState::Changed => "changed",
+            HostKeyState::Revoked => "revoked",
+            HostKeyState::Certificate => "certificate",
+            HostKeyState::CertificateExpected => "certificate_expected",
+            HostKeyState::PinMismatch => "pin_mismatch",
+            HostKeyState::RecordFailed => "record_failed",
+            HostKeyState::StoreUnsafe => "store_unsafe",
+        }
+    }
+}
+
+/// One key already on record for a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedHostKey {
+    pub fingerprint: String,
+    pub key_type: String,
+    /// `app`, `user` or `system`: which of the three `known_hosts` files it is in.
+    pub source: String,
+    pub path: String,
+    pub line: u32,
+}
+
+/// Why a bastion's host key was refused, as plain data.
+///
+/// Strings and numbers only, so `qh-core` knows nothing about SSH and the FFI layer can
+/// write the `host_key` object of an `error` event without reaching into the tunnel crate.
+/// [`HostKeyFailure::message`] is the sentence the command line prints; the rest is for
+/// the sheet that asks a person to decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyFailure {
+    pub message: String,
+    pub state: HostKeyState,
+    pub host: String,
+    pub port: u16,
+    /// The `~/.ssh/config` alias the host came from, for display.
+    pub alias: Option<String>,
+    pub key_type: Option<String>,
+    pub fingerprint: Option<String>,
+    /// The app's own `known_hosts`, when one is configured.
+    pub app_known_hosts: Option<String>,
+    /// A `@cert-authority` line covers this host.
+    pub ca_covered: bool,
+    pub recorded: Vec<RecordedHostKey>,
+    /// The fingerprint the caller pinned; set only for [`HostKeyState::PinMismatch`].
+    pub pinned: Option<String>,
+}
+
 impl EngineError {
     /// Whether the operation that produced this error may be attempted again.
     pub fn failure_kind(&self) -> FailureKind {
         match self {
             EngineError::Connect { kind, .. } | EngineError::Query { kind, .. } => *kind,
             EngineError::Usage { .. } | EngineError::Internal { .. } => FailureKind::Permanent,
+            // A refused host key does not change on the next attempt, and a retry
+            // loop that presented it again would only repeat the refusal. Named here
+            // rather than left to a wildcard, so a new variant has to choose.
+            EngineError::HostKey(_) => FailureKind::Permanent,
             // A bound the caller set is not an accident: repeating the statement
             // under the same limit produces the same timeout, so a retry would
             // only make the user wait for it again.
@@ -135,7 +224,16 @@ impl EngineError {
             | EngineError::Query { message, .. }
             | EngineError::Timeout { message, .. }
             | EngineError::Internal { message } => message,
+            EngineError::HostKey(failure) => &failure.message,
             EngineError::StaleHandle => "result handle is stale",
+        }
+    }
+
+    /// The structured host-key refusal, when that is what this error is.
+    pub fn host_key(&self) -> Option<&HostKeyFailure> {
+        match self {
+            EngineError::HostKey(failure) => Some(failure),
+            _ => None,
         }
     }
 
@@ -282,6 +380,65 @@ mod tests {
         };
         assert_eq!(error.failure_kind(), FailureKind::Permanent);
         assert_eq!(error.to_string(), "usage: SQL is required");
+    }
+
+    fn host_key_failure() -> HostKeyFailure {
+        HostKeyFailure {
+            message: "the host key of bastion.corp:22 is not on record".into(),
+            state: HostKeyState::Unknown,
+            host: "bastion.corp".into(),
+            port: 22,
+            alias: Some("prod-bastion".into()),
+            key_type: Some("ssh-ed25519".into()),
+            fingerprint: Some("SHA256:abc".into()),
+            app_known_hosts: None,
+            ca_covered: false,
+            recorded: vec![RecordedHostKey {
+                fingerprint: "SHA256:def".into(),
+                key_type: "ssh-rsa".into(),
+                source: "user".into(),
+                path: "/home/x/.ssh/known_hosts".into(),
+                line: 3,
+            }],
+            pinned: None,
+        }
+    }
+
+    #[test]
+    fn a_refused_host_key_is_never_retried_and_keeps_its_data() {
+        // The retry layer repeats only `Transient`, and presenting the same key to the
+        // same refusal cannot succeed, so the classification is spelled out and pinned.
+        let error = EngineError::HostKey(Box::new(host_key_failure()));
+        assert_eq!(error.failure_kind(), FailureKind::Permanent);
+        assert_eq!(
+            error.message(),
+            "the host key of bastion.corp:22 is not on record"
+        );
+        // Display is the same sentence: no variant name, no Debug text.
+        assert_eq!(error.to_string(), error.message());
+        let failure = error.host_key().expect("the structured half");
+        assert_eq!(failure.state, HostKeyState::Unknown);
+        assert_eq!(failure.recorded[0].line, 3);
+        assert_eq!(error.code(), None);
+        assert_eq!(error.position(), None);
+        assert!(EngineError::StaleHandle.host_key().is_none());
+    }
+
+    #[test]
+    fn a_host_key_state_is_spelled_the_way_the_event_wire_names_it() {
+        let all = [
+            (HostKeyState::Unknown, "unknown"),
+            (HostKeyState::Changed, "changed"),
+            (HostKeyState::Revoked, "revoked"),
+            (HostKeyState::Certificate, "certificate"),
+            (HostKeyState::CertificateExpected, "certificate_expected"),
+            (HostKeyState::PinMismatch, "pin_mismatch"),
+            (HostKeyState::RecordFailed, "record_failed"),
+            (HostKeyState::StoreUnsafe, "store_unsafe"),
+        ];
+        for (state, wire) in all {
+            assert_eq!(state.as_str(), wire);
+        }
     }
 
     #[test]

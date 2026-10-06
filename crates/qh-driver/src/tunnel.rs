@@ -47,6 +47,19 @@ pub struct TunnelConfig {
     /// own code, which is why the app ships without a sandbox (ADR-0007). When no
     /// path is set, `~/.ssh/known_hosts` is used — the file `ssh` itself writes.
     pub known_hosts: Option<PathBuf>,
+    /// The app's own `known_hosts` (`SSH_APP_KNOWN_HOSTS`): the one file the engine both
+    /// reads and writes, and the only place a host key accepted by a person is recorded
+    /// (blueprint W11 §5.2). `None` means the engine never writes a `known_hosts` and
+    /// there is no trust-on-first-use path at all, which is what the command line and the
+    /// MCP server get.
+    pub app_known_hosts: Option<PathBuf>,
+    /// The fingerprint a person confirmed for this one run (`SSH_HOST_KEY_ACCEPT`), as
+    /// `SHA256:<base64>`. Applies only to a host that is not on record, only when it
+    /// matches what the bastion presents, and is never stored on a connection.
+    pub host_key_accept: Option<String>,
+    /// The `~/.ssh/config` alias `host` was resolved from, for display only. It is not
+    /// part of what identifies the tunnel: `host`, `port` and `user` already are.
+    pub alias: Option<String>,
 }
 
 impl TunnelConfig {

@@ -30,7 +30,13 @@ tokio-postgres-rustls = "0.14"
 # are PEM. `io-util` because the fake server in `tests/tls.rs` reads and writes the
 # negotiation bytes by hand.
 rustls-pemfile = "2"
+# A certificate for a name the tests choose (`db.internal`), signed by a CA they make,
+# and the server side of the handshake that serves it, for `tests/ca_file.rs` and the
+# `roots_from` unit test. `default-features = false` on `tokio-rustls` for the same
+# reason as in the Trino crate: its default is `aws_lc_rs`, a second crypto provider.
+rcgen = "0.14"
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 [lints.rust]
 unsafe_code = "forbid"
