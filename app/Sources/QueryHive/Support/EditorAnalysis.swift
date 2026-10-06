@@ -1,10 +1,20 @@
 import AppKit
 import QueryHiveFFI
 
-/// The commit-A home of the tree-sitter editor analysis. Nothing in the app uses this
-/// yet: it converts the FFI's flat arrays into ranges, validates every packet against
-/// the blueprint §6 invariants, and applies colours only as temporary attributes.
-/// `SQLSyntax` and `SQLFolding` are untouched.
+extension ConnectionKind {
+    /// The lexical family the editor reads a tab's SQL under (blueprint w10 §8.6): the quote,
+    /// escape and comment rules differ, and a statement boundary depends on all three.
+    var editorDialect: EditorDialect {
+        switch self {
+        case .trino: .trino
+        case .postgres: .postgres
+        case .mysql: .mysql
+        }
+    }
+}
+
+/// The tree-sitter editor analysis: it converts the FFI's flat arrays into ranges, validates every
+/// packet against the blueprint §6 invariants, and applies colours only as temporary attributes.
 enum EditorAnalysisError: Error, Equatable {
     case stale
     case outOfBounds
@@ -112,8 +122,13 @@ final class EditorAnalysis: @unchecked Sendable {
     /// The newest revision this object has produced through `replace`.
     private(set) var revision: UInt64
 
-    init(text: String) throws {
-        document = try EditorDocument(text: text, dialect: .generic)
+    /// The dialect the document was built under. It is fixed for the document's life, so a tab whose
+    /// connection changes gets a new analysis rather than a changed one.
+    let dialect: EditorDialect
+
+    init(text: String, dialect: EditorDialect = .generic) throws {
+        self.dialect = dialect
+        document = try EditorDocument(text: text, dialect: dialect)
         do {
             revision = try document.revision()
         } catch let error as EditorError {
@@ -390,8 +405,8 @@ func editorCeiling() throws -> Int {
 }
 
 /// The statements of `sql` for Run, as ranges without their `;`.
-func editorStatementRanges(_ sql: String) throws -> [NSRange] {
-    let flat: [UInt32] = try mapEditorError { try sqlStatementRanges(sql: sql, dialect: .generic) }
+func editorStatementRanges(_ sql: String, dialect: EditorDialect = .generic) throws -> [NSRange] {
+    let flat: [UInt32] = try mapEditorError { try sqlStatementRanges(sql: sql, dialect: dialect) }
     guard flat.count % 2 == 0 else { throw EditorAnalysisError.malformed }
     return stride(from: 0, to: flat.count, by: 2).map {
         NSRange(location: Int(flat[$0]), length: Int(flat[$0 + 1]) - Int(flat[$0]))

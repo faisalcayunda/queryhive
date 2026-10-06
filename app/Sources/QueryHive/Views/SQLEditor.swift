@@ -1,8 +1,10 @@
 import AppKit
 import Observation
+import QueryHiveFFI
 import SwiftUI
 
-/// The line count the editor's gutter already knows, handed to SwiftUI.
+/// What the editor already knows and the pane around it needs, handed to SwiftUI: the line count,
+/// how many issues the text has, and whether the find bar is open.
 ///
 /// The corner readout used to split the whole query into lines on every body evaluation, which is a
 /// pass over the text per model change. The ruler keeps a line index for its own drawing, so the
@@ -11,6 +13,11 @@ import SwiftUI
 final class EditorLineCount {
     /// What the editor's gutter reports; nil until it has.
     var value: Int?
+    /// The underlined issues (W10-T6b), for the readout's "· N issues".
+    var issues = EditorIssueSummary()
+    /// Whether the find bar is showing. The pane hides its Clear button then: the button sits where
+    /// the bar's close button is (B-1).
+    var findOpen = false
     /// The text the pane was built for. Until the editor reports, the count comes from this, once per
     /// read — and holding it costs a reference, where counting in `init` cost a pass per re-render.
     let seed: String
@@ -51,6 +58,12 @@ struct SQLEditor: NSViewRepresentable {
     /// Where the editor reports how many lines the text has. Optional, so a host that does not show
     /// the count does not have to make one.
     var lineCount: EditorLineCount? = nil
+    /// The dialect the tab's connection speaks. The analysis is built under it and rebuilt when it
+    /// changes, so statement boundaries and quoting follow the connection (blueprint w10 §8.6).
+    var dialect: EditorDialect = .generic
+    /// Where the server said the last Run went wrong; underlined while the text is the one that Run
+    /// sent. The editor drops it on the first edit, ahead of the model.
+    var errorMark: ServerErrorMark? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -150,8 +163,7 @@ struct SQLEditor: NSViewRepresentable {
         // The find bar lives in the container, above the scroll view, and starts hidden. The
         // container lays the text view out below it rather than over it, so a find bar open over a
         // query never hides the line the query is on.
-        let findBar = SQLFindBar()
-        findBar.isHidden = true
+        let findBar = FlippedContainerView.makeFindBar()
         container.addSubview(findBar)
         container.findBar = findBar
         context.coordinator.findBar = findBar
@@ -211,6 +223,9 @@ struct SQLEditor: NSViewRepresentable {
         // editor remembers the value the model holds, and the model's string is the very one it
         // wrote, so the common case is one identity check.
         coordinator.adoptModelText(text)
+        // After the text, so the mark is compared with the text it is meant for.
+        coordinator.adoptDialect()
+        coordinator.adoptServerMark(errorMark)
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -327,8 +342,24 @@ struct SQLEditor: NSViewRepresentable {
         private var folded: [Int: NSRange] = [:]
 
         /// The statements as a rotor source (FR-ED-09): the list assistive navigation jumps
-        /// through, rebuilt with every outline. W10-T6 adds "Query issues" as the second source.
+        /// through, rebuilt with every outline. "Query issues" is the second source.
         private(set) var rotor: StatementsRotorSource?
+        /// "Query issues": the underlined diagnostics as rotor stops, rebuilt with every outline.
+        private(set) var issuesRotor: IssuesRotorSource?
+
+        // MARK: Diagnostics (W10-T6b)
+
+        /// The lexical issues of the last outline. They describe the text as the outline saw it, so
+        /// they are only merged and painted on an outline turn or while that outline is current.
+        private var lexicalIssues: [EditorIssueData] = []
+        /// What is underlined now: the lexical issues and the server's mark, merged.
+        private(set) var diagnostics: [EditorDiagnostic] = []
+        private let diagnosticsPainter = DiagnosticsPainter()
+        /// The server mark being worn, by the model mark's id. It is dropped by the first edit.
+        private var serverMark: (id: UUID, diagnostic: EditorDiagnostic)?
+        /// A mark that must not come back: the one an edit dropped, and one that never matched the
+        /// text. SwiftUI hands the same model mark on every update until the model drops it.
+        private var dismissedMarkID: UUID?
 
         private var findVisible = false
         private var findMatches: [NSRange] = []
@@ -477,6 +508,12 @@ struct SQLEditor: NSViewRepresentable {
             guard editedMask.contains(.editedCharacters) else { return }
             revision += 1
             guard !isReplacingText else { return }
+            // The server's position described the text before this edit. The underline goes with
+            // the next outline; the mark must not come back from the model in the meantime.
+            if let mark = serverMark {
+                dismissedMarkID = mark.id
+                serverMark = nil
+            }
             PerfSignposts.part(PerfSignposts.Part.replaceAndRuler) {
                 let edit = TextEdit(location: editedRange.location,
                                     oldLength: editedRange.length - delta, newLength: editedRange.length)
@@ -820,11 +857,17 @@ struct SQLEditor: NSViewRepresentable {
         private func rebuildAnalysis() {
             guard let textView, let storage = textView.textStorage,
                   let layoutManager = textView.layoutManager else { return }
-            analysis = try? EditorAnalysis(text: textView.string)
+            analysis = try? EditorAnalysis(text: textView.string, dialect: parent.dialect)
             outlineRevision = 0
             let whole = NSRange(location: 0, length: storage.length)
             storage.setAttributes(Self.baseAttributes(textView: textView), range: whole)
             layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: whole)
+            // A new analysis means a text the old issues and the old mark were not written for.
+            lexicalIssues = []
+            serverMark = nil
+            diagnostics = []
+            diagnosticsPainter.reset(layoutManager, length: storage.length)
+            publishIssues()
             textView.typingAttributes = Self.baseAttributes(textView: textView)
             ruler?.needsDisplay = true
             if storage.length <= Self.synchronousPaintLimit, !textView.hasMarkedText() {
@@ -1145,10 +1188,61 @@ struct SQLEditor: NSViewRepresentable {
                 folded = [:]
             }
             rotor = StatementsRotorSource(statements: statementBounds, text: nsText)
+            lexicalIssues = outline.issues
+            refreshDiagnostics()
             hideFolded()
             updateFoldMarks()
             updateRunMarks()
             updateHighlight(textView)
+        }
+
+        // MARK: Diagnostics
+
+        /// Merge the lexical issues with the server's mark, underline them, and refresh the rotor and
+        /// the readout. Only called while the outline is the text's own.
+        private func refreshDiagnostics() {
+            guard let textView, let layoutManager = textView.layoutManager else { return }
+            let text = nsText
+            diagnostics = EditorDiagnostics.merge(issues: lexicalIssues, server: serverMark?.diagnostic,
+                                                  text: text)
+            diagnosticsPainter.apply(diagnostics, to: layoutManager, length: text.length)
+            issuesRotor = IssuesRotorSource(diagnostics: diagnostics, text: text)
+            var sources: [any EditorRotorSource] = []
+            if let rotor { sources.append(rotor) }
+            if let issuesRotor { sources.append(issuesRotor) }
+            textView.rotorSources = sources
+            publishIssues()
+        }
+
+        private func publishIssues() {
+            guard let box = parent.lineCount else { return }
+            let summary = EditorIssueSummary(diagnostics)
+            guard box.issues != summary else { return }
+            DispatchQueue.main.async { if box.issues != summary { box.issues = summary } }
+        }
+
+        /// A tab whose connection changed reads its SQL under another dialect; the analysis is fixed
+        /// to the one it was built with, so it is built again.
+        func adoptDialect() {
+            guard let analysis, analysis.dialect != parent.dialect else { return }
+            rebuildAnalysis()
+        }
+
+        /// Wear the model's server mark, if it is for the text on screen. Called on every SwiftUI update.
+        func adoptServerMark(_ mark: ServerErrorMark?) {
+            let wanted = mark?.id == dismissedMarkID ? nil : mark
+            guard wanted?.id != serverMark?.id else { return }
+            if let wanted, nsText.isEqual(to: wanted.sqlSnapshot),
+               let range = wanted.range(in: nsText) {
+                serverMark = (wanted.id, EditorDiagnostic(kind: .server, range: range, message: wanted.message))
+            } else {
+                // Not this text, or a position outside it: never retried for this mark.
+                dismissedMarkID = wanted?.id ?? dismissedMarkID
+                serverMark = nil
+            }
+            // The lexical issues are the outline's, so the merge waits for an outline that is current.
+            ensureFreshAnalysis()
+            if outlineRevision == analysis?.revision { refreshDiagnostics() } else { scheduleIdle() }
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -1193,6 +1287,14 @@ struct SQLEditor: NSViewRepresentable {
 
         /// Tell SwiftUI how many lines there are, when that changed. Deferred a turn: this is also
         /// called from `makeNSView` and `updateNSView`, where writing state is not allowed.
+        /// Tell the pane whether the find bar is open, so its Clear button stays off the bar's close
+        /// button (B-1).
+        private func publishFindOpen() {
+            guard let box = parent.lineCount else { return }
+            let open = findVisible
+            DispatchQueue.main.async { if box.findOpen != open { box.findOpen = open } }
+        }
+
         private func publishLineCount() {
             guard let box = parent.lineCount, let ruler else { return }
             let lines = ruler.lineCount
@@ -1288,6 +1390,7 @@ struct SQLEditor: NSViewRepresentable {
             let wasVisible = findVisible
             findBar?.isReplacing = replacing
             findVisible = true
+            publishFindOpen()
             findBar?.isHidden = false
             container?.findBarVisible = true
             // Seeding from a selection is what every editor does: select a word, press ⌘F, and it
@@ -1308,6 +1411,7 @@ struct SQLEditor: NSViewRepresentable {
 
         func closeFind() {
             findVisible = false
+            publishFindOpen()
             findMatches = []
             findIndex = nil
             clearFindHighlight()
@@ -1599,10 +1703,12 @@ struct SQLEditor: NSViewRepresentable {
 struct EditorRotorItem: Equatable {
     let label: String
     let offset: Int
+    /// How much text the stop covers, for the range VoiceOver moves to; 0 is a point.
+    var length = 0
 }
 
-/// Something the editor can step through statement by statement: the "Statements" rotor today,
-/// "Query issues" with W10-T6. The coordinator rebuilds the list with every outline.
+/// Something the editor can step through: the "Statements" rotor and the "Query issues" rotor.
+/// The coordinator rebuilds the lists with every outline.
 protocol EditorRotorSource {
     var title: String { get }
     var items: [EditorRotorItem] { get }
@@ -1617,7 +1723,7 @@ struct StatementsRotorSource: EditorRotorSource, Equatable {
     init(statements: [NSRange], text: NSString) {
         items = statements.enumerated().map { index, range in
             EditorRotorItem(label: Self.label(index: index, range: range, text: text),
-                            offset: range.location)
+                            offset: range.location, length: range.length)
         }
     }
     static func label(index: Int, range: NSRange, text: NSString) -> String {
@@ -1655,14 +1761,29 @@ final class FlippedContainerView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// A hidden find bar, born at its fitting size and not at zero: its own frame is a required
+    /// constraint, and a zero one cannot hold its stack's insets, so the first layout pass logged a
+    /// constraint conflict (B-1).
+    static func makeFindBar() -> SQLFindBar {
+        let bar = SQLFindBar()
+        bar.frame = NSRect(origin: .zero, size: bar.fittingSize)
+        bar.isHidden = true
+        return bar
+    }
+
     override func layout() {
         super.layout()
         guard let findBar else { return }
         findBar.isHidden = !findBarVisible
         // `fittingSize` rather than a constant: the bar grows a second row when Replace is shown,
         // and a fixed height would clip it.
-        let barHeight = findBarVisible ? findBar.fittingSize.height : 0
-        findBar.frame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
+        let fitting = findBar.fittingSize
+        let barHeight = findBarVisible ? fitting.height : 0
+        // A hidden bar keeps its fitting size. At height 0, or in the zero-width container SwiftUI
+        // builds before it sizes it, its stack's 10 + 10 and 7 + 7 point insets could not be satisfied
+        // and Auto Layout logged a constraint conflict on every layout (B-1). A hidden view takes no
+        // room and draws nothing, so the frame is only what its constraints need.
+        findBar.frame = NSRect(x: 0, y: 0, width: max(bounds.width, fitting.width), height: fitting.height)
         for case let scroll as NSScrollView in subviews {
             scroll.frame = NSRect(x: 0, y: barHeight, width: bounds.width,
                                   height: max(0, bounds.height - barHeight))
@@ -1887,6 +2008,19 @@ private final class ObserverBag {
 /// AppKit's own completion list.
 final class SQLTextView: NSTextView {
     var interceptKey: ((NSEvent) -> Bool)?
+
+    /// The lists VoiceOver's rotor steps through ("Statements", "Query issues"), swapped by the
+    /// coordinator with every outline. The rotors themselves are made on demand and read this.
+    var rotorSources: [any EditorRotorSource] = []
+    /// A rotor holds its delegate weakly, so the view keeps them.
+    private var rotorDelegates: [EditorRotorDelegate] = []
+
+    override func accessibilityCustomRotors() -> [NSAccessibilityCustomRotor] {
+        rotorDelegates = rotorSources.map { EditorRotorDelegate(title: $0.title, textView: self) }
+        return zip(rotorSources, rotorDelegates).map {
+            NSAccessibilityCustomRotor(label: $0.title, itemSearchDelegate: $1)
+        }
+    }
 
     /// Called before a click in the text is handled. A click moves the caret, so a suggestion list
     /// still anchored to the old one is pointing at the wrong word; closing it is this hook's job.

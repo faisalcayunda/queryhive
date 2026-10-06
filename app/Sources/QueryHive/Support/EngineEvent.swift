@@ -142,6 +142,9 @@ struct Event: Decodable {
     /// for it (blueprint w11 §5.8). The key is read here once so the connection work that decides
     /// what to do with it adds no new key to this struct. `host_key` on the wire.
     var hostKey: HostKeyDetail?
+    /// `error`, only when the run set `ERROR_POSITION=1`: where the server says the statement it was
+    /// sent went wrong, as a 1-based offset in Unicode scalars into that exact text (W10-T6a).
+    var position: Int?
 
     /// The three parts of an object's name, one per slot the driver has.
     struct ObjectName: Decodable, Equatable {

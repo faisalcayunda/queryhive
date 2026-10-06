@@ -1,4 +1,5 @@
 import AppKit
+import QueryHiveFFI
 import SwiftUI
 
 extension AppModel {
@@ -66,32 +67,40 @@ extension AppModel {
         Self.flushEditorsNow()
         guard !tab.previewing, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
-        let sql = tab.sql(for: source)
-        let env: [String: String]
+        // Under this connection's dialect, so the statement a caret picks is the one the editor draws.
+        tab.dialect = connection.kind.editorDialect
+        let sent = tab.sent(for: source)
+        let sql = sent.text
+        var env: [String: String]
         do {
             env = try previewEnvironment(for: tab, connection: connection, sql: sql)
         } catch {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
+        // Run alone asks for the server's error position (W10-T6a): it is an offset into exactly the
+        // text sent here, which only this path can tie back to the document. Explain wraps the text,
+        // and a sort or a search wraps it too, so none of them asks.
+        env["ERROR_POSITION"] = "1"
+        let origin = (sent: sent, snapshot: tab.sql)
         // A Run of a write on a `confirm` connection asks first; the approval is merged into this
         // one run's environment and is never stored.
-        if let request = RunConfirmation.request(for: statements(in: sql), command: "preview",
-                                                 safeMode: connection.safeMode) {
+        if let request = RunConfirmation.request(for: statements(in: sql, dialect: tab.dialect),
+                                                 command: "preview", safeMode: connection.safeMode) {
             awaitConfirmation(request) { [weak self] in
                 self?.runPreview(tab, sql: sql, connection: connection,
                                  env: env.merging(RunConfirmation.approvalSettings(true)) { _, new in new },
-                                 baseRun: true)
+                                 baseRun: true, origin: origin)
             }
             return
         }
-        runPreview(tab, sql: sql, connection: connection, env: env, baseRun: true)
+        runPreview(tab, sql: sql, connection: connection, env: env, baseRun: true, origin: origin)
     }
 
     /// The statements a script holds, split the way the engine splits them, so the confirmation
     /// names the same pieces the engine's own classifier reads.
-    func statements(in sql: String) -> [String] {
-        sqlStatements(in: sql).map(\.text)
+    func statements(in sql: String, dialect: EditorDialect = .generic) -> [String] {
+        sqlStatements(in: sql, dialect: dialect).map(\.text)
     }
 
     /// Hold a run until the user answers it, with the action that starts it on approval.
@@ -106,7 +115,7 @@ extension AppModel {
     /// ones are spelled from the app's own qualified target, which is what the confirmation sheet
     /// shows; the engine quotes them itself when it runs, and both name the same table.
     func destinationStatements(_ tab: QueryTab, connection: Connection, sql: String) -> [String] {
-        guard tab.destination == .table else { return statements(in: sql) }
+        guard tab.destination == .table else { return statements(in: sql, dialect: tab.dialect) }
         let target = tab.target(for: connection.kind)
         let body = sql.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: ";"))
@@ -326,7 +335,8 @@ extension AppModel {
     private func runPreview(_ tab: QueryTab, sql: String, connection: Connection,
                             env: [String: String], clearSearch: Bool = true,
                             baseSQL: String? = nil, activeSort: ActiveSort? = nil,
-                            serverSearch: String? = nil, baseRun: Bool = false) {
+                            serverSearch: String? = nil, baseRun: Bool = false,
+                            origin: (sent: SentSQL, snapshot: String)? = nil) {
         let store: StoreRows
         do { store = try engine.makeResultStore() } catch {
             tab.previewError = "Could not open a result store: \(error.localizedDescription)"
@@ -335,6 +345,8 @@ extension AppModel {
         PerfSignposts.runBegin()
         tab.previewing = true
         tab.previewError = nil
+        // A new run retires the last one's mark: it described a failure this run has replaced.
+        tab.errorMark = nil
         // §18. A fresh Run retires both stores. A sort or search run keeps the base, because "off"
         // must return to the rows they started from, and lets go of the result it replaces.
         if baseRun {
@@ -373,6 +385,7 @@ extension AppModel {
         // here rather than inside the engine because the engine only knows when it started work.
         let startedAt = Date()
         var message: String?
+        var errorPosition: Int?
         var columns: [Event.Column] = []
         var fetched = 0
         var stopped = false
@@ -384,6 +397,7 @@ extension AppModel {
             switch event.event {
             case "error":
                 message = event.message
+                errorPosition = event.position
             case "columns":
                 PerfSignposts.stamp(.columns, onlyFirst: true)
                 columns = event.columns ?? []
@@ -432,6 +446,12 @@ extension AppModel {
                 if tab.baseResult?.rows !== store { store.release() }
                 tab.note(.error, tab.previewError ?? "Preview failed")
                 tab.panel = .log
+                // Only for the text this Run sent, and only while the document still is that text.
+                if let origin, let errorPosition, errorPosition >= 1, tab.sql == origin.snapshot {
+                    tab.errorMark = ServerErrorMark(sqlSnapshot: origin.snapshot, sent: origin.sent,
+                                                    scalarOffset: errorPosition,
+                                                    message: tab.previewError ?? "")
+                }
                 Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
                                    outcome: tab.cancelled ? "cancelled" : "error",
                                    elapsedMS: elapsed, rowCount: fetched,
@@ -528,9 +548,11 @@ extension AppModel {
         Self.flushEditorsNow()
         guard !tab.previewing, !tab.explaining, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
+        tab.dialect = connection.kind.editorDialect
         let sql = tab.sql(for: source)
         if !confirmed,
-           let request = RunConfirmation.request(for: statements(in: sql), command: "explain",
+           let request = RunConfirmation.request(for: statements(in: sql, dialect: tab.dialect),
+                                                 command: "explain",
                                                  safeMode: connection.safeMode) {
             awaitConfirmation(request) { [weak self] in
                 self?.explain(tab, from: source, confirmed: true)
@@ -624,7 +646,8 @@ extension AppModel {
         // The engine guards `count` against the caller's own statement, not the `COUNT(*)` wrapper,
         // so counting a write still needs the confirmation at `confirm`.
         if !confirmed,
-           let request = RunConfirmation.request(for: statements(in: sql), command: "count",
+           let request = RunConfirmation.request(for: statements(in: sql, dialect: tab.dialect),
+                                                 command: "count",
                                                  safeMode: connection.safeMode) {
             awaitConfirmation(request) { [weak self] in self?.countRows(tab, confirmed: true) }
             return

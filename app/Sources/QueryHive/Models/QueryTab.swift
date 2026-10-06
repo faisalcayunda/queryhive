@@ -369,8 +369,22 @@ final class QueryTab: Identifiable {
 
     // MARK: Query
 
-    var sql = ""
+    var sql = "" {
+        didSet {
+            // The mark says where the server found fault in a text that no longer exists.
+            if let mark = errorMark, sql != mark.sqlSnapshot { errorMark = nil }
+        }
+    }
     var connectionID: UUID?
+
+    /// The dialect the editor reads this tab's SQL under: its connection's, or `.generic` without
+    /// one. `EditorPane` keeps it current, and statement boundaries for Run, Export and History are
+    /// taken under it, so what the editor draws as one statement is what the engine is sent.
+    var dialect: EditorDialect = .generic
+
+    /// Where the server said the last Run went wrong, while the document is still the text that Run
+    /// sent (blueprint w10 §8.2). Set only by a Run whose text is a piece of this document.
+    var errorMark: ServerErrorMark?
 
     // MARK: Destination
 
@@ -959,17 +973,26 @@ final class QueryTab: Identifiable {
 
     /// The SQL one source resolves to. Every path out of the editor goes through this, so
     /// "the selected query" means the same thing to Run and to Export.
-    func sql(for source: QuerySource) -> String {
+    func sql(for source: QuerySource) -> String { sent(for: source).text }
+
+    /// What `sql(for:)` returns, and where it starts in the document. The start is measured after the
+    /// empty-selection fallback and after the trimming, because a server error position counts from
+    /// the first character that was sent.
+    func sent(for source: QuerySource) -> SentSQL {
         switch source {
         case .all:
-            return sql
+            return SentSQL(text: sql, documentStart: 0)
         case .selection:
             let text = sql as NSString
             guard selection.length > 0, selection.location >= 0,
-                  NSMaxRange(selection) <= text.length else { return sql }
-            return text.substring(with: selection)
+                  NSMaxRange(selection) <= text.length else { return SentSQL(text: sql, documentStart: 0) }
+            return SentSQL(text: text.substring(with: selection), documentStart: selection.location)
         case .statement:
-            return sqlStatement(in: sql, atUTF16Offset: selection.location) ?? sql
+            guard let found = sqlStatementLocated(in: sql, atUTF16Offset: selection.location,
+                                                  dialect: dialect) else {
+                return SentSQL(text: sql, documentStart: 0)
+            }
+            return SentSQL(text: found.text, documentStart: found.start)
         }
     }
 
@@ -1134,9 +1157,9 @@ final class QueryTab: Identifiable {
 /// one statement in both places instead of Run sending `select "a`.
 ///
 /// A splitter, not a parser: pieces hold more than whitespace, comments and `;`
-/// (`statements_with_lines`), so a comment-only stretch is no statement at all. The dialect is
-/// `.generic`: this free function sees no tab and therefore no connection to read one from, and
-/// per-tab dialect wiring belongs to W10-T6, which already owns the `EditorDocument` dialect.
+/// (`statements_with_lines`), so a comment-only stretch is no statement at all. The dialect is the
+/// caller's (a tab's own, `QueryTab.dialect`); a caller with no connection to read one from leaves
+/// it `.generic`.
 ///
 /// The range starts where the previous `;` left off, so it can carry the whitespace between two
 /// statements; the text is trimmed. A caller that needs the statement's own first line steps over
@@ -1144,10 +1167,11 @@ final class QueryTab: Identifiable {
 ///
 /// If the FFI refuses the text (past the editor ceiling), the whole script comes back as one
 /// piece rather than nothing, so Run still sends the user's SQL and the engine splits it itself.
-func sqlStatements(in sql: String) -> [(range: Range<String.Index>, text: String)] {
+func sqlStatements(in sql: String,
+                   dialect: EditorDialect = .generic) -> [(range: Range<String.Index>, text: String)] {
     let flat: [UInt32]
     do {
-        flat = try sqlStatementRanges(sql: sql, dialect: .generic)
+        flat = try sqlStatementRanges(sql: sql, dialect: dialect)
     } catch {
         let text = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return [] }
@@ -1185,12 +1209,23 @@ func sqlStatements(in sql: String) -> [(range: Range<String.Index>, text: String
 }
 
 /// The statement the caret sits in.
-func sqlStatement(in sql: String, atUTF16Offset caret: Int) -> String? {
-    let found = sqlStatements(in: sql)
+func sqlStatement(in sql: String, atUTF16Offset caret: Int, dialect: EditorDialect = .generic) -> String? {
+    sqlStatementLocated(in: sql, atUTF16Offset: caret, dialect: dialect)?.text
+}
+
+/// The statement the caret sits in, with the UTF-16 offset in `sql` of the first character of its
+/// trimmed text. The range `sqlStatements` returns starts where the previous `;` ended, so the
+/// whitespace the trimming removed from the front is added back to find where the text begins.
+func sqlStatementLocated(in sql: String, atUTF16Offset caret: Int,
+                         dialect: EditorDialect = .generic) -> (text: String, start: Int)? {
+    let found = sqlStatements(in: sql, dialect: dialect)
     guard !found.isEmpty else { return nil }
 
     let caretIndex = String.Index(utf16Offset: min(max(caret, 0), sql.utf16.count), in: sql)
-    if let (_, text) = found.first(where: { $0.0.contains(caretIndex) }) { return text }
     // Caret in the whitespace after a statement: that statement is the one being looked at.
-    return found.last(where: { $0.0.lowerBound <= caretIndex })?.1 ?? found.first?.1
+    guard let (range, text) = found.first(where: { $0.0.contains(caretIndex) })
+            ?? found.last(where: { $0.0.lowerBound <= caretIndex }) ?? found.first else { return nil }
+    let leading = sql[range].unicodeScalars.prefix { CharacterSet.whitespacesAndNewlines.contains($0) }
+        .reduce(0) { $0 + $1.utf16.count }
+    return (text, sql.utf16.distance(from: sql.utf16.startIndex, to: range.lowerBound) + leading)
 }

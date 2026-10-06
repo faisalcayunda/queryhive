@@ -1,4 +1,5 @@
 import AppKit
+import QueryHiveFFI
 import SwiftUI
 
 /// The tabbed query workspace: the tab strip, the query toolbar, the SQL editor, and the panel
@@ -520,6 +521,9 @@ struct EditorPane: View {
     /// an empty file says the same.
     private var lineCount: Int { lines.count }
 
+    /// The dialect this tab's connection speaks (blueprint w10 §8.6); `.generic` without one.
+    private var dialect: EditorDialect { model.connection(for: tab)?.kind.editorDialect ?? .generic }
+
     var body: some View {
         // No header row above the editor any more. It carried a "Query · N lines" label, a
         // "Load File…" button and a "Clear" button, and the label earned none of its height: the
@@ -544,8 +548,11 @@ struct EditorPane: View {
                       tab.caret = offset
                       model.run(tab, from: .statement)
                   },
-                  lineCount: lines)
+                  lineCount: lines, dialect: dialect, errorMark: tab.errorMark)
             .editorBox(focused: focused)
+            // The tab remembers the dialect it is edited under, so Run, Export and History cut
+            // statements the way the editor draws them.
+            .onChange(of: dialect, initial: true) { _, new in tab.dialect = new }
             // NSTextView has no placeholder of its own, so it is drawn over the text
             // container's own inset (8 wide, 9 tall) plus its line fragment padding.
             .overlay(alignment: .topLeading) {
@@ -573,7 +580,9 @@ struct EditorPane: View {
             // noise. Nothing reflows when it comes and goes, because it is an overlay rather than
             // a row.
             .overlay(alignment: .topTrailing) {
-                if !tab.sql.isEmpty {
+                // Not while the find bar is open: the bar fills the top of the editor and the button
+                // would sit on its close button (B-1).
+                if !tab.sql.isEmpty && !lines.findOpen {
                     IconButton(symbol: "xmark", help: "Clear the editor", diameter: 22) {
                         tab.sql = ""
                     }
@@ -586,14 +595,30 @@ struct EditorPane: View {
             // would compete with the last line of a long query. Monospaced so the number does not
             // shift sideways as it grows from 9 to 10.
             .overlay(alignment: .bottomTrailing) {
-                Text(pluralized(lineCount, "line"))
-                    .font(.code(10.5))
-                    // The same grey as the gutter numbers, so the two read as one readout rather
-                    // than as two greys that happen to be nearby.
-                    .foregroundStyle(Tone.readout)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 7)
-                    .allowsHitTesting(false)
+                HStack(spacing: 5) {
+                    Text(pluralized(lineCount, "line"))
+                        // The same grey as the gutter numbers, so the two read as one readout rather
+                        // than as two greys that happen to be nearby.
+                        .foregroundStyle(Tone.readout)
+                    // "· ⚠ 2 issues": a warning is not a readout, so it is brighter than the grey
+                    // beside it and wears the colour of the underline it counts (blueprint w10 §8.5).
+                    if lines.issues.count > 0 {
+                        Text("·").foregroundStyle(Tone.readout)
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(EditorReadout.tint(lines.issues))
+                        Text(EditorReadout.issues(lines.issues))
+                            .foregroundStyle(Tone.ink.opacity(0.9))
+                    }
+                }
+                .font(.code(10.5))
+                .padding(.trailing, 12)
+                .padding(.bottom, 7)
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isStaticText)
+                .accessibilityLabel(lines.issues.count > 0
+                                    ? "\(pluralized(lineCount, "line")), \(EditorReadout.accessibilityLabel(lines.issues))"
+                                    : pluralized(lineCount, "line"))
             }
             .overlay { SuggestionOverlay(completion: model.completion) }
             .padding(.horizontal, Metrics.gutter)

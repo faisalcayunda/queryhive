@@ -782,6 +782,13 @@ final class VisualParityTests: XCTestCase {
     SELECT 1
     """
 
+    /// A misspelt keyword the server named (position 1) and a quote that never closes: the two kinds of
+    /// underline the editor draws (V-11, W10-T6b).
+    private static let issuesDocument = """
+    SELEC kode_wilayah, nama FROM hive.analytics.penerima_manfaat;
+    SELECT kode_wilayah FROM hive.analytics.penerima_manfaat WHERE nama = 'Bandung
+    """
+
     private static let invisiblesDocument = "SELECT\tkode_wilayah,   nama  \n\tFROM hive.analytics.penerima_manfaat  \nWHERE tahun = 2026\t;\n"
 
     private struct EditorSpec {
@@ -791,6 +798,8 @@ final class VisualParityTests: XCTestCase {
         var fold = false
         var find: String? = nil
         var scrollToLine: Int? = nil
+        /// The server's position (1-based scalar offset into `sql`) of a failed Run of the whole text.
+        var serverErrorAt: Int? = nil
         var facts: [String: String] = [:]
     }
 
@@ -803,6 +812,10 @@ final class VisualParityTests: XCTestCase {
         if let caret = spec.caret {
             tab.caret = caret
             tab.selection = NSRange(location: caret, length: 0)
+        }
+        if let at = spec.serverErrorAt {
+            tab.errorMark = ServerErrorMark(sqlSnapshot: tab.sql, sent: SentSQL(text: tab.sql, documentStart: 0),
+                                            scalarOffset: at, message: "syntax error at or near \"SELEC\"")
         }
         let (view, window) = host(EditorPane(tab: tab).environment(model), size: Self.editorSize, look: look)
         let textView = try XCTUnwrap(Self.findTextView(in: view), "\(name): no SQL text view")
@@ -970,6 +983,19 @@ final class VisualParityTests: XCTestCase {
                      20 * s, Int(inHost.height.rounded()) * s], mustExist: true)
             }
         }
+        // The underline under the first few characters of each diagnostic: where the strip is, and that it
+        // is saturated (coral and amber), which the syntax colours of the text above it are not.
+        for (index, diagnostic) in coordinator.diagnostics.enumerated() {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: diagnostic.range, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            let line = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let span = layoutManager.boundingRect(
+                forGlyphRange: NSRange(location: glyphs.location, length: min(glyphs.length, 5)), in: container)
+            var strip = NSRect(x: span.minX + origin.x, y: line.maxY - 4 + origin.y, width: span.width, height: 5)
+            strip.size.width = max(strip.width, 4)
+            add("issue[\(index)].\(diagnostic.isServer ? "server" : "lexical")", "sat", rect(inTextView: strip),
+                mustExist: true)
+        }
         for (marker, mustExist) in found where mustExist && marker.count == 0 {
             XCTFail("[\(name)] probe \(marker.name) at \(marker.rect) found nothing: the probe is misplaced")
         }
@@ -1080,6 +1106,8 @@ final class VisualParityTests: XCTestCase {
                 ("editor-plain", EditorSpec(layout: plain, facts: ["scene": "syntax", "runButtons": "false",
                                                                     "statementBand": "false"])),
                 ("editor-find", EditorSpec(find: "jiwa", facts: ["scene": "syntax", "find": "jiwa"])),
+                ("editor-issues", EditorSpec(sql: Self.issuesDocument, caret: 0, serverErrorAt: 1,
+                                             facts: ["scene": "issues", "serverErrorAt": "1"])),
                 ("editor-invisibles", EditorSpec(layout: invisibles, sql: Self.invisiblesDocument, caret: 0,
                                                  facts: ["scene": "invisibles"])),
                 ("editor-wrap-on", EditorSpec(sql: Self.wrapDocument, caret: 0,
