@@ -2668,6 +2668,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "memchr",
  "qh-core",
  "qh-driver",
  "qh-sql",

@@ -9,6 +9,7 @@
 
 use thiserror::Error;
 
+use crate::lex::{lex, TokenKind};
 use crate::scan::{
     has_significant_text_dialect, scan_dialect, statement_count_dialect, Dialect, Lexer,
 };
@@ -141,6 +142,36 @@ pub fn count_statement_dialect(sql: &str, dialect: impl Into<Lexer>) -> Result<S
     ))
 }
 
+/// Whether `sql` is one plain `SELECT` (or `WITH ... SELECT`) that may be wrapped in another
+/// statement, such as PostgreSQL's `COPY (<sql>) TO STDOUT`, without changing what it does.
+///
+/// Anything doubtful answers `false`, and `false` only ever means "keep the normal path":
+/// more than one statement, a leading word other than `SELECT`/`WITH` (so `TABLE`, `VALUES`,
+/// a parenthesised select and `EXPLAIN` stay out), and any bare `INSERT`, `UPDATE`, `DELETE`,
+/// `MERGE` or `INTO` word, which covers a data-modifying CTE, `SELECT ... INTO`, and
+/// `FOR UPDATE`. Words inside strings, quoted identifiers, comments and dollar quotes are not
+/// words: the lexer reads them as opaque, the same way Safe Mode does.
+pub fn is_plain_select_dialect(sql: &str, dialect: impl Into<Lexer>) -> bool {
+    let dialect: Lexer = dialect.into();
+    // The text that would be wrapped, so a `;` followed by nothing but a comment is a
+    // terminator here as it is there, and not the start of a second statement.
+    let wrapped = strip_terminator_dialect(sql, dialect);
+    // One statement, led by SELECT or WITH: exactly what a count wrap accepts.
+    if count_statement_dialect(&wrapped, dialect).is_err() {
+        return false;
+    }
+    let mut plain = true;
+    lex(wrapped.as_bytes(), 0..wrapped.len(), dialect, |token| {
+        if token.kind == TokenKind::Word {
+            let word = &wrapped[token.start..token.end];
+            plain &= !["INSERT", "UPDATE", "DELETE", "MERGE", "INTO"]
+                .iter()
+                .any(|banned| word.eq_ignore_ascii_case(banned));
+        }
+    });
+    plain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +291,37 @@ mod tests {
             SqlError::Blank
         );
         assert_eq!(count_statement(";").unwrap_err(), SqlError::Blank);
+    }
+
+    #[test]
+    fn only_a_plain_single_select_may_be_wrapped() {
+        let plain = |sql: &str| is_plain_select_dialect(sql, Dialect::Postgres);
+        assert!(plain("SELECT 1"));
+        assert!(plain(
+            "  select a, 'insert into x' from t where b = \"update\";  "
+        ));
+        assert!(plain(
+            "-- c\nWITH x AS (SELECT 1) SELECT * FROM x /* delete */"
+        ));
+        assert!(plain("SELECT $$ update $$"));
+        assert!(plain("SELECT 1 AS a ; -- done"));
+        assert!(plain("SELECT 1; /* done */"));
+        for sql in [
+            "",
+            ";",
+            "SELECT 1; SELECT 2",
+            "INSERT INTO t VALUES (1)",
+            "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+            "WITH d AS (insert into t values (1) returning *) SELECT * FROM d",
+            "SELECT * INTO copy_of FROM t",
+            "SELECT * FROM t FOR UPDATE",
+            "TABLE t",
+            "VALUES (1)",
+            "(SELECT 1)",
+            "EXPLAIN SELECT 1",
+            "SHOW ALL",
+        ] {
+            assert!(!plain(sql), "{sql:?} must keep the normal path");
+        }
     }
 }

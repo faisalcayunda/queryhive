@@ -259,6 +259,16 @@ pub struct ExecuteOptions {
     /// [`Capabilities::statement_timeout`] is `false` ignores it, and the caller
     /// is expected to have asked first.
     pub statement_timeout: Option<Duration>,
+    /// The caller will read the whole result and wants it as fast as the server can send it.
+    ///
+    /// A hint, never a different answer: a driver with a bulk path (PostgreSQL's `COPY ... TO
+    /// STDOUT`) may use it for a plain single `SELECT`, and must return the same columns and
+    /// the same values as without it. Every other driver and statement ignores it.
+    ///
+    /// PostgreSQL's server holds a COPY's first bytes until it has a buffer of rows or an end to
+    /// send, so a bulk `execute` can return later than a normal one; a caller that stops early
+    /// drops the call and cancels, as it already does.
+    pub bulk: bool,
 }
 
 /// What the objects grid shows for one level.

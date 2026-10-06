@@ -39,5 +39,6 @@ pub use scan::{
     statement_count_dialect, walk, Dialect, EndState, Lexer, OpaqueKind, Scan, Visitor,
 };
 pub use wrap::{
-    count_statement, count_statement_dialect, strip_terminator, strip_terminator_dialect, SqlError,
+    count_statement, count_statement_dialect, is_plain_select_dialect, strip_terminator,
+    strip_terminator_dialect, SqlError,
 };
