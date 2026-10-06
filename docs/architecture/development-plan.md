@@ -105,7 +105,7 @@ Orkestrator menyimpan ledger di scratchpad sesi (bukan di repo). Isinya:
 | G-APP | `./app/build.sh && app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot "$SCRATCH/smoke.png" --scene done` | gate gelombang, dan tugas yang menyentuh `app/build.sh`, `Package.swift`, atau resource |
 | G-BENCH(a) | `python3 deploy/dev/bench_app.py --axis <a> --label <fase>-<yyyymmdd> --repeat <n>`, lalu `python3 deploy/dev/bench_fetch.py --report-only`. Untuk sumbu 3, rekaman mencatat `spilled_bytes` di samping memori (R-29), supaya hasil yang tumpah atau tidak tidak dibaca sebagai regresi. | tugas bench (eksklusif) |
 | G-BENCHQ | subset cepat `--bench ttfr-pg,scroll-1m,type-10k` dengan n = 5, dibanding rekaman gelombang sebelumnya | gate W9–W13 (NFR-P9) |
-| G-LEAK | `MallocStackLogging=1 leaks --atExit -- app/.build/debug/QueryHive --bench tabs-100`, lalu `store_stats().stores == 0` dan `spilled_bytes == 0` di akhir `tabs-100` (berkas spill di-unlink saat dibuat, jadi pemeriksaan direktori spill hampa) | Fase 6, dan final |
+| G-LEAK | `MallocStackLogging=1 leaks --atExit -- app/.build/debug/QueryHive --bench tabs-100`, lalu `store_stats().stores == 0` dan `spilled_bytes == 0` di akhir `tabs-100` (berkas spill di-unlink saat dibuat, jadi pemeriksaan direktori spill hampa; `spilled_bytes` nyata sejak `1b59154` dan dihitung atas store yang masih hidup, jadi nol di akhir mengikuti `stores == 0`). Ditambah skenario `tabs-100-held` (100 tab terbuka bersamaan, masing-masing dengan store yang tumpah): `open_fds_peak` (dibaca lewat `proc_pidinfo(PROC_PIDLISTFDS)`) dicatat sebelum, puncak, dan sesudah semua tab ditutup, dan hitungan fd akhir harus kembali ke nilai awal (ukuran R-19, blueprint Fase 6 §17.6 dan §19) | Fase 6, dan final |
 | G-ANALYTICS | `cargo test --manifest-path helpers/analytics/Cargo.toml && cargo build --release --manifest-path helpers/analytics/Cargo.toml && cargo deny --manifest-path helpers/analytics/Cargo.toml check licenses --config deny.toml`, ditambah `cargo tree --manifest-path helpers/analytics/Cargo.toml -e normal` yang tidak boleh memuat `reqwest`, `hyper`, `h2`, atau `rustls`. Ukuran helper stripped dan terkompresi dicatat. | W13-T8a, W13-T8b, gate W13, dan W14 |
 | **G-HEAVY** | G-RUST + G-DENY + G-FFI + G-SWIFT + G-VIS + G-GOLDEN + G-APP. Untuk W13 dan W14 saja, ditambah G-ANALYTICS. | penutupan setiap gelombang |
 
@@ -550,23 +550,24 @@ T1 (Swift) dan T2 (Rust) berjalan paralel di worktree. T2 memiliki `app/Generate
 
 **W6-A1.** Blueprint Fase 6 disegarkan terhadap seam Fase 5 (code-architect · opus, pemeriksa AR).
 
-**W6-T1. Fase 6-Swift: integrasi data plane.** Ukuran L. Implementer **GP-o**, karena kode lama dihapus besar-besaran dan umur handle berinteraksi dengan tab.
+**W6-T1. Fase 6-Swift: integrasi data plane.** Ukuran L. Implementer **sonnet** (O-20; sebelumnya GP-o). Kode lama dihapus besar-besaran dan umur handle berinteraksi dengan tab, jadi pengamannya adalah tiga commit, gate di tiap commit, dan satu putaran tinjau model terkuat. Rencana kerja presisinya ada di blueprint Fase 6 §21.4. **Tiga commit** (6a, 6b, 6c): 6a membangun hanya kolom yang tergambar dan memberi `distinctValues` kontrak sebenarnya (di atas `ArrayRows`, engine tidak disentuh); 6b memasukkan store; 6c menaikkan plafon, bersyarat P-1.
 - Cakupan: FR-PERF-05, FR-GRID-03 dan FR-GRID-04 (fallback Rust, "off" lewat store dasar), NFR-P1 (S2), P2, P3, P8.
 - Berkas:
   - `Models/StoreRows.swift` (baru), `Models/{QueryTab,AppModel,GridSort,GridSearch,WritePlan}.swift`;
   - `Support/RustEngine.swift`, `Support/DatabaseEngine.swift`, `Views/ResultGridTable.swift` (polling `displayLink`), `Views/ResultGrid.swift`, `Views/CellValueViewer.swift`, `Views/SettingsView.swift`;
-  - `Support/Snapshot.swift`, `Support/BenchMode.swift` (skenario memakai `store_from_rows` di luar interval ukur);
-  - `App.swift` (sapuan spill saat startup);
-  - tes di `app/Tests/QueryHiveTests/`: `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), `ResultGridTests.swift`, `GridColumnsTests.swift`, `Batch7Tests.swift`, `TabCloseTests.swift`, `MockEngine.swift`, `RowLimitSettingTests.swift`.
+  - `Views/GridTableView.swift`, `Views/GridRowView.swift` (rentang kolom yang tergambar dan display link), `Models/ResultRows.swift`, `Models/CellSelection.swift`;
+  - `Support/Snapshot.swift`, `Support/BenchMode.swift` (skenario memakai `store_from_rows` di luar interval ukur; `tabs-100-held` dan hitungan fd);
+  - `App.swift` (sapuan spill saat startup, `RLIMIT_NOFILE`);
+  - tes di `app/Tests/QueryHiveTests/`: `StoreRowsTests.swift` (baru), `Bench/StoreWindowBench.swift` (baru), `TestStores.swift` (baru), `ArrayRowsReference.swift` dan `SwiftGridReference.swift` (baru, pindahan), `ResultGridTests.swift`, `GridColumnsTests.swift`, `Batch7Tests.swift`, `TabCloseTests.swift`, `MockEngine.swift`, `RowLimitSettingTests.swift`, `VisualParityTests.swift`, `ResultRowsTests.swift`, `SortFixtureExport.swift`, `GridTestSupport.swift`, `StoppedRunTests.swift`, `CellEditUndoTests.swift`, `FilterPresetTests.swift`, `PanelDefaultTests.swift`, `EngineContract.swift`.
 - Dihapus: penumpukan baris, `previewPaintInterval`, `displayedCache`, dan `GridSort.order` di jalur panas.
 - Clamp naik ke 5.000.000.
-- Gate: SR, SF, AR, CR, PO.
+- Gate: SR, SF, AR, CR, PO. Tinjau: model terkuat, satu putaran (O-20), ditambah reviewer database untuk penjaga edit dan jalur `WritePlan` (D-27, blueprint Fase 6 §17.4).
 - Verifikasi:
   - G-SWIFT, G-VIS (terhadap baseline Fase 5), tes diferensial W4-T4;
   - P-1 lewat tangkapan compositor harus lulus sebelum `productRowLimitCeiling` naik ke 5.000.000. Pemilik yang menjalankannya (butuh Screen Recording), atau sesi eksklusif. Bila gagal, `WindowedRows` masuk W6-T1;
   - G-LEAK;
   - G-BENCH(1 S2, 2, 3) dan window.
-- Commit: `perf(app): results live in the Rust store, and the grid reads windows`.
+- Commit: tiga, yaitu 6a `refactor(grid): build only the columns on screen, and give the distinct list its real contract`, 6b `perf(app): results live in the Rust store, and the grid reads windows`, dan 6c `feat(app): raise the row limit ceiling to 5,000,000` (bersyarat P-1).
 
 **W6-T2.** Sesi bench lengkap Fase 6 dan G-LEAK (eksklusif), dengan verdict PO.
 
@@ -811,7 +812,7 @@ Kolom **Gate** di §5 adalah daftar spesialis maksimum untuk tugas berisiko ting
 | `Models/AppModel.swift` | W1-T4 → W2-T2 → W3-T1 → W4-T1 → W6-T1 → W9-T0. Sesudahnya, satu pemilik per extension. |
 | `Models/QueryTab.swift` | W2-T2 (bila perlu) → W4-T1 → W4-T2b → W5-T1 → W6-T1 → W11-T4 → W12-T2 → W12-T4 → W13-T1 |
 | `Views/ResultGrid.swift` | W1-T4 → W4-T1 → W5-T1 → W6-T1 → W9-T5 → W10-T3 → W12-T4 → W13-T1 → W13-T3 |
-| `Views/ResultGridTable.swift`, `GridRowView`, `GridHeaderView`, `Views/GridAccessibility.swift` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
+| `Views/ResultGridTable.swift`, `Views/GridTableView.swift`, `GridRowView`, `GridHeaderView`, `Views/GridAccessibility.swift`, dan `VisualParityTests.swift` | W5-T1 → W6-T1 → W10-T1 → W10-T2 → W10-T3 → W10-T4 |
 | `Views/SQLEditor.swift` | W1-T4 → W2-T3 → W4-T2 → W10-T6 → W10-T7 → W12-T2 |
 | `Views/Workspace.swift` | W2-T3 → W9-T1 → W9-T4 → W9-T8 → W12-T2 |
 | `App.swift` | W1-T4 → W6-T1 → W9-T2 → W9-T8 → W10-T3 → W12-T2 → W13-T8b |
@@ -943,7 +944,7 @@ Gate angka yang meleset tidak memblokir (P-21). Gate itu diperiksa PO satu putar
 4. **Ukuran unduhan helper terkompresi** (W13-T8a), throughput pipa (W13-T8b, target ≥ 1 GB/s), dan ambang NFR-P3 untuk SQL (gate W13).
 5. **Sort natural rayon dengan `view_pool` 4 thread** (W5-T2, `bench_ffi view-*`).
 6. **Perilaku profil `sandbox-exec` di macOS 26**, dibuktikan `confinement.rs` (W13-T8a). Jalur App Sandbox menunggu sertifikat Developer ID.
-7. **Dari W2-A3, untuk W6-A1:** bentuk pintu darurat `Json`, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan mitigasi R-19 bila batas fd terukur.
+7. ~~**Dari W2-A3, untuk W6-A1:** bentuk pintu darurat `Json`, nasib `ArrayRows`, `PAGE_ROWS`/`COL_BLOCK` dari angka W5-T3, dan mitigasi R-19 bila batas fd terukur.~~ **Terjawab di W6-A1 (2026-10-06), blueprint Fase 6 §26 dan ADR-0030:** pintu darurat `Json` = `swiftRenderedFormats`, awalnya `{.json}` (D-24); `ArrayRows` dan implementasi sort, filter, search Swift pindah ke target tes sebagai kembaran acuan (D-25); `PAGE_ROWS` 64 dan `COL_BLOCK` 32 sementara, dan W5-T3 mengonfirmasi atau menggantinya (D-22); mitigasi R-19 = `RLIMIT_NOFILE` lunak naik ke min(batas keras, 4.096) (D-26). Yang masih menunggu hanya angka halaman dari W5-T3.
 8. **W13-T8a–b tetap di lingkup program ini** (O-15). Bila tugas itu dipotong, orkestrator melaporkannya ke pemilik sebagai penyimpangan dari O-15, bukan diam-diam.
 
 Tidak ada pertanyaan produk yang tersisa. Semua keputusan yang diperlukan tercatat sebagai O-* dan P-* di PRD §11.

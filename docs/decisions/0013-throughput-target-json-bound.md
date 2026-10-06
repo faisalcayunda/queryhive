@@ -1,5 +1,10 @@
 # 0013 — Target throughput dibatasi protokol JSON
 
+> **Catatan 2026-10-06:** ADR ini **digantikan oleh ADR-0030**, yang kini ada (catatan 2026-09-30 di bawah menyebutnya
+> "akan datang"). Kesimpulan ADR-0030: batas throughput adalah CPU satu thread engine (decode driver, transpose dan clone, render),
+> bukan protokol, jadi hasil query disimpan di Rust sebagai store Arrow dan dibaca grid lewat `window()`; CLI, MCP, dan
+> golden tetap NDJSON. Angka TTFR dan memori di bawah tetap benar sebagai baseline Fase 0 dan tidak diubah.
+
 > **Catatan 2026-09-30:** klaim "JSON 99,6%" di bawah sudah diprofil pada W1-T8 dan **tidak
 > bertahan**. Angka itu hanya `(elapsed − TTFR)/elapsed`, jadi memuat seluruh kerja setelah batch
 > pertama, bukan hanya JSON. Hasil profil (samply, `preview` `wide_500k`): JSON **11%** di CLI dan

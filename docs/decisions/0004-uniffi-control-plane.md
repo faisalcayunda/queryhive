@@ -1,5 +1,12 @@
 # 0004 — UniFFI untuk control plane, bukan data plane
 
+> **Catatan 2026-10-06:** pemisahan control plane (UniFFI) dan data plane bertahan, tetapi isi data plane diamandemen oleh
+> ADR-0030: bukan sekadar "handle + offset buffer", melainkan objek UniFFI `ResultHandle` (semua metode throwing) yang
+> mengembalikan satu buffer `QHW1` berisi teks terender, offset, dan flag per sel, dengan array Arrow yang tidak pernah
+> menyeberang FFI. Sisi Rust sudah dibangun (W5-T2); sisi Swift (`StoreRows`) adalah W6-T1 dan belum ada. Syarat "bila
+> terukur callback→`AsyncThrowingStream` bermasalah" tidak terpicu. Eskalasi ke C ABI (Fase 8, W8-T2) tetap jalur bila
+> p99 jendela 64 × 32 lewat UniFFI melebihi 0,5 ms. Badan di bawah sengaja tidak ditulis ulang.
+
 - **Status:** Diterima
 - **Tanggal:** sesi Fase 0
 - **Konteks instruksi:** §8 Bagian 4, §7.4 (Swift 6 strict concurrency)

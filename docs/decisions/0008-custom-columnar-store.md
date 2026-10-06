@@ -1,5 +1,12 @@
 # 0008 — Result store kolumnar kustom; Arrow C Data Interface sebagai opsi, bukan dasar
 
+> **Catatan 2026-10-06:** ADR ini **digantikan oleh ADR-0030**. Keputusan pemilik O-15 mengadopsi Arrow, dan store
+> hasil menjadi `RecordBatch` Arrow per chunk (crate `qh-columnar`), bukan layout kustom. Layout `QHC1` yang disegel
+> W2-A3 tidak pernah dibangun. Syarat revisi di bawah (Arrow ditinjau bila salinan offset jadi bottleneck) terlewati oleh
+> keputusan itu. Yang bertahan dari ADR ini: window acak lewat indeks chunk, spill ke disk dengan file di-unlink
+> (kini terenkripsi, ADR-0037), dan `qh-result-store` tidak melewati batas FFI secara langsung. Dependensi diukur ulang:
+> gugus arrow menambah 18 crate, bukan ~60 (blueprint Fase 6 §1.2 F-8). Badan di bawah sengaja tidak ditulis ulang.
+
 - **Status:** Diterima (opsi Arrow ditinjau ulang bila benchmark Fase 3 menunjukkan salinan offset
   adalah bottleneck)
 - **Tanggal:** sesi Fase 0
