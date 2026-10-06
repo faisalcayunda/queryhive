@@ -37,6 +37,9 @@ use thiserror::Error;
 mod tunnel;
 
 pub use tunnel::{TunnelAuth, TunnelConfig};
+// Drivers write rows straight into the store's builder (W7-T1), and re-exporting it here
+// keeps the dependency edge to one crate: `qh-driver` -> `qh-columnar`.
+pub use qh_columnar::{self, ChunkBuilder};
 
 /// Which server a driver speaks to.
 ///
@@ -594,6 +597,32 @@ pub trait Cursor: Send {
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError>;
 
+    /// Appends up to `max_rows` rows straight into `out` and returns how many it appended
+    /// (`0` = finished, so unlike `next_batch` it never returns an empty page). A driver
+    /// stops early once `out.is_full()`.
+    ///
+    /// The default goes through `next_batch`, so a driver that has not been taught Arrow
+    /// keeps working. `next_batch` stays the path for export and NDJSON.
+    async fn next_chunk(
+        &mut self,
+        out: &mut ChunkBuilder,
+        max_rows: usize,
+    ) -> Result<usize, EngineError> {
+        loop {
+            let Some(batch) = self.next_batch(max_rows).await? else {
+                return Ok(0);
+            };
+            if batch.rows() == 0 {
+                continue;
+            }
+            return out
+                .push_owned(batch)
+                .map_err(|error| EngineError::Internal {
+                    message: format!("the cursor built a batch the chunk refused: {error}"),
+                });
+        }
+    }
+
     /// How many rows the statement affected, as the server reported it.
     ///
     /// A statement that writes — a `CREATE TABLE AS SELECT`, an `INSERT`, a `DELETE` —
@@ -844,6 +873,72 @@ mod tests {
             self.served += 1;
             Ok(Some(batch))
         }
+    }
+
+    #[tokio::test]
+    async fn the_default_next_chunk_serves_the_same_cells_as_next_batch() {
+        // One of every shape that matters, including an empty batch mid-stream (not the end)
+        // and a Float NaN, whose bits must survive.
+        let zoo = |n: i64| {
+            ColumnBatch::new(vec![
+                vec![Value::Int(n), Value::Null],
+                vec![Value::Text("a".into()), Value::Float(f64::NAN)],
+                vec![
+                    Value::Decimal {
+                        unscaled: 15,
+                        scale: 1,
+                    },
+                    Value::Json("{}".into()),
+                ],
+            ])
+            .unwrap()
+        };
+        let make = || FakeCursor {
+            columns: vec![
+                ColumnMeta::new("a", "t"),
+                ColumnMeta::new("b", "t"),
+                ColumnMeta::new("c", "t"),
+            ],
+            batches: vec![ColumnBatch::empty(3).unwrap(), zoo(1), zoo(2)],
+            served: 0,
+        };
+        let mut by_batch = make();
+        let mut expected = Vec::new();
+        while let Some(batch) = by_batch.next_batch(10).await.unwrap() {
+            expected.extend((0..batch.rows()).map(|row| {
+                (0..3)
+                    .map(|column| format!("{:?}", batch.value(row, column).unwrap()))
+                    .collect::<Vec<_>>()
+            }));
+        }
+
+        let mut by_chunk = make();
+        let mut got = Vec::new();
+        loop {
+            let mut out = ChunkBuilder::new(3);
+            let rows = by_chunk.next_chunk(&mut out, 10).await.unwrap();
+            if rows == 0 {
+                break;
+            }
+            let sealed = out.seal().unwrap();
+            for row in 0..rows {
+                got.push(
+                    (0..3)
+                        .map(|column| {
+                            let value = qh_columnar::value_at(
+                                sealed.batch.column(column).as_ref(),
+                                sealed.encodings[column],
+                                row,
+                            )
+                            .unwrap();
+                            format!("{value:?}")
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        assert_eq!(expected.len(), 4);
+        assert_eq!(got, expected);
     }
 
     #[test]

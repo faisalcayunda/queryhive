@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+qh-columnar.workspace = true
 qh-core.workspace = true
 thiserror.workspace = true
 
