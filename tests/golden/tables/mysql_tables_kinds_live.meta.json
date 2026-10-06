@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_tables_kinds_live",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`tables` with OBJECT_KINDS=1 from SHOW FULL TABLES: the same names as `mysql_tables_live`, and `BASE TABLE` mapped to `table`."
+}

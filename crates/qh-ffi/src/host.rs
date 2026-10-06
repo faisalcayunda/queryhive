@@ -21,9 +21,9 @@
 //!
 //! | Route | Commands | Session |
 //! |---|---|---|
-//! | `Local` | the connection store, history, saved queries, session, account, profiles, `credential` | none; one shared SQLite handle |
+//! | `Local` | the connection store, history, saved queries, session, account, profiles, `credential`, `execution_log` | none; one shared SQLite handle |
 //! | `Fresh` | `db_drivers`, `test` | a new one, and a new tunnel: *Test connection* has to prove connect and SSH from nothing |
-//! | `Pooled(Metadata)` | the object tree | the pool's metadata lane |
+//! | `Pooled(Metadata)` | the object tree, `columns`, `ddl` | the pool's metadata lane |
 //! | `Pooled(Query)` | preview, explain, count, apply, table operations | the pool's query lanes |
 //! | `LongOp` | export, `to_table`, import | one of its own, on the tunnel the key shares |
 
@@ -234,11 +234,15 @@ fn route(command: Command) -> Route {
         | Command::Account
         | Command::Profiles
         | Command::ProfileSave
-        | Command::ProfileDelete => Route::Local,
+        | Command::ProfileDelete
+        | Command::ExecutionLog => Route::Local,
         Command::DbDrivers | Command::Test => Route::Fresh,
-        Command::Catalogs | Command::Schemas | Command::Tables | Command::Objects => {
-            Route::Pooled(Lane::Metadata)
-        }
+        Command::Catalogs
+        | Command::Schemas
+        | Command::Tables
+        | Command::Objects
+        | Command::Columns
+        | Command::Ddl => Route::Pooled(Lane::Metadata),
         Command::Preview
         | Command::Explain
         | Command::Count
@@ -261,13 +265,17 @@ pub struct EngineHost {
     /// implicit default (blueprint fase-6 section 12.3), so a store made before the app has
     /// said where spill goes fails loudly instead of quietly running without it.
     stores: Mutex<Option<Arc<StoreRegistry>>>,
+    /// Whether a run writes its Safe Mode decisions down: true for the host the app keeps, false
+    /// for one built over a fake connector, which is the tests' seam and must not open the
+    /// database a developer's app uses.
+    records_decisions: bool,
 }
 
 #[uniffi::export]
 impl EngineHost {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
-        Self::with_connector(Arc::new(RealConnector::new()))
+        Self::build(Arc::new(RealConnector::new()), true)
     }
 
     /// Run one command, sending each event to `sink` as it is produced.
@@ -286,6 +294,7 @@ impl EngineHost {
         let settings = settings_of(settings);
         let command = command.as_command();
         let mut out = SinkEmitter::new(sink);
+        self.ensure_log(command, &settings);
         let engine = self.engine_for(command, &settings);
         run_with(
             command,
@@ -418,13 +427,44 @@ impl EngineHost {
 }
 
 impl EngineHost {
-    /// A host over another way of opening sessions: the seam the tests use.
+    /// A host over another way of opening sessions: the seam the tests use. It writes no decisions
+    /// to the execution log, so a test that runs a command through it does not touch the database
+    /// the app keeps; a test of the log itself uses [`EngineHost::new`] and a `DB_PATH` of its own.
     pub fn with_connector(connector: Arc<dyn Connector>) -> Arc<Self> {
+        Self::build(connector, false)
+    }
+
+    fn build(connector: Arc<dyn Connector>, records_decisions: bool) -> Arc<Self> {
         Arc::new(Self {
             pool: SessionPool::new(connector),
             storage: SharedStorage::default(),
             stores: Mutex::new(None),
+            records_decisions,
         })
+    }
+
+    /// Point the execution log at the database this run names, before a command that can decide
+    /// anything: the ones that run on a query lane or a long-operation session of their own, which
+    /// are the ones that go through Safe Mode's guard. `ensure_sink` says why on stderr when it
+    /// cannot, and the command still runs guarded: a log that cannot be opened is not a reason to
+    /// refuse a read.
+    ///
+    /// The local commands that read or write the database open the log too. They open that same
+    /// file themselves, so it is no new exposure, and it moves the open (and a first migration)
+    /// to the app's first local command, the session restore at launch, instead of the first Run,
+    /// whose time to first row it would otherwise be part of. `credential` is left out: it opens
+    /// no database, and a run that names none must not open the default one for it.
+    ///
+    /// The app must name the database on every run (`DB_PATH`, from `AppModel.localEnvironment`
+    /// when the store is redirected): the log follows the name, and a run that names none lands
+    /// in the Application Support file the installed app shares.
+    fn ensure_log(&self, command: Command, settings: &Settings) {
+        let decides = matches!(route(command), Route::Pooled(Lane::Query) | Route::LongOp);
+        let local =
+            matches!(route(command), Route::Local) && !matches!(command, Command::Credential);
+        if self.records_decisions && (decides || local) {
+            let _ = crate::execution_log::ensure_sink(settings);
+        }
     }
 
     /// A finished store of synthetic rows, for `bench_ffi` and the tests: Rust only, not exported.
@@ -537,6 +577,7 @@ impl EngineHost {
         let command = command.as_command();
         let writer = store.writer();
         let mut out = StoreEmitter::new(SinkEmitter::new(sink), writer.clone());
+        self.ensure_log(command, &settings);
         let engine = self.engine_for(command, &settings);
         run_with(
             command,
@@ -599,5 +640,14 @@ mod tests {
         assert_eq!(route(Command::Tables), Route::Pooled(Lane::Metadata));
         assert_eq!(route(Command::Export), Route::LongOp);
         assert_eq!(route(Command::History), Route::Local);
+    }
+
+    #[test]
+    fn the_metadata_commands_ride_the_metadata_lane_and_the_log_reader_is_local() {
+        // `columns` and `ddl` are the object tree's own kind of work, so they share its session
+        // (O-7: two query sessions and one for metadata); the reader of the log opens no driver.
+        assert_eq!(route(Command::Columns), Route::Pooled(Lane::Metadata));
+        assert_eq!(route(Command::Ddl), Route::Pooled(Lane::Metadata));
+        assert_eq!(route(Command::ExecutionLog), Route::Local);
     }
 }

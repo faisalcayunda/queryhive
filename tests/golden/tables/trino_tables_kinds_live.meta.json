@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_tables_kinds_live",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`tables` with OBJECT_KINDS=1: the same eight names `trino_objects_live` lists, and a parallel `kinds` array from information_schema.tables."
+}

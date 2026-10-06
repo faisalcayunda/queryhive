@@ -108,6 +108,108 @@ struct Event: Decodable {
     /// `profile_delete`: whether there was a row to delete. False is a no-op, not a failure.
     var deleted: Bool?
 
+    // The metadata events (W11-T1, `crates/qh-ffi/src/metadata.rs`). Each key is one this struct
+    // did not use for anything else, because one key cannot be two types: `names` stays the
+    // `tables` listing and `kinds` rides beside it, `fields` is not `columns` (the preview
+    // grid's typed headers) and `object` is not `table` (a `to_table` name).
+
+    /// `tables` with `OBJECT_KINDS=1`: one kind per name, in the same order. `table`, `view`,
+    /// `materialized_view` or `foreign_table`, and `null` where the server did not say. Absent for
+    /// a driver that has no kinds, and a name with no kind is a table.
+    var kinds: [String?]?
+    /// `table_columns` and `table_ddl`: what was asked about, by slot. A part the driver has no
+    /// level for is `null` (MySQL has no schema, PostgreSQL no catalog).
+    var object: ObjectName?
+    /// `table_columns`: the columns, in the table's order.
+    var fields: [ColumnField]?
+    /// `table_ddl`: what the object is, when the server said. `object_kind` on the wire.
+    var objectKind: String?
+    /// `table_ddl`: the DDL text. A reconstruction for PostgreSQL, whose first line says so.
+    var ddl: String?
+    /// `table_ddl`: whether a credential the server printed into the DDL was masked.
+    var redacted: Bool?
+    /// `execution_log`: the recent Safe Mode decisions, newest first.
+    var decisions: [LogDecision]?
+    /// `execution_log`: whether the chain over the rows still verifies.
+    var chain: LogChain?
+    /// `execution_log`: whether this engine is writing decisions to the log it reads.
+    var writer: Bool?
+    /// `error`: the host key behind a failed SSH connection, when `SSH_HOST_KEY_DETAIL=1` asked
+    /// for it (blueprint w11 §5.8). The key is read here once so the connection work that decides
+    /// what to do with it adds no new key to this struct. `host_key` on the wire.
+    var hostKey: HostKeyDetail?
+
+    /// The three parts of an object's name, one per slot the driver has.
+    struct ObjectName: Decodable, Equatable {
+        var catalog: String?
+        var schema: String?
+        var table: String?
+    }
+
+    /// One column of `table_columns`.
+    struct ColumnField: Decodable, Equatable {
+        var name: String
+        var type: String
+        /// `nil` when the server did not say.
+        var nullable: Bool?
+        /// The default expression as the server prints it. For a generated column this is its
+        /// expression, which is why `extra` has to be read with it.
+        var `default`: String?
+        /// `identity`, `generated`, `auto_increment`, or the server's own words; empty for none.
+        var extra: String
+    }
+
+    /// One decision of the execution log. The statement is never in it, only its hash.
+    struct LogDecision: Decodable, Equatable, Identifiable {
+        let seq: Int
+        let id: String
+        /// Unix milliseconds.
+        var at: Int
+        var safeMode: String
+        /// `allowed`, `confirmed`, `refused` or `needs_confirmation`.
+        var decision: String
+        /// `read_only`, `dml`, `ddl` or `unknown`.
+        var statementKind: String
+        var statementIndex: Int
+        var statementHash: String
+        var reason: String?
+    }
+
+    /// What `execution_log` says about its own chain. `verified` is `nil` when the caller asked
+    /// not to verify, `false` with `seq` and `detail` when a row was changed.
+    struct LogChain: Decodable, Equatable {
+        var verified: Bool?
+        var rows: Int?
+        var seq: Int?
+        var detail: String?
+    }
+
+    /// The host key of a bastion, and what is already recorded for it.
+    struct HostKeyDetail: Decodable, Equatable {
+        /// `unknown`, `changed`, `revoked`, `certificate`, `certificate_expected`, `pin_mismatch`,
+        /// `record_failed` or `store_unsafe`.
+        var state: String
+        var host: String
+        var port: Int?
+        var alias: String?
+        var keyType: String?
+        var fingerprint: String?
+        var appKnownHosts: String?
+        var caCovered: Bool?
+        var recorded: [RecordedKey]?
+        /// Only on `pin_mismatch`: the fingerprint the caller pinned.
+        var pinned: String?
+
+        struct RecordedKey: Decodable, Equatable {
+            var fingerprint: String?
+            var keyType: String?
+            /// `app`, `user` or `system`.
+            var source: String?
+            var path: String?
+            var line: Int?
+        }
+    }
+
     /// One execution in the engine's history.
     ///
     /// Three fields are optional because a row can be written before its run has finished: an

@@ -1,0 +1,1 @@
+{"ddl": "CREATE TABLE tpch.tiny.nation (\n   nationkey bigint NOT NULL,\n   name varchar(25) NOT NULL,\n   regionkey bigint NOT NULL,\n   comment varchar(152) NOT NULL\n);\n", "event": "table_ddl", "object": {"catalog": "tpch", "schema": "tiny", "table": "nation"}, "object_kind": "table", "redacted": false, "truncated": false}

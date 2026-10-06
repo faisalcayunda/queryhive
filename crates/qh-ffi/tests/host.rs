@@ -75,18 +75,34 @@ impl EventSink for Recorder {
     }
 }
 
+/// A database of the tests' own, for a run that names none. The host writes its Safe Mode decisions
+/// to the database the run names, and the default one is the app's: a test must not open it.
+const TEST_DATABASE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/host-tests.sqlite3");
+
+/// `pairs` as the host takes them, with a `DB_PATH` of the tests' own when the caller set none.
+fn host_settings(pairs: &[(&str, &str)]) -> Vec<Setting> {
+    let mut settings: Vec<Setting> = pairs
+        .iter()
+        .map(|(key, value)| Setting {
+            key: (*key).to_owned(),
+            value: (*value).to_owned(),
+        })
+        .collect();
+    if !pairs.iter().any(|(key, _)| *key == "DB_PATH") {
+        settings.push(Setting {
+            key: "DB_PATH".to_owned(),
+            value: TEST_DATABASE.to_owned(),
+        });
+    }
+    settings
+}
+
 /// Run one command through the host and return what its sink was handed.
 fn run_host(host: &EngineHost, command: EngineCommand, pairs: &[(&str, &str)]) -> Vec<Json> {
     let sink = Recorder::default();
     host.run(
         command,
-        pairs
-            .iter()
-            .map(|(key, value)| Setting {
-                key: (*key).to_owned(),
-                value: (*value).to_owned(),
-            })
-            .collect(),
+        host_settings(pairs),
         Arc::new(sink.clone()),
         RunCancel::new(),
     );
@@ -141,6 +157,9 @@ struct World {
     fail_stream: Mutex<Vec<(String, EngineError)>>,
     connect_delay: Mutex<Duration>,
     reset_delay: Mutex<Duration>,
+    /// `(needle, row)`: a statement containing the needle is answered with one row of text cells
+    /// instead of the numbers every other statement gets.
+    canned: Mutex<Vec<(String, Vec<Option<String>>)>>,
 }
 
 #[derive(Default)]
@@ -340,6 +359,33 @@ impl Session for FakeSession {
             .iter()
             .find(|(needle, _)| sql.contains(needle.as_str()))
             .map(|(_, error)| error.clone());
+        let canned = self
+            .world
+            .canned
+            .lock()
+            .expect("canned")
+            .iter()
+            .find(|(needle, _)| sql.contains(needle.as_str()))
+            .map(|(_, row)| row.clone());
+        if let Some(row) = canned {
+            return Ok(Box::new(FakeCursor {
+                columns: (0..row.len())
+                    .map(|index| ColumnMeta::new(format!("c{index}"), "text"))
+                    .collect(),
+                batches: vec![ColumnBatch::new(
+                    row.iter()
+                        .map(|cell| {
+                            vec![cell
+                                .as_deref()
+                                .map_or(Value::Null, |text| Value::Text(text.into()))]
+                        })
+                        .collect(),
+                )
+                .expect("a batch")],
+                fail_after_first: None,
+                served: 0,
+            }));
+        }
         let rows = options.row_limit.map_or(3, |limit| limit.min(3));
         Ok(Box::new(FakeCursor {
             columns: vec![ColumnMeta::new("n", "int")],
@@ -445,6 +491,56 @@ fn fake_host() -> (Arc<World>, Arc<EngineHost>) {
     let world = World::new();
     let host = EngineHost::with_connector(Arc::new(FakeConnector(Arc::clone(&world))));
     (world, host)
+}
+
+/// The metadata commands run through the pool's metadata lane and answer; they do not fall into
+/// a session method a wrapper forgot to forward (blueprint w11 D-1). The fake answers with text
+/// rows for the two statements, which is all the pooled path has to carry.
+#[test]
+fn columns_and_kinds_go_through_the_pooled_session_and_answer() {
+    let (world, host) = fake_host();
+    world.canned.lock().unwrap().extend([
+        (
+            "pg_attribute".to_owned(),
+            vec![
+                Some("id".to_owned()),
+                Some("bigint".to_owned()),
+                Some("NO".to_owned()),
+                None,
+                Some("identity".to_owned()),
+            ],
+        ),
+        (
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname"
+                .to_owned(),
+            vec![Some("v".to_owned()), Some("view".to_owned())],
+        ),
+    ]);
+    let mut pairs = pg_pairs("");
+    pairs.extend([
+        ("DB_SCHEMA", "public"),
+        ("TARGET_SCHEMA", "public"),
+        ("TARGET_TABLE", "t"),
+    ]);
+
+    let events = run_host(&host, EngineCommand::Columns, &pairs);
+    let columns = last_event(&events, "table_columns");
+    assert_eq!(columns["fields"][0]["name"], "id", "{events:?}");
+    assert_eq!(columns["fields"][0]["extra"], "identity");
+    assert_eq!(columns["object"]["schema"], "public");
+
+    pairs.push(("OBJECT_KINDS", "1"));
+    let events = run_host(&host, EngineCommand::Tables, &pairs);
+    let tables = last_event(&events, "tables");
+    assert_eq!(tables["names"][0], "v", "{events:?}");
+    assert_eq!(tables["kinds"][0], "view");
+
+    let sent = world.all_executed();
+    assert!(
+        sent.iter().any(|sql| sql.contains("pg_attribute")),
+        "{sent:?}"
+    );
+    assert_eq!(world.connects(), 1, "both ran on the one metadata session");
 }
 
 fn pg_pairs(sql: &'static str) -> Vec<(&'static str, &'static str)> {
@@ -917,13 +1013,7 @@ fn the_host_path_emits_what_the_free_run_emits() {
     let pairs = pg_pairs("SELECT 1");
     host.run(
         EngineCommand::Preview,
-        pairs
-            .iter()
-            .map(|(key, value)| Setting {
-                key: (*key).to_owned(),
-                value: (*value).to_owned(),
-            })
-            .collect(),
+        host_settings(&pairs),
         Arc::new(sink.clone()),
         cancel,
     );
@@ -2258,4 +2348,214 @@ fn mysql_a_connection_lost_after_the_statement_was_sent_is_not_resent() {
         check.close().await.expect("close");
         pool.settle().await;
     });
+}
+
+// --------------------------------------------------------------------------- //
+// W11-T1: the metadata commands against each dev server, through the host
+// --------------------------------------------------------------------------- //
+
+/// What one live round of the metadata commands saw: the three events it asked for, taken while
+/// the objects existed, and what the teardown said after.
+struct MetadataRound {
+    kinds: Vec<Json>,
+    columns: Vec<Json>,
+    ddl: Vec<Json>,
+}
+
+/// Create objects, ask the three metadata commands about them, and drop them again **before**
+/// anything is asserted, so a failed assertion leaves nothing behind on the dev server.
+fn metadata_round(
+    env: &[(&str, &str)],
+    setup: &[&str],
+    teardown: &[&str],
+    listing: &[(&str, &str)],
+    table: &[(&str, &str)],
+    view: &[(&str, &str)],
+) -> MetadataRound {
+    let host = EngineHost::new();
+    let sql = |statement: &str| {
+        let events = host_preview(&host, env, statement, "10");
+        assert!(
+            events.iter().all(|event| event["event"] != "error"),
+            "{statement}: {events:?}"
+        );
+    };
+    let ask = |command: EngineCommand, extra: &[(&str, &str)]| {
+        let mut pairs = env.to_vec();
+        pairs.push(("RETRIES", "0"));
+        pairs.extend_from_slice(extra);
+        run_host(&host, command, &pairs)
+    };
+    // A leftover from an earlier run that died between setup and teardown is cleared first.
+    for statement in teardown {
+        let _ = host_preview(&host, env, statement, "10");
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for statement in setup {
+            sql(statement);
+        }
+        let mut with_kinds = listing.to_vec();
+        with_kinds.push(("OBJECT_KINDS", "1"));
+        MetadataRound {
+            kinds: ask(EngineCommand::Tables, &with_kinds),
+            columns: ask(EngineCommand::Columns, table),
+            ddl: ask(EngineCommand::Ddl, view),
+        }
+    }));
+    for statement in teardown {
+        let _ = host_preview(&host, env, statement, "10");
+    }
+    block(async { host.pool().settle().await });
+    outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The kind a listing gave one name.
+fn kind_of(listing: &[Json], name: &str) -> Option<String> {
+    let event = last_event(listing, "tables");
+    let position = event["names"]
+        .as_array()?
+        .iter()
+        .position(|candidate| candidate == name)?;
+    event["kinds"][position].as_str().map(str::to_owned)
+}
+
+#[test]
+fn postgres_metadata_names_kinds_columns_and_ddl_through_the_host() {
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{PG_SKIP}");
+        return;
+    }
+    let round = metadata_round(
+        PG_ENV,
+        &[
+            "CREATE SCHEMA qh_w11t1",
+            "CREATE TABLE qh_w11t1.t (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, \
+             label text NOT NULL DEFAULT 'x', doubled bigint GENERATED ALWAYS AS (id * 2) STORED)",
+            "CREATE VIEW qh_w11t1.v AS SELECT id FROM qh_w11t1.t",
+            "CREATE MATERIALIZED VIEW qh_w11t1.mv AS SELECT id FROM qh_w11t1.t",
+        ],
+        &["DROP SCHEMA IF EXISTS qh_w11t1 CASCADE"],
+        &[("DB_SCHEMA", "qh_w11t1")],
+        &[("TARGET_SCHEMA", "qh_w11t1"), ("TARGET_TABLE", "t")],
+        &[("TARGET_SCHEMA", "qh_w11t1"), ("TARGET_TABLE", "v")],
+    );
+    assert_eq!(kind_of(&round.kinds, "t").as_deref(), Some("table"));
+    assert_eq!(kind_of(&round.kinds, "v").as_deref(), Some("view"));
+    assert_eq!(
+        kind_of(&round.kinds, "mv").as_deref(),
+        Some("materialized_view"),
+        "the kind `information_schema` cannot see at all"
+    );
+
+    let fields = &last_event(&round.columns, "table_columns")["fields"];
+    assert_eq!(fields[0]["name"], "id");
+    assert_eq!(fields[0]["extra"], "identity");
+    assert_eq!(fields[0]["nullable"], false);
+    assert_eq!(fields[1]["default"], "'x'::text");
+    assert_eq!(fields[2]["extra"], "generated");
+
+    let ddl = last_event(&round.ddl, "table_ddl");
+    assert_eq!(ddl["object_kind"], "view", "{ddl}");
+    assert!(
+        ddl["ddl"]
+            .as_str()
+            .unwrap()
+            .contains("CREATE VIEW qh_w11t1.v AS"),
+        "{ddl}"
+    );
+}
+
+#[test]
+fn mysql_metadata_names_kinds_columns_and_ddl_through_the_host() {
+    if std::env::var("QH_TEST_MYSQL").as_deref() != Ok("1") {
+        eprintln!("{MYSQL_SKIP}");
+        return;
+    }
+    let round = metadata_round(
+        MYSQL_ENV,
+        &[
+            "CREATE TABLE qh_w11t1_t (id bigint unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, \
+             label varchar(20) NOT NULL DEFAULT 'x')",
+            "CREATE VIEW qh_w11t1_v AS SELECT id FROM qh_w11t1_t",
+        ],
+        &[
+            "DROP VIEW IF EXISTS qh_w11t1_v",
+            "DROP TABLE IF EXISTS qh_w11t1_t",
+        ],
+        &[],
+        &[("TARGET_CATALOG", "qh"), ("TARGET_TABLE", "qh_w11t1_t")],
+        &[("TARGET_CATALOG", "qh"), ("TARGET_TABLE", "qh_w11t1_v")],
+    );
+    assert_eq!(
+        kind_of(&round.kinds, "qh_w11t1_t").as_deref(),
+        Some("table")
+    );
+    assert_eq!(kind_of(&round.kinds, "qh_w11t1_v").as_deref(), Some("view"));
+
+    let fields = &last_event(&round.columns, "table_columns")["fields"];
+    assert_eq!(fields[0]["name"], "id");
+    assert_eq!(fields[0]["type"], "bigint unsigned");
+    assert_eq!(fields[0]["extra"], "auto_increment");
+    assert_eq!(fields[1]["default"], "x");
+
+    let ddl = last_event(&round.ddl, "table_ddl");
+    assert_eq!(
+        ddl["object_kind"], "view",
+        "read from the first column's name: {ddl}"
+    );
+    assert!(
+        ddl["ddl"].as_str().unwrap().contains("VIEW `qh_w11t1_v`"),
+        "{ddl}"
+    );
+}
+
+#[test]
+fn trino_metadata_names_kinds_columns_and_ddl_through_the_host() {
+    if std::env::var("QH_TEST_TRINO").as_deref() != Ok("1") {
+        eprintln!("skipped: set QH_TEST_TRINO=1 with deploy/dev/up.sh trino running");
+        return;
+    }
+    let env: Vec<(&str, &str)> = TRINO_ENV
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != "DB_DATABASE" && *key != "DB_SCHEMA")
+        .chain([("DB_DATABASE", "memory"), ("DB_SCHEMA", "qh_w11t1")])
+        .collect();
+    let round = metadata_round(
+        &env,
+        &[
+            "CREATE SCHEMA memory.qh_w11t1",
+            "CREATE TABLE memory.qh_w11t1.t AS SELECT 1 AS id, 'x' AS label",
+            "CREATE VIEW memory.qh_w11t1.v AS SELECT id FROM memory.qh_w11t1.t",
+        ],
+        &[
+            "DROP VIEW IF EXISTS memory.qh_w11t1.v",
+            "DROP TABLE IF EXISTS memory.qh_w11t1.t",
+            "DROP SCHEMA IF EXISTS memory.qh_w11t1",
+        ],
+        &[],
+        &[
+            ("TARGET_CATALOG", "memory"),
+            ("TARGET_SCHEMA", "qh_w11t1"),
+            ("TARGET_TABLE", "t"),
+        ],
+        &[
+            ("TARGET_CATALOG", "memory"),
+            ("TARGET_SCHEMA", "qh_w11t1"),
+            ("TARGET_TABLE", "v"),
+        ],
+    );
+    assert_eq!(kind_of(&round.kinds, "t").as_deref(), Some("table"));
+    assert_eq!(kind_of(&round.kinds, "v").as_deref(), Some("view"));
+
+    let fields = &last_event(&round.columns, "table_columns")["fields"];
+    assert_eq!(fields[0]["name"], "id");
+    assert_eq!(fields[0]["extra"], "");
+
+    let ddl = last_event(&round.ddl, "table_ddl");
+    assert_eq!(ddl["object_kind"], "view", "{ddl}");
+    assert!(
+        ddl["ddl"].as_str().unwrap().contains("CREATE VIEW"),
+        "{ddl}"
+    );
 }

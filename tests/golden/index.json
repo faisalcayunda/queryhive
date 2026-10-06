@@ -89,11 +89,27 @@
   },
   {
     "captures": "stdout",
+    "case": "mysql_columns_live",
+    "command": "columns",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`columns` from SHOW COLUMNS: MySQL's own type text (`decimal(38,10)`, `enum('sad','ok','happy')`), nullability, and no default on a column that has none. The `object` carries the database in `catalog` and `null` for the schema MySQL does not have."
+  },
+  {
+    "captures": "stdout",
     "case": "mysql_count_live",
     "command": "count",
     "event_lines": 3,
     "exit_code": 0,
     "notes": "The count wrapper on MySQL over 500,000 real rows."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_ddl_live",
+    "command": "ddl",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "SHOW CREATE TABLE as the server prints it, read through the driver's own decoding, which is the one thing the unit tests cannot say: the answer arrives in a text or blob column and has to come out as text."
   },
   {
     "captures": "stdout",
@@ -134,6 +150,14 @@
     "event_lines": 1,
     "exit_code": 1,
     "notes": "The one browse command MySQL has no level for: a usage error naming the driver, raised before the network is touched."
+  },
+  {
+    "captures": "stdout",
+    "case": "mysql_tables_kinds_live",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`tables` with OBJECT_KINDS=1 from SHOW FULL TABLES: the same names as `mysql_tables_live`, and `BASE TABLE` mapped to `table`."
   },
   {
     "captures": "stdout",
@@ -185,11 +209,27 @@
   },
   {
     "captures": "stdout",
+    "case": "postgres_columns_live",
+    "command": "columns",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`columns` from pg_attribute: `format_type` text (`numeric(38,10)`, `timestamp with time zone`, an array and an enum spelled as the server spells them), nullability, and `extra` empty for a table with no identity or generated column."
+  },
+  {
+    "captures": "stdout",
     "case": "postgres_count_live",
     "command": "count",
     "event_lines": 3,
     "exit_code": 0,
     "notes": "`count`'s wrapper run by Postgres itself on 500,000 real rows, so the number is the server's rather than a fake cursor's."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_ddl_live",
+    "command": "ddl",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The four-statement recipe: the DDL PostgreSQL has no SHOW CREATE for, put together from the catalog. Its first line says it is a reconstruction."
   },
   {
     "captures": "stdout",
@@ -230,6 +270,14 @@
     "event_lines": 1,
     "exit_code": 0,
     "notes": "Postgres has no catalog level; schema listing is its top level."
+  },
+  {
+    "captures": "stdout",
+    "case": "postgres_tables_kinds_live",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`tables` with OBJECT_KINDS=1 from pg_class: the same two names as `postgres_tables_live` here (the seeded schema has no view), with a `kinds` array beside them."
   },
   {
     "captures": "stdout",
@@ -289,11 +337,27 @@
   },
   {
     "captures": "stdout",
+    "case": "trino_columns_live",
+    "command": "columns",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`columns` from Trino's information_schema: the real type text (`varchar(25)`), NOT NULL read from `is_nullable`, and an `extra` that is always empty because Trino has no such column."
+  },
+  {
+    "captures": "stdout",
     "case": "trino_count_live",
     "command": "count",
     "event_lines": 3,
     "exit_code": 0,
     "notes": "The count wrapper run by the coordinator over tpch.tiny.orders."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_ddl_live",
+    "command": "ddl",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "The two-statement recipe: the kind from information_schema, then the coordinator's own SHOW CREATE TABLE text, with a closing semicolon."
   },
   {
     "captures": "stdout",
@@ -318,6 +382,14 @@
     "event_lines": 1,
     "exit_code": 0,
     "notes": "Trino's information_schema objects query: Name/Type only, because Trino has no OID, owner or ACL to answer with."
+  },
+  {
+    "captures": "stdout",
+    "case": "trino_tables_kinds_live",
+    "command": "tables",
+    "event_lines": 1,
+    "exit_code": 0,
+    "notes": "`tables` with OBJECT_KINDS=1: the same eight names `trino_objects_live` lists, and a parallel `kinds` array from information_schema.tables."
   },
   {
     "captures": "stdout",

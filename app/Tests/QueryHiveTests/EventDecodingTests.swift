@@ -262,4 +262,111 @@ final class EventDecodingTests: XCTestCase {
         XCTAssertEqual(none.saved, false)
         XCTAssertNil(none.tabs)
     }
+
+    // MARK: - the metadata events (W11-T1)
+
+    func testTheMetadataEventsDecodeUnderTheKeysNothingElseUses() throws {
+        // `kinds` rides beside `names`, `fields` is not `columns`, `object` is not `table`, and
+        // `object_kind` reaches `objectKind`. A key that stopped decoding arrives as `nil` and the
+        // tree just shows no kind, so each one is asserted by what it carries.
+        let tables = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"tables","names":["a","b","c"],"kinds":["table","view",null]}"#.utf8)))
+        XCTAssertEqual(tables.names, ["a", "b", "c"])
+        XCTAssertEqual(tables.kinds?.count, 3)
+        XCTAssertEqual(tables.kinds?[1], "view")
+        XCTAssertEqual(tables.kinds?[2] ?? nil, nil, "a kind the server did not say stays unsaid")
+        let plain = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"tables","names":["a"]}"#.utf8)))
+        XCTAssertNil(plain.kinds, "no `OBJECT_KINDS`, no `kinds`: the old listing decodes as it did")
+
+        let columns = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"table_columns","object":{"catalog":null,"schema":"public","table":"t"},"fields":[{"name":"id","type":"bigint","nullable":false,"default":null,"extra":"identity"},{"name":"doubled","type":"bigint","nullable":true,"default":"(id * 2)","extra":"generated"},{"name":"u","type":"text","nullable":null,"default":null,"extra":""}],"truncated":false}"#.utf8)))
+        XCTAssertEqual(columns.object, Event.ObjectName(catalog: nil, schema: "public", table: "t"))
+        XCTAssertEqual(columns.fields?.map(\.name), ["id", "doubled", "u"])
+        XCTAssertEqual(columns.fields?[0].nullable, false)
+        XCTAssertEqual(columns.fields?[0].extra, "identity")
+        XCTAssertEqual(columns.fields?[1].default, "(id * 2)")
+        XCTAssertEqual(columns.fields?[1].extra, "generated", "the expression is not a default, and `extra` says so")
+        XCTAssertNil(columns.fields?[2].nullable, "an unknown nullability is not a `false`")
+        XCTAssertEqual(columns.truncated, false)
+
+        let ddl = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"table_ddl","object":{"catalog":"hive","schema":"a","table":"v"},"object_kind":"view","ddl":"CREATE VIEW v AS SELECT 1;\n","truncated":false,"redacted":true}"#.utf8)))
+        XCTAssertEqual(ddl.objectKind, "view")
+        XCTAssertEqual(ddl.ddl, "CREATE VIEW v AS SELECT 1;\n")
+        XCTAssertEqual(ddl.redacted, true)
+        XCTAssertEqual(ddl.object?.catalog, "hive")
+    }
+
+    func testTheExecutionLogDecodesWithItsChainWhetherOrNotItVerifies() throws {
+        let line = #"{"event":"execution_log","decisions":[{"seq":12,"id":"01a0ea97-d51a-74f1-a00c-f103e4770ad3","at":1790000000000,"safe_mode":"read_only","decision":"refused","statement_kind":"dml","statement_index":1,"statement_hash":"ab12","reason":"this connection is read-only"}],"chain":{"verified":true,"rows":214},"writer":true}"#
+        let log = try XCTUnwrap(EngineWire.event(in: Data(line.utf8)))
+        let decision = try XCTUnwrap(log.decisions?.first)
+        XCTAssertEqual(decision.seq, 12)
+        XCTAssertEqual(decision.safeMode, "read_only")
+        XCTAssertEqual(decision.statementKind, "dml")
+        XCTAssertEqual(decision.statementIndex, 1)
+        XCTAssertEqual(decision.statementHash, "ab12")
+        XCTAssertEqual(decision.reason, "this connection is read-only")
+        XCTAssertEqual(log.chain, Event.LogChain(verified: true, rows: 214, seq: nil, detail: nil))
+        XCTAssertEqual(log.writer, true)
+
+        // A broken chain still carries its rows: seeing them is how it is diagnosed. And a caller
+        // that asked not to verify gets neither a yes nor a no.
+        let broken = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"execution_log","decisions":[],"chain":{"verified":false,"seq":7,"detail":"chain broken"},"writer":false}"#.utf8)))
+        XCTAssertEqual(broken.chain?.verified, false)
+        XCTAssertEqual(broken.chain?.seq, 7)
+        XCTAssertEqual(broken.writer, false)
+        let unverified = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"execution_log","decisions":[],"chain":{"verified":null},"writer":true}"#.utf8)))
+        XCTAssertNil(unverified.chain?.verified)
+    }
+
+    func testAnErrorCarriesItsHostKeyOnlyWhenTheEngineWasAskedFor() throws {
+        // The key W11-T2 will send under `SSH_HOST_KEY_DETAIL=1`. It is read here because this
+        // struct is where a key is added once, and the connection work then adds none.
+        let line = #"{"event":"error","message":"the bastion's host key is not known","host_key":{"state":"unknown","host":"bastion.corp","port":22,"alias":"prod-bastion","key_type":"ssh-ed25519","fingerprint":"SHA256:abc","app_known_hosts":"/Users/x/Library/Application Support/QueryHive/known_hosts","ca_covered":false,"recorded":[{"fingerprint":"SHA256:def","key_type":"ssh-rsa","source":"user","path":"/Users/x/.ssh/known_hosts","line":3}],"pinned":null}}"#
+        let failed = try XCTUnwrap(EngineWire.event(in: Data(line.utf8)))
+        let key = try XCTUnwrap(failed.hostKey)
+        XCTAssertEqual(key.state, "unknown")
+        XCTAssertEqual(key.host, "bastion.corp")
+        XCTAssertEqual(key.port, 22)
+        XCTAssertEqual(key.keyType, "ssh-ed25519")
+        XCTAssertEqual(key.appKnownHosts, "/Users/x/Library/Application Support/QueryHive/known_hosts")
+        XCTAssertEqual(key.caCovered, false)
+        XCTAssertEqual(key.recorded?.first?.source, "user")
+        XCTAssertEqual(key.recorded?.first?.line, 3)
+        XCTAssertNil(key.pinned)
+        XCTAssertEqual(failed.message, "the bastion's host key is not known")
+
+        let plain = try XCTUnwrap(EngineWire.event(in: Data(#"{"event":"error","message":"boom"}"#.utf8)))
+        XCTAssertNil(plain.hostKey, "an error without the setting decodes exactly as it did")
+    }
+
+    func testTheRecordedMetadataCasesDecodeIntoWhatTheTreeAndTheDDLTabRead() throws {
+        // The three servers' real answers, frozen under `tests/golden/{columns,ddl,tables}`: the
+        // typed shapes above are only worth something if what an engine really wrote fits them.
+        let (decoded, _) = try recorded()
+        let described = events("table_columns", in: decoded)
+        XCTAssertGreaterThanOrEqual(described.count, 3, "one `columns` case per driver")
+        for event in described {
+            XCTAssertFalse((event.fields ?? []).isEmpty)
+            XCTAssertNotNil(event.object?.table)
+            XCTAssertTrue((event.fields ?? []).allSatisfy { !$0.type.isEmpty })
+        }
+        // Each driver names only the slots it has: MySQL's database is its `catalog`, and it has
+        // no schema.
+        XCTAssertTrue(described.contains { $0.object?.catalog == "qh" && $0.object?.schema == nil })
+        XCTAssertTrue(described.contains { $0.object?.catalog == nil && $0.object?.schema == "public" })
+        XCTAssertTrue(described.contains { $0.object?.catalog == "tpch" && $0.object?.schema == "tiny" })
+
+        let written = events("table_ddl", in: decoded)
+        XCTAssertGreaterThanOrEqual(written.count, 3)
+        for event in written {
+            XCTAssertEqual(event.objectKind, "table")
+            XCTAssertTrue((event.ddl ?? "").contains("CREATE TABLE"))
+            XCTAssertEqual(event.redacted, false)
+        }
+
+        let kinds = events("tables", in: decoded).filter { $0.kinds != nil }
+        XCTAssertGreaterThanOrEqual(kinds.count, 3, "one `OBJECT_KINDS` case per driver")
+        for event in kinds {
+            XCTAssertEqual(event.kinds?.count, event.names?.count, "`kinds` runs beside `names`")
+        }
+    }
 }

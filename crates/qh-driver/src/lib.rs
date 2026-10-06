@@ -34,8 +34,13 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, Value};
 use thiserror::Error;
 
+mod metadata;
 mod tunnel;
 
+pub use metadata::{
+    required_part, ColumnInfo, DdlRecipe, MetadataSql, ObjectDdl, ObjectKind, Rows, Step,
+    TableEntry,
+};
 pub use tunnel::{TunnelAuth, TunnelConfig};
 
 /// Which server a driver speaks to.
@@ -290,6 +295,13 @@ pub trait Driver: Send + Sync + 'static {
     fn capabilities(&self) -> Capabilities;
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError>;
+
+    /// The statements that answer for object kinds, columns and DDL, or `None` for a driver that
+    /// cannot. Must not perform I/O. The engine runs them through [`Session::execute`], not
+    /// through a method here (the `metadata` module note says why), and `None` is a usage error naming the driver.
+    fn metadata(&self) -> Option<&dyn MetadataSql> {
+        None
+    }
 }
 
 /// Everything needed to open one connection.

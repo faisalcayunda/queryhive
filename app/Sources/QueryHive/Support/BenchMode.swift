@@ -788,6 +788,10 @@ enum BenchMode {
         tab.connectionID = connection.id
         model.panelCollapsed = false
         tab.panel = .result
+        // The app's first local command opens the execution log (and migrates a fresh database)
+        // for its first Run; the app makes one at launch (the session restore), a bench model does
+        // not, so make it here and keep that open out of the first sample's time to first row.
+        model.loadHistory()
         let window = openWindow(model)
         await sleep(1.0)
         let sampler = FootprintSampler()

@@ -27,6 +27,10 @@
 //! | `credential` | `credential` |
 //! | `test` | `test` |
 //! | `catalogs`, `schemas`, `tables` | `catalogs` / `schemas` / `tables`, each `names` |
+//! | `tables` with `OBJECT_KINDS=1` | `tables` (`names`, and a parallel `kinds`) |
+//! | `columns` | `table_columns` (`object`, `fields`, `truncated`) |
+//! | `ddl` | `table_ddl` (`object`, `object_kind`, `ddl`, `truncated`, `redacted`) |
+//! | `execution_log` | `execution_log` (`decisions`, `chain`, `writer`) |
 //! | `objects` | `objects` (`object_columns`, `data`) |
 //! | `export` | `step`, `start`, `progress`, `done` |
 //! | `import_data` | `step`, `progress`, `done` |
@@ -106,6 +110,8 @@ pub mod local;
 /// The MCP server's protocol, tools, scope rules and handshake (Fase 2). A separate
 /// binary in this crate speaks it; the app links the same library and never calls it.
 pub mod mcp;
+/// Read-only metadata: `columns`, `ddl`, `execution_log`, and the kinds `tables` can add.
+pub mod metadata;
 pub mod progress;
 pub mod retry;
 pub mod sql_ident;
@@ -438,6 +444,9 @@ pub enum Command {
     ImportData,
     ApplyChanges,
     TableOp,
+    Columns,
+    Ddl,
+    ExecutionLog,
     Objects,
     Test,
     Catalogs,
@@ -458,8 +467,9 @@ pub enum Command {
 /// why `objects` sits near the head, ahead of the frozen suffix, rather than beside the
 /// other browse commands where it belongs semantically. The local commands are ahead of it
 /// for the same reason, and there are twelve of them now rather than the three that sat
-/// there when this order was written.
-pub const COMMANDS: [&str; 26] = [
+/// there when this order was written. `columns`, `ddl` and `execution_log` went in the same way,
+/// between `table_op` and `objects`.
+pub const COMMANDS: [&str; 29] = [
     "db_drivers",
     "connections",
     "import_connections",
@@ -476,6 +486,9 @@ pub const COMMANDS: [&str; 26] = [
     "import_data",
     "apply_changes",
     "table_op",
+    "columns",
+    "ddl",
+    "execution_log",
     "objects",
     "test",
     "catalogs",
@@ -508,6 +521,9 @@ impl Command {
             "import_data" => Command::ImportData,
             "apply_changes" => Command::ApplyChanges,
             "table_op" => Command::TableOp,
+            "columns" => Command::Columns,
+            "ddl" => Command::Ddl,
+            "execution_log" => Command::ExecutionLog,
             "objects" => Command::Objects,
             "test" => Command::Test,
             "catalogs" => Command::Catalogs,
@@ -573,6 +589,9 @@ pub async fn run_with(
         Command::ImportData => import::import_data(settings, out, engine, cancel).await,
         Command::ApplyChanges => apply::apply_changes(settings, out, engine, cancel).await,
         Command::TableOp => commands::table_op(settings, out, engine, cancel).await,
+        Command::Columns => metadata::columns(settings, out, engine).await,
+        Command::Ddl => metadata::ddl(settings, out, engine).await,
+        Command::ExecutionLog => metadata::execution_log(settings, out, storage).await,
         Command::Objects => commands::objects(settings, out, engine).await,
         Command::Test => commands::test(settings, out, engine).await,
         Command::Catalogs => commands::catalogs(settings, out, engine).await,

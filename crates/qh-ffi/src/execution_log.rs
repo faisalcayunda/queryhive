@@ -20,6 +20,12 @@
 //! user's database — the deliberate alternative to a default-on log that a test run would
 //! fill with its own fixtures.
 //!
+//! The one other place that installs is the engine host the app keeps ([`ensure_sink`], called
+//! by `EngineHost::run` for the commands that decide anything, and for the local commands that
+//! open the database anyway, so the first Run does not pay for the open). The app is the engine too, since
+//! the engine moved into its process, and a decision made there was written nowhere until then.
+//! A host built over a fake connector (`EngineHost::with_connector`, the tests' seam) does not.
+//!
 //! # The write is deliberately synchronous
 //!
 //! `guard` runs on the async path, and the crate's storage rule is that a `rusqlite`
@@ -29,6 +35,7 @@
 //! chain that races is a chain that verifies against an order nobody chose. Correctness of
 //! the chain wins over a few microseconds on the runtime thread.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use qh_sql::{SafeMode, StatementKind};
@@ -75,26 +82,67 @@ pub(crate) struct DecisionEntry<'a> {
     pub reason: Option<&'a str>,
 }
 
-/// The installed sink, or nothing. `OnceLock` so a process installs once and reads many
+/// The installed sink, or nothing.
+///
+/// `key` is the database the handle was opened for, spelled as [`path_key`] spells it. It is
+/// `None` for a handle a caller installed itself ([`install`]): that one is the caller's, and
+/// [`ensure_sink`] never replaces it. `OnceLock` so a process installs once and reads many
 /// times without a lock on the read path beyond the `Mutex` that keeps `rusqlite` honest.
-static SINK: OnceLock<Mutex<Option<Storage>>> = OnceLock::new();
+#[derive(Default)]
+struct Sink {
+    storage: Option<Storage>,
+    key: Option<String>,
+    /// The database a failed open was for, so a database that stays unopenable is reported once
+    /// and not once per run.
+    failed: Option<String>,
+}
 
-fn sink() -> &'static Mutex<Option<Storage>> {
-    SINK.get_or_init(|| Mutex::new(None))
+static SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
+
+/// How many databases [`ensure_sink`] has opened, so a test can tell that the same path is not
+/// opened twice.
+static OPENS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of databases [`ensure_sink`] has opened in this process.
+#[doc(hidden)]
+pub fn sink_opens() -> usize {
+    OPENS.load(Ordering::SeqCst)
+}
+
+fn sink() -> std::sync::MutexGuard<'static, Sink> {
+    SINK.get_or_init(|| Mutex::new(Sink::default()))
+        .lock()
+        .expect("the log sink mutex is not poisoned")
 }
 
 /// Install a storage handle as this process's decision log.
 ///
 /// Installing again replaces the handle; the binary calls this once. A test calls it with an
-/// in-memory database, which is how the write path is proven without touching a real one.
+/// in-memory database, which is how the write path is proven without touching a real one. A handle
+/// installed here is not tied to a path, so [`ensure_sink`] leaves it alone.
 pub fn install(storage: Storage) {
-    *sink().lock().expect("the log sink mutex is not poisoned") = Some(storage);
+    let mut sink = sink();
+    sink.storage = Some(storage);
+    sink.key = None;
 }
 
 /// Forget the installed sink. For tests, and for a caller that wants the engine to stop
 /// writing decisions.
 pub fn uninstall() {
-    *sink().lock().expect("the log sink mutex is not poisoned") = None;
+    *sink() = Sink::default();
+}
+
+/// Which database `settings` name, spelled the way `local::acquire` keys its shared handle:
+/// `DB_PATH` with `~` expanded, or the empty string for the default database.
+pub fn path_key(settings: &Settings) -> String {
+    let raw = settings.text("DB_PATH", "");
+    if raw.is_empty() {
+        String::new()
+    } else {
+        crate::commands::expand_user(&raw)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// Open the local database and install it as the decision log.
@@ -103,8 +151,57 @@ pub fn uninstall() {
 /// the Application Support file otherwise — so the log lands beside the history and the
 /// session rather than in a second place that has to agree about the name.
 pub fn install_from_settings(settings: &Settings) -> Result<(), CliError> {
-    install(crate::local::open_storage(settings)?);
+    let storage = crate::local::open_storage(settings)?;
+    let mut sink = sink();
+    sink.storage = Some(storage);
+    sink.key = Some(path_key(settings));
+    sink.failed = None;
     Ok(())
+}
+
+/// Make sure the decision log is the database `settings` name, opening it when it is not.
+///
+/// What the engine host calls before a command that decides anything, so a decision made through
+/// the app is written down like one made through the CLI. Keyed by path because `install` is global
+/// to the process: without the key, the first `DB_PATH` to arrive would be the log's for as long as
+/// the process lives, and a run for another database (every Swift test has its own) would write to
+/// the wrong file while the reader, which opens its own, read another. The same path is one string
+/// comparison under a lock and no I/O.
+///
+/// A failure to open does not stop the command, and is not silent: it is returned (the reader
+/// reports `writer: false` on it) and said on stderr once per database.
+///
+/// Two runs for different databases at the same moment, in one process, take the sink from each
+/// other. That is not supported; it can only happen in a test that runs several databases at once,
+/// and such a test must not depend on the log.
+pub fn ensure_sink(settings: &Settings) -> Result<(), CliError> {
+    let key = path_key(settings);
+    {
+        let sink = sink();
+        // A handle a caller installed is the caller's.
+        if sink.storage.is_some() && (sink.key.is_none() || sink.key.as_deref() == Some(&key)) {
+            return Ok(());
+        }
+    }
+    // Opened outside the lock: it migrates, and a busy file can make it wait.
+    match crate::local::open_storage(settings) {
+        Ok(storage) => {
+            OPENS.fetch_add(1, Ordering::SeqCst);
+            let mut sink = sink();
+            sink.storage = Some(storage);
+            sink.key = Some(key);
+            sink.failed = None;
+            Ok(())
+        }
+        Err(error) => {
+            let mut sink = sink();
+            if sink.failed.as_deref() != Some(&key) {
+                eprintln!("the execution log is not being written: {error}");
+                sink.failed = Some(key);
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Run `read` against the installed log, or return `None` when none is installed.
@@ -112,14 +209,13 @@ pub fn install_from_settings(settings: &Settings) -> Result<(), CliError> {
 /// The read half of the sink: a caller that wants the recent decisions, and a test that
 /// wants to verify the chain, both go through this rather than reaching for the lock.
 pub fn with_storage<R>(read: impl FnOnce(&Storage) -> R) -> Option<R> {
-    let guard = sink().lock().expect("the log sink mutex is not poisoned");
-    guard.as_ref().map(read)
+    sink().storage.as_ref().map(read)
 }
 
 /// Write one decision to the installed log, or do nothing when none is installed.
 pub(crate) fn record(entry: &DecisionEntry<'_>) -> Result<(), StorageError> {
-    let mut guard = sink().lock().expect("the log sink mutex is not poisoned");
-    let Some(storage) = guard.as_mut() else {
+    let mut guard = sink();
+    let Some(storage) = guard.storage.as_mut() else {
         return Ok(());
     };
     storage.append_execution(NewExecution {

@@ -86,6 +86,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod metadata;
 pub mod normalize;
 pub mod tls;
 
@@ -99,7 +100,7 @@ use futures_util::StreamExt;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
+    MetadataSql, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
 };
 use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
 use rustls::client::danger::ServerCertVerifier;
@@ -141,6 +142,10 @@ impl Driver for PostgresDriver {
 
     fn default_port(&self) -> u16 {
         5432
+    }
+
+    fn metadata(&self) -> Option<&dyn MetadataSql> {
+        Some(&metadata::PostgresMetadata)
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -921,8 +926,16 @@ fn objects_sql(schema: &str) -> String {
 ///
 /// String literals and identifiers are different problems: a schema name in a
 /// comparison is a literal, so `quote_ident` would be wrong here.
+///
+/// A name with a backslash is written as an `E'…'` string with the backslash doubled, which
+/// reads the same under either `standard_conforming_strings`: with it off, `'a\'` would swallow
+/// its own closing quote.
 fn quote_literal(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
+    if text.contains('\\') {
+        format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
 }
 
 fn describe_columns(statement: &Statement) -> (Vec<ColumnMeta>, Vec<String>) {

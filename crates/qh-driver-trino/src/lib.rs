@@ -79,6 +79,7 @@
 //! so a poll cannot be made to fall back.
 
 mod decode;
+pub mod metadata;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -88,7 +89,7 @@ use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
+    MetadataSql, ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
 };
 use qh_sql::{strip_terminator_dialect, Dialect};
 use serde::Deserialize;
@@ -405,6 +406,10 @@ impl Driver for TrinoDriver {
 
     fn default_port(&self) -> u16 {
         8080
+    }
+
+    fn metadata(&self) -> Option<&dyn MetadataSql> {
+        Some(&metadata::TrinoMetadata)
     }
 
     fn capabilities(&self) -> Capabilities {

@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_columns_live",
+  "command": "columns",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`columns` from pg_attribute: `format_type` text (`numeric(38,10)`, `timestamp with time zone`, an array and an enum spelled as the server spells them), nullability, and `extra` empty for a table with no identity or generated column."
+}

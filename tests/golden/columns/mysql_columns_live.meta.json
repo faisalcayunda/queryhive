@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_columns_live",
+  "command": "columns",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`columns` from SHOW COLUMNS: MySQL's own type text (`decimal(38,10)`, `enum('sad','ok','happy')`), nullability, and no default on a column that has none. The `object` carries the database in `catalog` and `null` for the schema MySQL does not have."
+}

@@ -396,7 +396,7 @@ pub(crate) fn record_kind(
 /// schemas, and MySQL's first level is its database — which its driver reads from
 /// the path's `schema` slot, because that is the slot that selects which tables are
 /// listed.
-fn path_for(config: &ConnectionConfig) -> ObjectPath {
+pub(crate) fn path_for(config: &ConnectionConfig) -> ObjectPath {
     let mut path = ObjectPath::new();
     match config.kind {
         DriverKind::Trino => path.catalog = config.database.clone(),
@@ -414,7 +414,7 @@ fn path_for(config: &ConnectionConfig) -> ObjectPath {
 /// names the levels it will accept, in order, and the driver's own capabilities
 /// pick one. A driver with none of them is a usage error naming the level, decided
 /// before anything is opened, exactly as the Python engine refused it.
-fn level_for(
+pub(crate) fn level_for(
     engine: &dyn Engine,
     kind: DriverKind,
     accepted: &[BrowseLevel],
@@ -801,6 +801,21 @@ pub async fn schemas(
 }
 
 pub async fn tables(
+    settings: &Settings,
+    out: &mut dyn Emitter,
+    engine: &dyn Engine,
+) -> Result<(), CliError> {
+    // `OBJECT_KINDS` is the one setting that changes what this command asks the server (W11-T1,
+    // P-06): off, the listing below is what it always was, byte for byte, and the golden corpus
+    // freezes that; on, the same names come with a parallel `kinds` array.
+    if settings.flag("OBJECT_KINDS", false) {
+        return crate::metadata::tables(settings, out, engine).await;
+    }
+    browse_tables(settings, out, engine).await
+}
+
+/// The plain `tables` listing: names only.
+pub(crate) async fn browse_tables(
     settings: &Settings,
     out: &mut dyn Emitter,
     engine: &dyn Engine,

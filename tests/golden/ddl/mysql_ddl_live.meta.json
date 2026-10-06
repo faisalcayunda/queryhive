@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "mysql_ddl_live",
+  "command": "ddl",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "SHOW CREATE TABLE as the server prints it, read through the driver's own decoding, which is the one thing the unit tests cannot say: the answer arrives in a text or blob column and has to come out as text."
+}

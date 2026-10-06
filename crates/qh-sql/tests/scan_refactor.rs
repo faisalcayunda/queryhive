@@ -876,7 +876,13 @@ fn add_surface(digest: &mut Digest, sql: &str) {
 /// The digest of the Safe Mode surface over `PAYLOADS`, `FILES` and 3,000 seeded inputs,
 /// computed with the scanner before the `walk` extraction (a25fa50). `SAFE_MODES` is folded
 /// in so a renamed mode does not slip through as an unrelated change.
-const SURFACE_DIGEST: u64 = 0x32b7_7040_9d40_e41a;
+///
+/// `FILES` includes `tools/golden/live_cases.py`, so the digest has to be taken again whenever
+/// that file changes: it was, on 6 Oct 2026 (W11-T1, nine metadata cases). Nothing the scanner
+/// or the classifier does moved with it: the payloads, the seeds and the random inputs are the
+/// same, `payloads_and_repository_sql_scan_identically` reads the new text of that file under
+/// every lexer and finds the frozen scanner agreeing, and `qh-sql`'s sources are untouched.
+const SURFACE_DIGEST: u64 = 0x289d_df56_5295_2503;
 
 #[test]
 fn the_safe_mode_surface_is_unchanged() {

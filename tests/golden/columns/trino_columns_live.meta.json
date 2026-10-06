@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_columns_live",
+  "command": "columns",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`columns` from Trino's information_schema: the real type text (`varchar(25)`), NOT NULL read from `is_nullable`, and an `extra` that is always empty because Trino has no such column."
+}

@@ -1231,3 +1231,393 @@ async fn a_users_own_no_ddl_refuses_a_confirm_floor() {
     assert!(usage_message(&error).contains("no_ddl"), "{error:?}");
     assert_eq!(engine.connects(), 0);
 }
+
+// --------------------------------------------------------------------------- //
+// the metadata commands (W11-T1, NFR-S1): read-only whatever the mode, whatever the name
+// --------------------------------------------------------------------------- //
+
+/// A session that records every statement and answers the metadata ones with one canned row, so a
+/// recipe that asks for several statements asks for all of them.
+struct ScriptedSession {
+    driver: Box<dyn Driver>,
+    statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// One batch of text cells, column-major as `ColumnBatch` wants them.
+struct OneBatch {
+    columns: Vec<qh_core::ColumnMeta>,
+    batch: Option<qh_core::ColumnBatch>,
+}
+
+#[async_trait]
+impl qh_driver::Cursor for OneBatch {
+    fn columns(&self) -> &[qh_core::ColumnMeta] {
+        &self.columns
+    }
+
+    async fn next_batch(
+        &mut self,
+        _max_rows: usize,
+    ) -> Result<Option<qh_core::ColumnBatch>, EngineError> {
+        Ok(self.batch.take())
+    }
+}
+
+/// What a statement is answered with: the cells of one row, `None` for a NULL, or no row at all.
+fn canned(sql: &str) -> Option<Vec<Option<&'static str>>> {
+    if sql.contains("pg_get_viewdef") {
+        // The PostgreSQL head: an ordinary table.
+        Some(vec![
+            Some("r"),
+            Some("s"),
+            Some("t"),
+            None,
+            None,
+            None,
+            None,
+        ])
+    } else if sql.contains("pg_get_constraintdef") || sql.contains("pg_get_indexdef") {
+        None
+    } else if sql.contains("information_schema.tables") && sql.contains("table_name =") {
+        // Trino's kind lookup.
+        Some(vec![Some("BASE TABLE")])
+    } else if sql.starts_with("SHOW CREATE") {
+        Some(vec![
+            Some("CREATE TABLE t (id int)"),
+            Some("CREATE TABLE t (id int)"),
+        ])
+    } else if sql.contains("pg_attribute") {
+        Some(vec![Some("id"), Some("bigint"), Some("NO"), None, Some("")])
+    } else {
+        Some(vec![Some("t"), Some("BASE TABLE")])
+    }
+}
+
+#[async_trait]
+impl Session for ScriptedSession {
+    fn capabilities(&self) -> qh_driver::Capabilities {
+        self.driver.capabilities()
+    }
+
+    fn query_id(&self) -> Option<String> {
+        None
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        _options: &qh_driver::ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
+        self.statements.lock().unwrap().push(sql.to_owned());
+        let Some(row) = canned(sql) else {
+            return Ok(Box::new(OneBatch {
+                columns: Vec::new(),
+                batch: None,
+            }));
+        };
+        let columns = (0..row.len())
+            .map(|index| qh_core::ColumnMeta::new(format!("c{index}"), "text"))
+            .collect();
+        let batch = qh_core::ColumnBatch::new(
+            row.iter()
+                .map(|cell| {
+                    vec![cell.map_or(qh_core::Value::Null, |text| {
+                        qh_core::Value::Text(text.into())
+                    })]
+                })
+                .collect(),
+        )
+        .expect("one row of equal columns");
+        Ok(Box::new(OneBatch {
+            columns,
+            batch: Some(batch),
+        }))
+    }
+
+    async fn browse(
+        &mut self,
+        _level: qh_driver::BrowseLevel,
+        _path: &qh_driver::ObjectPath,
+        _include_system: bool,
+    ) -> Result<Vec<String>, EngineError> {
+        Ok(Vec::new())
+    }
+
+    async fn objects(
+        &mut self,
+        _path: &qh_driver::ObjectPath,
+    ) -> Result<qh_driver::ObjectsPage, EngineError> {
+        Ok(qh_driver::ObjectsPage::default())
+    }
+
+    fn explain_statement(&self, sql: &str) -> String {
+        format!("EXPLAIN {sql}")
+    }
+
+    async fn cancel(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn read_only_statement(&self) -> Option<&'static str> {
+        Some("SET SESSION READ ONLY (test)")
+    }
+}
+
+struct ScriptedEngine {
+    inner: RealEngine,
+    statements: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Engine for ScriptedEngine {
+    fn kinds(&self) -> Vec<DriverKind> {
+        self.inner.kinds()
+    }
+
+    fn driver(&self, kind: DriverKind) -> &dyn Driver {
+        self.inner.driver(kind)
+    }
+
+    async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+        // The real driver's capabilities, so the session reads as the kind it is standing in for.
+        let driver: Box<dyn Driver> = match config.kind {
+            DriverKind::Postgres => Box::new(qh_driver_postgres::PostgresDriver::new()),
+            DriverKind::Mysql => Box::new(qh_driver_mysql::MysqlDriver::new()),
+            DriverKind::Trino => Box::new(qh_driver_trino::TrinoDriver::new()),
+        };
+        Ok(Box::new(ScriptedSession {
+            driver,
+            statements: self.statements.clone(),
+        }))
+    }
+}
+
+/// The three kinds, with the connection settings and the `TARGET_*` slots each one names.
+fn metadata_connections(name: &str) -> Vec<(DriverKind, Vec<(&str, String)>)> {
+    let target = |catalog: bool, schema: bool| {
+        let mut slots = vec![("TARGET_TABLE", name.to_owned())];
+        if catalog {
+            slots.push(("TARGET_CATALOG", name.to_owned()));
+        }
+        if schema {
+            slots.push(("TARGET_SCHEMA", name.to_owned()));
+        }
+        slots
+    };
+    let connection = |kind: &'static str, port: &'static str, database: &str, schema: &str| {
+        vec![
+            ("DB_KIND", kind.to_owned()),
+            ("DB_HOST", "db.invalid".to_owned()),
+            ("DB_PORT", port.to_owned()),
+            ("DB_USER", "queryhive".to_owned()),
+            ("DB_DATABASE", database.to_owned()),
+            ("DB_SCHEMA", schema.to_owned()),
+            ("RETRIES", "0".to_owned()),
+        ]
+    };
+    let join = |mut first: Vec<(&'static str, String)>, second: Vec<(&'static str, String)>| {
+        first.extend(second);
+        first
+    };
+    vec![
+        (
+            DriverKind::Postgres,
+            join(
+                connection("postgres", "5432", name, name),
+                target(false, true),
+            ),
+        ),
+        (
+            DriverKind::Mysql,
+            join(connection("mysql", "3306", name, ""), target(true, false)),
+        ),
+        (
+            DriverKind::Trino,
+            join(connection("trino", "8080", name, name), target(true, true)),
+        ),
+    ]
+}
+
+/// Every statement a metadata command sent, except the guard's own read-only switch.
+async fn metadata_statements(
+    command: Command,
+    kind_settings: &[(&str, String)],
+    mode: &str,
+    objects: bool,
+) -> Vec<String> {
+    let statements = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let engine = ScriptedEngine {
+        inner: RealEngine::new(),
+        statements: statements.clone(),
+    };
+    let mut pairs: Vec<(&str, &str)> = kind_settings
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    pairs.push(("SAFE_MODE", mode));
+    if objects {
+        pairs.push(("OBJECT_KINDS", "1"));
+    }
+    let mut out = Capture::new();
+    run(
+        command,
+        &settings(&pairs),
+        &mut out,
+        &engine,
+        &CancelFlag::new(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{command:?} under {mode}: {error:?} {pairs:?}"));
+    let sent = statements.lock().unwrap().clone();
+    sent.into_iter()
+        .filter(|sql| sql != "SET SESSION READ ONLY (test)")
+        .collect()
+}
+
+/// NFR-S1: `columns`, `ddl` and `tables` with kinds send only single read-only statements, under
+/// every Safe Mode including `read_only`, and under every reading of every dialect. The names are
+/// the ones a hostile schema would hold: quotes of all three kinds, a semicolon, a comment opener,
+/// and a backslash that would swallow a closing quote under one of the readings.
+#[tokio::test]
+async fn the_metadata_commands_send_only_read_only_statements_under_every_mode_and_name() {
+    let names = [
+        "people",
+        "a'b",
+        "a\"b",
+        "a`b",
+        "x; DROP TABLE y",
+        "x -- y",
+        "x /* y */",
+        "x # y",
+        "a\\",
+        "a\\'; DROP TABLE y; --",
+        "'; DROP TABLE y; --",
+    ];
+    for name in names {
+        for (kind, kind_settings) in metadata_connections(name) {
+            let dialect = match kind {
+                DriverKind::Postgres => qh_sql::Dialect::Postgres,
+                DriverKind::Mysql => qh_sql::Dialect::Mysql,
+                DriverKind::Trino => qh_sql::Dialect::Trino,
+            };
+            for mode in qh_sql::SAFE_MODES {
+                for (command, objects) in [
+                    (Command::Columns, false),
+                    (Command::Ddl, false),
+                    (Command::Tables, true),
+                ] {
+                    let sent = metadata_statements(command, &kind_settings, mode, objects).await;
+                    assert!(!sent.is_empty(), "{kind} {command:?} sent nothing");
+                    for sql in sent {
+                        let decisions = qh_sql::decisions_readings(
+                            qh_sql::SafeMode::ReadOnly,
+                            &sql,
+                            dialect.readings(),
+                        );
+                        assert_eq!(
+                            decisions.len(),
+                            1,
+                            "{kind} {command:?} {name:?} under {mode}: more than one statement: {sql}"
+                        );
+                        assert_eq!(
+                            decisions[0].kind,
+                            qh_sql::StatementKind::ReadOnly,
+                            "{kind} {command:?} {name:?} under {mode}: {sql}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A DDL recipe is asked for every one of its statements, so a write hiding in the third step
+/// would show here and not only in the first.
+#[tokio::test]
+async fn a_postgres_ddl_sends_all_four_of_its_statements_and_all_of_them_read() {
+    let (_, settings_of_kind) = metadata_connections("people").remove(0);
+    let sent = metadata_statements(Command::Ddl, &settings_of_kind, "read_only", false).await;
+    assert_eq!(sent.len(), 4, "{sent:#?}");
+    assert!(sent[0].contains("pg_get_viewdef"), "{}", sent[0]);
+    assert!(sent[1].contains("pg_attribute"), "{}", sent[1]);
+    assert!(sent[2].contains("pg_constraint"), "{}", sent[2]);
+    assert!(sent[3].contains("pg_get_indexdef"), "{}", sent[3]);
+}
+
+/// A name a driver has no slot for is not needed, and one it has a slot for is: refused by the
+/// setting's name, before anything is opened.
+#[tokio::test]
+async fn a_missing_target_is_refused_by_name_before_the_engine_connects() {
+    let engine = CountingEngine::new();
+    for (command, setting) in [
+        (Command::Columns, "TARGET_CATALOG"),
+        (Command::Ddl, "TARGET_CATALOG"),
+    ] {
+        let error = refuse(command, &engine, &[("TARGET_TABLE", "t")]).await;
+        assert!(usage_message(&error).contains(setting), "{error:?}");
+    }
+    assert_eq!(engine.connects(), 0);
+}
+
+/// A driver that cannot describe objects is a usage error naming it, not an empty answer.
+#[tokio::test]
+async fn a_driver_without_metadata_is_refused_by_name() {
+    struct Bare;
+
+    #[async_trait]
+    impl Driver for Bare {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Postgres
+        }
+        fn label(&self) -> &'static str {
+            "Bare"
+        }
+        fn default_port(&self) -> u16 {
+            1
+        }
+        fn capabilities(&self) -> qh_driver::Capabilities {
+            qh_driver_postgres::PostgresDriver::new().capabilities()
+        }
+        async fn connect(&self, _: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+            unreachable!("refused before connecting")
+        }
+    }
+
+    struct BareEngine;
+
+    #[async_trait]
+    impl Engine for BareEngine {
+        fn kinds(&self) -> Vec<DriverKind> {
+            vec![DriverKind::Postgres]
+        }
+        fn driver(&self, _: DriverKind) -> &dyn Driver {
+            &Bare
+        }
+        async fn connect(&self, _: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+            unreachable!("refused before connecting")
+        }
+    }
+
+    let (_, pairs) = metadata_connections("t").remove(0);
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let error = run(
+        Command::Columns,
+        &settings(&pairs),
+        &mut Capture::new(),
+        &BareEngine,
+        &CancelFlag::new(),
+    )
+    .await
+    .expect_err("a driver with no metadata cannot describe an object");
+    assert!(
+        usage_message(&error).contains("postgres cannot describe"),
+        "{error:?}"
+    );
+}

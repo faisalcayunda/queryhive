@@ -52,6 +52,33 @@ final class ConnectionEnvironmentTests: XCTestCase {
         XCTAssertEqual(AppModel.connectionEnvironment(plain, password: nil),
                        AppModel.connectionEnvironment(tagged, password: nil))
     }
+
+    /// A run on a query lane writes its Safe Mode decision to the database it names, and one that
+    /// names none writes to the Application Support file the installed app shares. So a redirected
+    /// session (the tests, a snapshot, `--bench`) has to name its own in every run environment.
+    @MainActor
+    func testARedirectedSessionNamesItsOwnDatabaseInEveryRunEnvironment() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qh-env-\(UUID().uuidString)")
+        let previousRoot = ConnectionStore.root
+        ConnectionStore.root = root
+        AppModel.benchPassword = ""
+        defer {
+            ConnectionStore.root = previousRoot
+            AppModel.benchPassword = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+        let expected = root.appendingPathComponent("queryhive.sqlite3").path
+        let saved = connection()
+
+        XCTAssertEqual(AppModel.connectionEnvironment(saved, password: nil)["DB_PATH"], expected)
+        XCTAssertEqual(try AppModel().connectionEnvironment(saved)["DB_PATH"], expected,
+                       "the environment a Run, a count and an export start from")
+
+        ConnectionStore.root = nil
+        XCTAssertNil(AppModel.connectionEnvironment(saved, password: nil)["DB_PATH"],
+                     "the product names no file: the engine's own default is the one the app means")
+    }
 }
 
 final class BadgeSpecTests: XCTestCase {

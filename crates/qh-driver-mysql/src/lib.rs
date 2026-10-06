@@ -83,6 +83,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod metadata;
 pub mod normalize;
 pub mod tls;
 
@@ -96,7 +97,7 @@ use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
+    MetadataSql, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
 };
 use qh_sql::{
     classify_readings, statements_dialect, strip_terminator_dialect, Dialect, StatementKind,
@@ -267,6 +268,10 @@ impl Driver for MysqlDriver {
 
     fn default_port(&self) -> u16 {
         3306
+    }
+
+    fn metadata(&self) -> Option<&dyn MetadataSql> {
+        Some(&metadata::MysqlMetadata)
     }
 
     fn capabilities(&self) -> Capabilities {

@@ -109,6 +109,9 @@ pub enum EngineCommand {
     ImportData,
     ApplyChanges,
     TableOp,
+    Columns,
+    Ddl,
+    ExecutionLog,
     Objects,
     Test,
     Catalogs,
@@ -139,7 +142,7 @@ pub enum EngineCommand {
 /// This exists because the tautology shipped once. `command_names` used to read `crate::COMMANDS`
 /// directly and the test compared it with `crate::COMMANDS`, so four new commands reached the
 /// usage line and `Command` while `EngineCommand` stayed at fourteen, and nothing failed.
-pub const EVERY_COMMAND: [EngineCommand; 26] = [
+pub const EVERY_COMMAND: [EngineCommand; 29] = [
     EngineCommand::DbDrivers,
     EngineCommand::Connections,
     EngineCommand::ImportConnections,
@@ -156,6 +159,9 @@ pub const EVERY_COMMAND: [EngineCommand; 26] = [
     EngineCommand::ImportData,
     EngineCommand::ApplyChanges,
     EngineCommand::TableOp,
+    EngineCommand::Columns,
+    EngineCommand::Ddl,
+    EngineCommand::ExecutionLog,
     EngineCommand::Objects,
     EngineCommand::Test,
     EngineCommand::Catalogs,
@@ -188,6 +194,9 @@ impl EngineCommand {
             Self::ImportData => "import_data",
             Self::ApplyChanges => "apply_changes",
             Self::TableOp => "table_op",
+            Self::Columns => "columns",
+            Self::Ddl => "ddl",
+            Self::ExecutionLog => "execution_log",
             Self::Objects => "objects",
             Self::Test => "test",
             Self::Catalogs => "catalogs",
@@ -428,12 +437,26 @@ mod tests {
     use crate::events::JsonLines;
 
     /// The host's blocking run, one host per call: these tests are about the surface, not the pool.
+    ///
+    /// A run that names no `DB_PATH` gets one of its own: a host writes its Safe Mode decisions to
+    /// the database the run names, and with none that is the app's, which a test must not open.
     fn run(
         command: EngineCommand,
-        settings: Vec<Setting>,
+        mut settings: Vec<Setting>,
         sink: Arc<dyn EventSink>,
         cancel: Arc<RunCancel>,
     ) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        if !settings.iter().any(|setting| setting.key == "DB_PATH") {
+            settings.push(Setting {
+                key: "DB_PATH".to_owned(),
+                value: directory
+                    .path()
+                    .join("queryhive.sqlite3")
+                    .to_string_lossy()
+                    .into_owned(),
+            });
+        }
         crate::host::EngineHost::new().run(command, settings, sink, cancel);
     }
 
@@ -575,6 +598,9 @@ mod tests {
                 EngineCommand::ImportData => "import_data",
                 EngineCommand::ApplyChanges => "apply_changes",
                 EngineCommand::TableOp => "table_op",
+                EngineCommand::Columns => "columns",
+                EngineCommand::Ddl => "ddl",
+                EngineCommand::ExecutionLog => "execution_log",
                 EngineCommand::Objects => "objects",
                 EngineCommand::Test => "test",
                 EngineCommand::Catalogs => "catalogs",

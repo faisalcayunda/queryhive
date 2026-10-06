@@ -93,6 +93,17 @@ const EXACT: &[&str] = &[
 /// `PARAMETRIC_DATETIME`, PostgreSQL's `catalogs` refusal, and the value-rendering deltas —
 /// and they are listed here so that a reader finds them rather than a passing test.
 const LIVE: &[&str] = &[
+    // The metadata commands (W11-T1): no previous engine had them, so these are recorded from
+    // this one and only check that it does not drift.
+    "postgres_columns_live",
+    "postgres_ddl_live",
+    "postgres_tables_kinds_live",
+    "mysql_columns_live",
+    "mysql_ddl_live",
+    "mysql_tables_kinds_live",
+    "trino_columns_live",
+    "trino_ddl_live",
+    "trino_tables_kinds_live",
     "postgres_type_zoo_live",
     "postgres_batching_live",
     "postgres_catalogs_live",
@@ -1183,7 +1194,7 @@ async fn an_unknown_command_is_one_error_event() {
     let usage = qh_ffi::usage("queryhive-engine");
     assert_eq!(
         usage,
-        "usage: queryhive-engine db_drivers|connections|import_connections|credential|history|history_add|history_clear|saved_queries|session|account|profiles|profile_save|profile_delete|import_data|apply_changes|table_op|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
+        "usage: queryhive-engine db_drivers|connections|import_connections|credential|history|history_add|history_clear|saved_queries|session|account|profiles|profile_save|profile_delete|import_data|apply_changes|table_op|columns|ddl|execution_log|objects|test|catalogs|schemas|tables|export|to_table|preview|count|explain"
     );
     let golden = snapshot("unknown_command", "usage");
     assert_eq!(golden.len(), 1);

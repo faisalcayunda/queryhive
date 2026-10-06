@@ -15,9 +15,10 @@
 > Status: **terverifikasi.** `crates/qh-ffi/tests/golden.rs` menjalankan **17 kasus** engine Rust
 > dengan sesi palsu, lalu membandingkan keluarannya dengan snapshot baris per baris. Itu cara yang
 > sama dulu dipakai `record.py` untuk mesin Python; skrip itu sudah terhapus bersama mesinnya, dan
-> normalisasi kini tinggal di `tools/golden/normalise.py`. Dari 43 kasus
-> terekam: **17 identik**, 4 terklasifikasi di bawah ini, dan 22 diklasifikasi
-> `LIVE` — direkam dari server nyata, yang hasilnya ada di `tests/golden/RECORDED.md` karena yang
+> normalisasi kini tinggal di `tools/golden/normalise.py`. Dari 52 kasus
+> terekam (6 Okt 2026, W11-T1): **17 identik**, 4 terklasifikasi di bawah ini, dan 31
+> diklasifikasi `LIVE` — 22 darinya direkam dari server nyata terhadap mesin Python, dan 9 sisanya
+> (perintah metadata, tanpa pembanding Python, lihat D-11) hanya dari mesin ini, yang hasilnya ada di `tests/golden/RECORDED.md` karena yang
 > dapat dibandingkan di sini hanyalah kasus yang bisa dijalankan tanpa jaringan. Kasus yang identik
 > tidak disebut lagi di sini; daftarnya ada di `EXACT` pada berkas uji itu, dan penjaganya menolak
 > snapshot baru yang belum masuk salah satu daftar, dengan id yang **di-parse** dari tabel kasus
@@ -308,6 +309,40 @@ Kalau kasus ini harus hijau, ada dua jalur dan keduanya keputusan pemilik, bukan
 maskir `Rows` di `tools/golden/normalise.py` (bersama id objek), atau rekam ulang dengan
 `live_cases.py --record --force mysql_objects_live`. Memilih yang kedua menyembunyikan gerakan
 statistik berikutnya juga, jadi yang pertama adalah yang konsisten dengan alasan masking ada.
+
+### D-11 — Perintah metadata (`columns`, `ddl`, `tables` dengan `OBJECT_KINDS`) tidak punya pembanding Python · **Bukan regresi**
+
+W11-T1 menambah tiga perintah baca dan satu setelan yang tidak pernah dimiliki mesin Python
+(blueprint W11 §3). Maka sembilan kasus live barunya tidak membandingkan dua mesin; ia merekam apa
+yang dijawab mesin ini dari server nyata, supaya jawaban itu tidak bergeser diam-diam:
+
+| Kasus | Server | Yang dibekukan |
+|---|---|---|
+| `postgres_columns_live`, `postgres_ddl_live`, `postgres_tables_kinds_live` | PostgreSQL 17.11 | teks tipe dari `format_type`, DDL **rekonstruksi** dari katalog (baris pertamanya mengatakan begitu), `kinds` dari `pg_class` |
+| `mysql_columns_live`, `mysql_ddl_live`, `mysql_tables_kinds_live` | MySQL 8.4.11 | teks tipe dari `SHOW COLUMNS`, `SHOW CREATE TABLE` yang tiba dalam kolom teks/blob dan harus keluar sebagai teks, `BASE TABLE` menjadi `table` |
+| `trino_columns_live`, `trino_ddl_live`, `trino_tables_kinds_live` | Trino 483, `tpch.tiny` | resep dua langkah (jenis dulu, lalu `SHOW CREATE TABLE`), `extra` selalu kosong |
+
+Klasifikasinya **bukan regresi**, dan tiga hal yang dicek sebelum mengklasifikasikannya:
+
+1. **Perintah lama tidak berubah.** `tables` tanpa `OBJECT_KINDS` tidak menyentuh kode baru
+   (`commands::tables` memanggil `browse_tables` yang sama seperti dulu), dan sebelas selisih
+   D-1…D-10 di atas tetap sebelas: larian `tools/golden/live_cases.py` 6 Okt 2026 menghasilkan
+   **20/31 cocok**, yaitu 11 kasus lama + 9 kasus baru, dan sebelas kasus yang berbeda adalah
+   kesebelasnya yang sudah terklasifikasi.
+2. **Himpunan nama `tables` tidak berubah** pada ketiga driver di server dev: `names` pada
+   `*_tables_kinds_live` identik dengan `*_tables_live`. Satu-satunya tempat himpunan itu berubah
+   adalah PostgreSQL dengan view, materialized view, atau foreign table di skema (D-3 blueprint:
+   `information_schema.tables` tidak memuat materialized view sama sekali); skema seed tidak punya
+   satu pun, jadi kasus ini tidak melihatnya, dan perilaku itu dibuktikan live di skema sementara
+   (dihapus lagi) serta oleh tes `crates/qh-driver-postgres/src/metadata.rs`.
+3. **Dua selisih dari blueprint yang disengaja** (dicatat di sini karena membentuk apa yang
+   dibekukan): MySQL memakai `SHOW COLUMNS` bukan `information_schema.COLUMNS` supaya tidak ada
+   literal string di SQL-nya (backslash di dalam literal berarti lain di bawah `NO_BACKSLASH_ESCAPES`,
+   dan driver tidak tahu mode itu sebelum terhubung), dan PostgreSQL membuang indeks yang merupakan
+   partisi dari indeks induk dari DDL-nya (membuat partisi sudah membuatnya).
+
+Rekaman ini hanya bisa diperbarui dengan `live_cases.py --record --force <id>`, dan perubahan teks
+DDL atau `kinds` di salah satunya adalah keputusan, bukan efek samping.
 
 ## Temuan yang sudah ditutup
 

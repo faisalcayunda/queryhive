@@ -1,0 +1,1 @@
+{"event": "tables", "kinds": ["table", "table", "table", "table", "table", "table", "table", "table"], "names": ["customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier"]}

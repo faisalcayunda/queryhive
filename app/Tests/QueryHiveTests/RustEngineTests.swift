@@ -88,4 +88,35 @@ final class RustEngineTests: XCTestCase {
 
         XCTAssertEqual(record.exits, 1, "a stopped run still has to end exactly once")
     }
+
+    @MainActor
+    func testARedirectedRunLogsItsDecisionInTheRedirectedDatabase() async throws {
+        // The engine host writes a Safe Mode decision to the database the run names. A Run built
+        // from `AppModel.connectionEnvironment` names none unless the store is redirected, and
+        // then the decision went to the real Application Support file, which the installed app
+        // shares. A `read_only` connection refuses a `DELETE` before it connects, so this needs
+        // no server: the one visible effect is the redirected file, which only a run that named it
+        // can have created.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qh-log-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let previousRoot = ConnectionStore.root
+        ConnectionStore.root = root
+        defer {
+            ConnectionStore.root = previousRoot
+            try? FileManager.default.removeItem(at: root)
+        }
+        let guarded = Connection(id: UUID(), name: "wh", color: .blue, kind: .postgres, host: "db.invalid",
+                                 port: 5432, user: "u", database: "d", schema: "", verify: true,
+                                 safeMode: .readOnly)
+        var env = AppModel.connectionEnvironment(guarded, password: nil)
+        env["SQL"] = "DELETE FROM t"
+        env["RETRIES"] = "0"
+
+        let (_, record) = await EngineContract.run(RustEngine(), "preview", env: env)
+
+        XCTAssertEqual(record.events.last?.event, "error", "the guard refused the statement")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("queryhive.sqlite3").path),
+                      "the decision was not written to the database the session redirected to")
+    }
 }

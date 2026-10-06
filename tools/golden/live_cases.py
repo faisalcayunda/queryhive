@@ -87,8 +87,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # The engine as the app runs it: the CLI binary `crates/qh-ffi` installs, built
 # from the same crate the app links against. Debug rather than release because
-# this runs against a fixture cluster, not a release.
-ENGINE = ROOT / "target" / "debug" / "queryhive-engine"
+# this runs against a fixture cluster, not a release. `QH_ENGINE` names another
+# build of it: lanes working at once share `target/`, and whichever built last owns
+# `target/debug/queryhive-engine`, so a lane that must check *its* binary copies it
+# aside and points here.
+ENGINE = Path(os.environ.get("QH_ENGINE") or ROOT / "target" / "debug" / "queryhive-engine")
 GOLDEN_DIR = ROOT / "tests" / "golden"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -252,6 +255,36 @@ def cases() -> list[LiveCase]:
             "masked to `<OID>` for the reason above; the column list that names it is not.",
         ),
         LiveCase(
+            "postgres_columns_live",
+            "columns",
+            "postgres",
+            PG,
+            "`columns` from pg_attribute: `format_type` text (`numeric(38,10)`, "
+            "`timestamp with time zone`, an array and an enum spelled as the server spells "
+            "them), nullability, and `extra` empty for a table with no identity or "
+            "generated column.",
+            env={"TARGET_SCHEMA": "public", "TARGET_TABLE": "type_zoo"},
+        ),
+        LiveCase(
+            "postgres_ddl_live",
+            "ddl",
+            "postgres",
+            PG,
+            "The four-statement recipe: the DDL PostgreSQL has no SHOW CREATE for, put "
+            "together from the catalog. Its first line says it is a reconstruction.",
+            env={"TARGET_SCHEMA": "public", "TARGET_TABLE": "type_zoo"},
+        ),
+        LiveCase(
+            "postgres_tables_kinds_live",
+            "tables",
+            "postgres",
+            PG,
+            "`tables` with OBJECT_KINDS=1 from pg_class: the same two names as "
+            "`postgres_tables_live` here (the seeded schema has no view), with a `kinds` "
+            "array beside them.",
+            env={"OBJECT_KINDS": "1"},
+        ),
+        LiveCase(
             "postgres_count_live",
             "count",
             "postgres",
@@ -332,6 +365,36 @@ def cases() -> list[LiveCase]:
             "The one browse command MySQL has no level for: a usage error naming the "
             "driver, raised before the network is touched.",
             expect_error=True,
+        ),
+        LiveCase(
+            "mysql_columns_live",
+            "columns",
+            "mysql",
+            MYSQL,
+            "`columns` from SHOW COLUMNS: MySQL's own type text (`decimal(38,10)`, "
+            "`enum('sad','ok','happy')`), nullability, and no default on a column that "
+            "has none. The `object` carries the database in `catalog` and `null` for "
+            "the schema MySQL does not have.",
+            env={"TARGET_CATALOG": "qh", "TARGET_TABLE": "type_zoo"},
+        ),
+        LiveCase(
+            "mysql_ddl_live",
+            "ddl",
+            "mysql",
+            MYSQL,
+            "SHOW CREATE TABLE as the server prints it, read through the driver's own "
+            "decoding, which is the one thing the unit tests cannot say: the answer arrives "
+            "in a text or blob column and has to come out as text.",
+            env={"TARGET_CATALOG": "qh", "TARGET_TABLE": "type_zoo"},
+        ),
+        LiveCase(
+            "mysql_tables_kinds_live",
+            "tables",
+            "mysql",
+            MYSQL,
+            "`tables` with OBJECT_KINDS=1 from SHOW FULL TABLES: the same names as "
+            "`mysql_tables_live`, and `BASE TABLE` mapped to `table`.",
+            env={"OBJECT_KINDS": "1"},
         ),
         LiveCase(
             "mysql_count_live",
@@ -417,6 +480,34 @@ def cases() -> list[LiveCase]:
             TRINO,
             "Trino's information_schema objects query: Name/Type only, because Trino "
             "has no OID, owner or ACL to answer with.",
+        ),
+        LiveCase(
+            "trino_columns_live",
+            "columns",
+            "trino",
+            TRINO,
+            "`columns` from Trino's information_schema: the real type text (`varchar(25)`), "
+            "NOT NULL read from `is_nullable`, and an `extra` that is always empty because "
+            "Trino has no such column.",
+            env={"TARGET_CATALOG": "tpch", "TARGET_SCHEMA": "tiny", "TARGET_TABLE": "nation"},
+        ),
+        LiveCase(
+            "trino_ddl_live",
+            "ddl",
+            "trino",
+            TRINO,
+            "The two-statement recipe: the kind from information_schema, then the "
+            "coordinator's own SHOW CREATE TABLE text, with a closing semicolon.",
+            env={"TARGET_CATALOG": "tpch", "TARGET_SCHEMA": "tiny", "TARGET_TABLE": "nation"},
+        ),
+        LiveCase(
+            "trino_tables_kinds_live",
+            "tables",
+            "trino",
+            TRINO,
+            "`tables` with OBJECT_KINDS=1: the same eight names `trino_objects_live` lists, "
+            "and a parallel `kinds` array from information_schema.tables.",
+            env={"OBJECT_KINDS": "1"},
         ),
         LiveCase(
             "trino_count_live",

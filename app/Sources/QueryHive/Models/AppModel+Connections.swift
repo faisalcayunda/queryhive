@@ -489,12 +489,17 @@ extension AppModel {
     /// the connection editor's Test button, so the engine contract lives in exactly one place.
     /// The password travels in its own variable and never inside `TRINO_URL`, so a URL echoed
     /// back in an error message can never carry the secret.
+    ///
+    /// `DB_PATH` comes from `localEnvironment`, and only when something redirected the store (the
+    /// tests, a snapshot, `--bench`). A run on a query lane writes its Safe Mode decision to the
+    /// database it names, and with no name that is the Application Support file the installed app
+    /// shares: a redirected session must log into its own.
     static func connectionEnvironment(kind: ConnectionKind, host: String, port: Int, user: String,
                                       password: String?, database: String, schema: String,
                                       scheme: String, sslmode: String, verify: Bool,
                                       safeMode: String) -> [String: String] {
         let transport = TrinoTransport(stored: scheme)
-        return [
+        return localEnvironment([
             "DB_KIND": kind.rawValue,
             "DB_HOST": host,
             "DB_PORT": String(port),
@@ -529,7 +534,7 @@ extension AppModel {
             // server run the same guard, and neither has this picker. Sent for every
             // driver, because the levels are about SQL and not about a server.
             "SAFE_MODE": safeMode,
-        ]
+        ])
     }
 
     static func connectionEnvironment(_ connection: Connection, password: String?) -> [String: String] {

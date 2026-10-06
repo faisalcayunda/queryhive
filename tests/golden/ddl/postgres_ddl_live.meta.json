@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_ddl_live",
+  "command": "ddl",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The four-statement recipe: the DDL PostgreSQL has no SHOW CREATE for, put together from the catalog. Its first line says it is a reconstruction."
+}

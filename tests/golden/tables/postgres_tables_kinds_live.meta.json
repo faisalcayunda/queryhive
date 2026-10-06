@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "postgres_tables_kinds_live",
+  "command": "tables",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "`tables` with OBJECT_KINDS=1 from pg_class: the same two names as `postgres_tables_live` here (the seeded schema has no view), with a `kinds` array beside them."
+}

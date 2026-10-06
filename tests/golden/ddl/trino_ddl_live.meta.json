@@ -1,0 +1,8 @@
+{
+  "captures": "stdout",
+  "case": "trino_ddl_live",
+  "command": "ddl",
+  "event_lines": 1,
+  "exit_code": 0,
+  "notes": "The two-statement recipe: the kind from information_schema, then the coordinator's own SHOW CREATE TABLE text, with a closing semicolon."
+}
