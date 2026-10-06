@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+qh-columnar.workspace = true
 qh-core.workspace = true
 # The CA bundle a connection can name (`ca.rs`): the PEM is read with
 # `rustls-pki-types`, and `rustls-webpki` is asked whether each certificate is a
