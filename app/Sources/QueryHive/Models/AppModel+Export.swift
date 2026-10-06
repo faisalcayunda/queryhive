@@ -35,11 +35,11 @@ extension AppModel {
         }
         let panel = NSOpenPanel()
         panel.title = "Import Data from File"
-        panel.message = "Choose a CSV, TSV or XLSX file to read rows from."
+        panel.message = "Choose a \(ImportSourceFormat.supportedNames) file to import."
         panel.prompt = "Choose"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = ["csv", "tsv", "xlsx"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = ImportSourceFormat.panelExtensions.compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         presentImport(from: url, into: node)
     }
@@ -48,7 +48,8 @@ extension AppModel {
     private func presentImport(from url: URL, into node: TreeNode?) {
         guard let format = ImportSourceFormat.detect(path: url.path) else {
             notice = Notice(title: "Unsupported file",
-                            message: "Import reads CSV, TSV or XLSX. \(url.lastPathComponent) is none of those.")
+                            message: "Import reads \(ImportSourceFormat.supportedNames). "
+                                + "\(url.lastPathComponent) is none of those.")
             return
         }
         let connectionID = node?.connectionID
@@ -75,7 +76,8 @@ extension AppModel {
     func configure(_ draft: ImportDraft, for url: URL) {
         guard let format = ImportSourceFormat.detect(path: url.path) else {
             notice = Notice(title: "Unsupported file",
-                            message: "Import reads CSV, TSV or XLSX. \(url.lastPathComponent) is none of those.")
+                            message: "Import reads \(ImportSourceFormat.supportedNames). "
+                                + "\(url.lastPathComponent) is none of those.")
             return
         }
         draft.mapping.path = url.path
@@ -140,13 +142,7 @@ extension AppModel {
         _ = Engine.current.run("import_data", env: env, onEvent: { event in
             switch event.event {
             case "done":
-                outcome.rows = event.rows ?? 0
-                outcome.rejected = event.rejected ?? 0
-                outcome.errors = event.errors ?? []
-                outcome.stoppedAt = event.stoppedAt
-                outcome.mode = event.mode ?? ""
-                outcome.disposition = event.disposition
-                outcome.transaction = event.transaction ?? false
+                outcome = ImportOutcome(done: event)
             case "error":
                 message = event.message
             default:

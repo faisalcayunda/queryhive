@@ -3,7 +3,8 @@ import XCTest
 @testable import QueryHive
 
 /// The import sheet's pure half: the mapping it builds into the engine's `COLUMNS`/`TARGET_*`
-/// settings, the header it reads from a file, and what it refuses to claim.
+/// settings (for rows, JSON and `.sql` files), the header it reads from a file, how it reads the
+/// engine's answer, and what it refuses to claim.
 ///
 /// The engine's own import is tested in Rust (`crates/qh-ffi/tests/`); these tests pin the
 /// settings the app sends it, so a sheet that showed one mapping and sent another would fail here.
@@ -45,6 +46,7 @@ final class ImportMappingTests: XCTestCase {
         XCTAssertEqual(rows[0]["target"] as? String, "id")
         XCTAssertEqual(rows[0]["include"] as? Bool, true)
         XCTAssertEqual(rows[1]["include"] as? Bool, false)
+        XCTAssertNil(rows[0]["name"], "CSV is not checked by name: the app's header and the engine's can differ")
     }
 
     func testColumnsJSONIsAbsentWhenTheTargetsColumnsAreUnknown() {
@@ -185,9 +187,255 @@ final class ImportMappingTests: XCTestCase {
         XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.csv"), .csv)
         XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.TSV"), .tsv)
         XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.xlsx"), .xlsx)
-        XCTAssertNil(ImportSourceFormat.detect(path: "/tmp/a.sql"))
-        XCTAssertNil(ImportSourceFormat.detect(path: "/tmp/a.json"))
+        XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.json"), .json)
+        XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.JSONL"), .json)
+        XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/a.ndjson"), .json)
+        XCTAssertEqual(ImportSourceFormat.detect(path: "/tmp/dump.sql"), .sql)
+        XCTAssertNil(ImportSourceFormat.detect(path: "/tmp/a.parquet"))
         XCTAssertFalse(ImportSourceFormat.xlsx.appCanReadHeader)
         XCTAssertTrue(ImportSourceFormat.csv.appCanReadHeader)
+    }
+
+    func testEveryExtensionThePanelOffersIsOneTheSheetOpens() {
+        for name in ImportSourceFormat.panelExtensions {
+            XCTAssertNotNil(ImportSourceFormat.detect(path: "/tmp/x.\(name)"), name)
+        }
+    }
+
+    func testOnlyJSONGetsItsFieldListFromTheEngine() {
+        // The app reads a CSV header itself and has no JSON reader, so the keys come from
+        // `IMPORT_PREVIEW`; XLSX and `.sql` have no field list at all.
+        XCTAssertEqual(ImportSourceFormat.allCases.filter(\.hasFieldList), [.csv, .tsv, .json])
+        XCTAssertEqual(ImportSourceFormat.allCases.filter(\.enginePreviewsFields), [.json])
+        XCTAssertEqual(ImportSourceFormat.allCases.filter(\.importsStatements), [.sql])
+        XCTAssertEqual(ImportSourceFormat.allCases.filter(\.hasDelimiter), [.csv, .tsv])
+        XCTAssertEqual(ImportSourceFormat.allCases.filter(\.hasHeaderRow), [.csv, .tsv, .xlsx])
+    }
+
+    // MARK: JSON
+
+    func testJSONSettingsCarryNoHeaderOrDelimiterAndNoNullTextUnlessAsked() {
+        var mapping = ImportMapping()
+        mapping.path = "/tmp/people.jsonl"
+        mapping.format = .json
+        mapping.targetSchema = "public"
+        mapping.targetTable = "people"
+        mapping.header = false
+        mapping.delimiter = "|"
+
+        let env = mapping.settings()
+        XCTAssertEqual(env["IMPORT_FORMAT"], "json")
+        XCTAssertEqual(env["TARGET_TABLE"], "people")
+        XCTAssertNil(env["HEADER"], "JSON names its columns with its keys")
+        XCTAssertNil(env["DELIMITER"], "JSON has no separator")
+        XCTAssertNil(env["NULL_TEXT"], "blank leaves an empty string a value and only null NULL")
+
+        mapping.nullText = "N/A"
+        XCTAssertEqual(mapping.settings()["NULL_TEXT"], "N/A")
+    }
+
+    func testJSONColumnsCarryTheKeyNameSoAChangedFileIsRefused() throws {
+        var mapping = ImportMapping()
+        mapping.format = .json
+        mapping.targetColumns = ["id", "email"]
+        mapping.fields = [
+            ImportField(source: 0, name: "id", include: true, target: "id"),
+            ImportField(source: 1, name: "mail", include: true, target: "email"),
+        ]
+        let json = try XCTUnwrap(mapping.columnsJSON)
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+        XCTAssertEqual(rows[1]["name"] as? String, "mail", "the key, not the target it maps to")
+        XCTAssertEqual(rows[1]["target"] as? String, "email")
+    }
+
+    func testAnXLSXImportSendsItsHeaderToggleButNoDelimiter() {
+        var mapping = ImportMapping()
+        mapping.format = .xlsx
+        mapping.delimiter = "|"
+        XCTAssertNil(mapping.settings()["DELIMITER"], "a workbook has no separator to send")
+        XCTAssertEqual(mapping.settings()["HEADER"], "1", "XLSX keeps its header toggle")
+    }
+
+    // MARK: SQL
+
+    func testASQLImportSendsNoTargetAndNoRowSettings() {
+        var mapping = ImportMapping()
+        mapping.path = "/tmp/dump.sql"
+        mapping.format = .sql
+        mapping.targetCatalog = "hive"
+        mapping.targetSchema = "analytics"
+        mapping.targetTable = "people"
+        mapping.nullText = "N/A"
+        mapping.batchSize = 500
+        mapping.onError = .commit
+        mapping.foreignKeys = false
+        mapping.targetColumns = ["id"]
+        mapping.fields = [ImportField(source: 0, name: "id", include: true, target: "id")]
+
+        XCTAssertEqual(mapping.settings(), [
+            "IMPORT_PATH": "/tmp/dump.sql",
+            "IMPORT_FORMAT": "sql",
+            "ON_ERROR": "commit",
+            "FOREIGN_KEYS": "0",
+        ], "the file carries its own tables; the policy and the foreign-key switch still apply")
+        XCTAssertNil(mapping.columnsJSON)
+    }
+
+    func testASQLImportNeedsOnlyAFile() {
+        var mapping = ImportMapping()
+        mapping.format = .sql
+        XCTAssertFalse(mapping.ready)
+        mapping.path = "/tmp/dump.sql"
+        XCTAssertTrue(mapping.ready, "no table to name: the statements say where they write")
+    }
+
+    func testTheErrorWordsFollowTheFamily() {
+        XCTAssertEqual(ImportErrorMode.skip.title(for: .csv), "Skip the row")
+        XCTAssertEqual(ImportErrorMode.skip.title(for: .sql), "Skip the statement")
+        XCTAssertTrue(ImportErrorMode.commit.detail(for: .json).hasPrefix("Rows before a bad row"))
+        XCTAssertTrue(ImportErrorMode.commit.detail(for: .sql).hasPrefix("Statements before a bad statement"))
+        // The rule does not change with the words: skip is still the one without a transaction.
+        for format in ImportSourceFormat.allCases {
+            XCTAssertTrue(ImportErrorMode.skip.detail(for: format).contains("No transaction"))
+        }
+    }
+
+    func testTheFormatNotesSayWhatTheControlsDoNot() throws {
+        XCTAssertNil(ImportSourceFormat.csv.note)
+        let json = try XCTUnwrap(ImportSourceFormat.json.note)
+        XCTAssertTrue(json.contains("empty string stays an empty string"), json)
+        let sql = try XCTUnwrap(ImportSourceFormat.sql.note)
+        XCTAssertTrue(sql.contains("all or nothing"), sql)
+    }
+
+    // MARK: What the engine answered
+
+    func testASQLDoneEventCarriesStatementsAndNotRows() throws {
+        let line = #"{"event":"done","statements":3,"mode":"stop","format":"sql","streams":false,"#
+            + #""transaction":true,"disposition":"pending","errors":[],"errors_truncated":false,"#
+            + #""stopped_at":null,"cancelled":false,"foreign_keys":"on","query_id":"q"}"#
+        let outcome = ImportOutcome(done: try XCTUnwrap(EngineWire.event(in: Data(line.utf8))))
+        XCTAssertEqual(outcome.statements, 3)
+        XCTAssertEqual(outcome.rows, 0)
+        XCTAssertTrue(outcome.transaction)
+    }
+
+    func testARowDoneEventCarriesItsWarnings() throws {
+        let line = #"{"event":"done","rows":2,"table":"people","mode":"commit","format":"json","#
+            + #""streams":true,"transaction":true,"disposition":"written","rejected":1,"#
+            + #""errors":["line 4: bad"],"errors_truncated":true,"stopped_at":4,"cancelled":false,"#
+            + #""warnings":["keys first seen after the rows that named the columns were not imported: 'x'"]}"#
+        let outcome = ImportOutcome(done: try XCTUnwrap(EngineWire.event(in: Data(line.utf8))))
+        XCTAssertNil(outcome.statements, "a row import has rows, not statements")
+        XCTAssertEqual(outcome.rows, 2)
+        XCTAssertEqual(outcome.rejected, 1)
+        XCTAssertEqual(outcome.errors, ["line 4: bad"])
+        XCTAssertTrue(outcome.errorsTruncated)
+        XCTAssertEqual(outcome.stoppedAt, 4)
+        XCTAssertEqual(outcome.warnings.count, 1)
+    }
+
+    func testTheStatementsKeyOfApplyChangesStillDecodes() throws {
+        // `apply_changes` writes `statements` as an array of per-statement results. A property typed
+        // for the integer `import_data` writes would throw here and the app would lose the whole
+        // `done` event, which is the one that says the edits were committed.
+        let line = #"{"event":"done","applied":2,"statements":[{"sql":"UPDATE t SET a = 1"},"#
+            + #"{"sql":"UPDATE t SET a = 2"}],"transaction":true,"disposition":"written","query_id":"q"}"#
+        let event = try XCTUnwrap(EngineWire.event(in: Data(line.utf8)))
+        XCTAssertEqual(event.applied, 2)
+        XCTAssertEqual(event.statements?.count, 2)
+    }
+
+    @MainActor
+    func testTheFooterSaysWhatWasRunAndWhatWasSkipped() {
+        var outcome = ImportOutcome()
+        outcome.statements = 41
+        outcome.errors = ["line 7: syntax error", "line 9: no such table"]
+        outcome.warnings = ["one thing was left out"]
+        outcome.transaction = true
+        let text = ImportSheet.outcomeText(outcome)
+        XCTAssertTrue(text.hasPrefix("Ran 41 statements"), text)
+        XCTAssertTrue(text.contains("2 errors listed above"), text)
+        XCTAssertTrue(text.contains("1 warning above"), text)
+        XCTAssertTrue(ImportSheet.hasReport(outcome))
+
+        outcome.errorsTruncated = true
+        XCTAssertTrue(ImportSheet.outcomeText(outcome).contains("2+ errors"), "a cut list is a beginning")
+
+        var rows = ImportOutcome()
+        rows.rows = 5
+        XCTAssertEqual(ImportSheet.outcomeText(rows), "Imported 5 rows into the target")
+        XCTAssertFalse(ImportSheet.hasReport(rows))
+    }
+
+    // MARK: Reading a JSON file's keys
+
+    func testThePreviewAsksTheEngineForOneSampleRowAndNeverAConnection() {
+        let env = ImportJSONPreview.environment(path: "/tmp/people.json")
+        XCTAssertEqual(env["IMPORT_PATH"], "/tmp/people.json")
+        XCTAssertEqual(env["IMPORT_FORMAT"], "json")
+        XCTAssertEqual(env["IMPORT_PREVIEW"], "1")
+        XCTAssertEqual(env["IMPORT_PREVIEW_ROWS"], "1")
+        XCTAssertNil(env["DRIVER"], "a preview opens the file and never a connection")
+    }
+
+    func testThePreviewReturnsTheKeysInTheOrderTheEngineSawThem() throws {
+        let engine = MockEngine()
+        engine.answer("import_data", with: .events([
+            Event(event: "columns", columns: [.init(name: "id", type: "text"),
+                                              .init(name: "email", type: "text")]),
+            Event(event: "done"),
+        ]))
+        let result = load(engine)
+        XCTAssertEqual(try result.get(), ["id", "email"])
+        XCTAssertEqual(engine.calls.map(\.command), ["import_data"])
+    }
+
+    func testThePreviewSaysWhyTheEngineRefusedTheFile() {
+        let engine = MockEngine()
+        engine.answer("import_data", with: .failure(
+            events: [Event(event: "error", message: "element 3 (line 3) is not an object")],
+            reason: "stderr noise"))
+        XCTAssertEqual(load(engine), .failure(.init(message: "element 3 (line 3) is not an object")))
+    }
+
+    func testAFileWithNoObjectsIsAFailureNotAnEmptyFieldList() {
+        let engine = MockEngine()
+        engine.answer("import_data", with: .events([Event(event: "columns", columns: []),
+                                                     Event(event: "done")]))
+        XCTAssertEqual(load(engine), .failure(.init(message: "The file has no JSON objects to read keys from.")))
+    }
+
+    /// The real engine, no connection and no database: the wire the mock scripts is the one the
+    /// importer writes (`IMPORT_PREVIEW`), and a mock cannot prove that.
+    func testTheRealEngineListsTheKeysOfAJSONLFileAndRefusesAnArrayOfNumbers() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qh-import-preview-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lines = directory.appendingPathComponent("people.jsonl")
+        try Data("{\"id\":1,\"nama\":\"a\"}\n{\"id\":2,\"kota\":null,\"nama\":\"b\"}\n".utf8).write(to: lines)
+        let numbers = directory.appendingPathComponent("numbers.json")
+        try Data("[1, 2, 3]".utf8).write(to: numbers)
+
+        XCTAssertEqual(try load(RustEngine(), path: lines.path).get(), ["id", "nama", "kota"],
+                       "the keys of every object, in the order they were first seen")
+        guard case .failure(let failure) = load(RustEngine(), path: numbers.path) else {
+            return XCTFail("an element that is not an object is refused")
+        }
+        XCTAssertTrue(failure.message.contains("not an object"), failure.message)
+    }
+
+    private func load(_ engine: any DatabaseEngine, path: String = "/tmp/people.json")
+        -> Result<[String], ImportJSONPreview.Failure> {
+        let done = expectation(description: "preview answered")
+        var result: Result<[String], ImportJSONPreview.Failure>?
+        ImportJSONPreview.load(path: path, engine: engine) {
+            result = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+        return result ?? .failure(.init(message: "no answer"))
     }
 }

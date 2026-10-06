@@ -78,6 +78,10 @@ struct Event: Decodable {
     var disposition: String?
     var streams: Bool?
     var format: String?
+    /// `import_data` on a `.sql` file: the statements it ran (`progress` and `done`), as a count.
+    /// The key is also on `apply_changes`' `done`, where it is the array of per-statement results,
+    /// so it decodes to either shape instead of failing the whole event (`StatementCount`).
+    var statements: StatementCount?
     /// `history_entry`: whether the write landed on a row that was already there. False means the
     /// id in the reply is the one the caller would have chosen.
     var merged: Bool?
@@ -271,5 +275,28 @@ struct Event: Decodable {
         var ownerId: String
         var kind: String
         var name: String
+    }
+
+    /// The `statements` key as a number of statements, whichever shape the engine wrote it in.
+    ///
+    /// `import_data` writes an integer and `apply_changes` writes one object per statement it ran.
+    /// One key cannot be two types, and a property typed for one would throw on the other and drop
+    /// the entire event, so this reads an integer as it is and an array as its length.
+    struct StatementCount: Decodable, Equatable {
+        var count: Int
+
+        init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer()
+            if let number = try? value.decode(Int.self) {
+                count = number
+            } else {
+                count = try value.decode([Anything].self).count
+            }
+        }
+
+        /// Any JSON value, read and thrown away.
+        private struct Anything: Decodable {
+            init(from decoder: Decoder) throws {}
+        }
     }
 }

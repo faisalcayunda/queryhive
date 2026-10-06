@@ -7,9 +7,13 @@ import UniformTypeIdentifiers
 /// `import_data` reads `COLUMNS` as `[{source, target, include}]` and derives the mapping from the
 /// header row when it is absent (`crates/qh-ffi/src/import.rs`). The engine is the importer; this
 /// sheet only says which file, which target and which field goes where — and says out loud what it
-/// cannot do rather than showing a control that does nothing. The three limits worth naming, all
-/// stated in the sheet: the app cannot read an XLSX header, the engine does not create the target
-/// table from the file's inferred types, and a `confirm` connection refuses an import outright.
+/// cannot do rather than showing a control that does nothing. The limits worth naming, all stated
+/// in the sheet: the app cannot read an XLSX header, the engine does not create the target table
+/// from the file's inferred types, and a `confirm` connection refuses an import outright.
+///
+/// A `.sql` file is the other family: it carries its own targets, so the sheet drops the target,
+/// the field list and the row settings and keeps the connection and the two policies. A JSON file
+/// gets its field list from the engine (`IMPORT_PREVIEW`), because the app has no JSON reader.
 struct ImportSheet: View {
     @Environment(AppModel.self) private var model
     @Bindable var draft: ImportDraft
@@ -31,6 +35,10 @@ struct ImportSheet: View {
             }
             .frame(height: 400)
             .scrollBounceBehavior(.basedOnSize)
+            if let outcome = draft.outcome, ImportSheet.hasReport(outcome) {
+                Divider().overlay(Tone.ink.opacity(0.08))
+                report(outcome)
+            }
             Divider().overlay(Tone.ink.opacity(0.08))
             footer
         }
@@ -67,7 +75,8 @@ struct ImportSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             SectionLabel(text: "Source")
             HStack(spacing: 8) {
-                Text(draft.mapping.path.isEmpty ? "Choose a CSV, TSV or XLSX file…" : draft.mapping.path)
+                Text(draft.mapping.path.isEmpty
+                     ? "Choose a \(ImportSourceFormat.supportedNames) file…" : draft.mapping.path)
                     .font(.code(11))
                     .foregroundStyle(draft.mapping.path.isEmpty ? Tone.coral : Tone.ink)
                     .lineLimit(1)
@@ -80,8 +89,8 @@ struct ImportSheet: View {
                     Segmented(selection: $draft.mapping.format,
                               options: ImportSourceFormat.allCases) { $0.label }
                 }
-                .frame(width: 190)
-                if draft.mapping.format != .xlsx {
+                .frame(width: 300)
+                if draft.mapping.format.hasDelimiter {
                     LabeledField("Delimiter") {
                         TextField(",", text: $draft.mapping.delimiter).field()
                             .frame(width: 70)
@@ -93,7 +102,14 @@ struct ImportSheet: View {
                 draft.mapping.delimiter = format.delimiter
                 reloadColumns()
             }
-            ChipToggle(label: "The first row holds the column names", isOn: $draft.mapping.header)
+            if draft.mapping.format.hasHeaderRow {
+                ChipToggle(label: "The first row holds the column names", isOn: $draft.mapping.header)
+            }
+            if let note = draft.mapping.format.note {
+                Text(note)
+                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -101,8 +117,17 @@ struct ImportSheet: View {
 
     private var targetSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "Target")
+            SectionLabel(text: draft.mapping.format.importsStatements ? "Run against" : "Target")
             connectionPicker
+            if !draft.mapping.format.importsStatements {
+                targetTable
+            }
+        }
+    }
+
+    /// The target's own part: where the rows go and which columns it has. A `.sql` file has none.
+    private var targetTable: some View {
+        VStack(alignment: .leading, spacing: 8) {
             driverTargetFields
             HStack(spacing: 8) {
                 if draft.loadingColumns {
@@ -216,12 +241,26 @@ struct ImportSheet: View {
     // MARK: Mapping
 
     @ViewBuilder private var mappingSection: some View {
-        if draft.mapping.format.appCanReadHeader {
+        let format = draft.mapping.format
+        if format.importsStatements {
+            EmptyView()
+        } else if format.hasFieldList {
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "Fields")
                 if draft.mapping.fields.isEmpty {
-                    Text("Choose a file to read its columns.")
-                        .font(.ui(11)).foregroundStyle(Tone.secondary)
+                    if draft.loadingFields {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.mini)
+                            Text("Reading the file's keys…").font(.ui(11)).foregroundStyle(Tone.secondary)
+                        }
+                    } else if let error = draft.fieldsError {
+                        Text(error).font(.ui(11)).foregroundStyle(Tone.coral)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(format == .json ? "Choose a file to read its keys."
+                                             : "Choose a file to read its columns.")
+                            .font(.ui(11)).foregroundStyle(Tone.secondary)
+                    }
                 } else {
                     VStack(spacing: 0) {
                         ForEach($draft.mapping.fields) { $field in
@@ -234,6 +273,12 @@ struct ImportSheet: View {
                     .padding(.vertical, 4)
                     .background(Tone.recess.opacity(0.22),
                                 in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    if format == .json {
+                        Text("The keys come from the start of the file, up to 1,000 objects. A key that first "
+                             + "appears later is not imported, and the import says so when it finishes.")
+                            .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         } else {
@@ -251,19 +296,26 @@ struct ImportSheet: View {
     // MARK: Policy
 
     private var policySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: "If a row is bad")
-            Segmented(selection: $draft.mapping.onError, options: ImportErrorMode.allCases) { $0.title }
-            Text(draft.mapping.onError.detail)
+        let format = draft.mapping.format
+        return VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(text: format.importsStatements ? "If a statement is bad" : "If a row is bad")
+            Segmented(selection: $draft.mapping.onError, options: ImportErrorMode.allCases) {
+                $0.title(for: format)
+            }
+            Text(draft.mapping.onError.detail(for: format))
                 .font(.ui(10.5)).foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(alignment: .top, spacing: 10) {
-                LabeledField("Empty cell means") {
-                    TextField("NULL", text: $draft.mapping.nullText).field().frame(width: 120)
-                }
-                LabeledField("Rows per INSERT") {
-                    TextField("200", value: $draft.mapping.batchSize, format: .number.grouping(.never))
-                        .field().frame(width: 90)
+            if !format.importsStatements {
+                HStack(alignment: .top, spacing: 10) {
+                    // JSON reads only a real `null` as NULL, so blank here means "nothing else does".
+                    LabeledField(format == .json ? "Also read as NULL" : "Empty cell means") {
+                        TextField(format == .json ? "nothing" : "NULL", text: $draft.mapping.nullText)
+                            .field().frame(width: 120)
+                    }
+                    LabeledField("Rows per INSERT") {
+                        TextField("200", value: $draft.mapping.batchSize, format: .number.grouping(.never))
+                            .field().frame(width: 90)
+                    }
                 }
             }
             ChipToggle(label: "Keep the server's foreign-key checks on", isOn: $draft.mapping.foreignKeys)
@@ -280,15 +332,18 @@ struct ImportSheet: View {
                     .foregroundStyle(Tone.amber)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("The target table must already exist: this engine imports rows into a table, and "
-                 + "creating one from the file's inferred types is not built (ADR-0019). Naming a "
-                 + "table that is not there is a failed import, not a new table.")
-                .font(.ui(10.5)).foregroundStyle(Tone.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("A `.sql` file is a statement import, not a row import, and is not offered here. "
-                 + "The engine reads one through `import_data` on the command line or the MCP server.")
-                .font(.ui(10.5)).foregroundStyle(Tone.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if draft.mapping.format.importsStatements {
+                Text("The whole file is read into memory to split it into statements, so the engine "
+                     + "refuses one over 512 MiB and says how big it is.")
+                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("The target table must already exist: this engine imports rows into a table, and "
+                     + "creating one from the file's inferred types is not built (ADR-0019). Naming a "
+                     + "table that is not there is a failed import, not a new table.")
+                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -336,17 +391,66 @@ struct ImportSheet: View {
 
     /// What the engine reported, in the words a person reads.
     static func outcomeText(_ outcome: ImportOutcome) -> String {
-        var text = "Imported \(pluralized(outcome.rows, "row")) into the target"
+        var text: String
+        if let statements = outcome.statements {
+            text = "Ran \(pluralized(statements, "statement"))"
+        } else {
+            text = "Imported \(pluralized(outcome.rows, "row")) into the target"
+        }
         if outcome.rejected > 0 {
             text += " · \(pluralized(outcome.rejected, "row")) rejected"
         }
         if let stoppedAt = outcome.stoppedAt {
             text += " · stopped at line \(stoppedAt)"
         }
+        // A skipped bad row or statement is in `errors`, not in the count above, so say it is there.
+        if !outcome.errors.isEmpty {
+            text += outcome.errorsTruncated
+                ? " · \(outcome.errors.count)+ errors listed above"
+                : " · \(pluralized(outcome.errors.count, "error")) listed above"
+        }
+        if !outcome.warnings.isEmpty {
+            text += " · \(pluralized(outcome.warnings.count, "warning")) above"
+        }
         if !outcome.transaction, outcome.disposition == "written" {
             text += " · no transaction (this driver cannot roll back)"
         }
         return text
+    }
+
+    /// Whether there is anything to list above the footer: errors the engine kept going past, and
+    /// warnings about what it left out without failing.
+    static func hasReport(_ outcome: ImportOutcome) -> Bool {
+        !outcome.errors.isEmpty || !outcome.warnings.isEmpty
+    }
+
+    /// How many error lines the sheet prints before it says how many more there are.
+    private static let reportedErrors = 6
+
+    /// The engine's own words for what it skipped or did not import, with the line it names.
+    private func report(_ outcome: ImportOutcome) -> some View {
+        let shown = outcome.errors.prefix(ImportSheet.reportedErrors)
+        let more = outcome.errors.count - shown.count
+        return VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(outcome.warnings.enumerated()), id: \.offset) { _, warning in
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.ui(10.5)).foregroundStyle(Tone.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, error in
+                Text(error).font(.code(10.5)).foregroundStyle(Tone.coral)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if more > 0 {
+                Text("…and \(more) more").font(.ui(10.5)).foregroundStyle(Tone.secondary)
+            }
+            if outcome.errorsTruncated {
+                Text("The engine cut its own list of errors short.")
+                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Actions
@@ -358,6 +462,13 @@ struct ImportSheet: View {
     /// Rebuilds the mapping from the file's header and asks the server for the target's columns.
     private func reloadColumns() {
         guard let id = draft.connectionID else { return }
+        // A JSON read still in flight for a format the sheet has left must not leave its spinner up.
+        draft.loadingFields = false
+        // A statement file has no target to describe and no fields to map.
+        guard !draft.mapping.format.importsStatements else {
+            draft.columnsError = nil
+            return
+        }
         refreshFieldsFromFile()
         guard let qualified = qualifiedTarget() else {
             draft.mapping = draft.mapping.remapped(to: [])
@@ -377,8 +488,19 @@ struct ImportSheet: View {
     }
 
     /// Reads the file's own header, when the format allows it, and rebuilds the field list.
+    ///
+    /// A format with no field list (XLSX) clears the one a previous format left, so a stale list
+    /// is never sent as `COLUMNS` for a file it does not describe.
     private func refreshFieldsFromFile() {
-        guard draft.mapping.format.appCanReadHeader, !draft.mapping.path.isEmpty else { return }
+        guard !draft.mapping.path.isEmpty else { return }
+        guard draft.mapping.format.hasFieldList else {
+            draft.mapping.fields = []
+            return
+        }
+        guard draft.mapping.format.appCanReadHeader else {
+            previewFields()
+            return
+        }
         let delimiter: Character
         if draft.mapping.delimiter.count == 1, let only = draft.mapping.delimiter.first {
             delimiter = only
@@ -396,6 +518,26 @@ struct ImportSheet: View {
         }
     }
 
+    /// Asks the engine for a JSON file's keys and rebuilds the field list when they arrive.
+    private func previewFields() {
+        let path = draft.mapping.path
+        draft.mapping.fields = []
+        draft.fieldsError = nil
+        draft.loadingFields = true
+        ImportJSONPreview.load(path: path, engine: model.engine) { [draft] result in
+            // The user may have chosen another file, or another format, while the engine read this.
+            guard draft.mapping.path == path, draft.mapping.format.enginePreviewsFields else { return }
+            draft.loadingFields = false
+            switch result {
+            case .success(let keys):
+                draft.mapping.fields = ImportMapping.mappedFields(
+                    headers: keys, targetColumns: draft.mapping.targetColumns)
+            case .failure(let failure):
+                draft.fieldsError = failure.localizedDescription
+            }
+        }
+    }
+
     private func qualifiedTarget() -> String? {
         let table = draft.mapping.trimmedTable
         guard !table.isEmpty, let kind = connectionKind else { return nil }
@@ -409,7 +551,7 @@ struct ImportSheet: View {
         panel.title = "Import Data from File"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = ["csv", "tsv", "xlsx"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = ImportSourceFormat.panelExtensions.compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.configure(draft, for: url)
         reloadColumns()

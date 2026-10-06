@@ -6,7 +6,8 @@ import Observation
 /// The three come from the engine's transaction policy (ADR-0019), and the labels say what the row
 /// does rather than borrowing a name: `stop` rolls the whole import back, `commit` keeps what came
 /// before the bad row, and `skip` leaves the row out and keeps going **without a transaction**. The
-/// sheet states the last part rather than letting "skip" imply a safety it does not have.
+/// sheet states the last part rather than letting "skip" imply a safety it does not have. A `.sql`
+/// file is the same policy over statements, so the words change and the rule does not.
 enum ImportErrorMode: String, CaseIterable, Identifiable {
     case stop
     case commit
@@ -14,19 +15,20 @@ enum ImportErrorMode: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
-    var title: String {
+    func title(for format: ImportSourceFormat) -> String {
         switch self {
         case .stop: "Stop and roll back"
         case .commit: "Stop and keep"
-        case .skip: "Skip the row"
+        case .skip: format.importsStatements ? "Skip the statement" : "Skip the row"
         }
     }
 
-    var detail: String {
+    func detail(for format: ImportSourceFormat) -> String {
+        let (unit, plural) = format.importsStatements ? ("statement", "Statements") : ("row", "Rows")
         switch self {
-        case .stop: "The default. One bad row rolls the whole import back; nothing lands."
-        case .commit: "Rows before a bad row stay; the import reports the line it stopped at."
-        case .skip: "Bad rows are left out and the import continues. No transaction."
+        case .stop: return "The default. One bad \(unit) rolls the whole import back; nothing lands."
+        case .commit: return "\(plural) before a bad \(unit) stay; the import reports the line it stopped at."
+        case .skip: return "Bad \(unit)s are left out and the import continues. No transaction."
         }
     }
 }
@@ -36,23 +38,47 @@ enum ImportSourceFormat: String, CaseIterable, Identifiable {
     case csv
     case tsv
     case xlsx
+    /// One JSON array of objects, or JSONL / NDJSON: the engine has one reader for all three.
+    case json
+    /// A script of statements. It is the other import family: no target table and no fields,
+    /// because the file carries its own.
+    case sql
 
     var id: Self { self }
 
     /// What the engine's `IMPORT_FORMAT` says. A `.tsv` is a CSV with a tab delimiter, because the
     /// engine has one row format with a configurable separator.
-    var engineName: String { self == .xlsx ? "xlsx" : "csv" }
+    var engineName: String {
+        switch self {
+        case .csv, .tsv: "csv"
+        case .xlsx: "xlsx"
+        case .json: "json"
+        case .sql: "sql"
+        }
+    }
 
     var label: String {
         switch self {
         case .csv: "CSV"
         case .tsv: "TSV"
         case .xlsx: "XLSX"
+        case .json: "JSON"
+        case .sql: "SQL"
         }
     }
 
     /// The delimiter a fresh mapping starts with.
     var delimiter: String { self == .tsv ? "\t" : "," }
+
+    /// Whether the format has a field separator at all.
+    var hasDelimiter: Bool { self == .csv || self == .tsv }
+
+    /// Whether the first row can be a header. JSON names its columns with its keys and a `.sql`
+    /// file has no columns, so neither is asked.
+    var hasHeaderRow: Bool { self == .csv || self == .tsv || self == .xlsx }
+
+    /// Whether the file is statements rather than rows.
+    var importsStatements: Bool { self == .sql }
 
     /// Whether the app can read this format's header itself, which the mapping needs.
     ///
@@ -60,7 +86,38 @@ enum ImportSourceFormat: String, CaseIterable, Identifiable {
     /// a workbook `calamine` parses on the Rust side, and a second reader in Swift would be a
     /// second answer to "what are this file's columns". The sheet says so and runs the import with
     /// the engine's own header mapping instead of faking a picture of the sheet.
-    var appCanReadHeader: Bool { self != .xlsx }
+    var appCanReadHeader: Bool { self == .csv || self == .tsv }
+
+    /// Whether the engine lists this format's fields for the sheet (`IMPORT_PREVIEW`), which is how
+    /// JSON gets a field list without a second JSON parser in Swift.
+    var enginePreviewsFields: Bool { self == .json }
+
+    /// Whether the sheet has a field list to draw at all.
+    var hasFieldList: Bool { appCanReadHeader || enginePreviewsFields }
+
+    /// What the sheet says about this format that the controls do not, or `nil` for the three
+    /// that already read like a spreadsheet.
+    var note: String? {
+        switch self {
+        case .csv, .tsv, .xlsx:
+            nil
+        case .json:
+            "A JSON array of objects, or one object per line (JSONL). A JSON null and a key an object "
+                + "lacks both become NULL; an empty string stays an empty string. Nested objects and "
+                + "arrays are written as their JSON text."
+        case .sql:
+            "The file's own statements run against the connection, and the file names its own tables, "
+                + "so there is no target or field list here. An import is all or nothing by default: "
+                + "on a server that can roll back it runs as one transaction, and one bad statement "
+                + "leaves nothing behind. Safe Mode checks every statement before the engine connects."
+        }
+    }
+
+    /// The extensions the file panel offers, which are the ones `detect` maps.
+    static let panelExtensions = ["csv", "tsv", "xlsx", "json", "jsonl", "ndjson", "sql"]
+
+    /// How the formats read in a sentence, for the "not a file I open" notices.
+    static let supportedNames = "CSV, TSV, XLSX, JSON, JSONL or SQL"
 
     /// The format an extension names, or `nil` for one the import sheet does not open.
     static func detect(path: String) -> ImportSourceFormat? {
@@ -68,6 +125,8 @@ enum ImportSourceFormat: String, CaseIterable, Identifiable {
         case "csv": .csv
         case "tsv", "tab": .tsv
         case "xlsx", "xlsm": .xlsx
+        case "json", "jsonl", "ndjson": .json
+        case "sql": .sql
         default: nil
         }
     }
@@ -135,14 +194,21 @@ struct ImportMapping: Equatable {
     /// to pick from, and the engine's header-derived default is the honest answer. An explicit
     /// empty array is returned when every field is excluded, so the engine refuses with "no columns
     /// to import" rather than falling back to importing all of them.
+    ///
+    /// For JSON each entry also carries the key's `name`, which the engine checks against the
+    /// file's own key at that position: a file that changed since the sheet read it is refused
+    /// instead of landing its values in the wrong columns. CSV and XLSX do not send it, because the
+    /// app's header and the engine's can differ over a BOM or a quote.
     var columnsJSON: String? {
-        guard !fields.isEmpty, !targetColumns.isEmpty else { return nil }
+        guard !format.importsStatements, !fields.isEmpty, !targetColumns.isEmpty else { return nil }
         let rows: [[String: Any]] = fields.map { field in
-            [
+            var entry: [String: Any] = [
                 "source": field.source,
                 "target": field.effectiveTarget,
                 "include": field.include,
             ]
+            if format == .json { entry["name"] = field.name }
+            return entry
         }
         guard let data = try? JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8) else { return nil }
@@ -150,19 +216,27 @@ struct ImportMapping: Equatable {
     }
 
     /// The engine settings this mapping builds. The connection settings are the caller's to add.
+    ///
+    /// A `.sql` file gets no target and no row settings at all: the engine reads its own statements
+    /// and ignores a `TARGET_TABLE`, so sending one would only suggest the table matters.
     func settings() -> [String: String] {
         var env: [String: String] = [
             "IMPORT_PATH": path,
             "IMPORT_FORMAT": format.engineName,
-            "TARGET_CATALOG": trimmedCatalog,
-            "TARGET_SCHEMA": trimmedSchema,
-            "TARGET_TABLE": trimmedTable,
             "ON_ERROR": onError.rawValue,
-            "HEADER": header ? "1" : "0",
             "FOREIGN_KEYS": foreignKeys ? "1" : "0",
         ]
+        if format.importsStatements { return env }
+        env["TARGET_CATALOG"] = trimmedCatalog
+        env["TARGET_SCHEMA"] = trimmedSchema
+        env["TARGET_TABLE"] = trimmedTable
+        // Blank is the engine's own default: CSV and XLSX read an empty cell as NULL, and JSON
+        // reads only a real `null` (and a missing key) as NULL, so an empty string stays a value.
         if !nullText.isEmpty { env["NULL_TEXT"] = nullText }
-        if delimiter != format.delimiter || format == .tsv { env["DELIMITER"] = delimiter }
+        if format.hasHeaderRow { env["HEADER"] = header ? "1" : "0" }
+        if format.hasDelimiter, delimiter != format.delimiter || format == .tsv {
+            env["DELIMITER"] = delimiter
+        }
         if batchSize > 0 { env["IMPORT_BATCH"] = String(batchSize) }
         if let columns = columnsJSON { env["COLUMNS"] = columns }
         return env
@@ -189,7 +263,10 @@ struct ImportMapping: Equatable {
 
     /// Whether the sheet has enough to run.
     var ready: Bool {
-        guard !path.isEmpty, !trimmedTable.isEmpty else { return false }
+        guard !path.isEmpty else { return false }
+        // A statement file names its own targets, so a path is all it needs.
+        if format.importsStatements { return true }
+        guard !trimmedTable.isEmpty else { return false }
         // With a real mapping, at least one field must be written; without one the engine's
         // header-derived default covers every column, so there is nothing to check.
         if columnsJSON != nil, !fields.contains(where: \.include) { return false }
@@ -315,12 +392,84 @@ enum ImportHeaderReader {
 /// The engine's answer to one import, as much of it as the sheet shows.
 struct ImportOutcome: Equatable {
     var rows: Int = 0
+    /// The statements a `.sql` import ran. `nil` for a row import, which reports `rows` instead:
+    /// zero statements and no statements are different answers, and only one is a `.sql` file.
+    var statements: Int?
     var rejected: Int = 0
     var errors: [String] = []
+    /// Whether the engine cut `errors` short, so the list is a beginning and not the whole.
+    var errorsTruncated = false
     var stoppedAt: Int?
     var mode: String = "stop"
     var disposition: String?
     var transaction = false
+    /// What the engine says the import left out without failing, such as JSON keys that first
+    /// appeared after the rows that named the columns.
+    var warnings: [String] = []
+}
+
+extension ImportOutcome {
+    /// The outcome a `done` event carries.
+    init(done event: Event) {
+        self.init(rows: event.rows ?? 0,
+                  statements: event.statements?.count,
+                  rejected: event.rejected ?? 0,
+                  errors: event.errors ?? [],
+                  errorsTruncated: event.errorsTruncated ?? false,
+                  stoppedAt: event.stoppedAt,
+                  mode: event.mode ?? "",
+                  disposition: event.disposition,
+                  transaction: event.transaction ?? false,
+                  warnings: event.warnings ?? [])
+    }
+}
+
+/// The keys of a JSON file, read by the engine.
+///
+/// `IMPORT_PREVIEW=1` opens the file with the importer's own reader and answers with the columns it
+/// would map, without connecting. That is the field list for JSON: a second JSON parser in Swift
+/// would be a second answer to "what are this file's columns", the same reason XLSX has none.
+enum ImportJSONPreview {
+    struct Failure: Error, LocalizedError, Equatable {
+        var message: String
+        var errorDescription: String? { message }
+    }
+
+    /// One sample row is all the engine is asked for: only the keys are used, and a larger sample
+    /// would only make the answer longer.
+    static func environment(path: String) -> [String: String] {
+        AppModel.localEnvironment([
+            "IMPORT_PATH": path,
+            "IMPORT_FORMAT": ImportSourceFormat.json.engineName,
+            "IMPORT_PREVIEW": "1",
+            "IMPORT_PREVIEW_ROWS": "1",
+        ])
+    }
+
+    /// Asks the engine for the file's keys, in the order it first saw them. The completion runs on
+    /// the main queue, like every engine callback.
+    static func load(path: String, engine: any DatabaseEngine,
+                     completion: @escaping (Result<[String], Failure>) -> Void) {
+        var keys: [String] = []
+        var message: String?
+        engine.run("import_data", env: environment(path: path), onEvent: { event in
+            switch event.event {
+            case "columns": keys = (event.columns ?? []).map(\.name)
+            case "error": message = event.message
+            default: break
+            }
+        }, onExit: { status, log in
+            if status != 0 {
+                completion(.failure(Failure(
+                    message: message ?? log.split(separator: "\n").last.map(String.init)
+                        ?? "The engine exited with status \(status).")))
+            } else if keys.isEmpty {
+                completion(.failure(Failure(message: "The file has no JSON objects to read keys from.")))
+            } else {
+                completion(.success(keys))
+            }
+        })
+    }
 }
 
 /// One import being set up, and the transient state of loading the target's columns while it is.
@@ -335,6 +484,10 @@ final class ImportDraft: Identifiable {
     var connectionID: UUID?
     /// Set while the app is asking the server for the target's columns.
     var loadingColumns = false
+    /// Set while the engine is reading a JSON file's keys for the field list.
+    var loadingFields = false
+    /// Why the JSON keys could not be read, in a sentence the sheet can show.
+    var fieldsError: String?
     /// Why the last column read failed, in a sentence the sheet can show.
     var columnsError: String?
     /// Set while the engine is importing, so the sheet can disable its own button.
