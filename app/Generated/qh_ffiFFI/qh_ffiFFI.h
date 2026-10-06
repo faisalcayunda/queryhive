@@ -477,9 +477,19 @@ uint32_t uniffi_qh_ffi_fn_func_editor_ceiling_utf16(RustCallStatus *_Nonnull out
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_FORMAT_SQL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_FORMAT_SQL
+RustBuffer uniffi_qh_ffi_fn_func_format_sql(RustBuffer sql, RustBuffer dialect, RustBuffer options, uint32_t selection_start, uint32_t selection_len, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
 RustBuffer uniffi_qh_ffi_fn_func_sql_statement_ranges(RustBuffer sql, RustBuffer dialect, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_TOGGLE_LINE_COMMENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_TOGGLE_LINE_COMMENT
+RustBuffer uniffi_qh_ffi_fn_func_toggle_line_comment(RustBuffer sql, RustBuffer dialect, uint32_t selection_start, uint32_t selection_len, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_COMMAND_NAMES
@@ -760,9 +770,21 @@ uint16_t uniffi_qh_ffi_checksum_func_editor_ceiling_utf16(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_FORMAT_SQL
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_FORMAT_SQL
+uint16_t uniffi_qh_ffi_checksum_func_format_sql(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
 uint16_t uniffi_qh_ffi_checksum_func_sql_statement_ranges(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_TOGGLE_LINE_COMMENT
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_TOGGLE_LINE_COMMENT
+uint16_t uniffi_qh_ffi_checksum_func_toggle_line_comment(void
     
 );
 #endif

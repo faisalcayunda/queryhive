@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -2352,6 +2368,138 @@ public func FfiConverterTypeEditorPaint_lower(_ value: EditorPaint) -> RustBuffe
 
 
 /**
+ * One replacement of `[start, start + len)` by `replacement`, and the selection to set once it
+ * is applied. All offsets are UTF-16 units. `len == 0` with an empty `replacement` means the
+ * text does not change; the selection is still the one to keep. Named `Editor*` like the other
+ * records here: the app already has its own `TextEdit` (`SQLEditor.swift`).
+ */
+public struct EditorTextEdit: Equatable, Hashable {
+    public var start: UInt32
+    public var len: UInt32
+    public var replacement: String
+    public var selectionStart: UInt32
+    public var selectionLen: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(start: UInt32, len: UInt32, replacement: String, selectionStart: UInt32, selectionLen: UInt32) {
+        self.start = start
+        self.len = len
+        self.replacement = replacement
+        self.selectionStart = selectionStart
+        self.selectionLen = selectionLen
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorTextEdit: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorTextEdit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorTextEdit {
+        return
+            try EditorTextEdit(
+                start: FfiConverterUInt32.read(from: &buf), 
+                len: FfiConverterUInt32.read(from: &buf), 
+                replacement: FfiConverterString.read(from: &buf), 
+                selectionStart: FfiConverterUInt32.read(from: &buf), 
+                selectionLen: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorTextEdit, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.start, into: &buf)
+        FfiConverterUInt32.write(value.len, into: &buf)
+        FfiConverterString.write(value.replacement, into: &buf)
+        FfiConverterUInt32.write(value.selectionStart, into: &buf)
+        FfiConverterUInt32.write(value.selectionLen, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorTextEdit_lift(_ buf: RustBuffer) throws -> EditorTextEdit {
+    return try FfiConverterTypeEditorTextEdit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorTextEdit_lower(_ value: EditorTextEdit) -> RustBuffer {
+    return FfiConverterTypeEditorTextEdit.lower(value)
+}
+
+
+public struct FormatOptionsWire: Equatable, Hashable {
+    /**
+     * Spaces per indent level, 1 to 8; 0 is a tab.
+     */
+    public var indentWidth: UInt8
+    public var keywordCase: KeywordCaseWire
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Spaces per indent level, 1 to 8; 0 is a tab.
+         */indentWidth: UInt8, keywordCase: KeywordCaseWire) {
+        self.indentWidth = indentWidth
+        self.keywordCase = keywordCase
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FormatOptionsWire: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFormatOptionsWire: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FormatOptionsWire {
+        return
+            try FormatOptionsWire(
+                indentWidth: FfiConverterUInt8.read(from: &buf), 
+                keywordCase: FfiConverterTypeKeywordCaseWire.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FormatOptionsWire, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.indentWidth, into: &buf)
+        FfiConverterTypeKeywordCaseWire.write(value.keywordCase, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormatOptionsWire_lift(_ buf: RustBuffer) throws -> FormatOptionsWire {
+    return try FfiConverterTypeFormatOptionsWire.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormatOptionsWire_lower(_ value: FormatOptionsWire) -> RustBuffer {
+    return FfiConverterTypeFormatOptionsWire.lower(value)
+}
+
+
+/**
  * What `row_count` answers: atomics only, no side effects, cheap enough for a display link.
  */
 public struct RowCount: Equatable, Hashable {
@@ -2906,6 +3054,114 @@ public func FfiConverterTypeCellFormat_lower(_ value: CellFormat) -> RustBuffer 
     return FfiConverterTypeCellFormat.lower(value)
 }
 
+
+
+/**
+ * Why [`toggle_line_comment`] changed nothing. Lines are 1-based.
+ */
+public 
+enum CommentFfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * The line starts or ends inside a string, quoted name, block comment or dollar quote.
+     */
+    case InsideRegion(line: UInt32
+    )
+    /**
+     * Commenting would change the text next to the lines (a string would join the next one).
+     */
+    case Spills
+    case TooLarge
+    case OutOfBounds
+    case SplitsCharacter
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension CommentFfiError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCommentFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = CommentFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CommentFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .InsideRegion(
+            line: try FfiConverterUInt32.read(from: &buf)
+            )
+        case 2: return .Spills
+        case 3: return .TooLarge
+        case 4: return .OutOfBounds
+        case 5: return .SplitsCharacter
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CommentFfiError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .InsideRegion(line):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt32.write(line, into: &buf)
+            
+        
+        case .Spills:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .TooLarge:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .OutOfBounds:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .SplitsCharacter:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCommentFfiError_lift(_ buf: RustBuffer) throws -> CommentFfiError {
+    return try FfiConverterTypeCommentFfiError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCommentFfiError_lower(_ value: CommentFfiError) -> RustBuffer {
+    return FfiConverterTypeCommentFfiError.lower(value)
+}
 
 
 /**
@@ -3631,6 +3887,197 @@ public func FfiConverterTypeFilterSpec_lower(_ value: FilterSpec) -> RustBuffer 
 
 
 /**
+ * Why [`format_sql`] changed nothing. Lines are 1-based.
+ */
+public 
+enum FormatFfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    /**
+     * The SQL reads differently under different server settings (a backslash or comment form).
+     */
+    case Ambiguous(line: UInt32
+    )
+    /**
+     * The text ends inside a quote, a block comment or a dollar quote.
+     */
+    case Unterminated(line: UInt32
+    )
+    case TooLarge
+    /**
+     * The result failed the formatter's own check: a bug. The text is untouched.
+     */
+    case SelfCheck
+    case OutOfBounds
+    case SplitsCharacter
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension FormatFfiError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFormatFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = FormatFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FormatFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .Ambiguous(
+            line: try FfiConverterUInt32.read(from: &buf)
+            )
+        case 2: return .Unterminated(
+            line: try FfiConverterUInt32.read(from: &buf)
+            )
+        case 3: return .TooLarge
+        case 4: return .SelfCheck
+        case 5: return .OutOfBounds
+        case 6: return .SplitsCharacter
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FormatFfiError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .Ambiguous(line):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt32.write(line, into: &buf)
+            
+        
+        case let .Unterminated(line):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt32.write(line, into: &buf)
+            
+        
+        case .TooLarge:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .SelfCheck:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .OutOfBounds:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .SplitsCharacter:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormatFfiError_lift(_ buf: RustBuffer) throws -> FormatFfiError {
+    return try FfiConverterTypeFormatFfiError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormatFfiError_lower(_ value: FormatFfiError) -> RustBuffer {
+    return FfiConverterTypeFormatFfiError.lower(value)
+}
+
+
+/**
+ * What the formatter does to the case of keywords. A Bool setting in the app today
+ * (`autoUppercaseKeywords`), so two values.
+ */
+
+public enum KeywordCaseWire: Equatable, Hashable {
+    
+    case preserve
+    case upper
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension KeywordCaseWire: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeKeywordCaseWire: FfiConverterRustBuffer {
+    typealias SwiftType = KeywordCaseWire
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> KeywordCaseWire {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .preserve
+        
+        case 2: return .upper
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: KeywordCaseWire, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .preserve:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .upper:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeywordCaseWire_lift(_ buf: RustBuffer) throws -> KeywordCaseWire {
+    return try FfiConverterTypeKeywordCaseWire.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeywordCaseWire_lower(_ value: KeywordCaseWire) -> RustBuffer {
+    return FfiConverterTypeKeywordCaseWire.lower(value)
+}
+
+
+
+/**
  * What a store call can throw.
  */
 public 
@@ -4196,6 +4643,24 @@ public func editorCeilingUtf16()throws  -> UInt32  {
 })
 }
 /**
+ * Format `sql` (blueprint W12 section 3): whitespace moves, and with
+ * `KeywordCaseWire::Upper` keywords written in lower case become upper case (except in MySQL,
+ * see [`EditorDialect::upper_case_is_neutral`]); nothing else changes. The selection is the
+ * one to keep: the result says where it lands.
+ */
+public func formatSql(sql: String, dialect: EditorDialect, options: FormatOptionsWire, selectionStart: UInt32, selectionLen: UInt32)throws  -> EditorTextEdit  {
+    return try  FfiConverterTypeEditorTextEdit_lift(try rustCallWithError(FfiConverterTypeFormatFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_format_sql(
+        FfiConverterString.lower(sql),
+        FfiConverterTypeEditorDialect_lower(dialect),
+        FfiConverterTypeFormatOptionsWire_lower(options),
+        FfiConverterUInt32.lower(selectionStart),
+        FfiConverterUInt32.lower(selectionLen),uniffiCallStatus
+    )
+})
+}
+/**
  * The statements of `sql` for Run, as `(start, end)` pairs in UTF-16 units: the
  * pieces between separators that hold more than whitespace, comments and `;`.
  */
@@ -4205,6 +4670,22 @@ public func sqlStatementRanges(sql: String, dialect: EditorDialect)throws  -> [U
     uniffi_qh_ffi_fn_func_sql_statement_ranges(
         FfiConverterString.lower(sql),
         FfiConverterTypeEditorDialect_lower(dialect),uniffiCallStatus
+    )
+})
+}
+/**
+ * Toggle `-- ` on the lines the selection touches (a selection that ends exactly at the start
+ * of a line does not touch it). The selection keeps its text: a place at or after a marker
+ * moves with it.
+ */
+public func toggleLineComment(sql: String, dialect: EditorDialect, selectionStart: UInt32, selectionLen: UInt32)throws  -> EditorTextEdit  {
+    return try  FfiConverterTypeEditorTextEdit_lift(try rustCallWithError(FfiConverterTypeCommentFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_toggle_line_comment(
+        FfiConverterString.lower(sql),
+        FfiConverterTypeEditorDialect_lower(dialect),
+        FfiConverterUInt32.lower(selectionStart),
+        FfiConverterUInt32.lower(selectionLen),uniffiCallStatus
     )
 })
 }
@@ -4250,7 +4731,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_func_editor_ceiling_utf16() != 55107) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_qh_ffi_checksum_func_format_sql() != 8323) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_qh_ffi_checksum_func_sql_statement_ranges() != 45986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_func_toggle_line_comment() != 1544) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_func_command_names() != 54298) {
