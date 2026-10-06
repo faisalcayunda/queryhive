@@ -258,18 +258,21 @@ showing, and because the toolbar had no room left for a second primary.
 That split is also why `runBlockedReason` exists twice. Run needs a connection and a statement and
 nothing else: a destination it has not been given yet is none of its business. Export needs the
 destination too. Before the split there was one check and one button, and pressing it wrote a file
-before you had seen a single row.
+before you had seen a single row. Stop aborts the query at the server within a budget (PostgreSQL
+and MySQL p95 ≤ 100 ms, Trino ≤ 300 ms) and cancels further fetch.
 
 The grid is the panel's first tab and the default one after a run, so the panel is now 344pt tall —
 232pt showed four rows of the thing the user just asked for. Panel tabs are **Result / Log /
 Files**; the old Columns tab is gone, because the grid's own header carries every column name and
 its type chip and a second list of them was the same information twice.
 
-The grid itself: a `#` gutter shared by the header and the rows so they cannot drift apart, a
-pinned header with per-column type chips tinted by kind, numbers right-aligned and everything else
-left, alternating rows, `null` in italic dim rather than an empty cell (which is a different
-thing), and a footer that never overstates what is on screen — `First N rows · limit reached` in
-amber when the cap stopped it, `N rows` otherwise.
+The grid itself (§5): `NSTableView` draws cells with `CoreText`, backed by `ResultGridTable`
+(Swift `NSViewRepresentable`). The data store is a columnar Arrow `RecordBatch` per chunk in
+`qh-result-store`, spilled to disk with AES-256-GCM encryption. The header row is `NSTableHeaderView`
+with sort chevron and filter funnel. A pinned header with per-column type chips tinted by kind,
+numbers right-aligned and everything else left, alternating rows, `null` in italic dim rather than
+an empty cell (which is a different thing), and a footer that never overstates what is on screen —
+`First N rows · limit reached` in amber when the cap stopped it, `N rows` otherwise.
 
 ### The seams do not shiver
 
@@ -691,10 +694,11 @@ a comment or a word inherits its neighbour's colour for the turn the analysis ta
 temporary key has one owner: syntax owns `.foregroundColor`, the find bar owns `.backgroundColor`,
 diagnostics will own the underline keys — no feature ever clears another's.
 
-Two things it deliberately does not do. It **stops past 2,000,000 characters** rather than paying
-for a full analysis on every keystroke of a pasted dump. And it sets **attributes only**, never
-the string: that is what keeps it from looping back through `textDidChange`, and why the binding
-keeps exactly what was typed.
+Two things it deliberately does not do. It **stops past 2,000,000 UTF-16 characters** for analysis
+(tree-sitter per statement plus lexical fallback for errors and unknowns): the visible range is
+prioritized and coloured first, while the tail is deferred. Keystroke p99 ≤ 4 ms within this
+ceiling. And it sets **attributes only**, never the string: that is what keeps it from looping
+back through `textDidChange`, and why the binding keeps exactly what was typed.
 
 `updateNSView` cannot do the colouring — it returns early when the string already matches, and
 re-running the scan on every SwiftUI update would make typing pay for the model's changes. Text

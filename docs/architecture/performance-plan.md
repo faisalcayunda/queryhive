@@ -1,6 +1,6 @@
 # Rencana performa: melampaui TablePro di setiap sumbu
 
-- **Status:** rencana kerja, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan, lalu W3. Rincian di `PROGRESS.md` §"Run perf-parity".
+- **Status:** rencana kerja, 29 Sep 2026. W0 sampai W8-T1 hasil terukur (X6) sudah mendarat di branch `work/perf-parity` (puncak 2026-10-06). W8-T2 keputusan: W8-F0 sampai W8-F3 + F5 diadopsi; W8-E2s dan W8-E4 bersyarat; W8-E1/E3 tidak diadopsi. Rincian di `target/run/w8t2-decision.md` dan ledger.
 - **Konteks:** hasil audit statis QueryHive dan TablePro. Setiap klaim yang dipakai di sini sudah diperiksa ulang terhadap kode di pohon ini, dan path serta nomor barisnya disebut. Pemilik melonggarkan batasnya. ADR lama diperlakukan sebagai catatan, dan rencana ini boleh membatalkannya asal menyebut yang mana (§14). Penggantian data plane masuk lingkup sekarang.
 - **Pasangan:** `docs/benchmarks.md` (angka), `docs/architecture/remaining-work-plan.md` Batch 7 (sort dan search ke server), dan `docs/architecture/tablepro-adoption-plan.md` §12.2 dan §13 (dicatat di §15, mana yang diserap dan mana yang digantikan).
 

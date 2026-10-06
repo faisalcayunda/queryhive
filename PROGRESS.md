@@ -2278,7 +2278,17 @@ golden 12/22 (terklasifikasi), app berjalan.
 - I-2: `xctrace --launch` menyalakan `/Applications/QueryHive` (pid 40923) dengan argumen bench; hanya pid itu yang dimatikan.
 - I-3: reboot laptop menghapus scratchpad `/tmp`; ledger dibangun ulang di `target/run/`.
 
+### W8 (Fase 1): hasil benchmark dan keputusan
+
+**Status 2026-10-06.** W8-T1 (X6 run) selesai: TTFR S1/S2 meleset (masing-masing 55.6/71.3 ms vs batas 25/25 ms);
+throughput MySQL 537k/s vs 575k (−6.5%, noise); Trino 371k/s vs 575k (−35.5%, ingest idle); PG pasar hanya
+ceiling, bukan app; editor keystroke p99 8.01 ms vs 4 ms (tail, 2M overceiling); spill miss 1.17/1.36 ms vs
+0.5 ms target. Scroll p99 frame pada 60 Hz pass (tidak bisa ukur 120 Hz di mesin ini). Cold start dan introspect
+(tidak diukur). **W8-T2 keputusan:** tidak ada eskalasi diadopsi (E1/E3 trigger tidak terpenuhi, E2/E4 bersyarat).
+Empat tugas perbaikan (W8-F0 scenario baru, W8-F1 TTFR diagnosis, W8-F2 ingest A/B, W8-F3 editor analysis) plus
+W8-F5 re-bench; W8-E2s/E4 hanya jika F3/F0 gagal. Rincian keputusan di `target/run/w8t2-decision.md` §1–§4.
+
 ### Berikutnya
 
-**W3** (Fase 2: `EngineHost`, pool, dan TTFR; plus Fase 4B-core; memuat B-3, B-7, dan B-10), setelah blueprint 4B dan
-Fase 6 selesai ditulis ulang dan lolos AR. Biaya run sekitar US$235 di titik tengah W2.
+W8-F0 sampai W8-F3 + F5 masuk lane terpisah (parallel S-lane F1/F3, R-lane F2). Setelah itu W8-D dan W8-C.
+Eskalasi E2s dan E4 hanya jika gate F3 atau F0 tetap melewati. Direncanakan lanjut W9 per `development-plan.md`.
