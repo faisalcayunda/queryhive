@@ -4,13 +4,13 @@ QueryHive is a macOS database client: a SwiftUI app (`app/`) over a Rust engine 
 
 ## Current work: the perf-parity run
 
-Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-10-06 in the middle of W7/W9. Everything through `2ee80c5` is on `main` and `work/perf-parity`: W0-W5, W6 (except 6c, which waits on the owner-run P-1), W9-T0/T1/T5/T6, the W9-W13 blueprints, and the Rust or Swift cores W10-T7a, W11-T2a, W11-T6a, W12-T1a, W12-T5a and W13-T3a. W7-T1 was dropped by its A/B.
+Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-10-06 (evening) in the middle of B4. Everything through `ae3b278` is on `main` and `work/perf-parity`; six lane branches hold work not yet integrated.
 
 Resume in this order:
 
-1. Read `docs/architecture/development-plan.md` (task IDs, files each task owns, gates, review tier) and `target/run/ledger.md`: task status, backlog `B-*`, incidents `I-*`, owner decisions O-14 to O-23, the lane plan O-22, and "PAUSE POINT 3" (the latest).
-2. Six lane branches (`lane/w7-t7`, `lane/w7-t5`, `lane/w9-t2`, `lane/w9-t3`, `lane/w9-t4`, `lane/w7-t2`) are committed but not integrated; PAUSE POINT 3 lists which are reviewed, which are WIP, and the order to finish, integrate, gate and A/B them.
-3. Then W7-C and W7-T6, W8, the rest of W9, and W10 to W14 per `development-plan.md` §5, in parallel lanes where §7 file ownership allows.
+1. Read `docs/architecture/development-plan.md` (task IDs, files each task owns, gates, review tier) and `target/run/ledger.md`: task status, backlog `B-*`, incidents `I-*`, owner decisions O-14 to O-23, the lane plan O-22, and "PAUSE POINT 4" (the latest).
+2. The lane branches listed in PAUSE POINT 4 (`lane/tabs-on-top`, `lane/w8-f3`, `lane/w11-t5`, `lane/w10-t6a`, `lane/w8-f1`, `lane/w7-t1`) are committed but not integrated; PAUSE POINT 4 says which are reviewed, which are WIP, and how to finish them. The batch plan is `target/run/plan-b1-onward.md` and the W8 decision `target/run/w8t2-decision.md`.
+3. Then the rest of B4 and the batches after it through W14 per `development-plan.md` §5, in parallel lanes where §7 file ownership allows.
 
 Review policy in force (owner decision O-20): implementation, docs, bench and cleanup run on cheaper models; only review uses the strongest model, for **one** round. After a blocking finding, fix it, verify with the gates, commit, and record "pending review" in the ledger.
 
