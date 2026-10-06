@@ -10,10 +10,14 @@
 //! golden harness parses before comparing: key order is not part of the contract, but
 //! which keys are present is.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use qh_core::EngineError;
+use qh_driver::{ConnectionConfig, Driver, DriverKind, Session};
 use qh_ffi::mcp::{self, Handshake, McpToken, Server};
-use qh_ffi::RealEngine;
+use qh_ffi::{Engine, RealEngine};
 use qh_storage::{ConnectionKind, ConnectionRecord, McpTokenRecord, Storage};
 use qh_sync::SyncId;
 use serde_json::{json, Value as Json};
@@ -166,7 +170,7 @@ fn to_table_is_not_in_the_tool_list_even_for_a_full_token() {
         .map(|tool| tool["name"].as_str().expect("a name"))
         .collect();
     assert!(!names.contains(&"to_table"), "{names:?}");
-    assert_eq!(names.len(), 9, "the read-only set is nine tools");
+    assert_eq!(names.len(), 11, "the read-only set is eleven tools");
 }
 
 // --------------------------------------------------------------------------- //
@@ -389,6 +393,592 @@ fn mcp_runs_caller_sql_read_only_so_a_drop_is_refused_before_connecting() {
     assert!(
         text.contains("read-only"),
         "MCP must run caller SQL read-only: {text}"
+    );
+}
+
+// --------------------------------------------------------------------------- //
+// describe_table and table_ddl (W11-T5, blueprint w11 section 10.2)
+// --------------------------------------------------------------------------- //
+
+/// The two tools W11 added, and the nine that were there before.
+const METADATA_TOOLS: [&str; 2] = ["describe_table", "table_ddl"];
+
+/// The text of a refused (or failed) `tools/call`, asserting it is a tool error.
+fn error_text(result: &Json) -> String {
+    assert_eq!(result["result"]["isError"], json!(true), "{result}");
+    result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a text block")
+        .to_owned()
+}
+
+fn tool_names(response: &Json) -> Vec<String> {
+    response["result"]["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name").to_owned())
+        .collect()
+}
+
+#[test]
+fn the_metadata_tools_are_listed_for_a_full_token_and_filtered_for_a_narrow_one() {
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+    let full = request(&Server::new(full_token(), Vec::new()), &runtime(), &list);
+    let names = tool_names(&full);
+    assert_eq!(names.len(), 11, "{names:?}");
+    for tool in METADATA_TOOLS {
+        assert!(names.iter().any(|name| name == tool), "{tool} missing");
+        assert!(
+            mcp::is_read_only_tool(tool),
+            "{tool} is not a read-only tool"
+        );
+        assert!(mcp::read_only_tool_names().iter().any(|name| name == tool));
+    }
+    // Both take the same arguments, and a client reads them from the schema.
+    for tool in full["result"]["tools"].as_array().expect("an array") {
+        if METADATA_TOOLS.contains(&tool["name"].as_str().expect("a name")) {
+            assert_eq!(
+                tool["inputSchema"]["required"],
+                json!(["connection", "table"])
+            );
+        }
+    }
+
+    let mut narrow = full_token();
+    narrow.scopes = vec!["describe_table".to_owned(), "tables".to_owned()];
+    let names = tool_names(&request(
+        &Server::new(narrow, Vec::new()),
+        &runtime(),
+        &list,
+    ));
+    assert_eq!(names, vec!["tables", "describe_table"]);
+}
+
+#[test]
+fn a_token_issued_before_the_metadata_tools_existed_does_not_reach_them() {
+    // The scope list is exactly what `issue` wrote then: nine names. It fails closed, with the
+    // same sentence any out-of-scope tool gets.
+    let mut token = full_token();
+    token
+        .scopes
+        .retain(|scope| !METADATA_TOOLS.contains(&scope.as_str()));
+    assert_eq!(token.scopes.len(), 9);
+    let (_dir, db_path, allowed_id, _denied_id) = seeded_allowlisted_db();
+    token.connections = vec![allowed_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    for tool in METADATA_TOOLS {
+        let text = error_text(&call(
+            &server,
+            &runtime(),
+            tool,
+            json!({"connection": allowed_id, "table": "t", "schema": "s"}),
+        ));
+        assert!(
+            text.contains("outside this token's scope"),
+            "{tool}: {text}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_allowlist_refuses_the_metadata_tools_without_saying_whether_the_connection_exists() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+    // `full_token` has an empty allowlist: the scope names every tool and the allowlist grants
+    // nothing, which is the one combination a misconfigured token lands on.
+    let server = Server::new(full_token(), vec![("DB_PATH".to_owned(), db_path)]);
+    for tool in METADATA_TOOLS {
+        // A real row, a real row of another kind, and an id that was never there: the three
+        // answers must be the same sentence, differing only in the id the caller sent.
+        let mut shapes = Vec::new();
+        for id in [
+            allowed_id.as_str(),
+            denied_id.as_str(),
+            "99999999-9999-7999-8999-999999999999",
+        ] {
+            let text = error_text(&call(
+                &server,
+                &runtime(),
+                tool,
+                json!({"connection": id, "table": "t", "schema": "s"}),
+            ));
+            assert!(
+                text.contains("not allowed for this token"),
+                "{tool}: {text}"
+            );
+            assert!(!text.contains("was not found"), "{tool}: {text}");
+            assert!(!text.contains("not a connection id"), "{tool}: {text}");
+            shapes.push(text.replace(id, "<id>"));
+        }
+        assert!(
+            shapes.windows(2).all(|pair| pair[0] == pair[1]),
+            "{shapes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_connection_outside_the_allowlist_is_refused_for_the_metadata_tools_as_columns_refuses_it() {
+    let (_dir, db_path, allowed_id, denied_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![allowed_id];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    let arguments = json!({"connection": denied_id, "table": "t", "schema": "s"});
+    let columns = error_text(&call(&server, &runtime(), "columns", arguments.clone()));
+    assert!(columns.contains("not allowed for this token"), "{columns}");
+    for tool in METADATA_TOOLS {
+        assert_eq!(
+            error_text(&call(&server, &runtime(), tool, arguments.clone())),
+            columns,
+            "{tool} must refuse exactly as `columns` does"
+        );
+    }
+}
+
+#[test]
+fn a_slot_nothing_supplies_is_refused_by_the_arguments_name_before_any_connection() {
+    // The seeded PostgreSQL row has no `schema` option, and PostgreSQL names a table by schema
+    // and table. The engine would say `TARGET_SCHEMA`, a setting no MCP client has ever seen.
+    let (_dir, db_path, _allowed_id, denied_id) = seeded_allowlisted_db();
+    let mut token = full_token();
+    token.connections = vec![denied_id.clone()];
+    let server = Server::new(token, vec![("DB_PATH".to_owned(), db_path)]);
+    for tool in METADATA_TOOLS {
+        let text = error_text(&call(
+            &server,
+            &runtime(),
+            tool,
+            json!({"connection": denied_id, "table": "t"}),
+        ));
+        assert!(
+            text.contains("the argument 'schema' is required"),
+            "{tool}: {text}"
+        );
+        assert!(!text.contains("TARGET_"), "{tool}: {text}");
+
+        let text = error_text(&call(
+            &server,
+            &runtime(),
+            tool,
+            json!({"connection": denied_id}),
+        ));
+        assert!(
+            text.contains("the argument 'table' is required"),
+            "{tool}: {text}"
+        );
+    }
+}
+
+/// A session that records every statement and answers the metadata ones with one canned row, so
+/// a recipe that asks for several statements asks for all of them.
+struct ScriptedSession {
+    driver: Box<dyn Driver>,
+    statements: Arc<Mutex<Vec<String>>>,
+    show_create: String,
+}
+
+/// One batch of text cells, column-major as `ColumnBatch` wants them.
+struct OneBatch {
+    columns: Vec<qh_core::ColumnMeta>,
+    batch: Option<qh_core::ColumnBatch>,
+}
+
+#[async_trait]
+impl qh_driver::Cursor for OneBatch {
+    fn columns(&self) -> &[qh_core::ColumnMeta] {
+        &self.columns
+    }
+
+    async fn next_batch(
+        &mut self,
+        _max_rows: usize,
+    ) -> Result<Option<qh_core::ColumnBatch>, EngineError> {
+        Ok(self.batch.take())
+    }
+}
+
+impl ScriptedSession {
+    /// The cells of the one row a statement is answered with, `None` for a NULL, or no row.
+    fn canned(&self, sql: &str) -> Option<Vec<Option<String>>> {
+        let text = |cell: &str| Some(cell.to_owned());
+        if sql.contains("pg_get_viewdef") {
+            // The PostgreSQL head: an ordinary table.
+            Some(vec![
+                text("r"),
+                text("s"),
+                text("t"),
+                None,
+                None,
+                None,
+                None,
+            ])
+        } else if sql.contains("pg_get_constraintdef") || sql.contains("pg_get_indexdef") {
+            None
+        } else if sql.contains("information_schema.tables") && sql.contains("table_name =") {
+            // Trino's kind lookup.
+            Some(vec![text("BASE TABLE")])
+        } else if sql.starts_with("SHOW CREATE") {
+            Some(vec![
+                Some(self.show_create.clone()),
+                Some(self.show_create.clone()),
+            ])
+        } else if sql.contains("pg_attribute") {
+            Some(vec![text("id"), text("bigint"), text("NO"), None, text("")])
+        } else {
+            Some(vec![text("t"), text("BASE TABLE")])
+        }
+    }
+}
+
+#[async_trait]
+impl Session for ScriptedSession {
+    fn capabilities(&self) -> qh_driver::Capabilities {
+        self.driver.capabilities()
+    }
+
+    fn query_id(&self) -> Option<String> {
+        None
+    }
+
+    async fn execute(
+        &mut self,
+        sql: &str,
+        _options: &qh_driver::ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::Cursor>, EngineError> {
+        self.statements.lock().unwrap().push(sql.to_owned());
+        let Some(row) = self.canned(sql) else {
+            return Ok(Box::new(OneBatch {
+                columns: Vec::new(),
+                batch: None,
+            }));
+        };
+        let columns = (0..row.len())
+            .map(|index| qh_core::ColumnMeta::new(format!("c{index}"), "text"))
+            .collect();
+        let batch = qh_core::ColumnBatch::new(
+            row.into_iter()
+                .map(|cell| {
+                    vec![cell.map_or(qh_core::Value::Null, |text| {
+                        qh_core::Value::Text(text.into())
+                    })]
+                })
+                .collect(),
+        )
+        .expect("one row of equal columns");
+        Ok(Box::new(OneBatch {
+            columns,
+            batch: Some(batch),
+        }))
+    }
+
+    async fn browse(
+        &mut self,
+        _level: qh_driver::BrowseLevel,
+        _path: &qh_driver::ObjectPath,
+        _include_system: bool,
+    ) -> Result<Vec<String>, EngineError> {
+        Ok(Vec::new())
+    }
+
+    async fn objects(
+        &mut self,
+        _path: &qh_driver::ObjectPath,
+    ) -> Result<qh_driver::ObjectsPage, EngineError> {
+        Ok(qh_driver::ObjectsPage::default())
+    }
+
+    fn explain_statement(&self, sql: &str) -> String {
+        format!("EXPLAIN {sql}")
+    }
+
+    async fn cancel(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    async fn close(self: Box<Self>) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn read_only_statement(&self) -> Option<&'static str> {
+        Some(READ_ONLY_SWITCH)
+    }
+}
+
+/// The statement a session is switched read-only with. It is sent only when the run's Safe Mode is
+/// `read_only`, so seeing it is seeing the mode MCP pinned.
+const READ_ONLY_SWITCH: &str = "SET SESSION READ ONLY (test)";
+
+/// The real drivers' metadata and capabilities over sessions that never leave the process.
+struct ScriptedEngine {
+    inner: RealEngine,
+    statements: Arc<Mutex<Vec<String>>>,
+    show_create: String,
+}
+
+impl ScriptedEngine {
+    fn new(show_create: &str) -> Self {
+        Self {
+            inner: RealEngine::new(),
+            statements: Arc::new(Mutex::new(Vec::new())),
+            show_create: show_create.to_owned(),
+        }
+    }
+
+    fn statements(&self) -> Vec<String> {
+        self.statements.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Engine for ScriptedEngine {
+    fn kinds(&self) -> Vec<DriverKind> {
+        self.inner.kinds()
+    }
+
+    fn driver(&self, kind: DriverKind) -> &dyn Driver {
+        self.inner.driver(kind)
+    }
+
+    async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
+        let driver: Box<dyn Driver> = match config.kind {
+            DriverKind::Postgres => Box::new(qh_driver_postgres::PostgresDriver::new()),
+            DriverKind::Mysql => Box::new(qh_driver_mysql::MysqlDriver::new()),
+            DriverKind::Trino => Box::new(qh_driver_trino::TrinoDriver::new()),
+        };
+        Ok(Box::new(ScriptedSession {
+            driver,
+            statements: self.statements.clone(),
+            show_create: self.show_create.clone(),
+        }))
+    }
+}
+
+/// `tools/call` through a given engine.
+fn call_with(server: &Server, engine: &dyn Engine, name: &str, arguments: Json) -> Json {
+    server
+        .handle_line(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}})
+            .to_string(),
+            engine,
+            &runtime(),
+        )
+        .response
+        .expect("a request with an id gets a response")
+}
+
+/// One connection of each kind, every one carrying a user name and a Keychain reference that must
+/// not reach a tool's output. The ids are returned with their kinds.
+fn metadata_db() -> (tempfile::TempDir, String, Vec<(ConnectionKind, String)>) {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("queryhive.sqlite3");
+    let mut storage = Storage::open(&path).expect("open");
+    storage.migrate().expect("migrate");
+
+    let mut ids = Vec::new();
+    for (kind, name, database, options) in [
+        (
+            ConnectionKind::Postgres,
+            "Pg",
+            "app",
+            r#"{"schema":"sales"}"#,
+        ),
+        (ConnectionKind::Mysql, "My", "shop", "{}"),
+        (
+            ConnectionKind::Trino,
+            "Tr",
+            "hive",
+            r#"{"schema":"web","scheme":"http"}"#,
+        ),
+    ] {
+        let mut record = ConnectionRecord::new(name, kind, 1_700_000_000_000);
+        record.host = Some("db.invalid".to_owned());
+        record.database_name = Some(database.to_owned());
+        record.user_name = Some("meta-secret-user".to_owned());
+        record.options_json = options.to_owned();
+        record.secret_ref = Some(format!("keychain-ref-{}", record.meta.id));
+        storage.save_connection(&record).expect("save");
+        ids.push((kind, record.meta.id.to_string()));
+    }
+    (dir, path.to_string_lossy().into_owned(), ids)
+}
+
+fn allowing(ids: &[(ConnectionKind, String)]) -> McpToken {
+    let mut token = full_token();
+    token.connections = ids.iter().map(|(_, id)| id.clone()).collect();
+    token
+}
+
+#[test]
+fn the_metadata_tools_name_the_object_the_way_each_driver_does_and_stay_read_only() {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+
+    for (kind, id) in &ids {
+        let (dialect, object) = match kind {
+            ConnectionKind::Postgres => (
+                qh_sql::Dialect::Postgres,
+                json!({"catalog": null, "schema": "sales", "table": "t"}),
+            ),
+            ConnectionKind::Mysql => (
+                qh_sql::Dialect::Mysql,
+                json!({"catalog": "shop", "schema": null, "table": "t"}),
+            ),
+            ConnectionKind::Trino => (
+                qh_sql::Dialect::Trino,
+                json!({"catalog": "hive", "schema": "web", "table": "t"}),
+            ),
+        };
+        for (tool, event) in [
+            ("describe_table", "table_columns"),
+            ("table_ddl", "table_ddl"),
+        ] {
+            let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+            let result = call_with(
+                &server,
+                &engine,
+                tool,
+                json!({"connection": id, "table": "t"}),
+            );
+            let events = call_events(&result);
+            assert_eq!(events.len(), 1, "{kind:?} {tool}: {events:?}");
+            assert_eq!(events[0]["event"], json!(event), "{kind:?} {tool}");
+            assert_eq!(events[0]["object"], object, "{kind:?} {tool}");
+
+            // `read_only` kept: the session was switched read-only, which the engine does only
+            // under that mode and which a `full` connection would never have been sent, and
+            // everything else it sent is one read under every reading of the dialect.
+            let sent = engine.statements();
+            assert!(
+                sent.iter().any(|sql| sql == READ_ONLY_SWITCH),
+                "{kind:?} {tool}: {sent:?}"
+            );
+            let reads: Vec<&String> = sent.iter().filter(|sql| *sql != READ_ONLY_SWITCH).collect();
+            assert!(!reads.is_empty(), "{kind:?} {tool} sent nothing");
+            for sql in reads {
+                let decisions =
+                    qh_sql::decisions_readings(qh_sql::SafeMode::ReadOnly, sql, dialect.readings());
+                assert_eq!(decisions.len(), 1, "{kind:?} {tool}: {sql}");
+                assert_eq!(
+                    decisions[0].kind,
+                    qh_sql::StatementKind::ReadOnly,
+                    "{kind:?} {tool}: {sql}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_argument_overrides_the_connections_own_database_and_schema() {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let (_, trino) = ids
+        .iter()
+        .find(|(kind, _)| *kind == ConnectionKind::Trino)
+        .unwrap();
+    let engine = ScriptedEngine::new("CREATE TABLE t (id int)");
+    let result = call_with(
+        &server,
+        &engine,
+        "describe_table",
+        json!({"connection": trino, "table": "orders", "catalog": "tpch", "schema": "tiny"}),
+    );
+    let events = call_events(&result);
+    assert_eq!(
+        events[0]["object"],
+        json!({"catalog": "tpch", "schema": "tiny", "table": "orders"})
+    );
+}
+
+#[test]
+fn a_ddl_with_a_password_in_it_comes_out_masked_and_no_credential_reaches_either_tool() {
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let (_, mysql) = ids
+        .iter()
+        .find(|(kind, _)| *kind == ConnectionKind::Mysql)
+        .unwrap();
+    // A FEDERATED table prints the URL it forwards to, password included. The engine masks it
+    // before the event leaves, so the MCP output is masked by the same code the app's tab is.
+    let federated = "CREATE TABLE t (id int) ENGINE=FEDERATED \
+                     CONNECTION='mysql://app:hunter2@db.internal:3306/shop/t'";
+    for tool in METADATA_TOOLS {
+        let engine = ScriptedEngine::new(federated);
+        let result = call_with(
+            &server,
+            &engine,
+            tool,
+            json!({"connection": mysql, "table": "t"}),
+        );
+        let text = result["result"]["content"][0]["text"]
+            .as_str()
+            .expect("a text block");
+        for forbidden in [
+            "hunter2",
+            "meta-secret-user",
+            "keychain-ref",
+            "secret_ref",
+            "DB_PASSWORD",
+            "DB_JWT",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{tool}: {forbidden} leaked: {text}"
+            );
+        }
+    }
+    let engine = ScriptedEngine::new(federated);
+    let events = call_events(&call_with(
+        &server,
+        &engine,
+        "table_ddl",
+        json!({"connection": mysql, "table": "t"}),
+    ));
+    assert_eq!(events[0]["redacted"], json!(true), "{events:?}");
+    assert!(
+        events[0]["ddl"].as_str().expect("a ddl").contains("***"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_ddl_with_newlines_is_still_one_line_on_the_wire() {
+    // MCP framing is one JSON-RPC message per line, and a DDL is the first tool output with real
+    // newlines in it. They must travel escaped inside the one line, never as a second line.
+    let (_dir, db_path, ids) = metadata_db();
+    let server = Server::new(allowing(&ids), vec![("DB_PATH".to_owned(), db_path)]);
+    let (_, mysql) = ids
+        .iter()
+        .find(|(kind, _)| *kind == ConnectionKind::Mysql)
+        .unwrap();
+    let engine = ScriptedEngine::new("CREATE TABLE t (\n  id int\n)");
+    let line = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                      "params": {"name": "table_ddl", "arguments": {"connection": mysql, "table": "t"}}})
+    .to_string();
+    let mut output = Vec::new();
+    mcp::serve(
+        &server,
+        &engine,
+        &runtime(),
+        line.as_bytes(),
+        &mut output,
+        &mut || {},
+    )
+    .expect("serve");
+    let written = String::from_utf8(output).expect("utf-8");
+    assert_eq!(written.matches('\n').count(), 1, "{written:?}");
+    assert!(written.ends_with('\n'));
+    let reply: Json = serde_json::from_str(written.trim_end()).expect("one JSON reply");
+    assert_eq!(reply["id"], json!(7));
+    let events = call_events(&reply);
+    assert!(
+        events[0]["ddl"]
+            .as_str()
+            .expect("a ddl")
+            .contains("\n  id int\n"),
+        "{events:?}"
     );
 }
 

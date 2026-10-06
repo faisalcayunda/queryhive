@@ -1,9 +1,10 @@
 # Kebijakan stabilitas MCP
 
-> Satu halaman janji: apa yang boleh berubah di permukaan MCP dan apa yang tidak. Ditulis sebelum
-> tool kesepuluh mendarat, karena janji yang ditulis sesudahnya adalah janji yang menyesuaikan
-> kenyataan. Keputusan token dan scope ada di `docs/decisions/0015-mcp-token-scope.md`; yang ini
-> hanya tentang kompatibilitas.
+> Satu halaman janji: apa yang boleh berubah di permukaan MCP dan apa yang tidak. Ditulis ketika
+> baru ada sembilan tool, dan dipakai tanpa perubahan saat tool kesepuluh dan kesebelas mendarat
+> (W11, bagian "Tool metadata"), karena janji yang ditulis sesudahnya adalah janji yang
+> menyesuaikan kenyataan. Keputusan token dan scope ada di
+> `docs/decisions/0015-mcp-token-scope.md`; yang ini hanya tentang kompatibilitas.
 
 ## Yang dijanjikan
 
@@ -34,6 +35,32 @@ Versi yang didukung sekarang: `2025-06-18`, `2025-03-26`, `2024-11-05`.
 
 Menolak lebih baik daripada turun diam-diam ke versi server: negosiasi turun menyembunyikan
 ketidakcocokan, dan klien tidak punya cara mengetahui versi mana yang boleh ia minta.
+
+## Tool metadata (W11)
+
+`describe_table` dan `table_ddl` menjadi tool kesepuluh dan kesebelas. Keduanya aditif, jadi
+tabel di atas berlaku untuk mereka seperti untuk sembilan yang lain, dan `columns` **tetap**:
+namanya, skemanya, dan `LIMIT 0`-nya tidak berubah. Deskripsi `columns` hanya diperjelas dengan
+petunjuk ke `describe_table`.
+
+- **Masukan.** `connection` dan `table` wajib; `catalog` dan `schema` opsional dan, bila kosong,
+  diambil dari koneksi. Slot yang dipakai mengikuti driver: PostgreSQL schema dan tabel, MySQL
+  database (argumen `catalog`) dan tabel, Trino ketiganya. Slot yang tidak diisi argumen maupun
+  koneksi ditolak dengan nama argumennya, sebelum koneksi dibuka.
+- **Keluaran.** Event engine apa adanya: `table_columns` (`object`, `fields`, `truncated`) dan
+  `table_ddl` (`object`, `object_kind`, `ddl`, `truncated`, `redacted`). Kunci baru boleh
+  ditambahkan; yang ada tidak berubah arti.
+- **Allowlist dan scope.** Allowlist diperiksa sebelum store dibaca, dan allowlist kosong berarti
+  tidak ada koneksi: id yang ada dan id yang tidak pernah ada dijawab dengan kalimat yang sama. Token yang diterbitkan tanpa `--scope` memuat keduanya; token lama tidak
+  (gagal tertutup), dan operator yang menginginkannya menerbitkan token baru.
+- **Read-only.** Setiap panggilan MCP tetap dipaksa `read_only`, apa pun Safe Mode koneksinya.
+  Perintah metadata tidak membawa SQL dari klien, setiap statement-nya satu pembacaan katalog,
+  dan sesinya dipaksa read-only oleh engine.
+- **DDL.** Engine menyensor kredensial yang dicetak server ke dalam DDL (`redacted: true`), dan
+  itu usaha terbaik: definisi view dibawa apa adanya dan bisa membuka logika bisnis. Operator
+  yang tidak menginginkannya menerbitkan token tanpa `table_ddl` di `--scope`. Apakah `table_ddl`
+  keluar dari scope bawaan adalah keputusan SEC yang belum diambil; sampai itu diputuskan ia ikut
+  scope bawaan.
 
 ## Keputusan atas sisa pengerasan §12.3
 

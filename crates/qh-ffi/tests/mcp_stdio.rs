@@ -306,6 +306,141 @@ fn the_stdio_server_answers_over_a_real_pipe_and_cleans_up_its_handshake() {
     assert!(!used.is_null(), "last_used_at was not recorded: {listing}");
 }
 
+/// `issue` with the given extra flags, and the token it printed.
+fn issue_with(db_path: &str, flags: &[&str]) -> String {
+    let output = Command::new(BIN)
+        .args(["issue", "--name", "metadata"])
+        .args(flags)
+        .env("DB_PATH", db_path)
+        .output()
+        .expect("run issue");
+    assert!(
+        output.status.success(),
+        "issue failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed: Json = serde_json::from_slice(&output.stdout).expect("issue prints a JSON object");
+    printed["token"].as_str().expect("a token").to_owned()
+}
+
+/// Serve one process over a pipe: write every request, close stdin, and return the replies. The
+/// handshake goes to the temporary directory, never to the owner's Application Support.
+fn serve_once(dir: &std::path::Path, db_path: &str, token: &str, requests: &[Json]) -> Vec<Json> {
+    let mut child = Command::new(BIN)
+        .env("DB_PATH", db_path)
+        .env("QH_MCP_TOKEN", token)
+        .env("QH_MCP_HANDSHAKE", dir.join("mcp-handshake.json"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the server");
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        for request in requests {
+            writeln!(stdin, "{request}").expect("write");
+        }
+    }
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "{:?}", output.status);
+    String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every stdout line is one JSON reply"))
+        .collect()
+}
+
+/// W11-T5: the two metadata tools are in a default-scope token, and an empty allowlist still
+/// refuses them, without saying whether the connection is real, over the real transport.
+#[test]
+fn the_metadata_tools_are_in_the_default_scope_and_an_empty_allowlist_refuses_them() {
+    let (dir, db_path, connection_id) = seeded_database();
+    // No --scope: every read-only tool. No --connection: no connection at all.
+    let token = issue_with(&db_path, &[]);
+    let arguments = |id: &str| json!({"connection": id, "table": "t", "schema": "s"});
+    let replies = serve_once(
+        dir.path(),
+        &db_path,
+        &token,
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                   "params": {"name": "describe_table", "arguments": arguments(&connection_id)}}),
+            json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                   "params": {"name": "table_ddl", "arguments": arguments(&connection_id)}}),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                   "params": {"name": "table_ddl",
+                              "arguments": arguments("99999999-9999-7999-8999-999999999999")}}),
+        ],
+    );
+    assert_eq!(replies.len(), 4, "{replies:?}");
+
+    let names: Vec<&str> = replies[0]["result"]["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names.len(), 11, "{names:?}");
+    assert!(
+        names.contains(&"describe_table") && names.contains(&"table_ddl"),
+        "{names:?}"
+    );
+
+    // The real row and the made-up id get the same sentence, apart from the id itself.
+    let texts: Vec<String> = replies[1..]
+        .iter()
+        .map(|reply| {
+            assert_eq!(reply["result"]["isError"], json!(true), "{reply}");
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .expect("text")
+                .to_owned()
+        })
+        .collect();
+    for text in &texts {
+        assert!(text.contains("not allowed for this token"), "{text}");
+        assert!(!text.contains("was not found"), "{text}");
+    }
+    assert_eq!(
+        texts[1].replace(&connection_id, "<id>"),
+        texts[2].replace("99999999-9999-7999-8999-999999999999", "<id>")
+    );
+}
+
+/// A token scoped to one of the two cannot call the other, and the refusal says why.
+#[test]
+fn a_token_scoped_to_one_metadata_tool_cannot_call_the_other() {
+    let (dir, db_path, connection_id) = seeded_database();
+    let token = issue_with(
+        &db_path,
+        &["--scope", "describe_table", "--connection", &connection_id],
+    );
+    let replies = serve_once(
+        dir.path(),
+        &db_path,
+        &token,
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                   "params": {"name": "table_ddl",
+                              "arguments": {"connection": connection_id, "table": "t", "schema": "s"}}}),
+        ],
+    );
+    let names: Vec<&str> = replies[0]["result"]["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["describe_table"]);
+    assert_eq!(replies[1]["result"]["isError"], json!(true));
+    assert!(replies[1]["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text")
+        .contains("outside this token's scope"));
+}
+
 #[test]
 fn a_revoked_token_is_refused_at_startup() {
     let (_dir, db_path, connection_id) = seeded_database();

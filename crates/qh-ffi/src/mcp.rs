@@ -16,6 +16,12 @@
 //! its query (`crate::commands::to_table`), and opening that to a client before the
 //! engine has a tested authorisation model is not a thing this phase does.
 //!
+//! `describe_table` and `table_ddl` (W11) are the same kind of mapping: they run the
+//! engine's `columns` and `ddl` commands, whose statements are single catalog reads, and
+//! they emit the engine's `table_columns` and `table_ddl` events as they are. The engine
+//! masks credentials in a DDL before the event leaves it, so this module has no masking of
+//! its own to keep in step. The older `columns` tool stays as it was.
+//!
 //! # Framing is newline-delimited JSON-RPC, and stdout carries nothing else
 //!
 //! One JSON-RPC message per line, in both directions. **Every byte on stdout is a
@@ -70,7 +76,7 @@ use secrecy::ExposeSecret;
 use serde_json::{json, Value as Json};
 
 use crate::events::Capture;
-use crate::sql_ident::{self, SlotStyle};
+use crate::sql_ident::{self, Part, SlotStyle};
 use crate::{CancelFlag, CliError, Command, Engine, Settings};
 
 /// The MCP revision this server speaks when the client does not name one it knows.
@@ -230,7 +236,7 @@ pub struct ToolSpec {
 /// The order is the order of the plan's own table. `to_table` is absent on purpose and
 /// is refused by name in [`Server::call_tool`], so removing it here cannot be undone by
 /// a caller that guesses the name.
-pub const TOOLS: [ToolSpec; 9] = [
+pub const TOOLS: [ToolSpec; 11] = [
     ToolSpec {
         name: "db_drivers",
         description:
@@ -262,7 +268,8 @@ pub const TOOLS: [ToolSpec; 9] = [
         name: "columns",
         description:
             "Return a table's columns. Runs `SELECT * FROM <table> LIMIT 0` and reports the \
-             engine's `columns` event; no row is returned.",
+             engine's `columns` event; no row is returned. For nullability, defaults and \
+             extras use `describe_table`.",
         schema: columns_schema,
     },
     ToolSpec {
@@ -292,6 +299,22 @@ pub const TOOLS: [ToolSpec; 9] = [
             "Stream a SELECT into one or more files under a directory on the machine running \
              this server, and report the paths written.",
         schema: export_schema,
+    },
+    ToolSpec {
+        name: "describe_table",
+        description:
+            "Describe one table or view from the server's own catalog: each column's type, \
+             nullability, default and extras (such as identity or auto_increment). Reads the \
+             catalog, not the table, and returns the engine's `table_columns` event.",
+        schema: columns_schema,
+    },
+    ToolSpec {
+        name: "table_ddl",
+        description:
+            "Return the DDL of one table, view or materialized view as the server prints it, \
+             as the engine's `table_ddl` event. Credentials the server prints into it are \
+             masked and `redacted` says so; a view's definition is shown as written.",
+        schema: columns_schema,
     },
 ];
 
@@ -364,7 +387,7 @@ fn columns_schema() -> Json {
         "type": "object",
         "properties": {
             "connection": {"type": "string", "description": "A connection id from connections_list."},
-            "table": {"type": "string", "description": "The table whose columns are wanted."},
+            "table": {"type": "string", "description": "The table (or view) the call is about."},
             "catalog": {"type": "string", "description": "Trino catalog (or PostgreSQL/MySQL database) that qualifies the table."},
             "schema": {"type": "string", "description": "Schema that qualifies the table."}
         },
@@ -977,6 +1000,14 @@ impl Server {
                 )?;
                 self.run_tool(Command::Export, settings, engine, runtime)
             }
+            "describe_table" => {
+                let settings = self.target_settings(arguments)?;
+                self.run_tool(Command::Columns, settings, engine, runtime)
+            }
+            "table_ddl" => {
+                let settings = self.target_settings(arguments)?;
+                self.run_tool(Command::Ddl, settings, engine, runtime)
+            }
             other => Err(format!("unknown tool '{other}'")),
         }
     }
@@ -1209,6 +1240,38 @@ impl Server {
         let catalog = optional_str(arguments, "catalog");
         let schema = optional_str(arguments, "schema");
         self.connection_settings(connection, catalog, schema, &[])
+    }
+
+    /// The settings `describe_table` and `table_ddl` need: the connection, and the
+    /// `TARGET_*` slots its driver names an object by (`sql_ident::slots`: PostgreSQL schema
+    /// and table, MySQL database and table, Trino all three).
+    ///
+    /// The allowlist is checked by [`Server::resolve`] before anything else is read. A slot
+    /// the arguments and the connection both leave empty is refused here, by the argument's
+    /// own name, rather than by the engine's `TARGET_*` setting name a client never sees.
+    fn target_settings(&self, arguments: &Json) -> Result<Settings, String> {
+        let connection = required_str(arguments, "connection")?;
+        let table = required_str(arguments, "table")?;
+        let resolved = self.resolve(
+            connection,
+            optional_str(arguments, "catalog"),
+            optional_str(arguments, "schema"),
+        )?;
+        let mut targets: Vec<(&str, String)> = Vec::new();
+        for slot in sql_ident::slots(SlotStyle::of(driver_kind(resolved.record.kind))) {
+            let (argument, value) = match slot.part {
+                Part::Database => ("catalog", resolved.catalog.as_str()),
+                Part::Schema => ("schema", resolved.schema.as_str()),
+                Part::Table => ("table", table),
+            };
+            if value.is_empty() {
+                return Err(format!(
+                    "the argument '{argument}' is required: this connection has no default for it"
+                ));
+            }
+            targets.push((slot.target, value.to_owned()));
+        }
+        self.settings_for(&resolved, &targets)
     }
 
     /// Build the per-call settings for a connection, with the allowlist checked first.
