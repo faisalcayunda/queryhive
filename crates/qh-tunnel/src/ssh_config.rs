@@ -10,15 +10,19 @@
 //! line instead (and the message tells the user to fill the fields in explicitly).
 //!
 //! Supported: `HostName` (`%h`, `%%`), `User`, `Port`, `IdentityFile` (`~/`, `%d`, `%h`,
-//! `%%`) and `Include`. A short list of cosmetic directives is ignored because none of
-//! them can change the destination, the trust or the credentials. `Match` anywhere in
+//! `%%`; `%h` there is the resolved `HostName`, as in OpenSSH) and `Include`. A short
+//! list of cosmetic directives is ignored because none of them can change the
+//! destination, the trust or the credentials. `Match` anywhere in
 //! the loaded files refuses every resolution: its criteria are not evaluated and could
 //! add any of the refused directives.
 //!
-//! OpenSSH semantics that are copied: blocks apply in file order, the first value wins
-//! per keyword, `IdentityFile` accumulates, a `Host` block matches when a positive
-//! pattern matches and no `!` pattern does, and `Include` leaves the surrounding block
-//! as it found it (a `Host` inside an included file does not leak into the parent).
+//! OpenSSH semantics that are copied: lines apply in the order they are read, the first
+//! value wins per keyword, `IdentityFile` accumulates, and a `Host` line matches when a
+//! positive pattern matches and no `!` pattern does. An `Include` is read where it
+//! stands and in the scope of the line it is on: inside a `Host` block that does not
+//! apply, nothing in the included file does (not even its own `Host` lines), and when the
+//! included file ends the surrounding block is as it was (a `Host` inside it does not leak
+//! into the parent). `tests/ssh_config.rs` checks all of this against `ssh -G`.
 //!
 //! This module reads files and nothing else. It never opens a network connection.
 
@@ -139,18 +143,25 @@ struct Directive {
     line: usize,
 }
 
+/// What a line of the config means to a resolution, in the order OpenSSH reads them, with
+/// every `Include` expanded where it stands.
 #[derive(Debug)]
-struct Block {
-    /// `None` is the part of the file before any `Host` line, which applies to every
-    /// alias. `Some(vec![])` is a block that can never match (what follows `Match`).
-    patterns: Option<Vec<String>>,
-    directives: Vec<Directive>,
+enum Item {
+    /// A `Host` line. Before the first one, directives apply to every alias. An empty
+    /// list is a block that can never match (what follows `Match`).
+    Host(Vec<String>),
+    /// An `Include` begins. What follows, up to the matching [`Item::Leave`], is read in
+    /// the state this line is in.
+    Enter,
+    /// The included file ended: the surrounding block is as it was before the `Include`.
+    Leave,
+    Directive(Directive),
 }
 
 /// A parsed config: every file, `Include`s followed, nothing evaluated yet.
 #[derive(Debug)]
 pub struct SshConfig {
-    blocks: Vec<Block>,
+    items: Vec<Item>,
     match_at: Option<(PathBuf, usize)>,
     /// First `Include` whose argument we cannot expand faithfully (tokens, env vars,
     /// `~user`, classes, wildcards outside the last component).
@@ -180,15 +191,11 @@ pub fn load_in(path: &Path, home: Option<&Path>) -> Result<SshConfig, SshConfigE
         files: 0,
         lines: 0,
         config: SshConfig {
-            blocks: vec![Block {
-                patterns: None,
-                directives: Vec::new(),
-            }],
+            items: Vec::new(),
             match_at: None,
             unsupported_include_at: None,
             home: home.map(Path::to_path_buf),
         },
-        current: 0,
     };
     loader.read(path, 0)?;
     Ok(loader.config)
@@ -199,7 +206,6 @@ struct Loader<'a> {
     files: usize,
     lines: usize,
     config: SshConfig,
-    current: usize,
 }
 
 impl Loader<'_> {
@@ -248,29 +254,18 @@ impl Loader<'_> {
                     if args.is_empty() {
                         return Err(malformed());
                     }
-                    self.config.blocks.push(Block {
-                        patterns: Some(args),
-                        directives: Vec::new(),
-                    });
-                    self.current = self.config.blocks.len() - 1;
+                    self.config.items.push(Item::Host(args));
                 }
                 "match" => {
                     if self.config.match_at.is_none() {
                         self.config.match_at = Some((path.to_path_buf(), line));
                     }
-                    self.config.blocks.push(Block {
-                        patterns: Some(Vec::new()),
-                        directives: Vec::new(),
-                    });
-                    self.current = self.config.blocks.len() - 1;
+                    self.config.items.push(Item::Host(Vec::new()));
                 }
                 "include" => {
                     if args.is_empty() {
                         return Err(malformed());
                     }
-                    // What follows an Include in this file belongs to the block it was
-                    // in, whatever `Host` lines the included files contain.
-                    let saved = self.current;
                     for arg in &args {
                         if include_is_unsupported(arg) {
                             if self.config.unsupported_include_at.is_none() {
@@ -280,18 +275,21 @@ impl Loader<'_> {
                             continue;
                         }
                         for file in self.expand_include(arg)? {
+                            // What follows the Include in this file belongs to the block
+                            // it was in, whatever `Host` lines the included file has.
+                            self.config.items.push(Item::Enter);
                             self.read(&file, depth + 1)?;
+                            self.config.items.push(Item::Leave);
                         }
                     }
-                    self.current = saved;
                 }
-                _ => self.config.blocks[self.current].directives.push(Directive {
+                _ => self.config.items.push(Item::Directive(Directive {
                     name,
                     key,
                     args,
                     file: path.to_path_buf(),
                     line,
-                }),
+                })),
             }
         }
         Ok(())
@@ -410,9 +408,12 @@ impl SshConfig {
     pub fn aliases(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for pattern in self
-            .blocks
+            .items
             .iter()
-            .filter_map(|block| block.patterns.as_ref())
+            .filter_map(|item| match item {
+                Item::Host(patterns) => Some(patterns),
+                _ => None,
+            })
             .flatten()
         {
             if !pattern.contains(['*', '?', '!']) && !names.contains(pattern) {
@@ -446,19 +447,31 @@ impl SshConfig {
             return Err(unsupported("Include", file, *line));
         }
 
-        // An alias is found when some block names it by something more specific than a
-        // lone `*`; otherwise a typo would resolve to itself and fail elsewhere.
+        // Walk the lines the way OpenSSH reads them. An alias is found when some `Host`
+        // line names it by something more specific than a lone `*`; otherwise a typo
+        // would resolve to itself and fail elsewhere.
         let mut named = false;
-        let mut applying: Vec<&Block> = Vec::new();
-        for block in &self.blocks {
-            match &block.patterns {
-                None => applying.push(block),
-                Some(patterns) => {
-                    if let Some(specific) = block_matches(patterns, alias) {
-                        named |= specific;
-                        applying.push(block);
+        let mut applying: Vec<&Directive> = Vec::new();
+        let mut active = true;
+        // The state of each enclosing `Include` line: a `Host` line inside an included
+        // file can only apply when the line that included it did.
+        let mut scopes: Vec<bool> = Vec::new();
+        for item in &self.items {
+            match item {
+                Item::Host(patterns) => {
+                    let in_scope = scopes.last().copied().unwrap_or(true);
+                    match block_matches(patterns, alias).filter(|_| in_scope) {
+                        Some(specific) => {
+                            named |= specific;
+                            active = true;
+                        }
+                        None => active = false,
                     }
                 }
+                Item::Enter => scopes.push(active),
+                Item::Leave => active = scopes.pop().unwrap_or(true),
+                Item::Directive(directive) if active => applying.push(directive),
+                Item::Directive(_) => {}
             }
         }
         if !named {
@@ -470,8 +483,10 @@ impl SshConfig {
         let mut host_name = None;
         let mut user = None;
         let mut port = None;
-        let mut identity_files = Vec::new();
-        for directive in applying.iter().flat_map(|block| &block.directives) {
+        // Expanded after the loop: `%h` in an `IdentityFile` is the host name the
+        // connection resolves to, wherever `HostName` stands relative to it.
+        let mut identity_raw: Vec<(&str, &Directive)> = Vec::new();
+        for directive in applying {
             let malformed = || SshConfigError::Malformed {
                 file: directive.file.clone(),
                 line: directive.line,
@@ -500,17 +515,7 @@ impl SshConfig {
                     let value = single()?.parse::<u16>().map_err(|_| malformed())?;
                     port.get_or_insert(value);
                 }
-                "identityfile" => {
-                    let raw = single()?;
-                    let home = self.home.as_deref();
-                    let value = if let Some(rest) = raw.strip_prefix("~/") {
-                        home.ok_or(SshConfigError::NoHomeDirectory)?
-                            .join(expand(rest, alias, home).map_err(token_error)?)
-                    } else {
-                        PathBuf::from(expand(raw, alias, home).map_err(token_error)?)
-                    };
-                    identity_files.push(value);
-                }
+                "identityfile" => identity_raw.push((single()?, directive)),
                 key if COSMETIC.contains(&key) => {}
                 // Only the settings that are no weaker than our own behaviour pass.
                 "stricthostkeychecking"
@@ -526,8 +531,27 @@ impl SshConfig {
             }
         }
 
+        let host_name = host_name.unwrap_or_else(|| alias.to_owned());
+        let home = self.home.as_deref();
+        let mut identity_files = Vec::new();
+        for (raw, directive) in identity_raw {
+            let token_error = |token: String| SshConfigError::UnsupportedToken {
+                directive: directive.name.clone(),
+                token,
+                alias: alias.to_owned(),
+                file: directive.file.clone(),
+                line: directive.line,
+            };
+            identity_files.push(if let Some(rest) = raw.strip_prefix("~/") {
+                home.ok_or(SshConfigError::NoHomeDirectory)?
+                    .join(expand(rest, &host_name, home).map_err(token_error)?)
+            } else {
+                PathBuf::from(expand(raw, &host_name, home).map_err(token_error)?)
+            });
+        }
+
         Ok(Resolved {
-            host_name: host_name.unwrap_or_else(|| alias.to_owned()),
+            host_name,
             user,
             port,
             identity_files,
@@ -556,9 +580,10 @@ fn block_matches(patterns: &[String], alias: &str) -> Option<bool> {
     matched.then_some(specific)
 }
 
-/// Expand `%%`, `%h` (the alias) and, when `home` is given, `%d` (home). Any other token
-/// is returned as the error.
-fn expand(value: &str, alias: &str, home: Option<&Path>) -> Result<String, String> {
+/// Expand `%%`, `%h` (`host`) and, when `home` is given, `%d` (home). Any other token is
+/// returned as the error. `host` is the name as typed for `HostName` and the resolved
+/// `HostName` for `IdentityFile`, which is what OpenSSH substitutes in each.
+fn expand(value: &str, host: &str, home: Option<&Path>) -> Result<String, String> {
     let mut out = String::new();
     let mut chars = value.chars();
     while let Some(c) = chars.next() {
@@ -568,7 +593,7 @@ fn expand(value: &str, alias: &str, home: Option<&Path>) -> Result<String, Strin
         }
         match (chars.next(), home) {
             (Some('%'), _) => out.push('%'),
-            (Some('h'), _) => out.push_str(alias),
+            (Some('h'), _) => out.push_str(host),
             (Some('d'), Some(home)) => out.push_str(&home.display().to_string()),
             (Some(other), _) => return Err(format!("%{other}")),
             (None, _) => return Err("%".to_owned()),
@@ -751,7 +776,13 @@ Host skip.corp
         assert_eq!(resolved.host_name, "web.example.com");
         assert_eq!(
             resolved.identity_files,
-            vec![PathBuf::from(format!("{}/keys/web", f.home().display()))]
+            // OpenSSH substitutes the resolved HostName for %h in IdentityFile, and the
+            // name as typed only in HostName itself (checked against `ssh` in
+            // tests/ssh_config.rs).
+            vec![PathBuf::from(format!(
+                "{}/keys/web.example.com",
+                f.home().display()
+            ))]
         );
         match f.resolve("Host web\n  IdentityFile %u/key\n", "web") {
             Err(SshConfigError::UnsupportedToken {
@@ -878,17 +909,49 @@ Host skip.corp
     }
 
     #[test]
-    fn a_host_inside_an_included_file_does_not_leak_into_the_parent() {
+    fn an_include_is_read_in_the_scope_of_its_line_and_hands_the_block_back() {
         let f = Fixture::new();
-        f.write(".ssh/inc", "Host inner\n  User inner-user\n");
+        f.write(
+            ".ssh/inc",
+            "Host inner\n  User inner-user\nHost *\n  Port 7\n",
+        );
+
+        // Inside `Host outer`: the file's `Host *` applies to `outer` and nothing else, its
+        // `Host inner` is inert (the line that included it does not apply to `inner`),
+        // and when the file ends we are back in `outer`.
         let text = "Host outer\n  Include inc\n  User outer-user\n";
+        let outer = f.resolve(text, "outer").expect("resolves");
+        assert_eq!(outer.user.as_deref(), Some("outer-user"));
+        assert_eq!(outer.port, Some(7));
+        assert!(matches!(
+            f.resolve(text, "inner"),
+            Err(SshConfigError::NotFound { .. })
+        ));
+
+        // At the top of the file nothing gates the include, so the file's `Host` lines
+        // work, and `Host outer` after it does not see what `Host inner` set.
+        let top = "Include inc\nHost outer\n  User outer-user\n";
         assert_eq!(
-            f.resolve(text, "outer").expect("resolves").user.as_deref(),
-            Some("outer-user")
+            f.resolve(top, "inner").expect("resolves").user.as_deref(),
+            Some("inner-user")
         );
         assert_eq!(
-            f.resolve(text, "inner").expect("resolves").user.as_deref(),
-            Some("inner-user")
+            f.resolve(top, "outer").expect("resolves").user.as_deref(),
+            Some("outer-user")
+        );
+    }
+
+    #[test]
+    fn lines_after_an_include_come_after_what_the_file_set() {
+        // First value wins in the order the lines are read, an included file's lines
+        // included: the file's `Host *` block is read before the `User` below the
+        // Include, although the block that holds that `User` started earlier.
+        let f = Fixture::new();
+        f.write(".ssh/inc", "Host *\n  User from-file\n");
+        let text = "Host a\n  Include inc\n  User later\n";
+        assert_eq!(
+            f.resolve(text, "a").expect("resolves").user.as_deref(),
+            Some("from-file")
         );
     }
 

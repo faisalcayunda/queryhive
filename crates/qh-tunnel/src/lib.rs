@@ -27,6 +27,11 @@
 //! host key check accepted ([`Error::HostKeyNotVerified`]). `~/.ssh/config` aliases
 //! resolve through [`ssh_config`], which refuses directives it cannot honour by name.
 //!
+//! A bastion that never answers does not hang the caller: the TCP connect and the key
+//! exchange share one limit ([`BastionConfig::connect_timeout`], 15 s by default) and
+//! end in [`Error::ConnectTimeout`], with no credential sent. A handshake that is still
+//! running when the limit hits is told the caller left, so it records nothing.
+//!
 //! The app reads `~/.ssh/known_hosts` itself, which is why it ships without a sandbox
 //! (ADR-0007): the sandbox and this requirement collide directly, not in theory.
 //!
@@ -62,7 +67,7 @@ mod tunnel;
 pub use error::Error;
 pub use key::{fingerprint, ServerKey};
 pub use known_hosts::{HostKeyVerdict, Origin, RecordedKey, StoreFile};
-pub use tunnel::{Auth, BastionConfig, HostKeyPolicy, Target, Tunnel};
+pub use tunnel::{Auth, BastionConfig, HostKeyPolicy, Target, Tunnel, DEFAULT_CONNECT_TIMEOUT};
 // The type of the passwords and passphrases in [`Auth`], so a caller does not have to
 // depend on `secrecy` itself to build one.
 pub use secrecy::SecretString;

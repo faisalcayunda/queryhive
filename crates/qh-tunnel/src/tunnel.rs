@@ -27,6 +27,12 @@
 //! the server refuses — comes back as [`Error::Ssh`] wrapping `russh::Error::Disconnect`
 //! with nothing more specific, because that is all the transport was told; the reason is
 //! in the server's log, not in the protocol.
+//!
+//! The connection is bounded in time: [`BastionConfig::connect_timeout`] covers the TCP
+//! connect, the version exchange and the key exchange with its host-key check, so an
+//! address that drops packets or a port that accepts and says nothing ends in
+//! [`Error::ConnectTimeout`] instead of whatever the OS gives up after (minutes).
+//! Authentication is outside that limit on purpose: an agent may be waiting on a person.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -63,6 +69,13 @@ pub enum Auth {
     Password(SecretString),
 }
 
+/// How long [`Tunnel::open`] waits for the bastion to connect and finish the key exchange.
+///
+/// Long enough for a slow link and a 4096-bit RSA host key, short enough that a wrong
+/// address does not look like a hung app. A caller that knows better sets
+/// [`BastionConfig::connect_timeout`].
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// What to do when the bastion's key is not in `known_hosts`.
 #[derive(Debug, Clone)]
 pub enum HostKeyPolicy {
@@ -95,6 +108,9 @@ pub struct BastionConfig {
     /// only by [`HostKeyPolicy::TrustFingerprint`].
     pub record_to: Option<PathBuf>,
     pub host_key_policy: HostKeyPolicy,
+    /// The time allowed for the TCP connect and the key exchange, host-key check
+    /// included; [`DEFAULT_CONNECT_TIMEOUT`] unless changed.
+    pub connect_timeout: Duration,
 }
 
 impl BastionConfig {
@@ -115,6 +131,7 @@ impl BastionConfig {
             known_hosts: vec![known_hosts.into()],
             record_to: None,
             host_key_policy: HostKeyPolicy::Strict,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 
@@ -138,6 +155,13 @@ impl BastionConfig {
     #[must_use]
     pub fn trust_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
         self.host_key_policy = HostKeyPolicy::TrustFingerprint(fingerprint.into());
+        self
+    }
+
+    /// Give up on the bastion after `timeout` instead of [`DEFAULT_CONNECT_TIMEOUT`].
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
         self
     }
 
@@ -217,6 +241,8 @@ impl Tunnel {
     /// # Errors
     /// [`Error::HostKeyUnknown`], [`Error::HostKeyMismatch`], [`Error::HostKeyRevoked`],
     /// [`Error::HostCertificateUnsupported`] from the key check;
+    /// [`Error::ConnectTimeout`] if the handshake did not finish in
+    /// [`BastionConfig::connect_timeout`];
     /// [`Error::AuthenticationRejected`] if no authentication method worked.
     pub async fn open(config: &BastionConfig, target: Target) -> Result<Self, Error> {
         // Everything that can be refused before the network is touched, is.
@@ -237,6 +263,7 @@ impl Tunnel {
         let ssh_config = Arc::new(client_config(&recorded));
 
         let verified = Arc::new(AtomicBool::new(false));
+        let abandoned = Arc::new(AtomicBool::new(false));
         let verifier = HostKeyVerifier {
             host: config.host.clone(),
             port: config.port,
@@ -249,14 +276,9 @@ impl Tunnel {
             record_to: config.record_to.clone(),
             policy: config.host_key_policy.clone(),
             verified: Arc::clone(&verified),
+            abandoned: Arc::clone(&abandoned),
         };
-        let mut handle =
-            client::connect(ssh_config, (config.host.as_str(), config.port), verifier).await?;
-
-        // Belt and braces: `russh` skips the handler when a key exchange carries no
-        // host key at all, and nothing authenticating may follow that.
-        require_verified(&verified)?;
-        authenticate(&mut handle, config).await?;
+        let handle = connect_verified(config, ssh_config, verifier, &verified, &abandoned).await?;
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let local_port = listener.local_addr()?.port();
@@ -361,6 +383,43 @@ async fn forward(
     Ok(())
 }
 
+/// Connect within the time limit, require that the host-key check accepted the server,
+/// and only then authenticate. Generic over the handler so a test can stand in a handler
+/// that says yes without verifying anything.
+async fn connect_verified<H>(
+    config: &BastionConfig,
+    ssh_config: Arc<Config>,
+    handler: H,
+    verified: &AtomicBool,
+    abandoned: &AtomicBool,
+) -> Result<client::Handle<H>, Error>
+where
+    H: client::Handler<Error = Error> + Send + 'static,
+{
+    let connecting = client::connect(ssh_config, (config.host.as_str(), config.port), handler);
+    let mut handle = match tokio::time::timeout(config.connect_timeout, connecting).await {
+        Ok(connected) => connected?,
+        Err(_) => {
+            // `russh` runs the session on a task of its own, and dropping this future
+            // does not stop a handshake that is half done. Tell the handler the caller
+            // is gone, so a late host key is not recorded for an attempt that already
+            // reported failure.
+            abandoned.store(true, Ordering::SeqCst);
+            return Err(Error::ConnectTimeout {
+                host: config.host.clone(),
+                port: config.port,
+                after: config.connect_timeout,
+            });
+        }
+    };
+
+    // Belt and braces: `russh` skips the handler when a key exchange carries no
+    // host key at all, and nothing authenticating may follow that.
+    require_verified(verified)?;
+    authenticate(&mut handle, config).await?;
+    Ok(handle)
+}
+
 /// `SHA256:` and the 43 base64 characters of an unpadded SHA-256.
 fn is_fingerprint(text: &str) -> bool {
     text.strip_prefix("SHA256:").is_some_and(|rest| {
@@ -434,11 +493,17 @@ struct HostKeyVerifier {
     policy: HostKeyPolicy,
     /// Set only when a key was matched or accepted-and-recorded.
     verified: Arc<AtomicBool>,
+    /// Set when the caller gave up (the connect timeout), so nothing is decided or
+    /// recorded afterwards on a session nobody is waiting for.
+    abandoned: Arc<AtomicBool>,
 }
 
 impl HostKeyVerifier {
     /// The decision, with no network in it (blueprint W11 §5.3 and §5.5).
     fn decide(&self, key: ServerKey) -> Result<bool, Error> {
+        if self.abandoned.load(Ordering::SeqCst) {
+            return Err(Error::HostKeyNotVerified);
+        }
         // `check_all` reads the files and walks them. That is blocking work inside the
         // session loop, and it is deliberate: the files are small, and the alternative
         // — checking after the exchange — would be checking after authenticating.
@@ -766,6 +831,7 @@ mod tests {
             record_to: Some(app),
             policy,
             verified: Arc::new(AtomicBool::new(false)),
+            abandoned: Arc::new(AtomicBool::new(false)),
         };
         Rig { dir, verifier }
     }
@@ -809,6 +875,7 @@ mod tests {
         let again = HostKeyVerifier {
             policy: HostKeyPolicy::Strict,
             verified: Arc::new(AtomicBool::new(false)),
+            abandoned: Arc::new(AtomicBool::new(false)),
             files: rig.verifier.files.clone(),
             record_to: rig.verifier.record_to.clone(),
             fallback_path: rig.verifier.fallback_path.clone(),
@@ -1017,6 +1084,209 @@ mod tests {
             Tunnel::open(&bad_pin, target()).await,
             Err(Error::Usage(_))
         ));
+    }
+
+    #[test]
+    fn a_session_the_caller_gave_up_on_records_nothing() {
+        let presented = key(KEY_A);
+        let rig = rig("", pin(&presented));
+        rig.verifier.abandoned.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            rig.verifier.decide(presented),
+            Err(Error::HostKeyNotVerified)
+        ));
+        assert!(!verified(&rig));
+        assert!(!rig.app_file().exists());
+    }
+
+    // The time limit and the guard, against sockets of our own: no container needed.
+
+    /// A listener that accepts, says `greeting` (maybe nothing) and then never speaks
+    /// or closes again.
+    async fn quiet_listener(greeting: &'static [u8]) -> u16 {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.write_all(greeting).await;
+                held.push(stream);
+            }
+        });
+        port
+    }
+
+    fn quick(port: u16) -> BastionConfig {
+        BastionConfig::new(
+            "127.0.0.1",
+            port,
+            "nobody",
+            Auth::Password(SecretString::new("not-sent".into())),
+            "/nonexistent/known_hosts",
+        )
+        .connect_timeout(Duration::from_millis(300))
+    }
+
+    /// Says yes to every host key, as a verifier with a bug would, and marks the
+    /// connection verified only if it was given the flag.
+    struct Lax(Option<Arc<AtomicBool>>);
+
+    impl client::Handler for Lax {
+        type Error = Error;
+
+        async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Error> {
+            if let Some(flag) = &self.0 {
+                flag.store(true, Ordering::SeqCst);
+            }
+            Ok(true)
+        }
+    }
+
+    /// An SSH server that rejects every login and counts how many it was asked for.
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl russh::server::Handler for Counting {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, russh::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(russh::server::Auth::reject())
+        }
+
+        async fn auth_password(
+            &mut self,
+            _: &str,
+            _: &str,
+        ) -> Result<russh::server::Auth, russh::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(russh::server::Auth::reject())
+        }
+    }
+
+    async fn counting_server() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = Arc::new(russh::server::Config {
+            keys: vec![russh::keys::PrivateKey::from(
+                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]),
+            )],
+            auth_rejection_time: Duration::from_millis(1),
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..russh::server::Config::default()
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let counter = Arc::clone(&attempts);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let counting = Counting(Arc::clone(&counter));
+                if let Ok(session) =
+                    russh::server::run_stream(Arc::clone(&config), stream, counting).await
+                {
+                    tokio::spawn(session);
+                }
+            }
+        });
+        (port, attempts)
+    }
+
+    #[tokio::test]
+    async fn a_bastion_that_goes_quiet_ends_in_a_timeout_not_a_hang() {
+        // Silent from the first byte (a black hole that accepts), and silent after its
+        // banner (stalled in the key exchange): the two places the handshake can wait.
+        for greeting in [&b""[..], &b"SSH-2.0-quiet\r\n"[..]] {
+            let port = quiet_listener(greeting).await;
+            let started = std::time::Instant::now();
+            let result = Tunnel::open(&quick(port), Target::new("db", 5432)).await;
+            match result {
+                Err(Error::ConnectTimeout {
+                    port: reported,
+                    after,
+                    ..
+                }) => {
+                    assert_eq!(reported, port);
+                    assert_eq!(after, Duration::from_millis(300));
+                }
+                other => panic!("expected a connect timeout, got {other:?}"),
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_tells_the_session_the_caller_left() {
+        let port = quiet_listener(b"SSH-2.0-quiet\r\n").await;
+        let (verified, abandoned) = (AtomicBool::new(false), AtomicBool::new(false));
+        let result = connect_verified(
+            &quick(port),
+            Arc::new(client_config(&[])),
+            Lax(None),
+            &verified,
+            &abandoned,
+        )
+        .await;
+        assert!(matches!(result, Err(Error::ConnectTimeout { .. })));
+        assert!(abandoned.load(Ordering::SeqCst));
+        assert!(!verified.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_fails_at_once_and_is_not_a_timeout() {
+        let port = {
+            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+            probe.local_addr().expect("addr").port()
+        };
+        let started = std::time::Instant::now();
+        let result = Tunnel::open(&quick(port), Target::new("db", 5432)).await;
+        // `russh` reports the refused socket as its own transport error.
+        assert!(
+            matches!(result, Err(Error::Ssh(_) | Error::Io(_))),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn authentication_never_starts_on_a_connection_the_verifier_did_not_accept() {
+        let (port, attempts) = counting_server().await;
+        let config = quick(port).connect_timeout(Duration::from_secs(10));
+        let ssh_config = || Arc::new(client_config(&[]));
+
+        // The handler says yes and never marks the connection verified: the guard, not
+        // the handler, is what keeps the password at home.
+        let unmarked = AtomicBool::new(false);
+        let refused = connect_verified(
+            &config,
+            ssh_config(),
+            Lax(None),
+            &unmarked,
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(Error::HostKeyNotVerified)),
+            "{:?}",
+            refused.err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "a login was attempted");
+
+        // The control: the same server and config, verified this time. The server does
+        // see the login, so the zero above means something.
+        let marked = Arc::new(AtomicBool::new(false));
+        let reached = connect_verified(
+            &config,
+            ssh_config(),
+            Lax(Some(Arc::clone(&marked))),
+            &marked,
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(
+            matches!(reached, Err(Error::AuthenticationRejected { .. })),
+            "{:?}",
+            reached.err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
