@@ -154,9 +154,8 @@ struct ResultGridTable: NSViewRepresentable {
 
         /// The inputs last applied, which is what makes `updateNSView`'s diff possible.
         private(set) var applied: GridInputs?
-        /// The rows, resolved once per revision: `ArrayRows` reads through a filter and a sort that
-        /// must not be recomputed per row.
-        var rows: any ResultRows = ArrayRows(rows: [], sizing: [], columns: [])
+        /// The rows, resolved once per revision: the tab's store, or the empty stand-in.
+        var rows: any ResultRows = EmptyRows()
         /// The column formats, read once per result and again when the store says one changed
         /// (blueprint D-5) — never per cell on the draw path.
         private(set) var formats: [ColumnFormat] = []
@@ -206,6 +205,7 @@ struct ResultGridTable: NSViewRepresentable {
             // The header draws its labels and chips through the same cache the body does: without
             // this it would fall back to an unattributed `CTLine`, which is black.
             table.header.lineCache = lineCache
+            tab.pollHook = { [weak self] in MainActor.assumeIsolated { self?.pollRows() } }
         }
 
         func install(in scroll: NSScrollView) {
@@ -261,6 +261,7 @@ struct ResultGridTable: NSViewRepresentable {
                 // every result for nobody, which is the thing D-10 forbids.
                 if axClientAttached { axTree.invalidate() }
                 noteResultChangedForAX()
+                table?.isPolling = rows.isLive
             } else if let old {
                 let rows = GridPaintDiff.invalidatedRows(old: old, new: inputs,
                                                          oldRowCount: rowCount(old), newRowCount: rows.count)
@@ -278,6 +279,7 @@ struct ResultGridTable: NSViewRepresentable {
 
         private func refreshRowsAndGeometry(_ inputs: GridInputs) {
             rows = tab.result
+            tab.pollHook = { [weak self] in MainActor.assumeIsolated { self?.pollRows() } }
             naturalWidths = inputs.layout.columnWidths
             showRowNumbers = inputs.style.showRowNumbers
             let previousPalette = paint.palette
@@ -368,6 +370,8 @@ struct ResultGridTable: NSViewRepresentable {
                 else { return .raw }
                 return ColumnFormatStore.format(identity)
             }
+            // Before any text is rebuilt: the store drops the pages whose format changed.
+            rows.prepare(formats: formats)
         }
 
         private func formatChanged(_ note: Notification) {
@@ -378,6 +382,7 @@ struct ResultGridTable: NSViewRepresentable {
                                            column: column.name) == identity {
                 formats[index] = ColumnFormatStore.format(identity)
             }
+            rows.prepare(formats: formats)
             textCache.removeAll()
             table?.needsDisplay = true
         }
@@ -734,10 +739,16 @@ struct ResultGridTable: NSViewRepresentable {
         // MARK: Copy
 
         func copy(withHeaders: Bool) {
-            let text = GridClipboard.text(result: rows, selection: tab.cellSelection,
-                                          visible: applied?.layout.visibleSources ?? tab.visibleColumnSources,
-                                          withHeaders: withHeaders)
-            guard let text else { return }
+            let text: String
+            do {
+                guard let built = try GridClipboard.text(result: rows, selection: tab.cellSelection,
+                                                         visible: applied?.layout.visibleSources ?? tab.visibleColumnSources,
+                                                         withHeaders: withHeaders) else { return }
+                text = built
+            } catch {
+                if (error as? StoreFailure)?.isStale != true { tab.note(.error, "Copy failed: \(error)") }
+                return
+            }
             let pasteboard = NSPasteboard.general
             let changeCount = pasteboard.changeCount
             // A block of more than 10,000 cells is built off the main thread, and the pasteboard is
@@ -844,8 +855,15 @@ struct ResultGridTable: NSViewRepresentable {
 
         // MARK: Rows grew
 
-        /// W6 calls this from a display link when a streaming result adds pages without replacing
-        /// the store. In W5 a replace is the only way rows grow, so it is the identity.
+        /// One display tick, or a wake-up from the run's first `progress`: ask the store what it
+        /// learned, grow the table by the new rows, and stop the link once the rows are final.
+        func pollRows() {
+            let result = rows.poll()
+            if let from = result.grewFrom { rowsDidGrow(from: from, to: rows.count) }
+            table?.isPolling = rows.isLive
+        }
+
+        /// A streaming result added rows to the view on screen, without replacing it.
         func rowsDidGrow(from: Int, to: Int) {
             table?.noteNumberOfRowsChanged()
             guard let table, from < to else { return }

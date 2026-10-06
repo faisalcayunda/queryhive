@@ -98,19 +98,26 @@ final class GridColumnsTests: XCTestCase {
 
     // MARK: Reconciliation: a sort and a filter follow their column
 
-    private func threeColumns() -> PreviewResult {
-        PreviewResult(columns: [Event.Column(name: "a", type: "bigint"),
-                                Event.Column(name: "b", type: "varchar"),
-                                Event.Column(name: "c", type: "varchar")],
-                      rows: [["3", "x", "q"], ["1", "y", "r"], ["2", "y", "s"]],
-                      truncated: false, queryID: nil, elapsedMS: 0)
+    private func loadThree(_ tab: QueryTab) {
+        tab.showRows(columns: [Event.Column(name: "a", type: "bigint"),
+                               Event.Column(name: "b", type: "varchar"),
+                               Event.Column(name: "c", type: "varchar")],
+                     rows: [["3", "x", "q"], ["1", "y", "r"], ["2", "y", "s"]],
+                     truncated: false, queryID: nil, elapsedMS: 0)
+    }
+
+    /// One source column of the rows the grid draws, once the view the tab asked for has landed.
+    private func shown(_ tab: QueryTab, _ column: Int) -> [String?] {
+        let until = Date().addingTimeInterval(5)
+        while tab.viewBusy, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+        return tab.result.rows(in: 0..<tab.result.count, columns: [column]).map { $0[0] }
     }
 
     func testASortFollowsAMovedColumn() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"])
+        XCTAssertEqual(shown(tab, 0), ["1", "2", "3"])
 
         // Move `a` from first to last on screen. Its identity has not changed, so the order must
         // not either; only the chevron's place moves.
@@ -118,25 +125,25 @@ final class GridColumnsTests: XCTestCase {
 
         XCTAssertEqual(tab.activeSort, ActiveSort(column: 0, direction: .ascending, origin: .memory))
         XCTAssertEqual(tab.visibleColumnSources, [1, 2, 0])
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"],
+        XCTAssertEqual(shown(tab, 0), ["1", "2", "3"],
                        "still ordered by source column 0")
     }
 
     func testAFilterFollowsAMovedColumn() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.columnFilters[0] = .text("2")
 
         tab.moveColumn(from: 0, to: 2)
 
         XCTAssertEqual(tab.columnFilters[0], .text("2"))
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["2"],
+        XCTAssertEqual(shown(tab, 0), ["2"],
                        "the filter still reads the source column it was set on")
     }
 
     func testMovingAColumnKeepsAFilterAndASortOnDifferentColumns() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.columnFilters[1] = .text("y")
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
@@ -148,7 +155,7 @@ final class GridColumnsTests: XCTestCase {
 
     func testHidingTheSortedColumnDropsTheSort() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.setColumnHidden(0, true)
@@ -161,18 +168,18 @@ final class GridColumnsTests: XCTestCase {
 
     func testHidingAnotherColumnKeepsTheSort() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.setColumnHidden(1, true)
 
         XCTAssertEqual(tab.activeSort, ActiveSort(column: 0, direction: .ascending, origin: .memory))
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"])
+        XCTAssertEqual(shown(tab, 0), ["1", "2", "3"])
     }
 
     func testAHiddenColumnsFilterStaysActiveRatherThanPointingElsewhere() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.columnFilters[1] = .text("y")
 
         tab.setColumnHidden(1, true)
@@ -180,12 +187,12 @@ final class GridColumnsTests: XCTestCase {
         // The filter is keyed by the source column, so hiding the column does not move the filter
         // onto a neighbour — it keeps describing the same data, whether or not its funnel is drawn.
         XCTAssertEqual(tab.columnFilters[1], .text("y"))
-        XCTAssertEqual(tab.displayedRows.map { $0[1] }, ["y", "y"])
+        XCTAssertEqual(shown(tab, 1), ["y", "y"])
     }
 
     func testRenamingDoesNotTouchTheSortOrTheFilter() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.columnFilters[0] = .text("2")
         tab.applyMemorySort(GridSort(column: 1, direction: .descending))
 
@@ -199,7 +206,7 @@ final class GridColumnsTests: XCTestCase {
         // The selection is a rectangle of display positions, so a column that moves or disappears
         // under it changes what it points at. Edits are keyed by source and survive.
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.cellSelection = CellRange(from: (row: 0, column: 0), to: (row: 1, column: 1))
         tab.cellEdits.edit("z", at: CellKey(row: 0, column: 0), original: "3")
 
@@ -214,17 +221,17 @@ final class GridColumnsTests: XCTestCase {
 
     func testALayoutIsResetWhenTheColumnSetChangesButKeptAcrossARepaint() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.renameColumn(1, to: "kode")
         tab.setColumnHidden(2, true)
 
         // A repaint of the same result — a streaming run paints several times — keeps the layout.
-        tab.preview = threeColumns()
+        loadThree(tab)
         XCTAssertEqual(tab.columnLayout.label(1, original: tab.preview!.columns), "kode")
         XCTAssertFalse(tab.columnLayout.isVisible(2))
 
         // A result with a different number of columns cannot reuse it.
-        tab.preview = PreviewResult(columns: [Event.Column(name: "a", type: "bigint"),
+        tab.showRows(columns: [Event.Column(name: "a", type: "bigint"),
                                               Event.Column(name: "b", type: "varchar")],
                                     rows: [], truncated: false, queryID: nil, elapsedMS: 0)
         XCTAssertEqual(tab.columnLayout.sourceCount, 2)
@@ -234,7 +241,7 @@ final class GridColumnsTests: XCTestCase {
 
     func testShowAllAndResetPutTheGridBack() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.setColumnHidden(0, true)
         tab.renameColumn(1, to: "kode")
         tab.moveColumn(from: 0, to: 1)
@@ -250,23 +257,23 @@ final class GridColumnsTests: XCTestCase {
     // MARK: Cross-column search
 
     func testTheInMemorySearchFindsATermInAnyColumn() {
-        XCTAssertTrue(GridSearch.matches(["32.01", "KPM Sukamaju", "4"], term: "sukamaju"))
-        XCTAssertTrue(GridSearch.matches(["32.01", "KPM Sukamaju", "4"], term: "32.01"))
-        XCTAssertFalse(GridSearch.matches(["32.01", "KPM Sukamaju", nil], term: "bandung"))
+        XCTAssertTrue(SwiftGridReference.matches(["32.01", "KPM Sukamaju", "4"], term: "sukamaju"))
+        XCTAssertTrue(SwiftGridReference.matches(["32.01", "KPM Sukamaju", "4"], term: "32.01"))
+        XCTAssertFalse(SwiftGridReference.matches(["32.01", "KPM Sukamaju", nil], term: "bandung"))
         // A NULL contains nothing, and a blank term contains everything.
-        XCTAssertTrue(GridSearch.matches([nil, nil], term: "   "))
+        XCTAssertTrue(SwiftGridReference.matches([nil, nil], term: "   "))
     }
 
     func testASearchNarrowsTheRowsAndIsResetLikeAFilter() {
         let tab = QueryTab(title: "Q")
-        tab.preview = threeColumns()
+        loadThree(tab)
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
         tab.gridSearch = "y"
 
         XCTAssertNil(tab.activeSort, "a search is a claim about a new set of rows")
-        XCTAssertEqual(tab.displayedRows.count, 2)
-        XCTAssertEqual(tab.displayedRows.map { $0[1] }, ["y", "y"])
+        XCTAssertEqual(shown(tab, 1).count, 2)
+        XCTAssertEqual(shown(tab, 1), ["y", "y"])
         XCTAssertTrue(tab.hasGridSearch)
     }
 
@@ -321,7 +328,7 @@ final class GridColumnsTests: XCTestCase {
     func testTheGridRendersWithHiddenMovedRenamedColumnsAndASearch() throws {
         let model = AppModel()
         let tab = QueryTab(title: "Q")
-        let preview = PreviewResult(
+        tab.showRows(
             columns: [Event.Column(name: "kode_wilayah", type: "varchar"),
                       Event.Column(name: "nama", type: "varchar"),
                       Event.Column(name: "jumlah_jiwa", type: "bigint"),
@@ -331,11 +338,11 @@ final class GridColumnsTests: XCTestCase {
                    ["32.01.01.2002", "KPM Cibadak", "2", "true", "verifikasi"],
                    ["32.01.02.1004", "KPM Sukajadi", "1", "true", nil]],
             truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 210)
-        tab.preview = preview
         tab.renameColumn(1, to: "Nama KPM")
         tab.setColumnHidden(3, true)          // `aktif` hidden
         tab.moveColumn(from: 0, to: 3)        // `kode_wilayah` moved to the end
         tab.gridSearch = "kpm"
+        _ = shown(tab, 0)   // the view must land first: it drops the selection
         tab.cellSelection = CellRange(from: (row: 0, column: 0), to: (row: 1, column: 1))
 
         let view = ResultGrid(tab: tab)

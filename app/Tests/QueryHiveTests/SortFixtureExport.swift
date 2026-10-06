@@ -116,7 +116,7 @@ final class SortFixtureExport: XCTestCase {
     private static func sortOrder(column: Int, direction: GridSort.Direction,
                                   over rows: [[String?]], ids: [Int]) -> [Int] {
         let tagged = zip(rows, ids).map { $0.0 + [String($0.1)] }
-        let sorted = GridSort(column: column, direction: direction).order(tagged)
+        let sorted = SwiftGridReference.order(GridSort(column: column, direction: direction), tagged)
         return sorted.map { Int($0[rows[0].count]!)! }
     }
 
@@ -143,30 +143,30 @@ final class SortFixtureExport: XCTestCase {
             for needle in textNeedles {
                 filters.append([
                     "kind": "text", "column": column, "needle": needle,
-                    "rows": filterIndices(rows) { ColumnFilter.matchesText($0[column], needle) },
+                    "rows": filterIndices(rows) { SwiftGridReference.matchesText($0[column], needle) },
                 ])
             }
             for set in valueSets {
                 let filter = ColumnFilter.values(Set(set.map { $0 ?? ColumnFilter.nullToken }))
                 filters.append([
                     "kind": "values", "column": column, "values": set.map(json),
-                    "rows": filterIndices(rows) { filter.matches($0[column]) },
+                    "rows": filterIndices(rows) { SwiftGridReference.matches(filter, $0[column]) },
                 ])
             }
         }
 
         let searches: [[String: Any]] = searchTerms.map { term in
-            ["term": term, "rows": filterIndices(rows) { GridSearch.matches($0, term: term) }]
+            ["term": term, "rows": filterIndices(rows) { SwiftGridReference.matches($0, term: term) }]
         }
 
-        // The pipeline `QueryTab.displayedRows` runs: filters, then search, then the sort.
+        // The pipeline the Swift grid ran (`QueryTab.displayedRows`, now the Rust view): filters, then search, then the sort.
         let pipelines: [[String: Any]] = [
             (1, ">=5", "k", 0, false), (1, "<10", "", 2, true), (0, "an", "e", 1, false),
             (2, "=ß", " ", 0, true), (1, "", "10", 1, true), (0, "zzz", "", 0, false),
         ].map { filterColumn, needle, term, sortColumn, descending in
             let kept = all.filter {
-                ColumnFilter.matchesText(rows[$0][filterColumn], needle)
-                    && GridSearch.matches(rows[$0], term: term)
+                SwiftGridReference.matchesText(rows[$0][filterColumn], needle)
+                    && SwiftGridReference.matches(rows[$0], term: term)
             }
             let order = sortOrder(column: sortColumn,
                                   direction: descending ? .descending : .ascending,

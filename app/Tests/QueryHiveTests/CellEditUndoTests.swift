@@ -16,7 +16,7 @@ final class CellEditUndoTests: XCTestCase {
 
     private func tab() -> QueryTab {
         let tab = QueryTab(title: "Q")
-        tab.preview = PreviewResult(columns: [Event.Column(name: "a", type: "bigint"),
+        tab.showRows(columns: [Event.Column(name: "a", type: "bigint"),
                                               Event.Column(name: "b", type: "varchar")],
                                     rows: [["3", "x"], ["1", "y"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)

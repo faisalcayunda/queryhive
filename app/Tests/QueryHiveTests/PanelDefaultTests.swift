@@ -25,7 +25,7 @@ final class PanelDefaultTests: XCTestCase {
 
     /// A one-column preview, so a test can say "this tab has rows" without repeating the shape.
     private func preview(rows: [[String?]]) -> PreviewResult {
-        PreviewResult(columns: [Event.Column(name: "a", type: "12")], rows: rows,
+        PreviewResult(columns: [Event.Column(name: "a", type: "12")], rowCount: rows.count,
                       truncated: false, elapsedMS: 1)
     }
 

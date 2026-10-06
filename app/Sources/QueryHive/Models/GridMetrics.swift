@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import QueryHiveFFI
 
 /// The grid's numbers, as pure values: no view, no table, no state.
 ///

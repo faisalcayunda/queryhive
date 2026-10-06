@@ -208,23 +208,6 @@ enum ColumnFilter: Equatable {
     /// Past this many distinct values the picker becomes a search box.
     static let valuePickerLimit = 10
 
-    /// The distinct values offered for a column, in a stable order: `nil` first because a NULL is
-    /// its own state and not a value, then the non-nulls sorted so the list does not reshuffle
-    /// between runs. Only the first `valuePickerLimit + 1` are needed to make the decision, but the
-    /// full set is cheap over at most a preview's worth of rows.
-    static func distinctValues(in rows: [[String?]], column: Int) -> [String?] {
-        var seen = Set<String>()
-        var hasNull = false
-        for row in rows {
-            guard column < row.count, let value = row[column] else {
-                hasNull = true
-                continue
-            }
-            seen.insert(value)
-        }
-        return (hasNull ? [nil] : []) + seen.sorted()
-    }
-
     var isEmpty: Bool {
         switch self {
         case .values(let picked): picked.isEmpty
@@ -242,57 +225,15 @@ enum ColumnFilter: Equatable {
         }
     }
 
-    func matches(_ value: String?) -> Bool {
-        switch self {
-        case .values(let picked):
-            // A NULL is represented by a sentinel string, because a Set cannot hold nil and the
-            // picker has to be able to offer it: "show me the rows with no value here" is a real
-            // question about a column full of them.
-            guard let value else { return picked.contains(ColumnFilter.nullToken) }
-            return picked.contains(value)
-        case .text(let needle):
-            return ColumnFilter.matchesText(value, needle)
-        }
-    }
-
     /// The picker's stand-in for SQL NULL.
     static let nullToken = "\u{0}null"
-
-    static func matchesText(_ value: String?, _ filter: String) -> Bool {
-        let needle = filter.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return true }
-        // A NULL is not a value that can contain anything, and it is not the empty string either.
-        guard let value else { return false }
-
-        for op in [">=", "<=", ">", "<", "="] where needle.hasPrefix(op) {
-            let operand = String(needle.dropFirst(op.count)).trimmingCharacters(in: .whitespaces)
-            guard !operand.isEmpty else { break }
-            if op == "=" { return value.localizedCaseInsensitiveCompare(operand) == .orderedSame }
-            // Text ordering when either side is not a number, so a filter on a date column still
-            // does something instead of matching nothing.
-            if let left = Double(value), let right = Double(operand) {
-                switch op {
-                case ">=": return left >= right
-                case "<=": return left <= right
-                case ">": return left > right
-                default: return left < right
-                }
-            }
-            switch op {
-            case ">=": return value >= operand
-            case "<=": return value <= operand
-            case ">": return value > operand
-            default: return value < operand
-            }
-        }
-        return value.localizedCaseInsensitiveContains(needle)
-    }
 }
 
-/// The rows a Run fetched, rendered by the grid.
+/// What a Run produced, apart from the rows: those live in the Rust store (`StoreRows`).
 struct PreviewResult {
     var columns: [Event.Column]
-    var rows: [[String?]]
+    /// Rows the run fetched; written by `done`, and 0 while the result is still arriving.
+    var rowCount: Int
     /// The row limit stopped it short, so what is on screen is not the whole result.
     var truncated: Bool
     var queryID: String?
@@ -303,22 +244,18 @@ struct PreviewResult {
     /// What the grid's footer says it is showing. It must never imply the grid holds everything.
     var summary: String {
         if stopped {
-            return rows.isEmpty ? "Stopped before any rows arrived" : "Stopped · \(pluralized(rows.count, "row"))"
+            return rowCount == 0 ? "Stopped before any rows arrived" : "Stopped · \(pluralized(rowCount, "row"))"
         }
         return truncated
-            ? "First \(rows.count.formatted()) rows · limit reached"
-            : pluralized(rows.count, "row")
+            ? "First \(rowCount.formatted()) rows · limit reached"
+            : pluralized(rowCount, "row")
     }
-
-    /// Non-grid readers (snapshots, benches) use this instead of `.rows.count`.
-    var rowCount: Int { rows.count }
 }
 
-/// The "off" rule before the result store lands: a base result is kept only
-/// when holding it beside the active one does not double a large buffer.
-enum BaseResultCache {
-    static let limit = 10_000
-    static func shouldStore(rowCount: Int) -> Bool { rowCount <= limit }
+/// A finished result and the store that holds its rows: what "off" returns to (blueprint §18).
+struct ResultSlot {
+    var meta: PreviewResult
+    var rows: StoreRows
 }
 
 /// Which panel is showing under the SQL editor.
@@ -561,7 +498,7 @@ final class QueryTab: Identifiable {
             cellEdits.discard()
             clearEditUndo()
             if activeSort?.origin == .memory { activeSort = nil }
-            gridRevision += 1
+            scheduleViewApply()
         }
     }
 
@@ -579,7 +516,7 @@ final class QueryTab: Identifiable {
             cellEdits.discard()
             clearEditUndo()
             if activeSort?.origin == .memory { activeSort = nil }
-            gridRevision += 1
+            scheduleViewApply()
         }
     }
 
@@ -593,14 +530,14 @@ final class QueryTab: Identifiable {
 
     /// The in-memory order over the fetched rows, or nil when the server owns
     /// the order (or there is none): a server order is never re-applied here.
-    private var memorySort: GridSort? {
+    var memorySort: GridSort? {
         guard let sort = activeSort, sort.origin == .memory else { return nil }
         return GridSort(column: sort.column, direction: sort.direction)
     }
 
     /// The term the grid filters in memory, or nil when the server already
     /// applied the same term: filtering twice would only risk diverging.
-    private var effectiveLocalSearch: String? {
+    var effectiveLocalSearch: String? {
         let term = gridSearch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return nil }
         if let server = serverSearch, server == term { return nil }
@@ -629,8 +566,9 @@ final class QueryTab: Identifiable {
     /// grid does not filter the same rows a second time in memory.
     var serverSearch: String?
 
-    /// The base result kept for "off": restored without a query when small.
-    var baseResult: PreviewResult?
+    /// The base result kept for "off": the rows in server order, held by their own store, which
+    /// spills before it doubles memory (§18). `nil` for a restored tab, a stopped Run or a failed one.
+    var baseResult: ResultSlot?
 
     /// Sort the fetched rows in memory: the fallback when the server route
     /// does not apply. Drops the positional state the new order invalidates.
@@ -639,7 +577,7 @@ final class QueryTab: Identifiable {
         cellSelection = nil
         cellEdits.discard()
         clearEditUndo()
-        gridRevision += 1
+        scheduleViewApply()
     }
 
     /// Mark the rows server-ordered: set before the re-run, kept on failure
@@ -754,6 +692,7 @@ final class QueryTab: Identifiable {
 
     /// Open an editing session over a cell, seeded with what it currently shows.
     func beginCellEdit(at key: CellKey) {
+        guard !refusedWhileBusy() else { return }
         let seed = cellValue(at: key) ?? ""
         editSession = CellEditSession(key: key, original: fetchedValue(at: key), text: seed)
     }
@@ -761,7 +700,7 @@ final class QueryTab: Identifiable {
     /// A keystroke. The buffer is replaced; nothing reaches the queue and nothing is registered with
     /// undo until the session ends. That is the whole point: typing "hello" is one undo, not five.
     func typeCellEdit(_ text: String) {
-        guard var session = editSession else { return }
+        guard !viewBusy, var session = editSession else { return }
         session.text = text
         editSession = session
     }
@@ -777,6 +716,7 @@ final class QueryTab: Identifiable {
     func endCellEdit() {
         guard let session = editSession else { return }
         editSession = nil
+        guard !refusedWhileBusy() else { return }
         let before = cellEdits
         cellEdits.edit(session.text, at: session.key, original: session.original)
         registerGridEdit(before)
@@ -784,6 +724,7 @@ final class QueryTab: Identifiable {
 
     /// Stage the editor's text over a whole selected block as one undo step.
     func fillCellEdits(_ text: String, over selection: CellRange) {
+        guard !refusedWhileBusy() else { return }
         let before = cellEdits
         cellEdits.fill(text, over: selection, rows: result, columns: visibleColumnSources)
         registerGridEdit(before)
@@ -791,10 +732,20 @@ final class QueryTab: Identifiable {
 
     /// Stage a pasted block as one undo step.
     func pasteCellEdits(_ text: String, at origin: CellKey, columnCount: Int) {
+        guard !refusedWhileBusy() else { return }
         let before = cellEdits
         cellEdits.paste(text, at: origin, rows: result, columnCount: columnCount,
                         columns: visibleColumnSources)
         registerGridEdit(before)
+    }
+
+    static let viewBusyMessage = "The grid is updating its rows"
+
+    /// Edits name rows of the view on screen, and a view is on its way out (D-27): refuse, and say so.
+    private func refusedWhileBusy() -> Bool {
+        guard viewBusy else { return false }
+        note(.warning, Self.viewBusyMessage)
+        return true
     }
 
     /// Empty the queue as one undo step.
@@ -850,65 +801,125 @@ final class QueryTab: Identifiable {
         editUndoManager.endUndoGrouping()
     }
 
-    /// A counter that changes whenever the rows, the filters, the search or the sort change.
-    ///
-    /// It exists so `displayedRows` can be cached: the grid reads that value several times per
-    /// render, and filtering and sorting a large result on each read is work the user pays for on
-    /// every hover and selection. Bumped in the places that can change what is on screen —
-    /// `preview`, `columnFilters`, `gridSearch` and the sort setters.
+    /// A counter that changes whenever the rows the grid draws are a different set: a new result,
+    /// a view that has just been installed, a layout change. The grid redraws from it. Growth of a
+    /// streaming result does not bump it (`StoreRows.poll` and `rowsDidGrow` carry that, D-28).
     private(set) var gridRevision = 0
 
-    /// The cached answer, and the revision it was computed for.
-    @ObservationIgnored private var displayedCache: [[String?]]?
-    @ObservationIgnored private var displayedCacheRevision = -1
-
-    /// The rows the grid draws: the fetched rows with the filters and the sort applied.
-    ///
-    /// Pure in the rows, the filters and the sort — all three revision-stamped — so the answer
-    /// cannot change without a bump, which is what makes the cache safe rather than merely fast.
-    var displayedRows: [[String?]] {
-        if displayedCacheRevision == gridRevision, let displayedCache { return displayedCache }
-        let rows: [[String?]]
-        if let preview {
-            var filtered = columnFilters.isEmpty
-                ? preview.rows
-                : preview.rows.filter { row in
-                    columnFilters.allSatisfy { index, filter in
-                        filter.matches(index < row.count ? row[index] : nil)
-                    }
-                }
-            // The cross-column search narrows the same set the filters do, and before the sort for
-            // the same reason: the order is over what survives.
-            if let term = effectiveLocalSearch {
-                filtered = filtered.filter { GridSearch.matches($0, term: term) }
-            }
-            rows = memorySort.map { $0.order(filtered) } ?? filtered
-        } else {
-            rows = []
+    /// The rows the grid draws. Written when a Run starts, and released with the tab (§19).
+    var activeResult: StoreRows? {
+        // A different store means an apply still in flight is for rows that are gone: its hop must
+        // neither land nor be waited for, so the guard goes down with the store (D-27).
+        didSet {
+            guard oldValue !== activeResult else { return }
+            viewGeneration += 1
+            viewBusy = false
         }
-        displayedCache = rows
-        displayedCacheRevision = gridRevision
-        return rows
     }
 
-    /// What the grid draws; rebuilt only when `gridRevision` changes.
-    ///
-    /// An `ArrayRows` over `displayedRows` for display; an empty one without a preview.
-    @ObservationIgnored private var resultCache: (any ResultRows)?
-    @ObservationIgnored private var resultCacheRevision = -1
+    /// Rows fetched so far, at most five times a second while streaming (D-28): the one number
+    /// SwiftUI watches, because the store itself is not observable.
+    var fetchedRows = 0
 
-    var result: any ResultRows {
-        if resultCacheRevision == gridRevision, let resultCache { return resultCache }
-        if let preview {
-            let displayed = displayedRows
-            let sizing = preview.rows
-            let columns = preview.columns
-            resultCache = ArrayRows(rows: displayed, sizing: sizing, columns: columns)
-        } else {
-            resultCache = ArrayRows(rows: [], sizing: [], columns: [])
+    /// A view is being applied to the store: edits, fills, pastes and write plans are refused until
+    /// it lands, because their row indices belong to the view being replaced (D-27).
+    private(set) var viewBusy = false
+    /// Which `scheduleViewApply` call is the latest. Only its hop may clear `viewBusy`.
+    @ObservationIgnored private(set) var viewGeneration = 0
+    /// Why the last view could not be applied, for the grid's banner.
+    var viewError: String?
+
+    @ObservationIgnored private static let noRows = EmptyRows()
+
+    /// What the grid draws: the store, or an empty stand-in before any Run.
+    var result: any ResultRows { activeResult ?? Self.noRows }
+
+    /// Ask the store for the view the filters, search and in-memory sort describe. The grid keeps
+    /// showing the old view until the new one is installed.
+    func scheduleViewApply() {
+        guard let store = activeResult else { gridRevision += 1; return }
+        viewGeneration += 1
+        let generation = viewGeneration
+        viewBusy = true
+        viewError = nil
+        let spec = viewSpec
+        Task { @MainActor [weak self] in
+            // A newer ask (or `applyViewBlocking`) came before this one ran: it is the one to apply.
+            guard self?.viewGeneration == generation else { return }
+            var failure: StoreFfiError?
+            do { _ = try await store.apply(spec) } catch let error as StoreFfiError {
+                switch error {
+                case .Superseded, .StaleHandle: self?.endViewApply(generation)
+                    return
+                case .StaleView: break
+                default: failure = error
+                }
+            } catch { self?.endViewApply(generation); return }
+            self?.viewApplied(on: store, generation: generation, failure: failure)
         }
-        resultCacheRevision = gridRevision
-        return resultCache!
+    }
+
+    /// Apply the view now, on this thread. For fixtures, snapshots and tests that set a filter, a
+    /// search or a sort and need the rows to be those straight away, before they stage anything.
+    func applyViewBlocking() {
+        guard let store = activeResult else { gridRevision += 1; return }
+        viewGeneration += 1
+        do { try store.applyBlocking(viewSpec); viewError = nil } catch {
+            viewError = error.localizedDescription
+        }
+        viewBusy = false
+        gridRevision += 1
+    }
+
+    /// An apply that installed nothing: lower the guard if it was the latest ask.
+    private func endViewApply(_ generation: Int) {
+        if generation == viewGeneration { viewBusy = false }
+    }
+
+    /// The hop that follows an `apply`. Every completed apply moves the store's view, so the grid
+    /// is told (its cached rows belong to the one before); only the latest one ends `viewBusy`.
+    func viewApplied(on store: StoreRows, generation: Int, failure: StoreFfiError? = nil) {
+        guard activeResult === store else { return }
+        gridRevision += 1
+        guard generation == viewGeneration else { return }
+        viewBusy = false
+        if let failure { viewError = failure.localizedDescription }
+        // An edit that got in before `viewBusy` came on names a row of the view that has gone.
+        cellSelection = nil
+        if !cellEdits.isEmpty { cellEdits.discard() }
+        clearEditUndo()
+    }
+
+    /// Installed by the grid's coordinator: asks it to poll the store now. The first `progress` of
+    /// a run calls it, so the first rows do not wait for a display tick.
+    @ObservationIgnored var pollHook: (() -> Void)?
+
+    /// Let go of both stores and forget the metadata that described them (§19). Replaces the token,
+    /// so events from a run that is still winding down are dropped by the guard that checks it.
+    func releaseResults() {
+        previewToken = UUID()
+        let held = [activeResult, baseResult?.rows]
+        activeResult = nil
+        baseResult = nil
+        viewBusy = false
+        viewGeneration += 1
+        for store in held { store?.release() }
+    }
+
+    /// A finished result from rows already in hand: fixtures, snapshots and benches. Builds the store
+    /// through the engine and installs it the way a `done` would.
+    func showRows(columns: [Event.Column], rows: [[String?]], truncated: Bool = false,
+                  queryID: String? = nil, elapsedMS: Int = 0, stopped: Bool = false) {
+        do {
+            let store = try Engine.current.storeFromRows(columns: columns, rows: rows)
+            activeResult?.release()
+            activeResult = store
+            fetchedRows = store.fetched
+            preview = PreviewResult(columns: columns, rowCount: store.fetched, truncated: truncated,
+                                    queryID: queryID, elapsedMS: elapsedMS, stopped: stopped)
+        } catch {
+            previewError = "Could not hold the rows: \(error.localizedDescription)"
+        }
     }
 
     /// The block of cells the pointer has dragged out in the grid, if any. Rows are positions in the

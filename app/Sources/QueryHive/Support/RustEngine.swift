@@ -165,6 +165,88 @@ struct RustEngine: DatabaseEngine {
         return handle
     }
 
+    // MARK: Result stores
+
+    /// Whether `configureResultStores` has been called, and who got there first. Under a lock rather
+    /// than inferred from the engine's own refusal, so no message is matched.
+    private static let storeLock = NSLock()
+    private static var storesConfigured = false
+
+    /// Configure the host's result stores once: the first caller wins and gets the sweep, every later
+    /// caller gets `nil`. Called before the first tab is restored (`QueryHiveMain.main`), by
+    /// `--snapshot` and `--bench` with their own budgets, and by the test host.
+    @discardableResult
+    static func ensureStoresConfigured(spillDir: String?, budgetBytes: UInt64) -> StoreSweep? {
+        storeLock.lock()
+        defer { storeLock.unlock() }
+        guard !storesConfigured else { return nil }
+        storesConfigured = true
+        do {
+            let sweep = try host.configureResultStores(spillDir: spillDir, budgetBytes: budgetBytes)
+            if sweep.spillEnabled {
+                NSLog("QueryHive: result spill on, swept \(sweep.removed) leftover file(s)")
+            } else {
+                NSLog("QueryHive: result spill off: \(sweep.reason ?? "no directory given")")
+            }
+            return sweep
+        } catch {
+            NSLog("QueryHive: result stores could not be configured: \(error)")
+            return nil
+        }
+    }
+
+    /// Raise the soft `RLIMIT_NOFILE` to `min(hard, wanted)` when it is lower (D-26, R-19). launchd
+    /// starts apps at 256, and a spilled store keeps its unlinked file open. Returns the limits as
+    /// they are afterwards.
+    @discardableResult
+    static func raiseFileLimit(to wanted: rlim_t = 4_096) -> rlimit {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { return limit }
+        let target = min(limit.rlim_max, wanted)
+        if limit.rlim_cur < target {
+            limit.rlim_cur = target
+            if setrlimit(RLIMIT_NOFILE, &limit) != 0 { getrlimit(RLIMIT_NOFILE, &limit) }
+        }
+        return limit
+    }
+
+    /// The host's own counters, for diagnostics and the leak checks.
+    static func storeStats() -> StoreStats? { try? host.storeStats() }
+
+    func makeResultStore() throws -> StoreRows { StoreRows(handle: try Self.host.createResultStore()) }
+
+    func storeFromRows(columns: [Event.Column], rows: [[String?]]) throws -> StoreRows {
+        let wire = columns.map { ColumnWire(name: $0.name, typeName: $0.type) }
+        return StoreRows(handle: try Self.host.storeFromRows(columns: wire, rows: rows), columns: columns)
+    }
+
+    @discardableResult
+    func runIntoStore(_ command: String, env: [String: String], store: StoreRows,
+                      onEvent: @escaping (Event) -> Void,
+                      onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? {
+        guard command == "preview" || command == "explain", let named = Self.commands[command] else {
+            onExit(Self.cannotStart, "A result store takes only preview and explain, not '\(command)'.")
+            return nil
+        }
+        // Not an assertion: a store that is not the engine's own (a test double) is refused out loud,
+        // through the one failure path every caller already has.
+        guard let native = store.handle as? ResultHandle else {
+            onExit(Self.cannotStart, "The result store is not backed by the engine (\(type(of: store.handle))).")
+            return nil
+        }
+        let handle = RustRun(command: command)
+        Self.running.insert(handle)
+        let settings = env.map { Setting(key: $0.key, value: $0.value) }
+        let cancel = RunCancel()
+        handle.attach(cancel: cancel)
+        let sink = Sink(handle: handle, onEvent: onEvent)
+        Self.runQueue.async {
+            Self.host.runWithStore(command: named, settings: settings, store: native, sink: sink, cancel: cancel)
+            DispatchQueue.main.async { Self.finish(handle, onExit: onExit, sink: sink) }
+        }
+        return handle
+    }
+
     func runBlocking(_ command: String, env: [String: String]) {
         // Not the general path; see the protocol's note. The one caller is the session write during
         // termination, and it needs no events: it is a best-effort save of the tabs that were open,

@@ -86,7 +86,9 @@ struct ResultGrid: View {
 
     /// What the body of the grid has to say for itself, or `nil` while it has rows to draw.
     private func placeholder(_ preview: PreviewResult) -> GridPlaceholder? {
-        GridPlaceholder.whenEmpty(shown: tab.result.count, fetched: preview.rowCount,
+        // `fetchedRows` is the one value here SwiftUI watches while a result streams: the store
+        // itself is not observable, so the body runs again when this number moves (D-28).
+        GridPlaceholder.whenEmpty(shown: tab.result.count, fetched: max(preview.rowCount, tab.fetchedRows),
                                   loading: loadingLabel)
     }
 
@@ -200,6 +202,7 @@ struct ResultGrid: View {
         let inputs = gridInputs(preview)
         return VStack(spacing: 0) {
             gridToolbar(preview)
+            if let note = failureNote { failureBanner(note) }
             if let sort = tab.activeSort, sort.origin == .memory, preview.truncated {
                 // The only banner left: an in-memory order over a cut-short result is partial, and
                 // one thin row says so. A full memory order and a server order need no banner — the
@@ -246,6 +249,28 @@ struct ResultGrid: View {
         }
     }
 
+    /// What went wrong with the store or the view, for a thin strip above the grid: a window the
+    /// store could not read, or a view it could not apply. Stale answers never reach here.
+    private var failureNote: String? {
+        if let error = tab.viewError { return "The grid could not update its rows: \(error)" }
+        if let failure = (tab.result as? StoreRows)?.lastFailure {
+            return "The grid could not read part of the result: \(failure.detail)"
+        }
+        return nil
+    }
+
+    private func failureBanner(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Tone.coral)
+            Text(text).font(.ui(10.5)).foregroundStyle(Tone.secondary).lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
     /// Open the rename sheet over one column, seeded with the label it currently carries.
     private func beginRename(_ source: Int) {
         let original = tab.preview?.columns ?? []
@@ -278,7 +303,8 @@ struct ResultGrid: View {
                 codeFontFamily: ThemeStore.shared.codeFontFamily,
                 accent: ThemeStore.shared.accent.rawValue,
                 isDark: colorScheme == .dark,
-                sortEnabled: true
+                // A sort needs every row to have arrived (§17.3).
+                sortEnabled: !tab.previewing
             ),
             filterPopover: model.filterPopoverColumn,
             viewing: viewingCell
@@ -293,6 +319,7 @@ struct ResultGrid: View {
     /// runs in `body` — so the slack is shared against a nominal width and the table refits on its
     /// first layout pass, which is where the real width arrives.
     private func columnWidths(_ preview: PreviewResult) -> [CGFloat] {
+        _ = tab.fetchedRows   // the widths follow the first 200 rows, which arrive while it streams
         let visible = tab.visibleColumnSources
         let counts = tab.result.naturalCharCounts()
         return GridMetrics.naturalWidths(
@@ -343,7 +370,7 @@ struct ResultGrid: View {
             .padding(.horizontal, Metrics.gutter)
             .padding(.vertical, 5)
             if tab.hasGridSearch, !tab.isServerSearched {
-                Text("In memory over the \(tab.preview?.rowCount.formatted() ?? "0") rows fetched. "
+                Text("In memory over the \(tab.result.fetched.formatted()) rows fetched. "
                      + "“Search Server” runs the query again with a WHERE over every column, so it "
                      + "can find rows this grid never fetched.")
                     .font(.ui(10.5))
@@ -463,9 +490,16 @@ struct ResultGrid: View {
     /// copy is the block the user selected, under the server's own column names, regardless of how
     /// the grid has been hidden, reordered or renamed.
     private func copySelection(withHeaders: Bool) {
-        guard let text = GridClipboard.text(result: tab.result, selection: tab.cellSelection,
-                                            visible: tab.visibleColumnSources,
-                                            withHeaders: withHeaders) else { return }
+        let text: String
+        do {
+            guard let built = try GridClipboard.text(result: tab.result, selection: tab.cellSelection,
+                                                     visible: tab.visibleColumnSources,
+                                                     withHeaders: withHeaders) else { return }
+            text = built
+        } catch {
+            if (error as? StoreFailure)?.isStale != true { tab.note(.error, "Copy failed: \(error)") }
+            return
+        }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -599,7 +633,7 @@ struct ResultGrid: View {
         }
         return WritePlan.build(edits: tab.cellEdits, rows: tab.result,
                                columns: preview.columns, table: tab.sourceTable,
-                               kind: connection.kind)
+                               kind: connection.kind, viewBusy: tab.viewBusy)
     }
 
     
@@ -611,9 +645,9 @@ struct ResultGrid: View {
         // finished, empty result — the one reading it must not give while a result is still
         // arriving. What has landed so far is worth saying, so it is said once there is something.
         if let label = loadingLabel {
-            return preview.rows.isEmpty
+            return tab.fetchedRows == 0
                 ? label
-                : "\(label) · \(pluralized(tab.result.fetched, "row")) so far"
+                : "\(label) · \(pluralized(tab.fetchedRows, "row")) so far"
         }
         // A plan is not a row count. The grid draws it because a plan *is* a result set, but the
         // footer must not report rows for it, and the total/limit controls below are meaningless.
@@ -680,7 +714,7 @@ struct ResultGrid: View {
                 } else {
                     SearchFilterField(tab: tab, index: index)
                 }
-                Text("This narrows the \((tab.preview?.rows.count ?? 0).formatted()) rows already "
+                Text("This narrows the \(tab.result.fetched.formatted()) rows already "
                      + "fetched — it does not re-run the query, so a row outside the limit is not "
                      + "searched.")
                     .font(.ui(11))
@@ -725,8 +759,10 @@ struct ResultGrid: View {
                         .font(.ui(11))
                         .foregroundStyle(Tone.amber)
                     IconButton(symbol: "checkmark.circle",
-                               help: "Review and commit the \(changeLabel.lowercased())",
+                               help: tab.viewBusy ? "\(QueryTab.viewBusyMessage)…"
+                                   : "Review and commit the \(changeLabel.lowercased())",
                                diameter: 22) { reviewingChanges = true }
+                        .disabled(tab.viewBusy)
                     IconButton(symbol: "arrow.uturn.backward",
                                help: "Discard the \(changeLabel.lowercased())",
                                diameter: 22) { tab.discardCellEdits() }

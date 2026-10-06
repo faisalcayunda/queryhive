@@ -43,6 +43,30 @@ final class MockEngine: DatabaseEngine, @unchecked Sendable {
 
     init(onMainQueue: Bool = true) {
         self.onMainQueue = onMainQueue
+        TestStores.ensureConfigured()
+    }
+
+    // MARK: Result stores
+
+    /// A store over a `FakeResultHandle`, which `runIntoStore` fills from the script's `rows` events
+    /// (the real host cannot be handed rows after the fact). `storeFromRows` is the real thing.
+    func makeResultStore() throws -> StoreRows { StoreRows(handle: FakeResultHandle()) }
+
+    func storeFromRows(columns: [Event.Column], rows: [[String?]]) throws -> StoreRows {
+        try TestStores.makeStore(columns: columns, rows: rows)
+    }
+
+    @discardableResult
+    func runIntoStore(_ command: String, env: [String: String], store: StoreRows,
+                      onEvent: @escaping (Event) -> Void,
+                      onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? {
+        let fake = store.handle as? FakeResultHandle
+        return run(command, env: env, onEvent: { event in
+            // What the engine's pump does: rows go to the store, and `done` seals it.
+            if event.event == "rows" { fake?.append(event.data ?? []) }
+            if event.event == "done" { fake?.setPhase(event.cancelled == true ? .cancelled : .complete) }
+            onEvent(event)
+        }, onExit: onExit)
     }
 
     /// Scripts one command. A command with no answer refuses to start, so a test that forgets to

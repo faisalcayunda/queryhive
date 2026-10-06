@@ -81,7 +81,7 @@ final class FilterPresetTests: XCTestCase {
 
     func testApplyingToATabSetsItsFiltersAndReturnsTheMissingNames() {
         let tab = QueryTab(title: "Q")
-        tab.preview = PreviewResult(columns: columns,
+        tab.showRows(columns: columns,
                                     rows: [["1", "2", "x"]], truncated: false,
                                     queryID: nil, elapsedMS: 0)
         let preset = FilterPreset(name: "p", filters: [
@@ -128,7 +128,7 @@ final class FilterPresetTests: XCTestCase {
         // preset stays with the tab. This also means the test never touches the user's defaults.
         let model = AppModel()
         let tab = QueryTab(title: "Q")
-        tab.preview = PreviewResult(columns: columns,
+        tab.showRows(columns: columns,
                                     rows: [["1", "2", "x"]], truncated: false,
                                     queryID: nil, elapsedMS: 0)
         tab.columnFilters[1] = .text("2")
@@ -147,7 +147,7 @@ final class FilterPresetTests: XCTestCase {
     func testSavingWithNoFiltersOrABlankNameIsRefused() {
         let model = AppModel()
         let tab = QueryTab(title: "Q")
-        tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
+        tab.showRows(columns: columns, rows: [], truncated: false,
                                     queryID: nil, elapsedMS: 0)
 
         XCTAssertFalse(model.saveFilterPreset(named: "x", in: tab), "nothing filtered")

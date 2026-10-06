@@ -71,7 +71,7 @@ final class GridFixture {
             selectionChanged: { log.selectionChanged += 1 })
 
         let tab = QueryTab(title: "Grid")
-        tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+        tab.showRows(columns: columns, rows: rows, truncated: false,
                                     queryID: nil, elapsedMS: 0)
         // The same two numbers `ResultGrid` feeds §10: the header label, and the widest of the
         // first 200 *fetched* rows with NULL counting 4.

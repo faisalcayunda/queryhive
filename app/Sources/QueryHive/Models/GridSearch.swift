@@ -12,21 +12,6 @@ import Foundation
 ///   it costs a round trip and reads the table; that is the price of searching rows you have not
 ///   seen.
 enum GridSearch {
-    /// Whether any cell of the row contains the term, case-insensitively.
-    ///
-    /// A nil cell is skipped — a NULL contains nothing — and the term is trimmed first, so a stray
-    /// space does not hide every row. Case-insensitive with the locale's own rules, which is what
-    /// someone typing a fragment of a name expects; the server escalation folds with `LOWER` for
-    /// the same reason.
-    static func matches(_ row: [String?], term: String) -> Bool {
-        let needle = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty else { return true }
-        for value in row {
-            guard let value else { continue }
-            if value.localizedCaseInsensitiveContains(needle) { return true }
-        }
-        return false
-    }
     /// Server search policy: one query per pause, not per keystroke.
     static let minimumLength = 3
     static let debounceInterval: TimeInterval = 0.25

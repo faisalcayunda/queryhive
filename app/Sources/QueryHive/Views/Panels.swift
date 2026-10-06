@@ -91,7 +91,7 @@ struct BottomPanel: View {
     private func count(_ panel: PanelTab) -> Int? {
         switch panel {
         case .log: tab.logLines.isEmpty ? nil : tab.logLines.count
-        case .result: tab.preview.map(\.rowCount)
+        case .result: tab.preview.map { max($0.rowCount, tab.fetchedRows) }   // the footer's own number, live while it streams
         case .files: tab.files.isEmpty ? nil : tab.files.count
         case .history: model.historyEntries.isEmpty ? nil : model.historyEntries.count
         case .saved: model.savedQueries.isEmpty ? nil : model.savedQueries.count

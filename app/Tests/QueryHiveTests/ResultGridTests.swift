@@ -1,4 +1,5 @@
 import AppKit
+import QueryHiveFFI
 import SwiftUI
 import XCTest
 
@@ -19,89 +20,89 @@ final class ResultGridTests: XCTestCase {
 
     // MARK: Ordering
 
-    func testNumbersSortByValueNotByText() {
+    /// The order Rust gives `rows` over `column`: the sort the grid runs now, asserted against the
+    /// store rather than the Swift comparator it replaced (that one lives on as
+    /// `SwiftGridReference`, and `SortFixtureExport` holds the two together).
+    private func rustOrder(_ rows: [[String?]], column: Int, _ direction: GridSort.Direction) throws -> [[String?]] {
+        let width = rows.map(\.count).max() ?? 1
+        let store = try TestStores.makeStore(columns: TestStores.textColumns(width), rows: rows)
+        defer { store.release() }
+        try store.applyBlocking(ViewSpec(sort: SortSpec(column: UInt32(column), descending: direction == .descending),
+                                         filters: [], search: nil))
+        return store.rows(in: 0..<store.count, columns: Array(0..<width))
+    }
+
+    func testNumbersSortByValueNotByText() throws {
         // The bug the comparator exists for: `[String?]` means a naive sort puts "10" before "9".
         let input: [[String?]] = [["10"], ["9"], ["2"], ["100"]]
 
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
                        ["2", "9", "10", "100"] as [String?])
-        XCTAssertEqual(GridSort(column: 0, direction: .descending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .descending).map { $0[0] },
                        ["100", "10", "9", "2"] as [String?])
     }
 
-    func testNullsSortLastAscendingAndFirstDescending() {
+    func testNullsSortLastAscendingAndFirstDescending() throws {
         // PostgreSQL's own default, and the reason descending is the exact reverse rather than a
         // second order with its own NULL rule.
         let input: [[String?]] = [["b"], [nil], ["a"], [nil]]
 
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
                        ["a", "b", nil, nil] as [String?])
-        XCTAssertEqual(GridSort(column: 0, direction: .descending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .descending).map { $0[0] },
                        [nil, nil, "b", "a"] as [String?])
     }
 
-    func testANumberSortsBeforeTextInAMixedColumn() {
+    func testANumberSortsBeforeTextInAMixedColumn() throws {
         let input: [[String?]] = [["apple"], ["10"], ["banana"], ["9"]]
 
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
                        ["9", "10", "apple", "banana"] as [String?])
     }
 
-    func testACodeWithDotsIsTextNotANumber() {
+    func testACodeWithDotsIsTextNotANumber() throws {
         // `Decimal(string:)` reads "32.01.01.2001" as 32.01 and a timestamp as its year. The strict
         // parser is what stops a column of codes from being silently reordered as decimals.
-        XCTAssertNil(GridSort.number("32.01.01.2001"))
-        XCTAssertNil(GridSort.number("2026-07-25 15:30:06.233"))
+        XCTAssertNil(SwiftGridReference.number("32.01.01.2001"))
+        XCTAssertNil(SwiftGridReference.number("2026-07-25 15:30:06.233"))
 
         let input: [[String?]] = [["32.01.01.2002"], ["32.01.01.2001"]]
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
                        ["32.01.01.2001", "32.01.01.2002"] as [String?])
     }
 
-    func testLargeIntegersKeepTheirLastDigit() {
+    func testLargeIntegersKeepTheirLastDigit() throws {
         // The reason the comparator uses `Decimal` rather than `Double`: past 2^53 the two differ.
-        let larger = GridSort.number("9007199254740993")
-        let smaller = GridSort.number("9007199254740992")
-
-        XCTAssertNotNil(larger)
-        XCTAssertNotNil(smaller)
-        XCTAssertGreaterThan(larger!, smaller!)
+        let input: [[String?]] = [["9007199254740993"], ["9007199254740992"]]
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
+                       ["9007199254740992", "9007199254740993"] as [String?])
     }
 
-    func testEqualKeysKeepTheOrderTheyArrivedIn() {
+    func testEqualKeysKeepTheOrderTheyArrivedIn() throws {
         // A stable sort: reversing a sort and reversing it back has to give the server's order among
         // ties, which `sorted(by:)` does not promise on its own.
         let input: [[String?]] = [["a", "first"], ["b", "second"], ["a", "third"]]
 
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[1] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[1] },
                        ["first", "third", "second"] as [String?])
     }
 
-    func testAShortRowSortsAsNull() {
-        // A row with fewer values than columns has no value there, which is a NULL, not an empty
-        // string — so it goes with the nulls rather than among the real empties.
-        XCTAssertNil(GridSort.value(in: ["only"], at: 3))
-
-        let input: [[String?]] = [["x", "has"], ["x"]]
-        XCTAssertEqual(GridSort(column: 1, direction: .ascending).order(input)
-                        .map { $0.count > 1 ? $0[1] : nil },
-                       ["has", nil] as [String?])
+    func testTheSwiftReferenceStillTreatsAShortRowAsNull() {
+        // The reference twin keeps the rule the Swift sort had; a store row is always full width.
+        XCTAssertNil(SwiftGridReference.value(in: ["only"], at: 3))
     }
 
-    func testTextWithDigitsSortsNaturally() {
+    func testTextWithDigitsSortsNaturally() throws {
         let input: [[String?]] = [["KPM 10"], ["KPM 9"], ["KPM 100"]]
 
-        XCTAssertEqual(GridSort(column: 0, direction: .ascending).order(input).map { $0[0] },
+        XCTAssertEqual(try rustOrder(input, column: 0, .ascending).map { $0[0] },
                        ["KPM 9", "KPM 10", "KPM 100"] as [String?])
     }
 
-    func testAColumnPastTheEndOfEveryRowIsUnchanged() {
-        // Reachable when a sort outlives its columns for an instant. It must not crash and must not
-        // shuffle what it cannot compare.
-        let input: [[String?]] = [["a"], ["b"], ["c"]]
-
-        XCTAssertEqual(GridSort(column: 9, direction: .ascending).order(input).map { $0[0] },
-                       ["a", "b", "c"] as [String?])
+    func testAColumnPastTheEndOfEveryRowIsRefusedNotACrash() throws {
+        // Reachable when a sort outlives its columns for an instant: Rust says so instead of
+        // guessing, and the grid reports it rather than shuffling what it cannot compare.
+        XCTAssertThrowsError(try rustOrder([["a"], ["b"], ["c"]], column: 9, .ascending))
     }
 
     // MARK: The header's cycle
@@ -133,7 +134,7 @@ final class ResultGridTests: XCTestCase {
         let tab = QueryTab(title: "Query 1")
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
 
-        tab.preview = PreviewResult(columns: [Event.Column(name: "a", type: "bigint")],
+        tab.showRows(columns: [Event.Column(name: "a", type: "bigint")],
                                     rows: [["1"]], truncated: false, queryID: nil, elapsedMS: 0)
 
         XCTAssertNil(tab.activeSort)
@@ -149,35 +150,50 @@ final class ResultGridTests: XCTestCase {
         XCTAssertNil(tab.activeSort)
     }
 
-    func testTheDisplayedRowsCacheFollowsTheThreeThingsThatChangeIt() {
-        // `QueryTab.displayedRows` is cached by `gridRevision`, so this is the test that the cache
-        // cannot go stale: the rows, the sort and the filter are the three things that change the
-        // answer, and each must invalidate it.
+    /// Wait for the view a filter, a search or a sort asked for to land, the way the run loop does.
+    @MainActor
+    private func settle(_ tab: QueryTab, file: StaticString = #filePath, line: UInt = #line) {
+        let until = Date().addingTimeInterval(5)
+        while tab.viewBusy, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+        XCTAssertFalse(tab.viewBusy, "the view never landed", file: file, line: line)
+    }
+
+    private func shown(_ tab: QueryTab) -> [String?] {
+        tab.result.rows(in: 0..<tab.result.count, columns: [0]).map { $0[0] }
+    }
+
+    @MainActor
+    func testTheViewFollowsTheThreeThingsThatChangeIt() {
+        // The grid reads the store through a view, and the rows, the sort and the filter are the
+        // three things that change what it holds: each must reach the store and bump the revision.
         let tab = QueryTab(title: "Query 1")
         let columns = [Event.Column(name: "n", type: "bigint")]
-        tab.preview = PreviewResult(columns: columns, rows: [["3"], ["1"], ["2"]],
+        tab.showRows(columns: columns, rows: [["3"], ["1"], ["2"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "server order first")
+        XCTAssertEqual(shown(tab), ["3", "1", "2"], "server order first")
 
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"], "the sort is followed")
+        settle(tab)
+        XCTAssertEqual(shown(tab), ["1", "2", "3"], "the sort is followed")
 
         tab.applyMemorySort(nil)
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"], "clearing it too")
+        settle(tab)
+        XCTAssertEqual(shown(tab), ["3", "1", "2"], "clearing it too")
 
-        tab.preview = PreviewResult(columns: columns, rows: [["9"], ["8"]],
+        tab.showRows(columns: columns, rows: [["9"], ["8"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["9", "8"], "and a new set of rows")
+        XCTAssertEqual(shown(tab), ["9", "8"], "and a new set of rows")
 
         tab.columnFilters[0] = .text("9")
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["9"], "and a filter")
+        settle(tab)
+        XCTAssertEqual(shown(tab), ["9"], "and a filter")
     }
 
     func testChangingTheSortDropsTheSelectionAndTheQueuedEdits() {
         // The selection and the edits are positions in the rows on screen, and sorting moves those
         // rows. Leaving either behind would attach it to the wrong row, exactly as a filter would.
         let tab = QueryTab(title: "Query 1")
-        tab.preview = PreviewResult(columns: [Event.Column(name: "a", type: "bigint")],
+        tab.showRows(columns: [Event.Column(name: "a", type: "bigint")],
                                     rows: [["1"], ["2"]], truncated: false, queryID: nil, elapsedMS: 0)
         tab.cellSelection = CellRange(from: (row: 0, column: 0), to: (row: 1, column: 0))
         tab.cellEdits.edit("9", at: CellKey(row: 0, column: 0), original: "1")

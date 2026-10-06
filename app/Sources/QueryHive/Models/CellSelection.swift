@@ -1,5 +1,4 @@
 import Foundation
-import QueryHiveFFI
 
 /// A minimal row accessor for write plans, edit staging, and clipboard.
 protocol RowReading {
@@ -133,8 +132,12 @@ enum GridClipboard {
     ///
     /// `nil` when nothing is selected or the block covers no source column — the caller has nothing
     /// to put on the pasteboard and should not clear it.
+    ///
+    /// Throws when the store cannot answer: a copy that put blank cells on the clipboard in place of
+    /// values it failed to read would be worse than one that did not happen (`StoreFailure.isStale`
+    /// says whether it is worth telling the user).
     static func text(result: any ResultRows, selection: CellRange?, visible: [Int],
-                     withHeaders: Bool) -> String? {
+                     withHeaders: Bool) throws -> String? {
         guard let selection else { return nil }
         let sources = (selection.left...selection.right)
             .compactMap { visible.indices.contains($0) ? visible[$0] : nil }
@@ -143,7 +146,7 @@ enum GridClipboard {
         let headers = sources.map { source in
             result.columns.indices.contains(source) ? result.columns[source].name : ""
         }
-        let rows = result.rows(in: selection.top..<selection.bottom + 1, columns: sources)
+        let rows = try result.rowsOrThrow(in: selection.top..<selection.bottom + 1, columns: sources)
         guard !rows.isEmpty else { return withHeaders ? headers.joined(separator: "\t") : nil }
         // The projected rows are already narrowed to the selected columns, so the block this reads
         // is a rectangle from the origin: the range's own offsets would index past every row.

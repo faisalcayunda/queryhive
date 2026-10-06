@@ -590,6 +590,9 @@ final class VisualParityTests: XCTestCase {
         applyGrid(prefs)
         let model = Snapshot.seeded(scene: scene)
         let tab = try XCTUnwrap(model.selectedTab, "\(name): the scene has no tab")
+        // A scene that set a sort or a filter has asked the store for a view; the render waits for it.
+        let landed = Date().addingTimeInterval(5)
+        while tab.viewBusy, Date() < landed { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
         let (view, _) = host(ResultGrid(tab: tab).environment(model), size: Self.gridSize, look: look)
         let data = try png(of: view)
         let pixels = try XCTUnwrap(Pixels(png: data))
@@ -600,7 +603,8 @@ final class VisualParityTests: XCTestCase {
 
         // Row height, measured: the rows' extent divided by how many there are. It has to be what the
         // Data pane says it is, and it is stored so the baseline says it too.
-        let rows = tab.displayedRows.count
+        let displayedRows = tab.result.rows(in: 0..<tab.result.count, columns: Array(0..<tab.result.columns.count))
+        let rows = displayedRows.count
         metrics["rows"] = [rows]
         if rows > 0 {
             let body = metrics["bodyHeight"]![0]
@@ -665,7 +669,8 @@ final class VisualParityTests: XCTestCase {
         }
         // The first NULL, empty string and truncated value in a text column.
         var seen: Set<String> = []
-        for (row, values) in tab.displayedRows.enumerated() where bodyTop + (row + 1) * rowH <= run[1] {
+        let displayedRows = tab.result.rows(in: 0..<tab.result.count, columns: Array(0..<tab.result.columns.count))
+        for (row, values) in displayedRows.enumerated() where bodyTop + (row + 1) * rowH <= run[1] {
             for (column, source) in visible.enumerated() {
                 guard source < values.count, source < preview.columns.count,
                       !Self.isNumeric(preview.columns[source].type),

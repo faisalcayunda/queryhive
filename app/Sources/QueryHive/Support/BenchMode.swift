@@ -12,9 +12,9 @@ import SwiftUI
 /// The shape of each line is the input contract in `deploy/dev/bench_app.py`'s docstring. Stdout
 /// carries nothing else; progress and failures go to stderr.
 ///
-/// Synthetic scenarios need no database. A result is put into the tab through the property a
-/// preview result takes (`QueryTab.preview`), so the grid, its layout and its paint are the real
-/// ones. The DB-backed scenarios run the real `AppModel.preview` against the server named by
+/// Synthetic scenarios need no database. A result is put into the tab the way a finished Run puts
+/// one (a Rust store from `store_from_rows`, built before the clock starts, then `QueryTab.preview`),
+/// so the grid, its layout and its paint are the real ones. The DB-backed scenarios run the real `AppModel.preview` against the server named by
 /// `QH_BENCH_KIND` / `_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DB`.
 ///
 /// Everything runs against a throwaway support directory (`ConnectionStore.root`, which
@@ -33,7 +33,7 @@ import SwiftUI
 /// - `launch_ms`: kernel process-start to the first window update after launch, plus one turn.
 enum BenchMode {
     static let synthetic = ["scroll-30x1m", "scroll-500x10k", "open-500x10k", "type-10k", "type-2m", "type-coloured-195k",
-                            "tabs-100", "launch-warm", "launch-cold"]
+                            "tabs-100", "tabs-100-held", "launch-warm", "launch-cold"]
     static let database = ["ttfr-s1-1k", "ttfr-s1-10k", "rows-wide-500k", "mem-500k", "cancel-pg-sleep"]
     /// The names development-plan.md uses, mapped to the ones the report grades.
     static let aliases = ["scroll-1m": "scroll-30x1m", "scroll-500c": "scroll-500x10k",
@@ -94,6 +94,22 @@ enum BenchMode {
         ], forName: UserDefaults.argumentDomain)
     }
 
+    /// The store budget for this process. The host takes one configuration for its whole life, so a
+    /// `--bench` run names the scenarios that share it: the tab scenarios need a budget small enough
+    /// that their stores really spill, the database ones run on the product's own 256 MiB with spill,
+    /// and the synthetic grid scenarios get 2 GiB with no spill (comparable with Fase 0, where the
+    /// rows were an array in the heap). Run `scroll-30x1m` and `tabs-*` in separate processes.
+    private static func configureStores(for scenarios: [String], support: URL) {
+        let spill = support.appendingPathComponent("spill").path
+        if scenarios.contains(where: { $0.hasPrefix("tabs-") }) {
+            RustEngine.ensureStoresConfigured(spillDir: spill, budgetBytes: 2 << 20)
+        } else if scenarios.contains(where: { database.contains($0) }) {
+            RustEngine.ensureStoresConfigured(spillDir: spill, budgetBytes: 256 << 20)
+        } else {
+            RustEngine.ensureStoresConfigured(spillDir: nil, budgetBytes: 2 << 30)
+        }
+    }
+
     /// Returns only in a `launch-warm` child, so the real app can start and report its first frame.
     @MainActor
     static func run() {
@@ -129,6 +145,7 @@ enum BenchMode {
         if !child { root = support }
         ConnectionStore.root = support
         pinPreferences()
+        configureStores(for: scenarios, support: support)
         PerfSignposts.recording = true
         watchdog(seconds: Double(ProcessInfo.processInfo.environment["QH_BENCH_TIMEOUT"] ?? "") ?? 600)
 
@@ -212,6 +229,7 @@ enum BenchMode {
         // editor's debounces, so the analysis and the model write run between keystrokes.
         case "type-coloured-195k": await type(scenario, lines: 0, minimumCharacters: 194_000, repeats: repeats, coloured: true)
         case "tabs-100": await tabs(scenario, repeats: repeats)
+        case "tabs-100-held": await tabsHeld(scenario, repeats: repeats)
         case "launch-warm": await launchWarm(repeats: repeats)
         case "launch-cold": emitStatus(scenario, "tidak diukur (butuh sudo)", "a cold start needs `purge`, which needs sudo")
         default: await databaseScenario(scenario, repeats: repeats)
@@ -312,8 +330,14 @@ enum BenchMode {
 
     private static let columnTypes = ["varchar", "bigint", "double", "timestamp(6)"]
 
+    /// Columns and the rows to put under them, before they are in a store.
+    private struct Fixture {
+        var columns: [Event.Column]
+        var rows: [[String?]]
+    }
+
     /// Rows of short strings and a NULL now and then. Built outside any timing.
-    private static func syntheticResult(rows: Int, columns: Int) -> PreviewResult {
+    private static func syntheticResult(rows: Int, columns: Int) -> Fixture {
         let header = (0..<columns).map { Event.Column(name: "col_\($0)", type: columnTypes[$0 % 4]) }
         var data = [[String?]]()
         data.reserveCapacity(rows)
@@ -330,7 +354,7 @@ enum BenchMode {
             }
             data.append(row)
         }
-        return PreviewResult(columns: header, rows: data, truncated: false, queryID: nil, elapsedMS: 0)
+        return Fixture(columns: header, rows: data)
     }
 
     /// A model with one idle tab and the result panel open, and a window showing it.
@@ -349,12 +373,27 @@ enum BenchMode {
     /// Puts a result into the tab the way a finished preview does, and returns the milliseconds to
     /// the first grid row on screen, or nil when it never came.
     @MainActor
-    private static func show(_ result: PreviewResult, in tab: QueryTab, timeout: Double = 300) async -> Double? {
+    private static func show(_ result: Fixture, in tab: QueryTab, timeout: Double = 300) async -> Double? {
+        // The store is built before the clock starts: what is timed is the grid taking a finished
+        // result, as it does after a Run, not the ingest (blueprint §17.4, R-38).
+        tab.activeResult?.release()
+        tab.activeResult = nil
+        let ingestStarted = CFAbsoluteTimeGetCurrent()
+        let store: StoreRows
+        do { store = try Engine.current.storeFromRows(columns: result.columns, rows: result.rows) } catch {
+            log("store_from_rows failed: \(error)")
+            return nil
+        }
+        log(String(format: "store_from_rows: %d rows x %d columns in %.1f s",
+                   result.rows.count, result.columns.count, CFAbsoluteTimeGetCurrent() - ingestStarted))
         tab.columns = result.columns
         tab.previewedSQL = tab.sql
         PerfSignposts.runBegin()
         let started = CFAbsoluteTimeGetCurrent()
-        tab.preview = result
+        tab.activeResult = store
+        tab.fetchedRows = store.fetched
+        tab.preview = PreviewResult(columns: result.columns, rowCount: store.fetched, truncated: false,
+                                    queryID: nil, elapsedMS: 0)
         guard await wait(timeout: timeout, { PerfSignposts.time(of: "firstPaint") != nil }),
               let painted = PerfSignposts.time(of: "firstPaint") else { return nil }
         return (painted - started) * 1000
@@ -518,6 +557,8 @@ enum BenchMode {
         let result = syntheticResult(rows: rows, columns: columns)
         for _ in 0..<repeats {
             tab.preview = nil
+            tab.activeResult?.release()
+            tab.activeResult = nil
             await sleep(0.5)
             guard let ms = await show(result, in: tab) else {
                 return emitStatus(scenario, "[belum diukur]", "the grid drew no row within the time limit")
@@ -609,6 +650,7 @@ enum BenchMode {
     private static func tabs(_ scenario: String, repeats: Int) async {
         guard let (model, _, _) = await gridWindow() else { return emitStatus(scenario, "[belum diukur]", "no tab") }
         let sampler = FootprintSampler()
+        let fixture = syntheticResult(rows: 2_000, columns: 10)
         for _ in 0..<repeats {
             var boxes = [Weak]()
             sampler.start()
@@ -622,8 +664,8 @@ enum BenchMode {
                 tab.stage = .done
                 tab.panel = .result
                 model.panelCollapsed = false
-                tab.columns = syntheticResult(rows: 0, columns: 10).columns
-                tab.preview = syntheticResult(rows: 2_000, columns: 10)
+                tab.columns = fixture.columns
+                tab.showRows(columns: fixture.columns, rows: fixture.rows)
                 await sleep(0.03)
                 model.closeSelectedTab()
                 await sleep(0.01)
@@ -631,9 +673,58 @@ enum BenchMode {
             await sleep(1.0)
             let peak = sampler.stop()
             let after = FootprintSampler.current()
+            // The engine's own count of what is still alive: zero stores and zero spilled bytes once
+            // every tab is closed (§19, TM-9). Anything else is a store a tab forgot to release.
+            let stats = RustEngine.storeStats()
             emit(scenario, ["leak_count": Double(boxes.filter { $0.tab != nil }.count),
+                            "stores_alive_count": Double(stats?.stores ?? 0),
+                            "spilled_bytes_alive": Double(stats?.spilledBytes ?? 0),
                             "footprint_delta_bytes": Double(Int64(after) - Int64(before)),
                             "peak_footprint_delta_bytes": Double(Int64(peak) - Int64(before))])
+        }
+    }
+
+    /// The process's open file descriptors, from `proc_pidinfo(PROC_PIDLISTFDS)`.
+    private static func openFileDescriptors() -> Int {
+        let bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+        return bytes > 0 ? Int(bytes) / MemoryLayout<proc_fdinfo>.stride : 0
+    }
+
+    /// R-19 (§17.6, §19): 100 tabs open at once, each holding a store that has spilled, so each holds
+    /// a descriptor. Records the descriptor count before, at the peak, and after every tab is closed,
+    /// which must come back to where it started.
+    @MainActor
+    private static func tabsHeld(_ scenario: String, repeats: Int) async {
+        guard let (model, first, _) = await gridWindow() else { return emitStatus(scenario, "[belum diukur]", "no tab") }
+        let fixture = syntheticResult(rows: 2_000, columns: 10)
+        for _ in 0..<repeats {
+            let before = openFileDescriptors()
+            var opened = [QueryTab]()
+            for _ in 0..<100 {
+                model.newTab()
+                guard let tab = model.selectedTab else { break }
+                tab.stage = .done
+                tab.panel = .result
+                tab.columns = fixture.columns
+                tab.showRows(columns: fixture.columns, rows: fixture.rows)
+                opened.append(tab)
+            }
+            await sleep(0.5)
+            let peak = openFileDescriptors()
+            let held = RustEngine.storeStats()
+            for tab in opened { model.closeTab(tab.id) }
+            if model.tabs.isEmpty { model.newTab() }
+            await sleep(1.0)
+            let after = openFileDescriptors()
+            let stats = RustEngine.storeStats()
+            _ = first
+            emit(scenario, ["open_fds_before_count": Double(before),
+                            "open_fds_peak_count": Double(peak),
+                            "open_fds_after_count": Double(after),
+                            "stores_held_count": Double(held?.stores ?? 0),
+                            "spilled_bytes_held": Double(held?.spilledBytes ?? 0),
+                            "stores_alive_count": Double(stats?.stores ?? 0),
+                            "spilled_bytes_alive": Double(stats?.spilledBytes ?? 0)])
         }
     }
 

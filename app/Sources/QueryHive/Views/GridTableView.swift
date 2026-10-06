@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import QuartzCore
 
 /// The result grid: one `NSTableView`, one table column, and every pixel drawn by hand.
 ///
@@ -37,6 +38,37 @@ final class GridTableView: NSTableView {
     /// Whether the body's own menu has been asked for at least once, which is what tells a plain
     /// right-click from one AppKit synthesised for the header.
     private var lastDirty = CGRect.zero
+
+    // MARK: Polling
+
+    private var displayLink: CADisplayLink?
+
+    /// Whether the rows can still change under the grid, which is what keeps the display link
+    /// running. The coordinator turns it on while a result streams or a view is being applied, and
+    /// off after one last poll once everything is terminal.
+    var isPolling = false {
+        didSet { displayLink?.isPaused = !isPolling }
+    }
+
+    /// The link lives only while the table is in a window: a tab in the background has none, so it
+    /// does not poll, and a tab that comes back to the front polls once at once (§17.3).
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        displayLink?.invalidate()
+        displayLink = nil
+        guard window != nil else { return }
+        let link = displayLink(target: self, selector: #selector(displayTick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        link.isPaused = !isPolling
+        // `.common`, so it keeps ticking while a scroll is being tracked.
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        coordinator?.pollRows()
+    }
+
+    @objc private func displayTick(_ link: CADisplayLink) {
+        coordinator?.pollRows()
+    }
 
     // MARK: Configuration
 

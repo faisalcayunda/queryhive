@@ -107,8 +107,11 @@ final class GridHeaderView: NSTableHeaderView {
         if showRowNumbers {
             drawGutterHeader(into: cg)
         }
-        for (display, column) in columns.enumerated() {
-            draw(column: column, display: display, into: cg)
+        // Only the columns the dirty rectangle reaches: with 500 columns, drawing them all on every
+        // draw cost more than the rows under them.
+        let visible = geometry.columns(in: dirtyRect.minX...max(dirtyRect.maxX, dirtyRect.minX))
+        for display in visible where columns.indices.contains(display) {
+            draw(column: columns[display], display: display, into: cg)
         }
         cg.restoreGState()
     }

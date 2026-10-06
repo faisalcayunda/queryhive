@@ -118,11 +118,20 @@ struct WritePlan: Equatable {
     /// A row whose every column is excluded from the predicate yields no statement
     /// and a warning, never a bare `DELETE`/`UPDATE` that would match the table.
     /// Added rows are grouped and bounded by `WriteBatchBudget`.
+    ///
+    /// `viewBusy` is the grid saying its rows are being replaced: row indices then name rows of a
+    /// view that is on its way out, and an `UPDATE` or `DELETE` built from them would write or
+    /// delete the wrong row (D-27). The plan refuses, and says why. A row that cannot be read is a
+    /// warning in the plan, never a silent skip.
     static func build(edits: CellEdits, rows: some RowReading, columns: [Event.Column],
                       table: String?, kind: ConnectionKind,
-                      budget: WriteBatchBudget? = nil) -> WritePlan {
+                      budget: WriteBatchBudget? = nil, viewBusy: Bool = false) -> WritePlan {
         guard let table, !columns.isEmpty else {
             return WritePlan(table: table, statements: [])
+        }
+        guard !viewBusy else {
+            return WritePlan(table: table, statements: [], warnings: [QueryTab.viewBusyMessage
+                + ": nothing was planned from rows that are being replaced."])
         }
         let budget = budget ?? WriteBatchBudget.forKind(kind)
         let style = ParameterStyle.forKind(kind)
@@ -130,7 +139,10 @@ struct WritePlan: Equatable {
         var warnings: [String] = []
 
         for row in edits.deletedRows.sorted() {
-            guard let rowData = rows.row(at: row) else { continue }
+            guard let rowData = rows.row(at: row) else {
+                warnings.append("row \(row + 1) was not deleted: it could not be read")
+                continue
+            }
             var bound = BoundSQL(style: style)
             bound.text("DELETE FROM \(table) WHERE ")
             let match = UpdateStatements.appendMatch(for: rowData, columns: columns, kind: kind,
@@ -147,6 +159,9 @@ struct WritePlan: Equatable {
                                              keyed: false, unmatchedColumns: match.excluded))
         }
 
+        for row in Set(edits.values.keys.map(\.row)).sorted() where rows.row(at: row) == nil {
+            warnings.append("row \(row + 1) was not updated: it could not be read")
+        }
         for update in UpdateStatements.generate(edits: edits, rows: rows, columns: columns,
                                                 table: table, kind: kind) {
             guard let bound = update.bound else {

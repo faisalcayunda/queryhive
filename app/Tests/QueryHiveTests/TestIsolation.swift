@@ -22,6 +22,9 @@ extension XCTestCase {
     ///
     /// Call from `setUp` **before** anything constructs an `AppModel`.
     func isolateConnectionStore() {
+        // Every class that builds a model or a tab goes through here, and a tab holds its rows in a
+        // store (`QueryTab.showRows`), so the shared host is configured here too (`TestStores`).
+        TestStores.ensureConfigured()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("qh-test-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

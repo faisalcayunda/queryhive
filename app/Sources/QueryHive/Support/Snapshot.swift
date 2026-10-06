@@ -259,6 +259,9 @@ enum Snapshot {
                   "wilayah": ParameterEntry(kind: .text, text: "%Sukamaju%")])
 
     static func seeded(scene: String) -> AppModel {
+        // Every scene that draws rows holds them in a store (`QueryTab.showRows`). Spill is off and
+        // the budget is small: a fixture is a few dozen rows.
+        RustEngine.ensureStoresConfigured(spillDir: nil, budgetBytes: 64 << 20)
         let model = AppModel()
         let primary = Connection(id: UUID(), name: "Trino production", color: .blue, kind: .trino,
                                  host: "trino.internal", port: 8443, scheme: "https",
@@ -537,9 +540,9 @@ enum Snapshot {
                 Event.Column(name: "diperbarui", type: "timestamp(6)"),
                 Event.Column(name: "catatan", type: "varchar"),
             ]
-            tab.preview = PreviewResult(
-                columns: tab.columns,
-                rows: [
+            // The JSON column and the long cell are set here, before the rows go into a store: a
+            // store is read-only, so the scenes that edit a cell cannot do it afterwards.
+            var gridRows: [[String?]] = [
                     ["32.01.01.2001", "KPM Sukamaju", "4", "142.857", "true", "2026-07-25 15:30:06.233", nil],
                     ["32.01.01.2002", "KPM Cibadak", "2", "97.321", "true", "2026-07-25 15:30:06.233", "verifikasi lapangan"],
                     ["32.01.01.2003", "KPM Mekarsari", "7", "249.998", "false", "2026-07-25 15:30:06.233", nil],
@@ -552,10 +555,23 @@ enum Snapshot {
                     ["32.01.05.4009", "KPM Cangkuang", "8", "271.555", "true", "2026-08-03 11:22:31.004", nil],
                     ["32.01.05.4010", "KPM Banjaran", "4", "133.870", "true", "2026-08-03 11:22:31.004", nil],
                     ["32.01.06.5001", "KPM Margahayu", "1", "8.412", "false", "2026-08-03 11:22:31.004", "menunggu verifikasi"],
-                ],
-                truncated: true,
-                queryID: "20260131_120412_00042_abcde",
-                elapsedMS: 412)
+            ]
+            if scene == "grid-inspector" {
+                tab.columns[6] = Event.Column(name: "catatan", type: "json")
+                gridRows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04","selesai":false}"#
+            }
+            if scene == "grid-kinds" {
+                tab.columns[6] = Event.Column(name: "catatan", type: "json")
+                gridRows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04"}"#
+                gridRows[4][6] = "[1,2,3]"
+                gridRows[7][6] = #"{"ganda":true}"#
+                gridRows[11][6] = #"{"status":"menunggu"}"#
+                gridRows[2][0] = ""
+                gridRows[3][1] = "KPM Sukajadi dengan nama yang sangat panjang sehingga tidak muat "
+                    + "di dalam satu sel dan harus dipotong di ujung kanannya oleh grid"
+            }
+            tab.showRows(columns: tab.columns, rows: gridRows, truncated: true,
+                         queryID: "20260131_120412_00042_abcde", elapsedMS: 412)
             // The statement that produced what is on screen, so "Count all" has something.
             tab.previewedSQL = tab.sql
             tab.stage = .done
@@ -581,6 +597,7 @@ enum Snapshot {
             // already in order by — so the scene shows the sort doing something.
             if scene == "grid-sorted" {
                 tab.applyMemorySort(GridSort(column: 2, direction: .ascending))
+                tab.applyViewBlocking()
             }
             // The rendering-only column work: one column renamed, one hidden, one moved, and a
             // cross-column search narrowing the rows. Drawn from the same model calls the UI makes,
@@ -590,6 +607,7 @@ enum Snapshot {
                 tab.moveColumn(from: 6, to: 1)    // `catatan` up beside the name
                 tab.setColumnHidden(4, true)      // `aktif`
                 tab.gridSearch = "kpm"
+                tab.applyViewBlocking()
             }
             // The value reader standing beside the grid rather than over the cell. `pin` and not the
             // public setter: the setters write, and a render must leave the user's preferences as it
@@ -600,10 +618,6 @@ enum Snapshot {
                 // `catatan` is a JSON column for this scene only, so the reader's mode picker and
                 // its two-row header are in the picture. Every column this fixture otherwise carries
                 // is a scalar, and a scalar offers one mode, which is no picker at all.
-                let json = Event.Column(name: "catatan", type: "json")
-                tab.columns[6] = json
-                tab.preview?.columns[6] = json
-                tab.preview?.rows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04","selesai":false}"#
                 tab.cellSelection = CellRange(from: (row: 1, column: 6), to: (row: 1, column: 6))
             }
             // Every cell kind, header state and footer state at once, for the visual parity gate: a
@@ -614,20 +628,12 @@ enum Snapshot {
             // hidden so the JSON column and its NULL fit inside the window the gate renders at.
             if scene == "grid-kinds" {
                 tab.sourceTable = "\"hive\".\"analytics\".\"penerima_manfaat\""
-                let json = Event.Column(name: "catatan", type: "json")
-                tab.columns[6] = json
-                tab.preview?.columns[6] = json
-                tab.preview?.rows[1][6] = #"{"masalah":"verifikasi lapangan","petugas":"BGN-04"}"#
-                tab.preview?.rows[4][6] = "[1,2,3]"
-                tab.preview?.rows[7][6] = #"{"ganda":true}"#
-                tab.preview?.rows[11][6] = #"{"status":"menunggu"}"#
-                tab.preview?.rows[2][0] = ""
-                tab.preview?.rows[3][1] = "KPM Sukajadi dengan nama yang sangat panjang sehingga tidak muat "
-                    + "di dalam satu sel dan harus dipotong di ujung kanannya oleh grid"
                 tab.setColumnHidden(4, true)
                 tab.setColumnHidden(5, true)
                 tab.columnFilters[1] = .text("KPM")
                 tab.applyMemorySort(GridSort(column: 2, direction: .ascending))
+                // The view has to be in before the edits are staged: its landing drops them.
+                tab.applyViewBlocking()
                 tab.cellEdits.edit("KPM Cibadak Baru", at: CellKey(row: 1, column: 1),
                                    original: "KPM Cibadak")
                 tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
@@ -661,7 +667,7 @@ enum Snapshot {
                 // Rows that a filter then hides. The filter is opened on `gender` and given a value
                 // none of them carries, which is the state that needs the explanation and the way
                 // out; the other two scenes have nothing to hide and no filter to clear.
-                tab.preview = PreviewResult(
+                tab.showRows(
                     columns: tab.columns, rows: [
                         ["KPM-0001", "KPM Sukamaju", "3201012001", "1987-04-11", "P", "true", "INS-01", "SUB-07"],
                         ["KPM-0002", "KPM Cibadak", "3201012002", "1991-09-02", "L", "false", "INS-01", "SUB-03"],
@@ -669,12 +675,13 @@ enum Snapshot {
                     ],
                     truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 383)
                 tab.columnFilters[4] = .values(["X"])
+                tab.applyViewBlocking()
             } else {
                 // Columns and no rows at all. The loading scene keeps `previewing` on, which is the
                 // moment the engine has sent the header and not the first batch — the state the
                 // footer used to call "0 rows" while it was still counting.
                 let loading = scene == "grid-loading"
-                tab.preview = PreviewResult(
+                tab.showRows(
                     columns: tab.columns, rows: [], truncated: false, queryID: nil,
                     elapsedMS: loading ? 0 : 383)
                 tab.previewing = loading
@@ -687,7 +694,7 @@ enum Snapshot {
             tab.destination = .file
             tab.sql = "SELECT * FROM hive.analytics.penerima_manfaat"
             tab.columns = [Event.Column(name: "Query Plan", type: "varchar")]
-            tab.preview = PreviewResult(
+            tab.showRows(
                 columns: tab.columns,
                 rows: [
                     ["Output[kode_wilayah, nama, jumlah_jiwa, bobot, aktif, diperbarui]"],
@@ -775,7 +782,7 @@ enum Snapshot {
             if let node = model.allNodes().first(where: { $0.kind == .table }) {
                 model.openTable(node)
                 model.selectedTab?.previewing = false
-                model.selectedTab?.preview = PreviewResult(
+                model.selectedTab?.showRows(
                     columns: [
                         Event.Column(name: "id_sppg", type: "varchar"),
                         Event.Column(name: "status_operasional_sppg", type: "varchar"),
@@ -802,7 +809,7 @@ enum Snapshot {
                 Event.Column(name: "jenis_kelamin", type: "varchar"),
                 Event.Column(name: "jumlah_kasus_baru", type: "bigint"),
             ]
-            tab.preview = PreviewResult(
+            tab.showRows(
                 columns: tab.columns,
                 rows: [
                     ["JAWA BARAT", "LAKI-LAKI", "41"],
@@ -814,6 +821,7 @@ enum Snapshot {
                 ],
                 truncated: false, queryID: "20260131_120412_00042_abcde", elapsedMS: 96)
             tab.columnFilters = [1: .values(["LAKI-LAKI", "PEREMPUAN"])]
+            tab.applyViewBlocking()
             tab.stage = .done
             tab.panel = .result
             model.filterPopoverColumn = 1
@@ -826,11 +834,12 @@ enum Snapshot {
                 Event.Column(name: "kode_wilayah", type: "varchar"),
                 Event.Column(name: "nama", type: "varchar"),
             ]
-            tab.preview = PreviewResult(
+            tab.showRows(
                 columns: tab.columns,
                 rows: (1...14).map { ["32.01.\(String(format: "%02d", $0)).2001", "KPM Wilayah \($0)"] },
                 truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 210)
             tab.columnFilters = [0: .text("32.01.0")]
+            tab.applyViewBlocking()
             tab.stage = .done
             tab.panel = .result
             model.filterPopoverColumn = 0
@@ -845,7 +854,7 @@ enum Snapshot {
                 Event.Column(name: "jumlah_jiwa", type: "bigint"),
                 Event.Column(name: "aktif", type: "boolean"),
             ]
-            tab.preview = PreviewResult(
+            tab.showRows(
                 columns: tab.columns,
                 rows: [
                     ["32.01.01.2001", "KPM Sukamaju", "4", "true"],
@@ -856,6 +865,7 @@ enum Snapshot {
                 ],
                 truncated: true, queryID: "20260131_120412_00042_abcde", elapsedMS: 388)
             tab.columnFilters = [0: .text("32.01"), 3: .text("=true")]
+            tab.applyViewBlocking()
             tab.stage = .done
             tab.panel = .result
         case "export-settings":

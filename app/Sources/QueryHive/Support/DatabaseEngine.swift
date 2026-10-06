@@ -49,6 +49,20 @@ protocol DatabaseEngine: Sendable {
     /// wait uses `run`, which keeps the main thread free.
     func runBlocking(_ command: String, env: [String: String])
 
+    /// An empty result store; its columns arrive later, with the run's `columns` event.
+    func makeResultStore() throws -> StoreRows
+
+    /// Runs `preview` or `explain` with its rows going into `store` instead of through `onEvent`
+    /// (no `rows` events: the grid reads the store). Anything else is refused the way `run` refuses
+    /// a command it cannot start. One store holds one run (D-12), so a new run makes a new store.
+    @discardableResult
+    func runIntoStore(_ command: String, env: [String: String], store: StoreRows,
+                      onEvent: @escaping (Event) -> Void,
+                      onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)?
+
+    /// A finished result from rows in hand: fixtures, snapshots, benches and tests.
+    func storeFromRows(columns: [Event.Column], rows: [[String?]]) throws -> StoreRows
+
     /// Hints that a run against this connection is likely soon, so an engine that keeps sessions
     /// can open one now. Returns at once and reports nothing: it is an optimisation, and the run
     /// that follows behaves the same without it. `env` is what a run would send.
@@ -83,4 +97,12 @@ struct SilentEngine: DatabaseEngine {
              onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? { Idle() }
     func terminateAll() {}
     func runBlocking(_ command: String, env: [String: String]) {}
+    // Making a store opens no connection, and a snapshot scene needs rows to draw.
+    func makeResultStore() throws -> StoreRows { try RustEngine().makeResultStore() }
+    func runIntoStore(_ command: String, env: [String: String], store: StoreRows,
+                      onEvent: @escaping (Event) -> Void,
+                      onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? { Idle() }
+    func storeFromRows(columns: [Event.Column], rows: [[String?]]) throws -> StoreRows {
+        try RustEngine().storeFromRows(columns: columns, rows: rows)
+    }
 }

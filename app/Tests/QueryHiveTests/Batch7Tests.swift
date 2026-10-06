@@ -58,16 +58,23 @@ final class Batch7Tests: XCTestCase {
                                         isObjectResult: false), .server, "otherwise server")
     }
 
+    /// The first source column of what the grid draws, once the view the tab asked for has landed.
+    private func shown(_ tab: QueryTab) -> [String?] {
+        let until = Date().addingTimeInterval(5)
+        while tab.viewBusy, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+        return tab.result.rows(in: 0..<tab.result.count, columns: [0]).map { $0[0] }
+    }
+
     func testMemorySortOrdersRowsAndServerSortLeavesThem() {
         let tab = QueryTab(title: "Q")
-        tab.preview = PreviewResult(columns: [Event.Column(name: "n", type: "bigint")],
+        tab.showRows(columns: [Event.Column(name: "n", type: "bigint")],
                                     rows: [["3"], ["1"], ["2"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
         tab.applyMemorySort(GridSort(column: 0, direction: .ascending))
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["1", "2", "3"])
+        XCTAssertEqual(shown(tab), ["1", "2", "3"])
+        XCTAssertNotNil(tab.viewSpec.sort)
         tab.applyServerSort(column: 0, direction: .ascending)
-        XCTAssertEqual(tab.displayedRows.map { $0[0] }, ["3", "1", "2"],
-                       "a server order is never re-applied in memory")
+        XCTAssertNil(tab.viewSpec.sort, "a server order is never asked of the store: it arrives sorted")
     }
 
     func testSearchNeedsThreeCharactersAndDebouncesAt250ms() {
@@ -96,50 +103,65 @@ final class Batch7Tests: XCTestCase {
                        [AppModel.stagedEditsMessage, AppModel.stagedEditsMessage])
     }
 
-    func testBaseResultIsStoredOnlyWhenSmall() {
+    func testBaseResultIsStoredWhateverItsSizeButNotWhenStopped() throws {
         let columns = [Event.Column(name: "n", type: "bigint")]
         let tab = QueryTab(title: "Q")
-        AppModel.applyPreviewDone(Event(event: "done"), columns: columns,
-                                  rows: [["1"], ["2"]], to: tab, storeBase: true)
-        XCTAssertEqual(tab.baseResult?.rows.count, 2)
+        let store = try TestStores.makeStore(columns: columns, rows: [["1"], ["2"]])
+        AppModel.applyPreviewDone(Event(event: "done"), columns: columns, rowCount: 2, to: tab,
+                                  store: store, storeBase: true)
+        XCTAssertTrue(tab.baseResult?.rows === store)
+        XCTAssertEqual(tab.baseResult?.meta.rowCount, 2)
+
+        // No 10,000-row rule any more: the base is a store of its own, and spill covers the size.
         let big = QueryTab(title: "Big")
-        AppModel.applyPreviewDone(Event(event: "done"), columns: columns,
-                                  rows: Array(repeating: ["1"], count: 10_001),
-                                  to: big, storeBase: true)
-        XCTAssertNil(big.baseResult, "a large base is re-run, not held twice")
-        XCTAssertTrue(BaseResultCache.shouldStore(rowCount: 10_000))
-        XCTAssertFalse(BaseResultCache.shouldStore(rowCount: 10_001))
+        let bigStore = try TestStores.makeStore(columns: columns, rows: Array(repeating: ["1"], count: 10_001))
+        AppModel.applyPreviewDone(Event(event: "done"), columns: columns, rowCount: 10_001, to: big,
+                                  store: bigStore, storeBase: true)
+        XCTAssertNotNil(big.baseResult)
+
+        // A stopped run is partial, and "off" must not return to a partial result.
+        let stopped = QueryTab(title: "Stopped")
+        var event = Event(event: "done")
+        event.cancelled = true
+        AppModel.applyPreviewDone(event, columns: columns, rowCount: 2, to: stopped,
+                                  store: store, storeBase: true)
+        XCTAssertNil(stopped.baseResult)
     }
 
-    func testOffRestoresTheStoredBaseWithoutAQuery() {
+    func testOffRestoresTheStoredBaseWithoutAQuery() throws {
         let (model, engine, _) = makeModel()
         let columns = [Event.Column(name: "n", type: "bigint")]
         let tab = QueryTab(title: "Q")
-        tab.baseResult = PreviewResult(columns: columns, rows: [["1"], ["2"]],
-                                       truncated: false, queryID: nil, elapsedMS: 0)
-        tab.preview = PreviewResult(columns: columns, rows: [["2"], ["1"]],
+        let base = try TestStores.makeStore(columns: columns, rows: [["1"], ["2"]])
+        tab.baseResult = ResultSlot(meta: PreviewResult(columns: columns, rowCount: 2, truncated: false,
+                                                        queryID: nil, elapsedMS: 0), rows: base)
+        tab.showRows(columns: columns, rows: [["2"], ["1"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
+        let sorted = try XCTUnwrap(tab.activeResult)
         tab.applyServerSort(column: 0, direction: .descending)
         model.clearSort(tab)
         XCTAssertNil(tab.activeSort)
-        XCTAssertEqual(tab.preview?.rows.map { $0[0] }, ["1", "2"])
+        XCTAssertTrue(tab.activeResult === base, "the base store is what the grid draws again")
+        XCTAssertTrue(sorted.isReleased, "the server-sorted store let go")
+        XCTAssertEqual(shown(tab), ["1", "2"])
+        XCTAssertEqual(tab.preview?.rowCount, 2)
         XCTAssertTrue(engine.calls.isEmpty, "no query for a stored base")
     }
 
-    func testBelowMinimumClearsTheServerSearch() {
+    func testBelowMinimumClearsTheServerSearch() throws {
         let (model, engine, _) = makeModel()
         let columns = [Event.Column(name: "nama", type: "varchar")]
-        let base = PreviewResult(columns: columns, rows: [["KPM Sukamaju"]],
-                                 truncated: false, queryID: nil, elapsedMS: 0)
         let tab = QueryTab(title: "Q")
-        tab.baseResult = base
-        tab.preview = PreviewResult(columns: columns, rows: [["KPM Sukamaju"]],
+        let store = try TestStores.makeStore(columns: columns, rows: [["KPM Sukamaju"]])
+        tab.baseResult = ResultSlot(meta: PreviewResult(columns: columns, rowCount: 1, truncated: false,
+                                                        queryID: nil, elapsedMS: 0), rows: store)
+        tab.showRows(columns: columns, rows: [["KPM Sukamaju"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
         tab.serverSearch = "kpm"
         tab.gridSearch = "kp"
         model.fireServerSearch(tab, term: "kp")
         XCTAssertNil(tab.serverSearch)
-        XCTAssertEqual(tab.preview?.rows.count, 1)
+        XCTAssertEqual(tab.preview?.rowCount, 1)
         XCTAssertTrue(engine.calls.isEmpty, "clearing below minimum runs nothing")
     }
 
@@ -169,7 +191,7 @@ final class Batch7Tests: XCTestCase {
         let tab = QueryTab(title: "Q")
         tab.connectionID = connection.id
         tab.previewBaseSQL = "SELECT * FROM t"
-        tab.preview = PreviewResult(columns: [Event.Column(name: "nama", type: "varchar")],
+        tab.showRows(columns: [Event.Column(name: "nama", type: "varchar")],
                                     rows: [["KPM Sukamaju"], ["KPM Cibadak"]],
                                     truncated: false, queryID: nil, elapsedMS: 0)
         tab.gridSearch = "kp"

@@ -15,7 +15,7 @@ final class StoppedRunTests: XCTestCase {
     func testAnOrdinaryDoneIsNotStopped() {
         let tab = QueryTab(title: "Query 1")
         let stopped = AppModel.applyPreviewDone(Event(event: "done", rows: 2), columns: [column],
-                                                rows: [["1"], ["2"]], to: tab)
+                                                rowCount: 2, to: tab)
         XCTAssertFalse(stopped)
         XCTAssertEqual(tab.preview?.summary, "2 rows")
         XCTAssertEqual(tab.logLines.last?.text, "2 rows returned")
@@ -26,7 +26,7 @@ final class StoppedRunTests: XCTestCase {
         var event = Event(event: "done", rows: 3)
         event.cancelled = true
         let stopped = AppModel.applyPreviewDone(event, columns: [column],
-                                                rows: [["1"], ["2"], ["3"]], to: tab)
+                                                rowCount: 3, to: tab)
         XCTAssertTrue(stopped)
         XCTAssertEqual(tab.preview?.summary, "Stopped · 3 rows")
         XCTAssertEqual(tab.preview?.truncated, true, "a partial result must keep Sort on Server")
@@ -36,7 +36,7 @@ final class StoppedRunTests: XCTestCase {
         let tab = QueryTab(title: "Query 1")
         var event = Event(event: "done", rows: 0)
         event.cancelled = true
-        AppModel.applyPreviewDone(event, columns: [], rows: [], to: tab)
+        AppModel.applyPreviewDone(event, columns: [], rowCount: 0, to: tab)
         XCTAssertEqual(tab.preview?.stopped, true)
         XCTAssertEqual(tab.preview?.summary, "Stopped before any rows arrived")
         XCTAssertEqual(tab.preview?.truncated, false)
@@ -47,7 +47,7 @@ final class StoppedRunTests: XCTestCase {
         var event = Event(event: "done", rows: 0)
         event.cancelled = true
         event.warnings = ["the server did not confirm the stop; the statement may still be running"]
-        AppModel.applyPreviewDone(event, columns: [], rows: [], to: tab)
+        AppModel.applyPreviewDone(event, columns: [], rowCount: 0, to: tab)
         XCTAssertTrue(tab.logLines.contains { $0.text.contains("did not confirm the stop") })
     }
 }
@@ -131,7 +131,7 @@ final class StopDeliveryTests: XCTestCase {
         poll()
         wait(for: [finished], timeout: 5)
 
-        XCTAssertEqual(tab.preview?.rows.count, 2, "the partial rows were thrown away")
+        XCTAssertEqual(tab.preview?.rowCount, 2, "the partial rows were thrown away")
         XCTAssertEqual(tab.preview?.stopped, true)
         XCTAssertNil(tab.previewError)
         XCTAssertEqual(engine.calls.first { $0.command == "history_add" }?.env["OUTCOME"], "cancelled")

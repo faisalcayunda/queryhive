@@ -707,7 +707,14 @@ final class AppModel {
 
     func closeTab(_ id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Both runs, then the stores (§19): `preview` and `explain` live in `previewProcess`, and a
+        // query still waiting on the server would otherwise run on for a tab nobody can see.
         tabs[index].process?.terminate()
+        tabs[index].previewProcess?.terminate()
+        tabs[index].previewProcess = nil
+        searchTasks[id]?.cancel()
+        searchTasks[id] = nil
+        tabs[index].releaseResults()
         tabs.remove(at: index)
         if selectedTabID == id {
             selectedTabID = tabs.indices.contains(index) ? tabs[index].id : tabs.last?.id
@@ -814,6 +821,12 @@ final class AppModel {
 
     func selectTab(_ id: UUID) {
         selectedTabID = id
+        // A tab in the background keeps its store, which spills first when the budget asks, but not
+        // the pages Swift cached from it (NFR-P3).
+        for other in tabs where other.id != id {
+            other.activeResult?.dropPages()
+            other.baseResult?.rows.dropPages()
+        }
         // The panel follows the tab, because an empty tab has nothing to show and a tab with rows
         // should show them without a second click. Without this, switching from a tab with results
         // to an empty one left the panel open at 480 points over "No result yet".
@@ -1942,15 +1955,10 @@ final class AppModel {
         preview(tab)
     }
 
-    /// How often a preview in flight hands its rows to the grid.
-    ///
-    /// Handing them over is what gives the buffer a second owner: from that moment the running
-    /// preview and the grid share it, and copy-on-write makes the *next* batch copy every row
-    /// fetched so far. A million-row preview paid that copy once per batch, and the grid paid a
-    /// rebuild of the same size on the same schedule. Five paints a second bounds both, and the
-    /// grid still fills in while the query runs. `done` paints the finished set either way, so the
-    /// last batch is never the one that got away.
-    static let previewPaintInterval: TimeInterval = 0.2
+    /// How often the footer's row count follows a streaming run (D-28). The grid itself is polled by
+    /// its display link; this is only the one number SwiftUI watches, so it is not re-evaluated per
+    /// engine batch.
+    static let footerCountInterval: TimeInterval = 0.2
 
     /// `source` decides what is sent: the selection, the statement under the caret, or everything.
     func preview(_ tab: QueryTab, from source: QuerySource = .selection) {
@@ -2356,20 +2364,36 @@ final class AppModel {
         guard let sort else { clearSort(tab); return }
         if SortPolicy.route(builderRefused: false, showingPlan: tab.showingPlan,
                             isObjectResult: tab.isObjects) == .memory {
+            // Rust answers `Streaming` to a sort until every row has arrived (§17.3).
+            guard !tab.previewing else { return }
             tab.applyMemorySort(sort)
             return
         }
         sortOnServer(tab, column: column, source: source, direction: sort.direction)
     }
 
-    /// The cycle's "off": a memory order just lifts, a server order returns
-    /// to the base rows — from the store when small, by re-running when not.
+    /// The cycle's "off": a memory order just lifts, a server order returns to the base store,
+    /// or runs the base statement again when there is none (§18).
     func clearSort(_ tab: QueryTab) {
         guard let sort = tab.activeSort else { return }
         tab.activeSort = nil
-        guard sort.origin == .server, tab.serverSearch == nil else { return }
-        if tab.baseResult == nil { rerunBaseSQL(tab); return }
-        tab.preview = tab.baseResult
+        guard sort.origin == .server, tab.serverSearch == nil else {
+            if sort.origin == .memory { tab.scheduleViewApply() }
+            return
+        }
+        restoreBase(tab)
+    }
+
+    /// Back to the result as the server first sent it. The base store takes over from a server-sorted
+    /// or server-searched one, and carries the filters and the in-memory search the tab still shows
+    /// (an empty `ViewSpec` would drop filters whose funnels are still lit).
+    private func restoreBase(_ tab: QueryTab) {
+        guard let base = tab.baseResult else { rerunBaseSQL(tab); return }
+        if tab.activeResult !== base.rows { tab.activeResult?.release() }
+        tab.activeResult = base.rows
+        tab.preview = base.meta
+        tab.fetchedRows = base.meta.rowCount
+        tab.scheduleViewApply()
     }
 
     /// The base statement again, for an "off" with no stored base: holding
@@ -2381,7 +2405,7 @@ final class AppModel {
             tab.previewError = "Couldn't re-run the base query."
             return
         }
-        runPreview(tab, sql: sql, connection: connection, env: env)
+        runPreview(tab, sql: sql, connection: connection, env: env, baseRun: true)
     }
 
     /// Queue one server search per pause in typing; a keystroke cancels the
@@ -2422,8 +2446,7 @@ final class AppModel {
     /// base was too large to keep. The field keeps its text; only the rows go.
     func clearSearch(_ tab: QueryTab) {
         tab.serverSearch = nil
-        if tab.baseResult == nil { rerunBaseSQL(tab); return }
-        tab.preview = tab.baseResult
+        restoreBase(tab)
     }
 
     /// The body of a preview run, shared by Run and the search escalation: put the tab into its
@@ -2432,9 +2455,22 @@ final class AppModel {
                             env: [String: String], clearSearch: Bool = true,
                             baseSQL: String? = nil, activeSort: ActiveSort? = nil,
                             serverSearch: String? = nil, baseRun: Bool = false) {
+        let store: StoreRows
+        do { store = try engine.makeResultStore() } catch {
+            tab.previewError = "Could not open a result store: \(error.localizedDescription)"
+            return
+        }
         PerfSignposts.runBegin()
         tab.previewing = true
         tab.previewError = nil
+        // §18. A fresh Run retires both stores. A sort or search run keeps the base, because "off"
+        // must return to the rows they started from, and lets go of the result it replaces.
+        if baseRun {
+            tab.releaseResults()
+        } else {
+            if tab.activeResult !== tab.baseResult?.rows { tab.activeResult?.release() }
+            tab.activeResult = nil
+        }
         tab.preview = nil
         tab.showingPlan = false
         tab.previewedSQL = sql
@@ -2442,9 +2478,6 @@ final class AppModel {
         // Set on every run, so an ordinary Run clears the order a sort left.
         tab.activeSort = activeSort
         tab.serverSearch = serverSearch
-        // A fresh base run retires the stored one; sort and search runs keep
-        // it, because "off" must return to the rows they started from.
-        if baseRun { tab.baseResult = nil }
 
         // The filters described rows that are about to be replaced, and clearing them is also what
         // drops the cell selection — see `columnFilters`' own note. The last total described them
@@ -2454,6 +2487,9 @@ final class AppModel {
         // that are arriving. The escalated search is the exception — it *is* the search — so its
         // caller keeps the term on screen.
         if clearSearch { tab.gridSearch = "" }
+        // After the clearing above, so those two do not ask the new, empty store for a view.
+        tab.activeResult = store
+        tab.fetchedRows = 0
         tab.totalRows = nil
         tab.countError = nil
         tab.panel = .result
@@ -2466,40 +2502,43 @@ final class AppModel {
         let startedAt = Date()
         var message: String?
         var columns: [Event.Column] = []
-        var rows: [[String?]] = []
+        var fetched = 0
         var stopped = false
         var finished = false
-        // When the grid last got the rows, so `previewPaintInterval` is measured from a paint
-        // rather than from the start of the run.
-        var paintedAt = Date.distantPast
-        tab.previewProcess = engine.run("preview", env: env, onEvent: { event in
+        var footerAt = Date.distantPast
+        var woke = false
+        tab.previewProcess = engine.runIntoStore("preview", env: env, store: store, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
                 message = event.message
             case "columns":
                 columns = event.columns ?? []
+                store.setColumns(columns)
                 // Paint the header as soon as it is known rather than after the first batch.
-                tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
+                tab.preview = PreviewResult(columns: columns, rowCount: 0, truncated: false,
                                             queryID: nil, elapsedMS: 0)
-            case "rows":
-                if !rows.isEmpty || event.data?.isEmpty == false { PerfSignposts.firstRowsEvent() }
-                rows.append(contentsOf: event.data ?? [])
-                // A partial grid while the rest arrives: the point of batching, on a clock rather
-                // than once per batch. Every paint costs a copy of the whole buffer here and a
-                // rebuild of the whole grid there, so a million rows painted per batch is the one
-                // thing this loop cannot afford. See `previewPaintInterval`.
+                // A statement that writes returns no columns and so no rows: nothing to hold.
+                if columns.isEmpty, tab.activeResult === store {
+                    tab.activeResult = nil
+                    store.release()
+                }
+            case "progress":
+                // The grid polls the store itself. The footer's count is the only thing handed to
+                // SwiftUI, and at most five times a second (D-28); the first progress also wakes
+                // the grid at once, so the first rows do not wait for a display tick.
+                fetched = event.rows ?? fetched
+                if !woke { woke = true; tab.pollHook?() }
                 let now = Date()
-                if now.timeIntervalSince(paintedAt) >= Self.previewPaintInterval {
-                    paintedAt = now
-                    tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
-                                                queryID: tab.preview?.queryID, elapsedMS: 0)
+                if now.timeIntervalSince(footerAt) >= Self.footerCountInterval {
+                    footerAt = now
+                    tab.fetchedRows = fetched
                 }
             case "done":
                 PerfSignposts.runDone()
                 finished = true
-                stopped = Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab,
-                                                storeBase: baseRun)
+                stopped = Self.applyPreviewDone(event, columns: columns, rowCount: event.rows ?? store.fetched,
+                                                to: tab, store: store, storeBase: baseRun)
             default:
                 break
             }
@@ -2516,11 +2555,13 @@ final class AppModel {
                 tab.previewError = message ?? log.split(separator: "\n").last.map(String.init)
                     ?? "The engine exited with status \(status)."
                 tab.preview = nil
+                if tab.activeResult === store { tab.activeResult = nil }
+                if tab.baseResult?.rows !== store { store.release() }
                 tab.note(.error, tab.previewError ?? "Preview failed")
                 tab.panel = .log
                 Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
                                    outcome: tab.cancelled ? "cancelled" : "error",
-                                   elapsedMS: elapsed, rowCount: rows.count,
+                                   elapsedMS: elapsed, rowCount: fetched,
                                    error: tab.previewError, recording: self.recordsHistory, engine: self.engine)
                 // Re-read, so a History panel that is already on screen counts this run without
                 // the user having to switch panels. `onAppear` only fires once per appearance.
@@ -2529,7 +2570,7 @@ final class AppModel {
             }
             Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
                                outcome: stopped ? "cancelled" : "ok", elapsedMS: tab.preview?.elapsedMS,
-                               rowCount: rows.count, error: nil,
+                               rowCount: tab.preview?.rowCount ?? fetched, error: nil,
                                recording: self.recordsHistory, engine: self.engine)
             self.loadHistory(search: self.historySearch)
         })
@@ -2543,23 +2584,25 @@ final class AppModel {
     /// partial, so it counts as truncated too: Sort on Server and the partial-order banner stay
     /// honest. `done.warnings` (for instance "the server did not confirm the stop") go to the log.
     @discardableResult
-    static func applyPreviewDone(_ event: Event, columns: [Event.Column], rows: [[String?]],
-                                 to tab: QueryTab, storeBase: Bool = false) -> Bool {
+    static func applyPreviewDone(_ event: Event, columns: [Event.Column], rowCount: Int,
+                                 to tab: QueryTab, store: StoreRows? = nil,
+                                 storeBase: Bool = false) -> Bool {
         let stopped = event.cancelled ?? false
-        let truncated = (event.truncated ?? false) || (stopped && !rows.isEmpty)
-        tab.preview = PreviewResult(columns: columns, rows: rows, truncated: truncated,
+        let truncated = (event.truncated ?? false) || (stopped && rowCount > 0)
+        tab.preview = PreviewResult(columns: columns, rowCount: rowCount, truncated: truncated,
                                     queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0,
                                     stopped: stopped)
-        // The base run keeps its rows for "off", but only when holding them
-        // beside the active ones does not double a large buffer.
-        if storeBase, !stopped, BaseResultCache.shouldStore(rowCount: rows.count) {
-            tab.baseResult = tab.preview
+        tab.fetchedRows = rowCount
+        // The base run keeps its store for "off". Its own store: holding it beside the active one
+        // does not double the resident rows, because a store that is not being read spills first.
+        if storeBase, !stopped, let store, let meta = tab.preview {
+            tab.baseResult = ResultSlot(meta: meta, rows: store)
         }
         if stopped {
-            tab.note(.warning, rows.isEmpty ? "Stopped before any rows arrived"
-                                            : "Stopped · \(pluralized(rows.count, "row")) fetched")
+            tab.note(.warning, rowCount == 0 ? "Stopped before any rows arrived"
+                                             : "Stopped · \(pluralized(rowCount, "row")) fetched")
         } else {
-            tab.note(.success, "\(pluralized(rows.count, "row")) returned\(truncated ? " (limit reached)" : "")")
+            tab.note(.success, "\(pluralized(rowCount, "row")) returned\(truncated ? " (limit reached)" : "")")
         }
         for warning in event.warnings ?? [] { tab.note(.warning, warning) }
         return stopped
@@ -2954,9 +2997,18 @@ final class AppModel {
             tab.previewError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             return
         }
+        let store: StoreRows
+        do { store = try engine.makeResultStore() } catch {
+            tab.previewError = "Could not open a result store: \(error.localizedDescription)"
+            return
+        }
         tab.explaining = true
         tab.previewError = nil
+        // A plan replaces both stores (§18): "off" has no base to return to afterwards.
+        tab.releaseResults()
         tab.preview = nil
+        tab.activeResult = store
+        tab.fetchedRows = 0
         tab.previewedSQL = sql
         tab.activeSort = nil
         tab.serverSearch = nil
@@ -2968,30 +3020,32 @@ final class AppModel {
         tab.previewToken = run
         var message: String?
         var columns: [Event.Column] = []
-        var rows: [[String?]] = []
         var finished = false
-        tab.previewProcess = Engine.current.run("explain", env: env, onEvent: { event in
+        var woke = false
+        tab.previewProcess = engine.runIntoStore("explain", env: env, store: store, onEvent: { event in
             guard tab.previewToken == run else { return }
             switch event.event {
             case "error":
                 message = event.message
             case "columns":
                 columns = event.columns ?? []
-                tab.preview = PreviewResult(columns: columns, rows: [], truncated: false,
+                store.setColumns(columns)
+                tab.preview = PreviewResult(columns: columns, rowCount: 0, truncated: false,
                                             queryID: nil, elapsedMS: 0)
-            case "rows":
-                rows.append(contentsOf: event.data ?? [])
-                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
-                                            queryID: tab.preview?.queryID, elapsedMS: 0)
+            case "progress":
+                tab.fetchedRows = event.rows ?? tab.fetchedRows
+                if !woke { woke = true; tab.pollHook?() }
             case "done":
                 finished = true
+                let count = event.rows ?? store.fetched
                 if event.cancelled == true {
-                    Self.applyPreviewDone(event, columns: columns, rows: rows, to: tab)
+                    Self.applyPreviewDone(event, columns: columns, rowCount: count, to: tab, store: store)
                     break
                 }
-                tab.preview = PreviewResult(columns: columns, rows: rows, truncated: false,
+                tab.preview = PreviewResult(columns: columns, rowCount: count, truncated: false,
                                             queryID: event.queryId, elapsedMS: event.elapsedMs ?? 0)
-                tab.note(.success, "Plan returned \(pluralized(rows.count, "line"))")
+                tab.fetchedRows = count
+                tab.note(.success, "Plan returned \(pluralized(count, "line"))")
             default:
                 break
             }
@@ -3003,6 +3057,8 @@ final class AppModel {
                 tab.previewError = message ?? log.split(separator: "\n").last.map(String.init)
                     ?? "The engine exited with status \(status)."
                 tab.preview = nil
+                if tab.activeResult === store { tab.activeResult = nil }
+                store.release()
                 tab.showingPlan = false
                 tab.note(.error, tab.previewError ?? "Explain failed")
                 tab.panel = .log
@@ -3224,6 +3280,12 @@ final class AppModel {
     /// user did not read. The engine verifies each statement's affected-row count and rolls the
     /// whole plan back if one disagrees.
     func applyChanges(_ plan: WritePlan, in tab: QueryTab) {
+        // A plan built before a view was replaced names rows of the view that has gone (D-27).
+        guard !tab.viewBusy else {
+            tab.note(.warning, QueryTab.viewBusyMessage)
+            tab.panel = .log
+            return
+        }
         // The plan says which rows it could not write, and it must not be a silent
         // partial save: those lines go to the log before anything runs.
         for warning in plan.warnings { tab.note(.warning, warning) }

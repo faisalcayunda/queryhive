@@ -8,6 +8,8 @@ enum QueryHiveMain {
     @MainActor
     static func main() {
         PerfSignposts.launchBegin()
+        // A result that has spilled holds one file descriptor for as long as its tab lives (D-26).
+        RustEngine.raiseFileLimit()
         if let path = AppIconRenderer.requestedSheetPath() {
             AppIconRenderer.runSheet(path: path)
         }
@@ -21,6 +23,12 @@ enum QueryHiveMain {
         // `--bench <scenario>` runs a measurement and exits; only `launch` comes back, to let the
         // real app start and report its own first frame.
         if CommandLine.arguments.contains("--bench") { BenchMode.run() }
+        // Once, synchronously, before `AppModel` restores any tab (§17.6): the sweep of leftover
+        // spill files is over before the first Run can make a store. `--snapshot` and `--bench`
+        // configured their own budgets above, and the first caller wins.
+        let spill = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("QueryHive/spill").path
+        RustEngine.ensureStoresConfigured(spillDir: spill, budgetBytes: 256 << 20)
         QueryHiveApp.main()
     }
 }
