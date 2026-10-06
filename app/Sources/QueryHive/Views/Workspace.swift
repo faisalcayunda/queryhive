@@ -697,7 +697,7 @@ struct FormatTile: View {
                                            : AnyShapeStyle(format.tint.opacity(0.14)))
                     }
                 Text(format.label)
-                    .font(.code(10.5, weight: .semibold))
+                    .font(.code(11, weight: .semibold))
                     .foregroundStyle(selected ? .white : Tone.secondary)
             }
             .frame(maxWidth: .infinity)
@@ -1074,7 +1074,7 @@ private struct ObjectInspector: View {
                 .fixedSize(horizontal: false, vertical: true)
             if let scope = tab.objectScope, !scope.title.isEmpty {
                 Text(scope.title)
-                    .font(.code(10.5))
+                    .font(.code(11))
                     .foregroundStyle(Tone.secondary)
                     .textSelection(.enabled)
             }
@@ -1108,12 +1108,12 @@ private struct ObjectInspector: View {
             }
             if let error = tab.objectDetailError {
                 Text(error)
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.coral)
                     .fixedSize(horizontal: false, vertical: true)
             } else if tab.objectDetailColumns.isEmpty {
                 Text(tab.objectDetailLoading ? "Reading…" : "No columns reported.")
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             } else {
                 ForEach(Array(tab.objectDetailColumns.enumerated()), id: \.offset) { _, column in
@@ -1126,7 +1126,7 @@ private struct ObjectInspector: View {
                             .textSelection(.enabled)
                         Spacer(minLength: 4)
                         Text(column.type)
-                            .font(.code(10))
+                            .font(.code(11))
                             .foregroundStyle(Tone.secondary)
                             .lineLimit(1)
                     }
@@ -1155,16 +1155,13 @@ private struct ObjectInspector: View {
     }
 
     private func sectionTitle(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.ui(9.5, weight: .bold))
-            .tracking(0.8)
-            .foregroundStyle(Tone.secondary)
+        DecorativeLabel(text: text, weight: .bold, tracking: 0.8)
     }
 
     private func field(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
-                .font(.ui(9.5, weight: .semibold))
+                .font(.ui(11, weight: .semibold))
                 .foregroundStyle(Tone.secondary)
             Text(value)
                 .font(.code(11))

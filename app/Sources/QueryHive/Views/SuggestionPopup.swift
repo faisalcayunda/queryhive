@@ -23,7 +23,7 @@ struct SuggestionPopup: View {
                         .lineLimit(1)
                     Spacer(minLength: 10)
                     Text(item.kind.label)
-                        .font(.ui(10))
+                        .font(.ui(11))
                         .foregroundStyle(Tone.secondary)
                 }
                 .padding(.horizontal, 9)

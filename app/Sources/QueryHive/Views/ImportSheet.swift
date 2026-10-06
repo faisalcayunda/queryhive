@@ -58,7 +58,7 @@ struct ImportSheet: View {
                     .font(.ui(13, weight: .semibold))
                     .foregroundStyle(Tone.ink)
                 Text(draft.mapping.fileName.isEmpty ? "No file chosen" : draft.mapping.fileName)
-                    .font(.code(10.5))
+                    .font(.code(11))
                     .foregroundStyle(Tone.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -107,7 +107,7 @@ struct ImportSheet: View {
             }
             if let note = draft.mapping.format.note {
                 Text(note)
-                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -150,7 +150,7 @@ struct ImportSheet: View {
                 Text("The target's own columns are not known, so the import maps each file column to "
                      + "the target column of the same name — the engine's own default. Name the "
                      + "table and press Load Columns to map field by field.")
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -276,7 +276,7 @@ struct ImportSheet: View {
                     if format == .json {
                         Text("The keys come from the start of the file, up to 1,000 objects. A key that first "
                              + "appears later is not imported, and the import says so when it finishes.")
-                            .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                            .font(.ui(11)).foregroundStyle(Tone.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -303,7 +303,7 @@ struct ImportSheet: View {
                 $0.title(for: format)
             }
             Text(draft.mapping.onError.detail(for: format))
-                .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                .font(.ui(11)).foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if !format.importsStatements {
                 HStack(alignment: .top, spacing: 10) {
@@ -335,13 +335,13 @@ struct ImportSheet: View {
             if draft.mapping.format.importsStatements {
                 Text("The whole file is read into memory to split it into statements, so the engine "
                      + "refuses one over 512 MiB and says how big it is.")
-                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text("The target table must already exist: this engine imports rows into a table, and "
                      + "creating one from the file's inferred types is not built (ADR-0019). Naming a "
                      + "table that is not there is a failed import, not a new table.")
-                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -434,19 +434,19 @@ struct ImportSheet: View {
         return VStack(alignment: .leading, spacing: 3) {
             ForEach(Array(outcome.warnings.enumerated()), id: \.offset) { _, warning in
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
-                    .font(.ui(10.5)).foregroundStyle(Tone.amber)
+                    .font(.ui(11)).foregroundStyle(Tone.amber)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(shown.enumerated()), id: \.offset) { _, error in
-                Text(error).font(.code(10.5)).foregroundStyle(Tone.coral)
+                Text(error).font(.code(11)).foregroundStyle(Tone.coral)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if more > 0 {
-                Text("…and \(more) more").font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                Text("…and \(more) more").font(.ui(11)).foregroundStyle(Tone.secondary)
             }
             if outcome.errorsTruncated {
                 Text("The engine cut its own list of errors short.")
-                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)

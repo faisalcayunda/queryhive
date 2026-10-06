@@ -44,7 +44,7 @@ struct JSONTreeView: View {
                 .font(.ui(11.5))
             if let search {
                 Text(search.hits.isEmpty ? "No matches" : "\(search.hits.count)")
-                    .font(.code(10.5))
+                    .font(.code(11))
                     .foregroundStyle(search.hits.isEmpty ? Tone.coral : Tone.secondary)
             }
             if !query.isEmpty {

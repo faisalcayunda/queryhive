@@ -726,15 +726,35 @@ struct ComboField: View {
     }
 }
 
+/// An uppercase caption that names a group and is not read as a sentence (W9-T9, blueprint w9 §12.1).
+///
+/// The one place below 11 pt that the font floor allows: 10 pt, at `Tone.secondary` (ink at 68%,
+/// 85% under Increase Contrast). Every other view that wants this look goes through here, or marks
+/// its own line `// decorative-label`; `FontFloorTests` rejects any other size under 11.
+struct DecorativeLabel: View {
+    /// The size, in points. Shared with `DecorativeLabelTests`.
+    static let size: CGFloat = 10
+    /// The ink, which `DecorativeLabelTests` holds at 0.68 or more.
+    static var ink: Color { Tone.secondary }
+
+    let text: String
+    var weight: Font.Weight = .semibold
+    var tracking: CGFloat = 0.9
+
+    var body: some View {
+        Text(text.uppercased())
+            .font(.ui(Self.size, weight: weight))
+            .tracking(tracking)
+            .foregroundStyle(Self.ink)
+    }
+}
+
 /// Uppercase section label, the one piece of chrome every Navicat pane header shares.
 struct SectionLabel: View {
     let text: String
 
     var body: some View {
-        Text(text.uppercased())
-            .font(.ui(10.5, weight: .semibold))
-            .tracking(0.9)
-            .foregroundStyle(Tone.secondary)
+        DecorativeLabel(text: text)
     }
 }
 

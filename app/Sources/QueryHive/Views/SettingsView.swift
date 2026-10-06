@@ -177,7 +177,7 @@ struct SettingsView: View {
                     .font(.system(size: 16, weight: .medium))
                     .frame(height: 17)
                 Text(option.title)
-                    .font(.ui(10.5, weight: active ? .semibold : .regular))
+                    .font(.ui(11, weight: active ? .semibold : .regular))
                     .lineLimit(1)
             }
             .foregroundStyle(active ? Tone.ink : Tone.secondary)
@@ -352,7 +352,7 @@ struct AccountSettings: View {
                 if let notice = model.accountNotice {
                     RowDivider()
                     Text(notice)
-                        .font(.ui(10.5))
+                        .font(.ui(11))
                         .foregroundStyle(Tone.ink.opacity(0.75))
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.vertical, 6)
@@ -395,7 +395,7 @@ struct AccountSettings: View {
                     .font(.ui(12, weight: .semibold))
                     .foregroundStyle(Tone.ink)
                 Text(identityDetail)
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .lineLimit(1)
             }
@@ -439,7 +439,7 @@ struct AccountSettings: View {
                     .font(.ui(11.5))
                     .foregroundStyle(Tone.ink)
                 Text(profile.kind)
-                    .font(.code(10))
+                    .font(.code(11))
                     .foregroundStyle(Tone.secondary)
             }
             Spacer(minLength: 12)
@@ -739,9 +739,7 @@ struct AppearanceSettings: View {
     private func lookGroup<Content: View>(_ title: String,
                                           @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(.ui(9.5, weight: .semibold))
-                .foregroundStyle(Tone.secondary)
+            DecorativeLabel(text: title, weight: .semibold, tracking: 0)
             content()
         }
     }
@@ -761,7 +759,7 @@ struct AppearanceSettings: View {
                     .foregroundStyle(active ? Tone.ink : Tone.ink.opacity(0.85))
                     .lineLimit(1)
                 Text(detail)
-                    .font(.ui(9.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .lineLimit(1)
             }
@@ -883,7 +881,7 @@ struct AppearanceSettings: View {
                                 .strokeBorder(active ? Tone.accent.opacity(0.9) : Tone.ink.opacity(0.16),
                                               lineWidth: active ? 2 : 1))
                         Text(theme.title)
-                            .font(.ui(9))
+                            .font(.ui(11))
                             .foregroundStyle(active ? Tone.ink : Tone.secondary)
                             .lineLimit(1)
                     }
@@ -1036,7 +1034,7 @@ struct EditorSettings: View {
                 // that is not fixed-pitch is not in the code list, and saying how many were dropped
                 // is better than a list that silently looks short.
                 Text("\(FontChoice.codeFamilies.count) of \(FontChoice.uiFamilies.count) installed families are fixed-pitch and offered here.")
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary.opacity(0.85))
             }
         }
@@ -1154,7 +1152,7 @@ struct KeyboardSettings: View {
                                         in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                     } else {
                         Text("not bound")
-                            .font(.ui(10.5))
+                            .font(.ui(11))
                             .foregroundStyle(Tone.secondary.opacity(0.7))
                     }
                 }

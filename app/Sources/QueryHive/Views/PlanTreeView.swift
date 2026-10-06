@@ -53,11 +53,11 @@ private struct PlanRow: View {
                     Text(verbatim: subtitle).font(.code(11)).foregroundStyle(Tone.secondary).lineLimit(1)
                 }
                 if hot {
-                    Text("Hottest").font(.ui(10, weight: .bold)).foregroundStyle(Tone.amber)
+                    Text("Hottest").font(.ui(11, weight: .bold)).foregroundStyle(Tone.amber)
                 }
                 Spacer(minLength: 8)
                 ForEach(Array(PlanText.columns(node, plan).enumerated()), id: \.offset) { _, text in
-                    Text(verbatim: text).font(.code(10.5)).foregroundStyle(Tone.secondary)
+                    Text(verbatim: text).font(.code(11)).foregroundStyle(Tone.secondary)
                 }
                 bar
                 if !node.facts.isEmpty {
@@ -72,7 +72,7 @@ private struct PlanRow: View {
             if open {
                 ForEach(Array(node.facts.enumerated()), id: \.offset) { _, fact in
                     Text(verbatim: "\(fact.key): \(fact.value)")
-                        .font(.code(10.5)).foregroundStyle(Tone.secondary).textSelection(.enabled)
+                        .font(.code(11)).foregroundStyle(Tone.secondary).textSelection(.enabled)
                 }
             }
         }

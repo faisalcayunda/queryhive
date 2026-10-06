@@ -123,7 +123,7 @@ struct PanelTabButton: View {
                     .font(.ui(11, weight: selected ? .semibold : .regular))
                 if let count {
                     Text("\(count)")
-                        .font(.ui(10, weight: .semibold))
+                        .font(.ui(11, weight: .semibold))
                         .foregroundStyle(Self.ink(selected: selected))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -189,7 +189,7 @@ struct LogRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Text(line.at, format: .dateTime.hour().minute().second())
-                .font(.code(10.5))
+                .font(.code(11))
                 .foregroundStyle(Tone.ink.opacity(0.35))
                 .frame(width: 56, alignment: .leading)
             Image(systemName: line.kind.symbol)
@@ -246,7 +246,7 @@ struct TablePanel: View {
                 Text(tab.isDestructive && tab.stage != .done
                      ? "Replace drops the existing table before the query runs."
                      : "Trino writes the rows itself; none of them travel through this app.")
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(tab.isDestructive && tab.stage != .done ? Tone.coral : Tone.secondary)
                     .lineLimit(1)
                 Spacer()
@@ -265,7 +265,7 @@ struct TablePanel: View {
     private func infoRow(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(label)
-                .font(.ui(10.5, weight: .semibold))
+                .font(.ui(11, weight: .semibold))
                 .tracking(0.6)
                 .foregroundStyle(Tone.secondary)
                 .frame(width: 96, alignment: .leading)
@@ -294,7 +294,7 @@ struct FilesPanel: View {
                     .foregroundStyle(Tone.secondary)
                 if let directory = tab.outputDirectory {
                     Text(directory.path)
-                        .font(.code(10.5))
+                        .font(.code(11))
                         .foregroundStyle(Tone.ink.opacity(0.35))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -339,7 +339,7 @@ struct FilesPanel: View {
                 }
                 HStack(spacing: 8) {
                     Text("\(pluralized(tab.files.count, "file")) · \(byteText(tab.totalBytes))")
-                        .font(.ui(10.5))
+                        .font(.ui(11))
                         .foregroundStyle(Tone.secondary)
                     Spacer()
                     PillButton(title: "Reveal in Finder", symbol: "magnifyingglass", compact: true) { tab.revealFiles() }
@@ -366,7 +366,7 @@ private func libraryBanner(_ text: String) -> some View {
             .font(.system(size: 9, weight: .bold))
             .foregroundStyle(Tone.coral)
         Text(text)
-            .font(.ui(10.5))
+            .font(.ui(11))
             .foregroundStyle(Tone.coral)
             .lineLimit(2)
         Spacer()
@@ -482,13 +482,13 @@ struct HistoryRow: View {
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(detail)
-                    .font(.ui(10))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             Text(started, format: .dateTime.month(.abbreviated).day().hour().minute())
-                .font(.code(10))
+                .font(.code(11))
                 .foregroundStyle(Tone.ink.opacity(0.35))
         }
         .padding(.horizontal, Metrics.gutter)

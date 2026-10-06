@@ -840,7 +840,7 @@ struct ConnectionTypeTile: View {
                     .font(.ui(13, weight: .semibold, rounded: true))
                     .foregroundStyle(Tone.ink)
                 Text(verbatim: "port \(kind.defaultPort)")
-                    .font(.code(10.5))
+                    .font(.code(11))
                     .foregroundStyle(Tone.secondary)
             }
             .frame(maxWidth: .infinity)
