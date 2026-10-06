@@ -279,6 +279,85 @@ pub struct ObjectsPage {
     pub rows: Vec<Vec<String>>,
 }
 
+/// How a plan is written down: what the server's own `EXPLAIN` prints, or JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExplainFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+/// What a caller asks of `EXPLAIN`. The default is what every driver has always spelled, so a
+/// caller that asks for nothing gets the statement it got before these options existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExplainOptions {
+    pub format: ExplainFormat,
+    /// Run the statement and report what it did (`EXPLAIN ANALYZE`). The server executes the
+    /// statement, so the engine only offers it for a read.
+    pub analyze: bool,
+}
+
+/// The statements that fence an `EXPLAIN ANALYZE` on a driver that has transactions: one that
+/// opens a transaction the server refuses writes in, and the one that always ends it by
+/// throwing it away. What the statement did, a side effect the classifier did not see included,
+/// is then undone or refused by the server itself (DBX-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalyzeFence {
+    pub begin: &'static str,
+    pub end: &'static str,
+}
+
+/// What a driver can spell for `EXPLAIN`, readable before connecting (the same rule as
+/// [`Capabilities`]: nothing here touches the network).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExplainSupport {
+    /// The server's name as a sentence uses it ("PostgreSQL"). Empty for a driver that has not
+    /// said, which reads as "this driver".
+    pub name: &'static str,
+    pub json: bool,
+    pub analyze: bool,
+    /// Whether `analyze` can be asked for in JSON at the same time.
+    pub analyze_json: bool,
+    /// How to run an ANALYZE without letting it write, when the driver can. `None` for a driver
+    /// with no transaction to put it in.
+    pub analyze_fence: Option<AnalyzeFence>,
+}
+
+impl ExplainSupport {
+    /// The options the driver will run for what was `asked`, and the sentence to report when
+    /// they differ. `Err` when ANALYZE is asked and the driver has none, so the caller can
+    /// refuse before anything is opened.
+    pub fn resolve(
+        &self,
+        asked: ExplainOptions,
+    ) -> Result<(ExplainOptions, Option<String>), EngineError> {
+        let name = if self.name.is_empty() {
+            "this driver"
+        } else {
+            self.name
+        };
+        if asked.analyze && !self.analyze {
+            return Err(EngineError::Usage {
+                message: format!("EXPLAIN ANALYZE is not available on {name}"),
+            });
+        }
+        let mut resolved = asked;
+        let mut warning = None;
+        if asked.format == ExplainFormat::Json {
+            if asked.analyze && !self.analyze_json {
+                resolved.format = ExplainFormat::Text;
+                warning = Some(format!(
+                    "{name} has no JSON form of EXPLAIN ANALYZE; the plan is text."
+                ));
+            } else if !asked.analyze && !self.json {
+                resolved.format = ExplainFormat::Text;
+                warning = Some(format!("{name} plans are returned as text."));
+            }
+        }
+        Ok((resolved, warning))
+    }
+}
+
 /// One driver.
 ///
 /// `connect` takes `&self` rather than `&mut self` so a single registered driver
@@ -296,6 +375,13 @@ pub trait Driver: Send + Sync + 'static {
     /// What this driver can do. Must not perform I/O: the UI calls it for
     /// connections that are not connected.
     fn capabilities(&self) -> Capabilities;
+
+    /// What this driver can spell for `EXPLAIN`. Must not perform I/O. The default says nothing
+    /// beyond the plain statement, so a driver that has not been taught more is never asked for
+    /// more.
+    fn explain_support(&self) -> ExplainSupport {
+        ExplainSupport::default()
+    }
 
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError>;
 
@@ -581,6 +667,26 @@ pub trait Session: Send {
     /// spelling belongs with the driver rather than in shared code that would
     /// have to grow a match on the kind.
     fn explain_statement(&self, sql: &str) -> String;
+
+    /// [`explain_statement`](Self::explain_statement) under `options`, which the caller has
+    /// already passed through [`ExplainSupport::resolve`].
+    ///
+    /// The default knows only the plain statement and **refuses anything else**. Quietly
+    /// spelling a plain `EXPLAIN` for an `ANALYZE` that was asked for would turn a request to
+    /// run the statement into one that does not, and a wrapper that forgot to forward this
+    /// would do that without anyone seeing it.
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: ExplainOptions,
+    ) -> Result<String, EngineError> {
+        if options == ExplainOptions::default() {
+            return Ok(self.explain_statement(sql));
+        }
+        Err(EngineError::Usage {
+            message: "this session spells only the plain EXPLAIN".to_owned(),
+        })
+    }
 
     /// Ask the server to stop the statement in flight.
     ///
@@ -1226,5 +1332,100 @@ mod tests {
     fn a_ragged_batch_is_refused_before_a_driver_can_emit_one() {
         let error = ColumnBatch::new(vec![vec![Value::Int(1)], vec![]]).unwrap_err();
         assert!(matches!(error, BatchError::RaggedColumn { .. }));
+    }
+
+    fn explain_support(
+        name: &'static str,
+        json: bool,
+        analyze: bool,
+        analyze_json: bool,
+    ) -> ExplainSupport {
+        ExplainSupport {
+            name,
+            json,
+            analyze,
+            analyze_json,
+            analyze_fence: None,
+        }
+    }
+
+    const ASK_JSON: ExplainOptions = ExplainOptions {
+        format: ExplainFormat::Json,
+        analyze: false,
+    };
+    const ASK_ANALYZE: ExplainOptions = ExplainOptions {
+        format: ExplainFormat::Text,
+        analyze: true,
+    };
+    const ASK_ANALYZE_JSON: ExplainOptions = ExplainOptions {
+        format: ExplainFormat::Json,
+        analyze: true,
+    };
+
+    #[test]
+    fn explain_options_resolve_per_driver_the_way_the_table_says() {
+        let postgres = explain_support("PostgreSQL", true, true, true);
+        let trino = explain_support("Trino", true, true, false);
+        let mysql = explain_support("MySQL", false, false, false);
+
+        // Nothing asked, nothing changed, nothing said.
+        for support in [postgres, trino, mysql, ExplainSupport::default()] {
+            assert_eq!(
+                support.resolve(ExplainOptions::default()).unwrap(),
+                (ExplainOptions::default(), None)
+            );
+        }
+        // PostgreSQL spells every combination.
+        for asked in [ASK_JSON, ASK_ANALYZE, ASK_ANALYZE_JSON] {
+            assert_eq!(postgres.resolve(asked).unwrap(), (asked, None));
+        }
+        // Trino has JSON and ANALYZE, but not both: ANALYZE wins and the plan is text.
+        assert_eq!(trino.resolve(ASK_JSON).unwrap(), (ASK_JSON, None));
+        assert_eq!(trino.resolve(ASK_ANALYZE).unwrap(), (ASK_ANALYZE, None));
+        assert_eq!(
+            trino.resolve(ASK_ANALYZE_JSON).unwrap(),
+            (
+                ASK_ANALYZE,
+                Some("Trino has no JSON form of EXPLAIN ANALYZE; the plan is text.".to_owned())
+            )
+        );
+        // MySQL has neither: JSON falls back to text, and ANALYZE is refused by name.
+        assert_eq!(
+            mysql.resolve(ASK_JSON).unwrap(),
+            (
+                ExplainOptions::default(),
+                Some("MySQL plans are returned as text.".to_owned())
+            )
+        );
+        for asked in [ASK_ANALYZE, ASK_ANALYZE_JSON] {
+            let error = mysql.resolve(asked).expect_err("MySQL has no ANALYZE");
+            assert!(matches!(error, EngineError::Usage { .. }), "{error:?}");
+            assert_eq!(error.message(), "EXPLAIN ANALYZE is not available on MySQL");
+        }
+        // A driver that said nothing is asked for nothing.
+        let silent = ExplainSupport::default();
+        assert!(silent.resolve(ASK_ANALYZE).is_err());
+        assert_eq!(
+            silent.resolve(ASK_JSON).unwrap().0,
+            ExplainOptions::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_spells_only_the_plain_explain_refuses_the_rest() {
+        let session = FakeSession { cancelled: false };
+        assert_eq!(
+            session
+                .explain_statement_with("SELECT 1", ExplainOptions::default())
+                .unwrap(),
+            "EXPLAIN SELECT 1"
+        );
+        // Never a plain EXPLAIN in place of an ANALYZE that was asked for.
+        for asked in [ASK_JSON, ASK_ANALYZE, ASK_ANALYZE_JSON] {
+            assert!(
+                session.explain_statement_with("SELECT 1", asked).is_err(),
+                "{asked:?}"
+            );
+        }
     }
 }

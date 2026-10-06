@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 use qh_core::{FailureKind, IntervalValue, Value};
 use qh_driver::{
-    BrowseLevel, ConnectionConfig, Driver, DriverKind, ExecuteOptions, ObjectPath, Session, TlsMode,
+    BrowseLevel, ConnectionConfig, Driver, DriverKind, ExecuteOptions, ExplainFormat,
+    ExplainOptions, ObjectPath, Session, TlsMode,
 };
 use qh_driver_trino::TrinoDriver;
 
@@ -586,6 +587,88 @@ async fn explain_returns_the_servers_own_plan_without_the_callers_terminator() {
             Value::Text(text) if text.contains("SYNTAX_ERROR")
         ))),
         "a syntax error must not be able to arrive as a plan: {rows:?}"
+    );
+}
+
+/// The one text cell a Trino plan comes back in, spelled for `options` the way the engine does:
+/// resolved against what the driver can spell first, and then asked of the session.
+async fn plan_for(
+    session: &mut Box<dyn Session>,
+    sql: &str,
+    options: ExplainOptions,
+) -> (String, Option<String>) {
+    let (resolved, warning) = TrinoDriver::new()
+        .explain_support()
+        .resolve(options)
+        .expect("Trino can spell it");
+    let statement = session
+        .explain_statement_with(sql, resolved)
+        .expect("the session spells it");
+    let rows = rows(session, &statement).await;
+    assert_eq!(rows.len(), 1, "{statement}: one row, one cell: {rows:?}");
+    match &rows[0][..] {
+        [Value::Text(plan)] => (plan.to_string(), warning),
+        other => panic!("{statement}: expected one text cell, got {other:?}"),
+    }
+}
+
+/// Trino 483: `EXPLAIN (TYPE DISTRIBUTED, FORMAT JSON)` is an object keyed by fragment id, and
+/// `EXPLAIN ANALYZE` is text with a `Fragment 1`. `EXPLAIN ANALYZE (FORMAT JSON)` is a syntax
+/// error on this release, so a JSON ANALYZE is asked for as text, with the driver's sentence.
+#[tokio::test]
+async fn explain_json_and_analyze_are_spelled_the_way_483_accepts() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    let sql = "SELECT c.name, count(*) FROM customer c JOIN orders o ON o.custkey = c.custkey \
+               GROUP BY c.name;";
+
+    let json = ExplainOptions {
+        format: ExplainFormat::Json,
+        analyze: false,
+    };
+    let (plan, warning) = plan_for(&mut session, sql, json).await;
+    assert_eq!(warning, None);
+    let plan: serde_json::Value = serde_json::from_str(&plan).expect("the plan is JSON");
+    let fragments = plan.as_object().expect("an object keyed by fragment id");
+    assert!(fragments.contains_key("0"), "{plan}");
+    assert!(
+        fragments.len() > 1,
+        "a join plan has several fragments: {plan}"
+    );
+    assert!(fragments["0"]["name"].is_string(), "{plan}");
+
+    let analyze = ExplainOptions {
+        format: ExplainFormat::Text,
+        analyze: true,
+    };
+    let (plan, warning) = plan_for(&mut session, sql, analyze).await;
+    assert_eq!(warning, None);
+    assert!(plan.contains("Fragment 1"), "{plan}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&plan).is_err(),
+        "text, not JSON"
+    );
+
+    // Both asked for: the server has no such form, so the text comes back and says so.
+    let both = ExplainOptions {
+        format: ExplainFormat::Json,
+        analyze: true,
+    };
+    let (plan, warning) = plan_for(&mut session, sql, both).await;
+    assert_eq!(
+        warning.as_deref(),
+        Some("Trino has no JSON form of EXPLAIN ANALYZE; the plan is text.")
+    );
+    assert!(plan.contains("Fragment 1"), "{plan}");
+
+    // The caller's terminator is still dropped, and a `;` inside a literal still survives.
+    assert_eq!(
+        session
+            .explain_statement_with("SELECT ';';", json)
+            .expect("spelled"),
+        "EXPLAIN (TYPE DISTRIBUTED, FORMAT JSON) SELECT ';'"
     );
 }
 

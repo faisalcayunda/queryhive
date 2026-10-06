@@ -97,7 +97,8 @@ use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use qh_core::{offset_of_line, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    MetadataSql, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
+    ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath, ObjectsPage, Parameter,
+    ParameterStyle, Session,
 };
 use qh_sql::{
     classify_readings, statements_dialect, strip_terminator_dialect, Dialect, StatementKind,
@@ -272,6 +273,19 @@ impl Driver for MysqlDriver {
 
     fn metadata(&self) -> Option<&dyn MetadataSql> {
         Some(&metadata::MysqlMetadata)
+    }
+
+    /// The plain text plan and nothing else: `EXPLAIN ANALYZE` exists on MySQL 8.0.18 and later
+    /// but only in a tree form this engine does not parse, and on older servers it is a syntax
+    /// error, so it is not offered at all.
+    fn explain_support(&self) -> ExplainSupport {
+        ExplainSupport {
+            name: "MySQL",
+            json: false,
+            analyze: false,
+            analyze_json: false,
+            analyze_fence: None,
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -809,6 +823,24 @@ impl Session for MysqlSession {
         // data — `strip_terminator` is what knows the difference. Read under MySQL's
         // own rules, so a `;` inside a `'\;'` backslash escape stays data.
         format!("EXPLAIN {}", strip_terminator_dialect(sql, Dialect::Mysql))
+    }
+
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: ExplainOptions,
+    ) -> Result<String, EngineError> {
+        if options.analyze {
+            return Err(EngineError::Usage {
+                message: "EXPLAIN ANALYZE is not available on MySQL".to_owned(),
+            });
+        }
+        if options.format == ExplainFormat::Json {
+            return Err(EngineError::Usage {
+                message: "MySQL plans are returned as text".to_owned(),
+            });
+        }
+        Ok(self.explain_statement(sql))
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
@@ -1966,6 +1998,31 @@ mod tests {
         // Read under MySQL's rules: a `;` after a backslash-escaped quote is inside the
         // string, so it stays data rather than becoming a terminator to peel.
         assert_eq!(session("SELECT '\\';'"), "EXPLAIN SELECT '\\';'");
+    }
+
+    #[test]
+    fn mysql_offers_the_plain_plan_only() {
+        let support = MysqlDriver.explain_support();
+        assert!(!support.json && !support.analyze && !support.analyze_json);
+        assert!(support.analyze_fence.is_none());
+        // Asked for ANALYZE, the engine refuses before connecting; asked for JSON it says the
+        // plan is text. `resolve` is where both are decided.
+        let analyze = ExplainOptions {
+            format: ExplainFormat::Text,
+            analyze: true,
+        };
+        let error = support.resolve(analyze).expect_err("no ANALYZE on MySQL");
+        assert_eq!(error.message(), "EXPLAIN ANALYZE is not available on MySQL");
+        let json = ExplainOptions {
+            format: ExplainFormat::Json,
+            analyze: false,
+        };
+        let (resolved, warning) = support.resolve(json).expect("JSON falls back");
+        assert_eq!(resolved, ExplainOptions::default());
+        assert_eq!(
+            warning.as_deref(),
+            Some("MySQL plans are returned as text.")
+        );
     }
 
     #[test]

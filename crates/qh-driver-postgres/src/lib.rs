@@ -106,8 +106,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
-    BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    MetadataSql, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
+    AnalyzeFence, BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind,
+    ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath,
+    ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
 };
 use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
 use rustls::client::danger::ServerCertVerifier;
@@ -180,6 +181,22 @@ impl Driver for PostgresDriver {
             // every type without mapping widths here.
             parameters: Some(ParameterStyle::Dollar),
             read_only: false,
+        }
+    }
+
+    /// Every form: JSON, ANALYZE, and both. An ANALYZE runs inside a read-only transaction that
+    /// is rolled back, so a write the classifier did not see (a function that writes) is
+    /// refused by the server instead of landing (DBX-4).
+    fn explain_support(&self) -> ExplainSupport {
+        ExplainSupport {
+            name: "PostgreSQL",
+            json: true,
+            analyze: true,
+            analyze_json: true,
+            analyze_fence: Some(AnalyzeFence {
+                begin: "BEGIN READ ONLY",
+                end: "ROLLBACK",
+            }),
         }
     }
 
@@ -720,13 +737,15 @@ impl Session for PostgresSession {
     }
 
     fn explain_statement(&self, sql: &str) -> String {
-        // PostgreSQL rejects `EXPLAIN SELECT 1;`, so the terminator goes — and
-        // only a real one: a `;` inside a literal is text. `strip_terminator`
-        // knows the difference, which is why it is shared rather than reimplemented.
-        format!(
-            "EXPLAIN {}",
-            strip_terminator_dialect(sql, Dialect::Postgres)
-        )
+        explain_sql(sql, ExplainOptions::default())
+    }
+
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: ExplainOptions,
+    ) -> Result<String, EngineError> {
+        Ok(explain_sql(sql, options))
     }
 
     async fn cancel(&self) -> Result<(), EngineError> {
@@ -802,6 +821,23 @@ impl Session for PostgresSession {
         self.statement_timeout = None;
         Ok(())
     }
+}
+
+/// The `EXPLAIN` statement for `sql` under `options`.
+///
+/// PostgreSQL rejects `EXPLAIN SELECT 1;`, so the terminator goes, and only a real one: a `;`
+/// inside a literal is text. `strip_terminator` knows the difference, which is why it is shared
+/// rather than reimplemented. `BUFFERS` rides with ANALYZE because it is cheap and says how many
+/// blocks each node read; `FORMAT JSON` and `BUFFERS` both predate every supported server.
+fn explain_sql(sql: &str, options: ExplainOptions) -> String {
+    let sql = strip_terminator_dialect(sql, Dialect::Postgres);
+    let list = match (options.analyze, options.format) {
+        (false, ExplainFormat::Text) => return format!("EXPLAIN {sql}"),
+        (false, ExplainFormat::Json) => "FORMAT JSON",
+        (true, ExplainFormat::Text) => "ANALYZE, BUFFERS",
+        (true, ExplainFormat::Json) => "ANALYZE, BUFFERS, FORMAT JSON",
+    };
+    format!("EXPLAIN ({list}) {sql}")
 }
 
 /// Rows from a running statement, in batches.
@@ -1424,18 +1460,36 @@ mod tests {
 
     #[test]
     fn explain_drops_a_terminator_but_not_a_semicolon_inside_text() {
-        let session = |sql: &str| {
-            format!(
-                "EXPLAIN {}",
-                strip_terminator_dialect(sql, Dialect::Postgres)
-            )
-        };
-        assert_eq!(session("SELECT 1"), "EXPLAIN SELECT 1");
+        let spelled = |sql: &str| explain_sql(sql, ExplainOptions::default());
+        assert_eq!(spelled("SELECT 1"), "EXPLAIN SELECT 1");
         // PostgreSQL rejects `EXPLAIN SELECT 1;`.
-        assert_eq!(session("SELECT 1;"), "EXPLAIN SELECT 1");
-        assert_eq!(session("SELECT 1;  \n"), "EXPLAIN SELECT 1");
+        assert_eq!(spelled("SELECT 1;"), "EXPLAIN SELECT 1");
+        assert_eq!(spelled("SELECT 1;  \n"), "EXPLAIN SELECT 1");
         // A `;` inside a literal is data and must survive.
-        assert_eq!(session("SELECT 'a;b;'"), "EXPLAIN SELECT 'a;b;'");
+        assert_eq!(spelled("SELECT 'a;b;'"), "EXPLAIN SELECT 'a;b;'");
+    }
+
+    #[test]
+    fn explain_is_spelled_per_option_and_keeps_its_terminator_rule() {
+        let with =
+            |format, analyze, sql: &str| explain_sql(sql, ExplainOptions { format, analyze });
+        assert_eq!(
+            with(ExplainFormat::Json, false, "SELECT 1;"),
+            "EXPLAIN (FORMAT JSON) SELECT 1"
+        );
+        assert_eq!(
+            with(ExplainFormat::Text, true, "SELECT 1"),
+            "EXPLAIN (ANALYZE, BUFFERS) SELECT 1"
+        );
+        assert_eq!(
+            with(ExplainFormat::Json, true, "SELECT 'a;b';\n"),
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT 'a;b'"
+        );
+        let support = PostgresDriver.explain_support();
+        assert!(support.json && support.analyze && support.analyze_json);
+        // An ANALYZE runs in a read-only transaction that is always rolled back.
+        let fence = support.analyze_fence.expect("PostgreSQL has transactions");
+        assert_eq!((fence.begin, fence.end), ("BEGIN READ ONLY", "ROLLBACK"));
     }
 
     #[test]

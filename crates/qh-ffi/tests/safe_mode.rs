@@ -647,6 +647,18 @@ impl Session for RecordingSession {
         format!("EXPLAIN {sql}")
     }
 
+    /// Spelled so a test can read what the engine resolved the options to.
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: qh_driver::ExplainOptions,
+    ) -> Result<String, EngineError> {
+        Ok(format!(
+            "EXPLAIN<{:?},{}> {sql}",
+            options.format, options.analyze
+        ))
+    }
+
     async fn cancel(&self) -> Result<(), EngineError> {
         Ok(())
     }
@@ -1620,4 +1632,485 @@ async fn a_driver_without_metadata_is_refused_by_name() {
         usage_message(&error).contains("postgres cannot describe"),
         "{error:?}"
     );
+}
+
+// --------------------------------------------------------------------------- //
+// W13-T2: EXPLAIN JSON and ANALYZE, REQUIRE_READ, and functions with an effect
+// --------------------------------------------------------------------------- //
+
+/// What a command did on the recording session: how it ended, what it sent, what it emitted.
+struct Recorded {
+    result: Result<(), CliError>,
+    statements: Vec<String>,
+    events: Vec<serde_json::Value>,
+}
+
+impl Recorded {
+    fn done(&self) -> &serde_json::Value {
+        self.events
+            .iter()
+            .rev()
+            .find(|event| event["event"] == "done")
+            .unwrap_or_else(|| panic!("no done event in {:?}", self.events))
+    }
+}
+
+async fn record(command: Command, extra: &[(&str, &str)]) -> Recorded {
+    let statements = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let engine = RecordingEngine {
+        inner: RealEngine::new(),
+        statements: statements.clone(),
+    };
+    let mut pairs: Vec<(&str, &str)> = vec![
+        ("DB_KIND", "postgres"),
+        ("DB_HOST", "postgres.invalid"),
+        ("DB_USER", "queryhive"),
+        ("SQL", "SELECT 1"),
+    ];
+    pairs.extend_from_slice(extra);
+    let mut out = Capture::new();
+    let result = run(
+        command,
+        &settings(&pairs),
+        &mut out,
+        &engine,
+        &CancelFlag::new(),
+    )
+    .await;
+    let events = out
+        .lines()
+        .iter()
+        .map(|line| serde_json::from_str(line).expect("an event is JSON"))
+        .collect();
+    let sent = statements.lock().unwrap().clone();
+    Recorded {
+        result,
+        statements: sent,
+        events,
+    }
+}
+
+const ANALYZE_SENT: [&str; 3] = ["BEGIN READ ONLY", "EXPLAIN<Text,true> SELECT 1", "ROLLBACK"];
+
+/// An ANALYZE of a read runs in every mode, inside a read-only transaction it rolls back.
+#[tokio::test]
+async fn explain_analyze_of_a_read_is_allowed_in_every_mode() {
+    for mode in ["full", "no_ddl", "confirm", "read_only"] {
+        let recorded = record(
+            Command::Explain,
+            &[("EXPLAIN_ANALYZE", "1"), ("SAFE_MODE", mode)],
+        )
+        .await;
+        recorded
+            .result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("{mode}: {error:?}"));
+        let mut expected: Vec<&str> = Vec::new();
+        if mode == "read_only" {
+            expected.push("SET SESSION READ ONLY (test)");
+        }
+        expected.extend(ANALYZE_SENT);
+        assert_eq!(recorded.statements, expected, "{mode}");
+    }
+    // The plain plan and the JSON plan send nothing around the statement.
+    let recorded = record(Command::Explain, &[("EXPLAIN_FORMAT", "json")]).await;
+    recorded.result.as_ref().expect("the plan runs");
+    assert_eq!(recorded.statements, ["EXPLAIN<Json,false> SELECT 1"]);
+    assert!(
+        recorded.done().get("warnings").is_none(),
+        "{:?}",
+        recorded.done()
+    );
+    let recorded = record(Command::Explain, &[]).await;
+    recorded.result.as_ref().expect("the plan runs");
+    assert_eq!(recorded.statements, ["EXPLAIN<Text,false> SELECT 1"]);
+}
+
+/// The two forms a driver cannot spell are said, not hidden: the plan comes back as text.
+#[tokio::test]
+async fn explain_format_json_downgrades_with_a_warning() {
+    let recorded = record(
+        Command::Explain,
+        &[("DB_KIND", "mysql"), ("EXPLAIN_FORMAT", "json")],
+    )
+    .await;
+    recorded.result.as_ref().expect("the plan runs");
+    assert_eq!(recorded.statements, ["EXPLAIN<Text,false> SELECT 1"]);
+    assert_eq!(
+        recorded.done()["warnings"],
+        serde_json::json!(["MySQL plans are returned as text."])
+    );
+
+    // Trino has no JSON form of ANALYZE: ANALYZE wins, and it is run unfenced because Trino has
+    // no transaction to put it in.
+    let recorded = record(
+        Command::Explain,
+        &[
+            ("DB_KIND", "trino"),
+            ("EXPLAIN_FORMAT", "json"),
+            ("EXPLAIN_ANALYZE", "1"),
+        ],
+    )
+    .await;
+    recorded.result.as_ref().expect("the plan runs");
+    assert_eq!(recorded.statements, ["EXPLAIN<Text,true> SELECT 1"]);
+    assert_eq!(
+        recorded.done()["warnings"],
+        serde_json::json!(["Trino has no JSON form of EXPLAIN ANALYZE; the plan is text."])
+    );
+}
+
+/// The statements an ANALYZE must never run. Each is a write, or something the classifier will
+/// not vouch for, and each is refused whatever mode asks for it.
+const NOT_FOR_ANALYZE: [&str; 9] = [
+    "INSERT INTO w13t2_{} VALUES (1)",
+    "UPDATE w13t2_{} SET a = 1",
+    "DELETE FROM w13t2_{}",
+    "WITH x AS (DELETE FROM w13t2_{} RETURNING 1) SELECT * FROM x",
+    "SELECT * FROM w13t2_{} FOR UPDATE",
+    "SELECT * INTO w13t2_{}_copy FROM w13t2_{}",
+    "EXECUTE w13t2_{}(1)",
+    "DO $$ BEGIN PERFORM 1 FROM w13t2_{}; END $$",
+    "SELECT pg_terminate_backend(w13t2_{})",
+];
+
+fn log_rows_for(statement: &str) -> Vec<(String, String, Option<String>)> {
+    let hash = qh_storage::hash_statement(statement);
+    qh_ffi::execution_log::with_storage(|storage| {
+        storage
+            .execution_log(10_000)
+            .expect("the log reads")
+            .into_iter()
+            .filter(|row| row.statement_hash == hash)
+            .map(|row| (row.decision, row.safe_mode, row.reason))
+            .collect()
+    })
+    .expect("a sink is installed")
+}
+
+/// The log's integrity (Koreksi B-1): a refused ANALYZE leaves exactly one row, `refused`, under
+/// the connection's own mode; it never leaves an `allowed` or a `confirmed` for a write that did
+/// not run. One test, because the sink is the process's: every statement below is its own, so
+/// the other tests' decisions, which land in the same log, are never counted.
+#[tokio::test]
+async fn explain_analyze_of_a_write_is_refused_before_connecting_and_logged_once() {
+    let mut storage = qh_storage::Storage::in_memory().expect("in-memory database");
+    storage.migrate_at(1_000).expect("migrations");
+    qh_ffi::execution_log::install(storage);
+
+    let mut case = 0;
+    for template in NOT_FOR_ANALYZE {
+        for (mode, confirmed) in [("full", false), ("confirm", true), ("no_ddl", false)] {
+            case += 1;
+            let sql = template.replace("{}", &format!("{mode}_{case}"));
+            let engine = CountingEngine::new();
+            let mut extra = vec![
+                ("DB_KIND", "postgres"),
+                ("DB_HOST", "postgres.invalid"),
+                ("EXPLAIN_ANALYZE", "1"),
+                ("SAFE_MODE", mode),
+                ("SQL", sql.as_str()),
+            ];
+            if confirmed {
+                extra.push(("SAFE_MODE_CONFIRMED", "1"));
+            }
+            let message = usage_message(&refuse(Command::Explain, &engine, &extra).await);
+            assert!(
+                message.contains("EXPLAIN ANALYZE runs the statement"),
+                "{mode} {sql}: {message}"
+            );
+            assert_eq!(engine.connects(), 0, "{mode} {sql}");
+            let rows = log_rows_for(&sql);
+            assert_eq!(rows.len(), 1, "{mode} {sql}: {rows:?}");
+            assert_eq!(rows[0].0, "refused", "{mode} {sql}");
+            assert_eq!(rows[0].1, mode, "the connection's own mode: {sql}");
+            assert!(
+                rows[0]
+                    .2
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("offered for reads only")),
+                "{rows:?}"
+            );
+        }
+    }
+
+    // A floor raises the mode, and the row says the mode the run was under.
+    let sql = "INSERT INTO w13t2_floor VALUES (1)";
+    let engine = CountingEngine::new();
+    refuse(
+        Command::Explain,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("EXPLAIN_ANALYZE", "1"),
+            ("SAFE_MODE", "full"),
+            ("SAFE_MODE_FLOOR", "read_only"),
+            ("SQL", sql),
+        ],
+    )
+    .await;
+    let rows = log_rows_for(sql);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].1.as_str()),
+        ("refused", "read_only")
+    );
+
+    // The readings are the server's: a quote the generic reading closes early hides a write
+    // from it, and the ANALYZE would have run that write.
+    for (kind, sql) in [
+        (
+            "postgres",
+            "SELECT E'w13t2\\' AS a, '; DELETE FROM w13t2_lex; --'",
+        ),
+        ("mysql", "SELECT 'w13t2\\''; DELETE FROM w13t2_lex; -- '"),
+    ] {
+        let engine = CountingEngine::new();
+        let message = usage_message(
+            &refuse(
+                Command::Explain,
+                &engine,
+                &[
+                    ("DB_KIND", kind),
+                    ("EXPLAIN_ANALYZE", "1"),
+                    ("SAFE_MODE", "full"),
+                    ("SQL", sql),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            message.contains("offered for reads only"),
+            "{kind}: {message}"
+        );
+        assert_eq!(engine.connects(), 0, "{kind}");
+    }
+
+    // Nothing else leaves a row of its own: an unknown format and a driver with no ANALYZE are
+    // refused by the checks that need no log, and a read is allowed once by the guard.
+    let sql = "SELECT w13t2_no_row FROM t";
+    for (extra, needle) in [
+        (
+            vec![("EXPLAIN_FORMAT", "yaml")],
+            "unknown EXPLAIN_FORMAT 'yaml'",
+        ),
+        (
+            vec![("DB_KIND", "mysql"), ("EXPLAIN_ANALYZE", "1")],
+            "EXPLAIN ANALYZE is not available on MySQL",
+        ),
+    ] {
+        let engine = CountingEngine::new();
+        let mut pairs = vec![("SQL", sql), ("SAFE_MODE", "full")];
+        pairs.extend(extra);
+        let message = usage_message(&refuse(Command::Explain, &engine, &pairs).await);
+        assert!(message.contains(needle), "{message}");
+        assert_eq!(engine.connects(), 0);
+        assert!(log_rows_for(sql).is_empty(), "{needle}");
+    }
+    let recorded = record(
+        Command::Explain,
+        &[
+            ("EXPLAIN_ANALYZE", "1"),
+            ("SAFE_MODE", "confirm"),
+            ("SQL", "SELECT w13t2_read FROM t"),
+        ],
+    )
+    .await;
+    recorded.result.as_ref().expect("a read is analysed");
+    let rows = log_rows_for("SELECT w13t2_read FROM t");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "allowed");
+
+    qh_ffi::execution_log::uninstall();
+}
+
+/// ANALYZE inherits the statement's refusal when the statement is not a read, and a read stays
+/// one under the floor: monotone, as ADR-0027 wants.
+#[tokio::test]
+async fn explain_analyze_is_refused_for_a_function_with_an_effect() {
+    for sql in [
+        "SELECT nextval('s')",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_cancel_backend(2)",
+    ] {
+        let engine = CountingEngine::new();
+        let message = usage_message(
+            &refuse(
+                Command::Explain,
+                &engine,
+                &[
+                    ("DB_KIND", "postgres"),
+                    ("EXPLAIN_ANALYZE", "1"),
+                    ("SAFE_MODE", "full"),
+                    ("SQL", sql),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            message.contains("offered for reads only"),
+            "{sql}: {message}"
+        );
+        assert_eq!(engine.connects(), 0, "{sql}");
+    }
+}
+
+/// `REQUIRE_READ` is how a re-run of a result says it is a read (AR #1): a statement that is not
+/// one is refused before connecting, in `full` too, where nothing else would have stopped it.
+#[tokio::test]
+async fn require_read_refuses_what_is_not_a_read_in_every_mode() {
+    for (sql, why) in [
+        ("INSERT INTO w13t2_rr VALUES (1)", "a write"),
+        ("SELECT * FROM w13t2_rr FOR UPDATE", "a lock"),
+        ("SELECT nextval('w13t2_seq')", "a sequence"),
+        ("SELECT pg_terminate_backend(1)", "a signal"),
+    ] {
+        for mode in ["full", "no_ddl"] {
+            // Control: without the setting the mode lets it through to the connection.
+            let engine = CountingEngine::new();
+            let error = refuse(
+                Command::Preview,
+                &engine,
+                &[("DB_KIND", "postgres"), ("SAFE_MODE", mode), ("SQL", sql)],
+            )
+            .await;
+            assert!(
+                matches!(error, CliError::Connect(_)),
+                "{why} {mode}: {error:?}"
+            );
+            assert_eq!(engine.connects(), 1, "{why} {mode}");
+
+            let engine = CountingEngine::new();
+            let message = usage_message(
+                &refuse(
+                    Command::Preview,
+                    &engine,
+                    &[
+                        ("DB_KIND", "postgres"),
+                        ("SAFE_MODE", mode),
+                        ("REQUIRE_READ", "1"),
+                        ("SQL", sql),
+                    ],
+                )
+                .await,
+            );
+            assert!(message.contains("REQUIRE_READ"), "{why} {mode}: {message}");
+            assert_eq!(engine.connects(), 0, "{why} {mode}");
+        }
+    }
+    // A read passes, and so does a run that did not ask.
+    let recorded = record(Command::Preview, &[("REQUIRE_READ", "1")]).await;
+    recorded.result.as_ref().expect("a read runs");
+    assert_eq!(recorded.statements, ["SELECT 1"]);
+    // MySQL's own lexical reading applies to the check too.
+    let engine = CountingEngine::new();
+    let message = usage_message(
+        &refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", "mysql"),
+                ("REQUIRE_READ", "1"),
+                ("SQL", "SELECT '\\''; DELETE FROM t; -- '"),
+            ],
+        )
+        .await,
+    );
+    assert!(message.contains("REQUIRE_READ"), "{message}");
+    assert_eq!(engine.connects(), 0);
+}
+
+/// S-2 / DBX-3: a `SELECT` that calls a function with an effect is a write to every mode that
+/// has an opinion about writes. Each of these classified as a read before the denylist, and
+/// `read_only` ran them.
+#[tokio::test]
+async fn a_select_that_calls_a_function_with_an_effect_is_refused_like_a_write() {
+    for sql in [
+        "SELECT pg_terminate_backend(42)",
+        "SELECT pg_cancel_backend(42)",
+        "SELECT pg_reload_conf()",
+        "SELECT nextval('s')",
+        "SELECT setval('s', 1)",
+        "SELECT lo_import('/etc/hostname')",
+        "SELECT lo_export(1, '/tmp/x')",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_try_advisory_xact_lock(1)",
+    ] {
+        // read_only refuses, before the server is reached.
+        let engine = CountingEngine::new();
+        let message = usage_message(
+            &refuse(
+                Command::Preview,
+                &engine,
+                &[
+                    ("DB_KIND", "postgres"),
+                    ("SAFE_MODE", "read_only"),
+                    ("SQL", sql),
+                ],
+            )
+            .await,
+        );
+        assert!(message.contains("read-only"), "{sql}: {message}");
+        assert_eq!(engine.connects(), 0, "{sql}");
+        // confirm asks.
+        let engine = CountingEngine::new();
+        let message = usage_message(
+            &refuse(
+                Command::Preview,
+                &engine,
+                &[
+                    ("DB_KIND", "postgres"),
+                    ("SAFE_MODE", "confirm"),
+                    ("SQL", sql),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            message.contains("requires confirmation"),
+            "{sql}: {message}"
+        );
+        assert_eq!(engine.connects(), 0, "{sql}");
+        // no_ddl and full let it through to the server, as any other write.
+        for mode in ["no_ddl", "full"] {
+            let engine = CountingEngine::new();
+            let error = refuse(
+                Command::Preview,
+                &engine,
+                &[("DB_KIND", "postgres"), ("SAFE_MODE", mode), ("SQL", sql)],
+            )
+            .await;
+            assert!(
+                matches!(error, CliError::Connect(_)),
+                "{mode} {sql}: {error:?}"
+            );
+        }
+    }
+    for sql in ["SELECT GET_LOCK('a', 1)", "SELECT RELEASE_ALL_LOCKS()"] {
+        let engine = CountingEngine::new();
+        refuse(
+            Command::Preview,
+            &engine,
+            &[
+                ("DB_KIND", "mysql"),
+                ("SAFE_MODE", "read_only"),
+                ("SQL", sql),
+            ],
+        )
+        .await;
+        assert_eq!(engine.connects(), 0, "{sql}");
+    }
+    // A name that is not a call is still a read.
+    let engine = CountingEngine::new();
+    let error = refuse(
+        Command::Preview,
+        &engine,
+        &[
+            ("DB_KIND", "postgres"),
+            ("SAFE_MODE", "read_only"),
+            ("SQL", "SELECT nextval FROM t"),
+        ],
+    )
+    .await;
+    assert!(matches!(error, CliError::Connect(_)), "{error:?}");
 }

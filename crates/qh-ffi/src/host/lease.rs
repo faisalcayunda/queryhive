@@ -13,7 +13,9 @@
 //! statement is sent again, but only if sending it twice cannot hurt: a read, or the exact text
 //! `BEGIN` / `START TRANSACTION` (a transaction on a dead connection died with it). A write is
 //! never sent again, by this layer or through `retry::execute`: a `Connect` error from MySQL can
-//! also mean the connection dropped after the server ran the statement.
+//! also mean the connection dropped after the server ran the statement. The read-only form of
+//! those two (`BEGIN READ ONLY`, which an `EXPLAIN ANALYZE` opens its transaction with) is just
+//! as safe, and for the same reason.
 //!
 //! # When a session goes back
 //!
@@ -32,8 +34,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind};
 use qh_driver::{
-    BrowseLevel, Capabilities, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath,
-    ObjectsPage, Parameter, Session,
+    BrowseLevel, Capabilities, ConnectionConfig, Cursor, DriverKind, ExecuteOptions,
+    ExplainOptions, ObjectPath, ObjectsPage, Parameter, Session,
 };
 use qh_sql::{Dialect, StatementKind};
 
@@ -49,7 +51,15 @@ use crate::retry::produced_no_page;
 /// engine's own write paths open a transaction with.
 fn rerunnable(sql: &str, kind: DriverKind) -> bool {
     let trimmed = sql.trim();
-    if trimmed.eq_ignore_ascii_case("BEGIN") || trimmed.eq_ignore_ascii_case("START TRANSACTION") {
+    if [
+        "BEGIN",
+        "START TRANSACTION",
+        "BEGIN READ ONLY",
+        "START TRANSACTION READ ONLY",
+    ]
+    .iter()
+    .any(|text| trimmed.eq_ignore_ascii_case(text))
+    {
         return true;
     }
     let dialect = match kind {
@@ -437,6 +447,13 @@ impl Held {
     }
 }
 
+/// What a spelling asked of a session that is gone, or busy, is told.
+fn closed_session() -> EngineError {
+    EngineError::Usage {
+        message: "the session is not available to spell the statement".to_owned(),
+    }
+}
+
 impl Drop for Held {
     /// A session dropped without `close` (a command left through `?`) still goes back.
     fn drop(&mut self) {
@@ -528,6 +545,25 @@ impl Session for Held {
         }
     }
 
+    /// Forwarded, not inherited: the trait's default spells only the plain statement and refuses
+    /// the rest, so a wrapper that did not pass this on would refuse every ANALYZE and JSON plan
+    /// for no reason the caller can see.
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: ExplainOptions,
+    ) -> Result<String, EngineError> {
+        match self.inner.try_lock() {
+            Ok(session) => match session.as_ref() {
+                Some(session) => session.explain_statement_with(sql, options),
+                None => Err(closed_session()),
+            },
+            // Unreachable for the reason `explain_statement` gives; refusing is the safe answer,
+            // because the spelling is what says whether the statement runs.
+            Err(_) => Err(closed_session()),
+        }
+    }
+
     async fn cancel(&self) -> Result<(), EngineError> {
         self.cancel_within(STOP_CEILING).await
     }
@@ -616,6 +652,14 @@ pub(crate) mod tests {
             sql.to_owned()
         }
 
+        fn explain_statement_with(
+            &self,
+            sql: &str,
+            options: ExplainOptions,
+        ) -> Result<String, EngineError> {
+            Ok(format!("{} {sql}", options.analyze))
+        }
+
         async fn cancel(&self) -> Result<(), EngineError> {
             std::future::pending().await
         }
@@ -656,5 +700,43 @@ pub(crate) mod tests {
             error.message().contains("no answer to the cancel"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_lease_passes_the_explain_options_to_the_session_it_holds() {
+        // The trait's default would refuse an ANALYZE, so a lease that did not forward the
+        // method would turn every ANALYZE into an error (and a lease that inherited the plain
+        // statement would run one without the ANALYZE the caller asked for).
+        let held = Held::new(Box::new(HangingCancel), None);
+        let analyze = ExplainOptions {
+            analyze: true,
+            ..ExplainOptions::default()
+        };
+        assert_eq!(
+            held.explain_statement_with("SELECT 1", analyze).unwrap(),
+            "true SELECT 1"
+        );
+    }
+
+    #[test]
+    fn the_transaction_an_analyze_opens_may_be_sent_again_on_a_new_connection() {
+        for sql in [
+            "BEGIN",
+            "begin read only",
+            " START TRANSACTION READ ONLY ",
+            "SELECT 1",
+        ] {
+            assert!(rerunnable(sql, DriverKind::Postgres), "{sql}");
+        }
+        // Nothing else that opens or ends a transaction, and no write.
+        for sql in [
+            "BEGIN READ WRITE",
+            "BEGIN ISOLATION LEVEL SERIALIZABLE",
+            "ROLLBACK",
+            "COMMIT",
+            "UPDATE t SET a = 1",
+        ] {
+            assert!(!rerunnable(sql, DriverKind::Postgres), "{sql}");
+        }
     }
 }

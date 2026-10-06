@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
-    BrowseLevel, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ObjectPath, Session,
+    BrowseLevel, ConnectionConfig, Cursor, DriverKind, ExecuteOptions, ExplainFormat,
+    ExplainOptions, ObjectPath, Session,
 };
 use qh_export::plan::{ExportSpec, Exporter};
 use qh_export::{ExportOptions, Format};
@@ -252,7 +253,7 @@ pub(crate) fn guard_confirmed(
 /// applied to a decision, shared by [`guard_confirmed`], [`guard_destructive`] and the
 /// whole-operation check [`record_kind`]. Keeping it in one function is what makes a
 /// confirmation recorded by one path read exactly like one recorded by another.
-fn record_decision(
+pub(crate) fn record_decision(
     mode: SafeMode,
     confirmed: bool,
     index: usize,
@@ -296,6 +297,92 @@ fn record_decision(
 /// unconfirmed [`guard`] deliberately: one confirmation does not cover a plan.
 pub(crate) fn guard_for(settings: &Settings, mode: SafeMode, sql: &str) -> Result<(), CliError> {
     guard_confirmed(mode, safe_mode_confirmed(settings), sql, dialect(settings))
+}
+
+/// Why `EXPLAIN ANALYZE` is refused for a statement that is not a read.
+const ANALYZE_READ_ONLY_REASON: &str =
+    "EXPLAIN ANALYZE runs the statement, so it is offered for reads only";
+
+/// Why a re-run asked to be a read is refused for a statement that is not.
+const REQUIRE_READ_REASON: &str =
+    "this run repeats a result that was already read, so it is offered for reads only \
+     (REQUIRE_READ)";
+
+/// Refuse a statement that is not a read, in every Safe Mode, and say so in the log once.
+///
+/// Some runs execute the statement again, or execute it for the plan, and neither is a decision
+/// the mode makes: a `full` connection may run an `INSERT`, and that is exactly why running it a
+/// second time to page through its rows is wrong. Each statement is read under the connection's
+/// readings with `read_only`'s own table, so what the classifier cannot read is refused too.
+///
+/// Pure until it refuses, and it must run **before** [`guard_for`]: `guard_for` writes one row
+/// per run, and `allowed` is documented as "ran without asking", so an `INSERT` that passed the
+/// guard and was then refused here would leave a log that claims a write ran. The refusal is
+/// recorded under the connection's own mode, not `read_only`, because that is the mode the run
+/// was under, and with the sentence of this check, because the mode would not have refused it.
+fn require_read(
+    settings: &Settings,
+    mode: SafeMode,
+    sql: &str,
+    reason: &'static str,
+) -> Result<(), CliError> {
+    for statement in
+        qh_sql::decisions_readings(SafeMode::ReadOnly, sql, dialect(settings).readings())
+    {
+        if statement.decision.is_allowed() {
+            continue;
+        }
+        let error = record_decision(
+            mode,
+            false,
+            statement.index,
+            statement.kind,
+            statement.statement,
+            Decision::Refuse,
+            Some(reason),
+        )?;
+        return Err(CliError::Usage(
+            error
+                .expect("a refused decision raises an error")
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `EXPLAIN ANALYZE` is offered for reads only (D-10): neither PostgreSQL nor Trino rolls back
+/// an ANALYZE of a write on its own. See [`require_read`] for where it sits.
+pub(crate) fn analyze_requires_read(
+    settings: &Settings,
+    mode: SafeMode,
+    sql: &str,
+) -> Result<(), CliError> {
+    require_read(settings, mode, sql, ANALYZE_READ_ONLY_REASON)
+}
+
+/// What `explain` was asked for, from `EXPLAIN_FORMAT` (`text`, the default, or `json`) and
+/// `EXPLAIN_ANALYZE` (a flag, off by default). A value nobody recognises is refused by name, as
+/// `SAFE_MODE` is. Only `explain` reads them: no other command sees these keys, and the app
+/// sends them only for a plan.
+pub(crate) fn explain_options(settings: &Settings) -> Result<ExplainOptions, CliError> {
+    let format = match settings
+        .text("EXPLAIN_FORMAT", "")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "text" => ExplainFormat::Text,
+        "json" => ExplainFormat::Json,
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown EXPLAIN_FORMAT '{other}'; expected text, json"
+            )))
+        }
+    };
+    Ok(ExplainOptions {
+        format,
+        analyze: settings.flag("EXPLAIN_ANALYZE", false),
+    })
 }
 
 /// Why a destructive table operation is a question on a `confirm` connection.
@@ -1572,6 +1659,12 @@ pub async fn preview(
     // Checked before the connect step: a read-only connection refuses a write
     // without opening one.
     let mode = safe_mode(settings, engine)?;
+    // A re-run of a result the caller already has (more rows, another sort) sets this: it is
+    // offered for a read and for nothing else, whatever the mode would have allowed (AR #1).
+    // Before `guard_for`, for the log's sake.
+    if settings.flag("REQUIRE_READ", false) {
+        require_read(settings, mode, &sql, REQUIRE_READ_REASON)?;
+    }
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
     // Floored at one: a preview that returned no rows at all would tell the caller
@@ -1613,9 +1706,17 @@ pub async fn preview(
 
 /// `explain`: the plan the server would use for the caller's statement.
 ///
-/// The statement is built by the driver — `explain_statement`, because EXPLAIN's
+/// The statement is built by the driver — `explain_statement_with`, because EXPLAIN's
 /// spelling is per-driver — and emitted exactly as `preview` emits a result set,
 /// because all three servers answer EXPLAIN with one.
+///
+/// `EXPLAIN_FORMAT` and `EXPLAIN_ANALYZE` ask for more than the plain plan. Everything that needs
+/// no I/O runs first, in this order, and **before** the guard (blueprint W13 §4.4, Koreksi B-1):
+/// the options, the read check an ANALYZE needs, and what the driver can spell. The guard writes
+/// one execution-log row per run, so a run refused by one of the earlier checks leaves exactly
+/// its own row (the ANALYZE refusal) or none (an unknown format, a driver with no ANALYZE), and
+/// never an `allowed` for a write that did not run. With no option set none of this changes what
+/// is sent or logged.
 pub async fn explain(
     settings: &Settings,
     out: &mut dyn Emitter,
@@ -1627,9 +1728,30 @@ pub async fn explain(
     // without opening one. The statement is the caller's own; the driver's `EXPLAIN`
     // prefix is added later and does not change what was asked.
     let mode = safe_mode(settings, engine)?;
+    let asked = explain_options(settings)?;
+    if asked.analyze {
+        analyze_requires_read(settings, mode, &sql)?;
+    }
+    let mut early = None;
+    let (resolved, downgrade, fence) = if asked == ExplainOptions::default() {
+        (asked, None, None)
+    } else {
+        let config = connection(settings, engine)?;
+        let support = engine.driver(config.kind).explain_support();
+        let (resolved, downgrade) = support.resolve(asked)?;
+        early = Some(config);
+        (
+            resolved,
+            downgrade,
+            support.analyze_fence.filter(|_| resolved.analyze),
+        )
+    };
     guard_for(settings, mode, &sql)?;
     let timeout = statement_timeout(settings)?;
-    let config = connection(settings, engine)?;
+    let config = match early {
+        Some(config) => config,
+        None => connection(settings, engine)?,
+    };
     let mut target = row_target(settings, out)?;
     let started = Instant::now();
     out.emit(event("step").field("step", "connect").build())?;
@@ -1638,17 +1760,41 @@ pub async fn explain(
         return stopped_run(out, 0, None, None, None, started);
     };
     let (mut session, policy) = opened?;
-    let statement = session.explain_statement(&sql);
+    let statement = session.explain_statement_with(&sql, resolved)?;
+    let options = ExecuteOptions {
+        max_batch_rows: Some(target.max_batch_rows()),
+        row_limit: None,
+        statement_timeout: timeout,
+    };
+    // An ANALYZE runs inside a transaction the server refuses writes in and that is thrown away
+    // afterwards (DBX-4): the read check above is the classifier's reading, and this is the
+    // server's. Opened with the same options as the statement, so a `statement_timeout` it sets
+    // is outside the transaction and survives the rollback.
+    if let Some(fence) = fence {
+        let begun = until_stopped(
+            cancel,
+            run_to_end(&mut session, &policy, fence.begin, &options),
+        )
+        .await;
+        match begun {
+            None => {
+                let query_id = session.query_id();
+                let warning = stop_session(session, None).await;
+                return stopped_run(out, 0, query_id, None, warning, started);
+            }
+            Some(Err(error)) => {
+                let _ = session.close().await;
+                return Err(error.into());
+            }
+            Some(Ok(())) => {}
+        }
+    }
     let executed = execute_until_stopped(
         cancel,
         &mut session,
         &policy,
         &statement,
-        &ExecuteOptions {
-            max_batch_rows: Some(target.max_batch_rows()),
-            row_limit: None,
-            statement_timeout: timeout,
-        },
+        &options,
         stop_grace(&config),
     )
     .await;
@@ -1676,23 +1822,40 @@ pub async fn explain(
         }
     };
     let query_id = session.query_id();
-    let warning = if cancelled {
-        stop_session(session, Some(cursor)).await
+    let mut warnings: Vec<String> = downgrade.into_iter().collect();
+    if cancelled {
+        warnings.extend(stop_session(session, Some(cursor)).await);
     } else {
         drop(cursor);
+        // Best effort: a rollback that fails leaves the pool's own reset to do it, and the
+        // plan is already out.
+        if let Some(fence) = fence {
+            let _ = run_to_end(&mut session, &policy, fence.end, &options).await;
+        }
         let _ = session.close().await;
-        None
-    };
+    }
     let done = event("done")
         .field("rows", rows)
         .field("query_id", query_id)
         .field("elapsed_ms", started.elapsed().as_millis() as u64)
-        .maybe("warnings", warning.map(|text| json!([text])));
+        .maybe("warnings", (!warnings.is_empty()).then(|| json!(warnings)));
     out.emit(if cancelled {
         done.field("cancelled", true).build()
     } else {
         done.build()
     })?;
+    Ok(())
+}
+
+/// Run one statement that has no result worth reading, to its end.
+async fn run_to_end(
+    session: &mut Box<dyn Session>,
+    policy: &RetryPolicy,
+    sql: &str,
+    options: &ExecuteOptions,
+) -> Result<(), EngineError> {
+    let mut cursor = retry::execute(session, policy, sql, options).await?;
+    while cursor.next_batch(1).await?.is_some() {}
     Ok(())
 }
 

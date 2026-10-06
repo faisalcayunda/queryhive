@@ -134,6 +134,11 @@ impl Lexer {
         }
     }
 
+    /// Whether the body of `/*! … */` is code to this lexer.
+    pub(crate) const fn runs_executable_comments(self) -> bool {
+        self.executable_code
+    }
+
     /// Whether `$tag$ … $tag$` is a quoted string.
     const fn dollar_quotes(self) -> bool {
         !self.mysql_syntax && !self.trino
@@ -275,7 +280,7 @@ fn dash_opens_comment(bytes: &[u8], index: usize, lexer: Lexer) -> bool {
 /// The body of an executable comment is left to be scanned as code — the server runs
 /// it — so only the opener is consumed here. The closing `*/` needs no special case:
 /// in `Normal` state a `*` and a `/` are punctuation the scanner ignores.
-fn executable_comment_opener(bytes: &[u8], index: usize, lexer: Lexer) -> Option<usize> {
+pub(crate) fn executable_comment_opener(bytes: &[u8], index: usize, lexer: Lexer) -> Option<usize> {
     if !lexer.executable_code {
         return None;
     }

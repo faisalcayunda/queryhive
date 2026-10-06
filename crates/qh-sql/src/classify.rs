@@ -49,6 +49,15 @@
 //! server's analyser, and they are stated here rather than hidden. A mode is a guardrail
 //! against a wrong statement, not a substitute for the database's own privileges.
 //!
+//! One part of that limit is closed by name. A `SELECT` that calls a function with an effect
+//! outside its result (`nextval`, `pg_terminate_backend`, `pg_advisory_lock`, `lo_import`,
+//! MySQL's `GET_LOCK`, and the rest of [`SIDE_EFFECT_FUNCTIONS`]) is **Dml**, so `read_only`
+//! refuses it and `confirm` asks. A function that takes a string and runs it as SQL
+//! (`query_to_xml`, `dblink`, [`TEXT_AS_SQL_FUNCTIONS`]) is **Unknown**, because the text it
+//! runs is read by nobody. Both are lists of names matched where the text *calls* them (a name
+//! followed by `(`, quoted or not): they stop what is known, not what a user's own function
+//! does, and the server's read-only session is what stands behind that.
+//!
 //! A statement is **ReadOnly** when its leading keyword is one of the read starters and
 //! no write keyword appears anywhere in it. It is **Dml** or **Ddl** when a write keyword
 //! does. Anything else — a session control word, a name nobody here knows, a fragment
@@ -61,7 +70,10 @@
 
 use thiserror::Error;
 
-use crate::scan::{first_significant, has_significant_text_dialect, scan_dialect, Dialect, Lexer};
+use crate::scan::{
+    executable_comment_opener, first_significant, has_significant_text_dialect, scan_dialect, walk,
+    Dialect, Lexer, OpaqueKind, Visitor,
+};
 
 /// What one statement does, as far as reading its text can say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,9 +493,19 @@ pub fn classify(sql: &str) -> StatementKind {
 pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
     let lexer: Lexer = dialect.into();
     let scan = scan_dialect(sql, lexer);
+    let surface = Surface::of(sql, lexer);
+    // A function that runs the text it is given as SQL: whatever that text says is read by
+    // nobody here, so the statement is not claimed to be anything.
+    if surface.calls_a_function(runs_text_as_sql) {
+        return StatementKind::Unknown;
+    }
     // The text names something that can change what the next bytes mean: a session setting
-    // the classifier's own reading depends on. Unclassifiable, so refused below `full`.
-    if lexer.is_postgres() && changes_session_encoding(sql) {
+    // the classifier's own reading depends on. Unclassifiable, so refused below `full`. A bare
+    // `SHOW client_encoding` only reads it.
+    if lexer.is_postgres()
+        && scan.leading_keyword.as_deref() != Some("SHOW")
+        && surface.names_encoding()
+    {
         return StatementKind::Unknown;
     }
     let Some(leading) = scan.leading_keyword.as_deref() else {
@@ -491,14 +513,14 @@ pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
         // recognise, so nothing is claimed.
         return StatementKind::Unknown;
     };
-    match leading {
+    let kind = match leading {
         // These are read-only whatever else they contain. `SHOW CREATE TABLE` holds
         // the word `CREATE` and creates nothing, so scanning their body would refuse a
         // read — the one false positive worth carving out.
         "SHOW" | "DESC" | "DESCRIBE" => StatementKind::ReadOnly,
         // A read starter, but one that can hide a write further in: `WITH x AS (DELETE
         // …) SELECT`, `SELECT … FOR UPDATE`, `SELECT … INTO new_table`, `EXPLAIN
-        // ANALYZE …`. Every bare word is checked.
+        // ANALYZE …`, `SELECT nextval('s')`. Every bare word is checked.
         "SELECT" | "VALUES" | "TABLE" | "WITH" | "EXPLAIN" => {
             // The strictest word wins, not the first: `DO` (Unknown) before `DELETE` (Dml)
             // must not lower the answer.
@@ -507,8 +529,14 @@ pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
                 .iter()
                 .filter_map(|word| write_kind(word))
                 .max_by_key(|kind| kind_rank(*kind));
-            let lock_kind = locking_clause(&scan.keywords).then_some(StatementKind::Dml);
-            [word_kind, lock_kind]
+            let lock_kind = surface.has_locking_clause().then_some(StatementKind::Dml);
+            // A read that calls a function with an effect outside its own result: it moves a
+            // sequence, takes a lock, signals a backend. Not a read to a connection that
+            // refuses writes, a question to one that asks first.
+            let call_kind = surface
+                .calls_a_function(has_side_effect)
+                .then_some(StatementKind::Dml);
+            [word_kind, lock_kind, call_kind]
                 .into_iter()
                 .flatten()
                 .max_by_key(|kind| kind_rank(*kind))
@@ -520,28 +548,359 @@ pub fn classify_dialect(sql: &str, dialect: impl Into<Lexer>) -> StatementKind {
         // Anything else is judged by its own leading word: a statement that *starts*
         // with `INSERT` is a write even if it contains no other write word.
         other => write_kind(other).unwrap_or(StatementKind::Unknown),
+    };
+    // A string that names the encoding is harmless in a read and a way to move it in a write
+    // (`UPDATE pg_settings … WHERE name = 'client_encoding'`).
+    if kind != StatementKind::ReadOnly && lexer.is_postgres() && surface.literal_names_encoding {
+        return StatementKind::Unknown;
+    }
+    kind
+}
+
+/// What a statement's text is made of once literals, comments and quoted names are told apart
+/// from code: the tokens a call or a lock clause is read from. Built from the same [`walk`]
+/// that [`scan_dialect`] is, so the two cannot disagree about what is text. Tokens hold byte
+/// ranges into `sql`, not copies, so a statement of many megabytes costs a small token each.
+struct Surface<'a> {
+    sql: &'a str,
+    tokens: Vec<Token>,
+    /// A `U&"…"` identifier is in the text: it can spell any name through an escape.
+    unicode_identifier: bool,
+    /// A string or dollar-quoted body mentions `set_config` or `client_encoding`. Only looked
+    /// for under PostgreSQL's lexer, the one the setting matters to.
+    literal_names_encoding: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token {
+    /// A bare word, `sql[start..end]`.
+    Word(usize, usize),
+    /// A quoted name (`"x"` or `` `x` ``), quotes included, `sql[start..end]`.
+    Quoted(usize, usize),
+    /// A string or dollar-quoted body.
+    Literal,
+    /// A `(` and whether it follows a name with nothing but whitespace and comments between.
+    Open {
+        call: bool,
+    },
+    Close,
+}
+
+impl<'a> Surface<'a> {
+    fn of(sql: &'a str, lexer: Lexer) -> Self {
+        let mut builder = SurfaceBuilder {
+            surface: Surface {
+                sql,
+                tokens: Vec::new(),
+                unicode_identifier: false,
+                literal_names_encoding: false,
+            },
+            track_literals: lexer.is_postgres(),
+            lexer,
+            seen: 0,
+            dirty: false,
+        };
+        walk(sql.as_bytes(), lexer, &mut builder);
+        builder.gap(sql.len());
+        builder.surface
+    }
+
+    /// The name a token spells, as written: a bare word, or what is inside the quotes.
+    fn name(&self, token: Token) -> Option<&'a str> {
+        match token {
+            Token::Word(start, end) => Some(&self.sql[start..end]),
+            Token::Quoted(start, end) => {
+                let text = &self.sql[start..end];
+                let text = text.strip_prefix(['"', '`']).unwrap_or(text);
+                Some(text.strip_suffix(['"', '`']).unwrap_or(text))
+            }
+            _ => None,
+        }
+    }
+
+    /// The bare word at `index`, or `""`.
+    fn word(&self, index: usize) -> &'a str {
+        match self.tokens.get(index) {
+            Some(Token::Word(start, end)) => &self.sql[*start..*end],
+            _ => "",
+        }
+    }
+
+    /// Whether the text calls a function `matches` accepts, which it is given in lowercase: a
+    /// name followed by `(`.
+    fn calls_a_function(&self, matches: impl Fn(&str) -> bool) -> bool {
+        self.tokens.windows(2).any(|pair| match pair[1] {
+            Token::Open { call: true } => self
+                .name(pair[0])
+                .is_some_and(|name| matches(&name.to_ascii_lowercase())),
+            _ => false,
+        })
+    }
+
+    /// Whether PostgreSQL text could switch the session's `client_encoding`, or hides the name
+    /// of the function that does. In a multibyte client encoding whose second byte can be `\`, a
+    /// later `E'…'` string ends somewhere no reading here predicts, so text that can move the
+    /// encoding is not read-only however it looks. A name is read in code only: `set_config`
+    /// and `client_encoding` as bare words, `"set_config"` and `pg_catalog."SET_CONFIG"` as the
+    /// same function, and any `U&"…"` identifier, which can spell any name through an escape.
+    /// What a string or a comment says is not code.
+    fn names_encoding(&self) -> bool {
+        self.unicode_identifier
+            || self
+                .tokens
+                .iter()
+                .filter_map(|token| self.name(*token))
+                .any(|name| {
+                    name.eq_ignore_ascii_case("set_config")
+                        || name.eq_ignore_ascii_case("client_encoding")
+                })
+    }
+
+    /// Whether the words hold a row-locking clause beyond `FOR UPDATE` (which `UPDATE`
+    /// catches): `FOR SHARE`, `FOR KEY SHARE` and `FOR NO KEY UPDATE` take row locks like
+    /// `FOR UPDATE` does. The `FOR` of `substring(a FROM 1 FOR share)` or `overlay(…)` is a
+    /// length, so a column named `key`, `no` or `share` there is not a lock. (A column named
+    /// `share` after a `FOR` that is not inside one of those calls is still read as the lock,
+    /// and a refused read is the cheap side of that.)
+    fn has_locking_clause(&self) -> bool {
+        // The word before each open parenthesis: the call the next `FOR` sits in.
+        let mut open: Vec<&str> = Vec::new();
+        for (index, token) in self.tokens.iter().enumerate() {
+            match token {
+                Token::Open { .. } => open.push(match index.checked_sub(1) {
+                    Some(before) => self.word(before),
+                    None => "",
+                }),
+                Token::Close => {
+                    open.pop();
+                }
+                Token::Word(..) if self.word(index).eq_ignore_ascii_case("for") => {
+                    let in_length = open.last().is_some_and(|call| {
+                        ["substring", "substr", "overlay"]
+                            .iter()
+                            .any(|name| call.eq_ignore_ascii_case(name))
+                    });
+                    let next = |offset: usize| self.word(index + offset).to_ascii_lowercase();
+                    if !in_length
+                        && matches!(
+                            (next(1).as_str(), next(2).as_str(), next(3).as_str()),
+                            ("share", _, _) | ("key", "share", _) | ("no", "key", "update")
+                        )
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 }
 
-/// Whether the words hold a row-locking clause beyond `FOR UPDATE` (which `UPDATE` catches):
-/// `FOR SHARE`, `FOR KEY SHARE` and `FOR NO KEY UPDATE` take row locks like `FOR UPDATE` does.
-/// A column named `key`, `no` or `share` right after a `FOR` is a false positive, and a refused
-/// read is the cheap side of that.
-fn locking_clause(words: &[String]) -> bool {
-    words
-        .windows(2)
-        .any(|pair| pair[0] == "FOR" && matches!(pair[1].as_str(), "SHARE" | "KEY" | "NO"))
+/// The visitor [`Surface::of`] runs: words and regions become tokens, and the text between
+/// them is read only for parentheses.
+struct SurfaceBuilder<'a> {
+    surface: Surface<'a>,
+    track_literals: bool,
+    lexer: Lexer,
+    /// Where the last token ended.
+    seen: usize,
+    /// Something other than whitespace came between the last token and here.
+    dirty: bool,
 }
 
-/// Whether PostgreSQL text could switch the session's `client_encoding`, or hides the name of
-/// the function that does. In a multibyte client encoding whose second byte can be `\`, a later
-/// `E'…'` string ends somewhere no reading here predicts, so text that can move the encoding is
-/// not read-only however it looks. Textual and case-insensitive on purpose: `"set_config"` and
-/// `pg_catalog.set_config` are the same function, so a keyword scan that skips quoted
-/// identifiers is not enough, and a `U&"…"` identifier can spell any name through an escape.
-fn changes_session_encoding(sql: &str) -> bool {
-    let lower = sql.to_ascii_lowercase();
-    lower.contains("set_config") || lower.contains("client_encoding") || lower.contains("u&\"")
+impl SurfaceBuilder<'_> {
+    /// Read the text up to `upto`, which no token covers: whitespace, operators, parentheses.
+    fn gap(&mut self, upto: usize) {
+        let bytes = self.surface.sql.as_bytes();
+        let mut index = self.seen.min(upto);
+        while index < upto {
+            let byte = bytes[index];
+            index += 1;
+            match byte {
+                b'(' => {
+                    let call = !self.dirty
+                        && matches!(
+                            self.surface.tokens.last(),
+                            Some(Token::Word(..) | Token::Quoted(..))
+                        );
+                    self.surface.tokens.push(Token::Open { call });
+                    self.dirty = false;
+                }
+                b')' => {
+                    self.surface.tokens.push(Token::Close);
+                    self.dirty = false;
+                }
+                // `\v` is whitespace to MySQL and to PostgreSQL 16 and later, which
+                // `is_ascii_whitespace` leaves out. Read as a gap on every server: a call
+                // spelled `name\v(` is then a call, and the wrong guess only refuses more.
+                byte if byte.is_ascii_whitespace() || byte == b'\x0b' => {}
+                // Under a lexer that runs executable comments, `/*!` (and a version after it)
+                // and the `*/` that closes the body are not there: `/*!GET_LOCK*/(` calls it.
+                b'/' if executable_comment_opener(bytes, index - 1, self.lexer)
+                    .is_some_and(|next| next <= upto) =>
+                {
+                    index = executable_comment_opener(bytes, index - 1, self.lexer)
+                        .expect("just checked");
+                }
+                b'*' if self.lexer.runs_executable_comments()
+                    && bytes.get(index) == Some(&b'/') =>
+                {
+                    index += 1;
+                }
+                _ => self.dirty = true,
+            }
+        }
+        self.seen = upto;
+    }
+
+    fn push(&mut self, token: Token, end: usize) {
+        self.surface.tokens.push(token);
+        self.seen = end;
+        self.dirty = false;
+    }
+}
+
+/// Whether `text` holds `set_config` or `client_encoding`, in any case, without copying it.
+fn mentions_encoding(text: &str) -> bool {
+    ["set_config", "client_encoding"].iter().any(|needle| {
+        text.as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    })
+}
+
+impl Visitor for SurfaceBuilder<'_> {
+    fn word(&mut self, start: usize, end: usize) {
+        self.gap(start);
+        self.push(Token::Word(start, end), end);
+    }
+
+    fn opaque(&mut self, kind: OpaqueKind, start: usize, end: usize) {
+        self.gap(start);
+        match kind {
+            // A comment is not there: a call can have one between its name and its `(`.
+            OpaqueKind::LineComment | OpaqueKind::BlockComment => self.seen = end,
+            OpaqueKind::DoubleQuote | OpaqueKind::Backtick => {
+                let bytes = self.surface.sql.as_bytes();
+                let escaped = bytes[start..end]
+                    .get(..2)
+                    .is_some_and(|head| head.eq_ignore_ascii_case(b"u&"))
+                    || (start >= 2
+                        && bytes[start - 2].eq_ignore_ascii_case(&b'u')
+                        && bytes[start - 1] == b'&');
+                self.surface.unicode_identifier |= escaped;
+                self.push(Token::Quoted(start, end), end);
+            }
+            OpaqueKind::SingleQuote | OpaqueKind::DollarQuote => {
+                if self.track_literals {
+                    self.surface.literal_names_encoding |=
+                        mentions_encoding(&self.surface.sql[start..end]);
+                }
+                self.push(Token::Literal, end);
+            }
+        }
+    }
+}
+
+/// Functions whose call changes something outside the statement's own result, though the
+/// statement reads as a `SELECT`: they move a sequence, take a lock another session waits on,
+/// signal or stop a backend, reload the server, write a large object or a file, send a
+/// notification, change replication or reset counters (S-2). Exact lowercase names, matched
+/// where the text calls them, in every dialect. The advisory-lock family is matched by prefix
+/// ([`has_side_effect`]). Trino has no scalar function with an effect: what changes state
+/// there is a `CALL`, which is refused as opaque.
+///
+/// A list of names can only name what it knows: a user's function that writes is still a
+/// read here, and the module note says so. `read_only` has the server behind it for that.
+const SIDE_EFFECT_FUNCTIONS: &[&str] = &[
+    // PostgreSQL: sequences.
+    "nextval",
+    "setval",
+    // PostgreSQL: other sessions and the server.
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+    "pg_reload_conf",
+    "pg_rotate_logfile",
+    "pg_logfile_rotate",
+    "pg_switch_wal",
+    "pg_switch_xlog",
+    "pg_create_restore_point",
+    "pg_backup_start",
+    "pg_backup_stop",
+    "pg_start_backup",
+    "pg_stop_backup",
+    "pg_promote",
+    "pg_wal_replay_pause",
+    "pg_wal_replay_resume",
+    "pg_xlog_replay_pause",
+    "pg_xlog_replay_resume",
+    "pg_create_physical_replication_slot",
+    "pg_create_logical_replication_slot",
+    "pg_drop_replication_slot",
+    "pg_replication_slot_advance",
+    "pg_logical_emit_message",
+    "pg_notify",
+    "pg_import_system_collations",
+    "pg_prewarm",
+    // PostgreSQL: counters.
+    "pg_stat_reset",
+    "pg_stat_reset_shared",
+    "pg_stat_reset_slru",
+    "pg_stat_reset_single_table_counters",
+    "pg_stat_reset_single_function_counters",
+    "pg_stat_statements_reset",
+    // PostgreSQL: large objects and files on the server.
+    "lo_create",
+    "lo_creat",
+    "lo_import",
+    "lo_export",
+    "lo_unlink",
+    "lo_put",
+    "lo_from_bytea",
+    "lo_truncate",
+    "lo_truncate64",
+    "lowrite",
+    "pg_file_write",
+    "pg_file_rename",
+    "pg_file_unlink",
+    // MySQL: named locks other sessions wait on.
+    "get_lock",
+    "release_lock",
+    "release_all_locks",
+];
+
+/// Whether `name` is a function with an effect outside its result, see [`SIDE_EFFECT_FUNCTIONS`].
+fn has_side_effect(name: &str) -> bool {
+    SIDE_EFFECT_FUNCTIONS.contains(&name)
+        || name.starts_with("pg_advisory_")
+        || name.starts_with("pg_try_advisory_")
+}
+
+/// Functions that take a string and run it as SQL (or, `sys_exec` and `sys_eval`, as a
+/// command), so what they run is invisible to a reading of the statement that calls them.
+/// The `dblink` family is matched by prefix ([`runs_text_as_sql`]).
+const TEXT_AS_SQL_FUNCTIONS: &[&str] = &[
+    "query_to_xml",
+    "query_to_xmlschema",
+    "query_to_xml_and_xmlschema",
+    "ts_stat",
+    // `ts_rewrite(tsquery, text)` runs its second argument as a SELECT (the 3-argument form
+    // runs none, and is refused with it: a rare false refusal).
+    "ts_rewrite",
+    // tablefunc: builds its query from the relation and key text without quoting it.
+    "connectby",
+    "crosstab",
+    "crosstab2",
+    "crosstab3",
+    "crosstab4",
+    "sys_exec",
+    "sys_eval",
+];
+
+/// Whether `name` runs text as SQL, see [`TEXT_AS_SQL_FUNCTIONS`].
+fn runs_text_as_sql(name: &str) -> bool {
+    TEXT_AS_SQL_FUNCTIONS.contains(&name) || name.starts_with("dblink")
 }
 
 /// Whether one bare word names a write, and which kind.
@@ -1804,8 +2163,6 @@ mod tests {
             "SELECT \"set_config\"('a', 'b', false)",
             "SELECT pg_catalog.\"SET_CONFIG\"('a', 'b', false)",
             "SELECT U&\"set\\005fconfig\"('a', 'b', false)",
-            "SELECT 'client_encoding'",
-            "SELECT 1 /* client_encoding */",
             "SELECT SET_CONFIG ('x', 'y', true)",
         ] {
             for lexer in Dialect::Postgres.readings() {
@@ -1827,7 +2184,8 @@ mod tests {
         );
         // `SET` itself was always refused.
         assert!(pg_read_only("SET client_encoding = 'SJIS'").is_err());
-        assert!(pg_read_only("SELECT current_setting('client_encoding')").is_err());
+        // Reading the setting is not changing it (B-17).
+        assert!(pg_read_only("SELECT current_setting('client_encoding')").is_ok());
     }
 
     #[test]
@@ -1907,5 +2265,250 @@ mod tests {
             assert!(check(SafeMode::Full, sql).is_ok(), "{sql}");
         }
         assert!(check(SafeMode::NoDdl, "COPY t FROM STDIN").is_ok());
+    }
+
+    // ----- W13-T2: side-effect functions (S-2 / DBX-3), B-16 and B-17 ----- //
+
+    /// The strictest kind any dialect's readings give `sql`.
+    fn kind_everywhere(sql: &str) -> StatementKind {
+        [
+            Dialect::Generic,
+            Dialect::Postgres,
+            Dialect::Mysql,
+            Dialect::Trino,
+        ]
+        .into_iter()
+        .map(|dialect| classify_readings(sql, dialect.readings()))
+        .max_by_key(|kind| kind_rank(*kind))
+        .expect("four dialects")
+    }
+
+    #[test]
+    fn a_select_that_calls_a_side_effect_function_is_a_write() {
+        for sql in [
+            "SELECT pg_terminate_backend(42)",
+            "SELECT pg_cancel_backend(42)",
+            "SELECT pg_reload_conf()",
+            "SELECT nextval('s')",
+            "SELECT setval('s', 1)",
+            "SELECT lo_import('/etc/passwd')",
+            "SELECT lo_export(1, '/tmp/x')",
+            "SELECT lo_unlink(1)",
+            "SELECT pg_advisory_lock(1)",
+            "SELECT pg_advisory_lock_shared(1)",
+            "SELECT pg_advisory_xact_lock(1)",
+            "SELECT pg_try_advisory_lock(1)",
+            "SELECT pg_try_advisory_xact_lock_shared(1)",
+            "SELECT pg_advisory_unlock(1)",
+            "SELECT pg_advisory_unlock_all()",
+            "SELECT pg_notify('c', 'p')",
+            "SELECT pg_switch_wal()",
+            "SELECT pg_create_logical_replication_slot('a', 'b')",
+            "SELECT GET_LOCK('a', 1)",
+            "SELECT RELEASE_LOCK('a')",
+            "SELECT RELEASE_ALL_LOCKS()",
+            // How a name can be spelled around the call.
+            "SELECT pg_catalog.pg_terminate_backend(42)",
+            "SELECT PG_TERMINATE_BACKEND (42)",
+            "SELECT pg_terminate_backend/* c */(42)",
+            "SELECT pg_terminate_backend -- c\n(42)",
+            "SELECT \"pg_terminate_backend\"(42)",
+            "SELECT pg_catalog.\"NEXTVAL\"('s')",
+            // Anywhere in a read statement, not only in the select list.
+            "SELECT * FROM pg_terminate_backend(42)",
+            "SELECT 1 WHERE pg_try_advisory_lock(1)",
+            "WITH x AS (SELECT pg_cancel_backend(1)) SELECT * FROM x",
+            "VALUES (nextval('s'))",
+            "TABLE t ORDER BY nextval('s')",
+            "EXPLAIN SELECT nextval('s')",
+            "EXPLAIN (FORMAT JSON) SELECT pg_terminate_backend(1)",
+            // A vertical tab is whitespace to MySQL and to PostgreSQL 16 and later.
+            "SELECT nextval\x0b('s')",
+            "SELECT pg_terminate_backend\x0b(1)",
+            "SELECT pg_advisory_lock\x0b(1)",
+            "SELECT pg_try_advisory_lock\x0b(1)",
+            "SELECT GET_LOCK\x0b('a', 1)",
+        ] {
+            assert_eq!(kind_everywhere(sql), StatementKind::Dml, "{sql}");
+            // The decision matrix does the rest: read_only refuses, confirm asks.
+            assert!(check(SafeMode::ReadOnly, sql).is_err(), "read_only {sql}");
+            assert!(
+                matches!(
+                    check(SafeMode::Confirm, sql),
+                    Err(SafeModeError::NeedsConfirmation { .. })
+                ),
+                "confirm {sql}"
+            );
+            assert!(check(SafeMode::NoDdl, sql).is_ok(), "no_ddl {sql}");
+            assert!(check(SafeMode::Full, sql).is_ok(), "full {sql}");
+            for mode in [SafeMode::ReadOnly, SafeMode::Confirm] {
+                assert!(pg_check(mode, sql).is_err(), "postgres {mode:?} {sql}");
+            }
+        }
+        // A backtick is a quote only to MySQL.
+        let sql = "SELECT `get_lock`('a', 1)";
+        assert_eq!(classify_dialect(sql, Dialect::Mysql), StatementKind::Dml);
+    }
+
+    /// MySQL runs the body of an executable comment, so a call can sit inside one with its
+    /// `(` outside it. Every MySQL reading must see the call, not only the ones that run it.
+    #[test]
+    fn a_mysql_executable_comment_around_a_function_name_still_calls_it() {
+        for (sql, kind) in [
+            ("SELECT /*!GET_LOCK*/('a', 1)", StatementKind::Dml),
+            ("SELECT /*!50000 GET_LOCK*/('a', 1)", StatementKind::Dml),
+            ("SELECT /*!pg_advisory_lock*/(1)", StatementKind::Dml),
+            (
+                "SELECT /*!query_to_xml*/('SELECT 1', true, false, '')",
+                StatementKind::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                classify_readings(sql, Dialect::Mysql.readings()),
+                kind,
+                "{sql}"
+            );
+            for mode in [SafeMode::ReadOnly, SafeMode::NoDdl] {
+                let refused = check_confirmed_readings(mode, false, sql, Dialect::Mysql.readings());
+                // no_ddl lets a row write through, and refuses the opaque one.
+                assert_eq!(
+                    refused.is_err(),
+                    mode == SafeMode::ReadOnly || kind == StatementKind::Unknown,
+                    "{mode:?} {sql}"
+                );
+            }
+        }
+        // The comment around a harmless name stays a read.
+        for sql in ["SELECT /*!LOWER*/('A')", "SELECT /*!50000 1 */ + (2)"] {
+            assert_eq!(
+                classify_readings(sql, Dialect::Mysql.readings()),
+                StatementKind::ReadOnly,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_call_is_still_a_read() {
+        for sql in [
+            // A column, an alias, a table: no call, no effect.
+            "SELECT nextval FROM t",
+            "SELECT a AS setval FROM t",
+            "SELECT get_lock FROM t WHERE release_lock = 1",
+            "SELECT nextval + (1) FROM t",
+            // Text and comments name nothing.
+            "SELECT 'nextval(1)'",
+            "SELECT 1 /* pg_terminate_backend(1) */",
+            "SELECT 1 -- pg_cancel_backend(1)",
+            // Look-alikes: the match is exact, or the advisory-lock family prefix.
+            "SELECT nextval_total(1) FROM t",
+            "SELECT my_pg_terminate_backend(1)",
+            "SELECT currval('s')",
+            "SELECT lo_get(1)",
+            "SELECT pg_advisory FROM t",
+            "SELECT * FROM pg_locks",
+            "SELECT * FROM pg_stat_activity",
+            "SELECT pg_backend_pid()",
+            "SELECT count(*) FROM t",
+            "SELECT 1 WHERE x IN (nextval, 2)",
+        ] {
+            assert_eq!(kind_everywhere(sql), StatementKind::ReadOnly, "{sql}");
+            assert!(check(SafeMode::ReadOnly, sql).is_ok(), "{sql}");
+        }
+        // Dollar quotes are PostgreSQL's: the other lexers read that text as code.
+        assert!(pg_read_only("SELECT $$ pg_reload_conf() $$").is_ok());
+    }
+
+    #[test]
+    fn a_function_that_runs_text_as_sql_is_not_a_read() {
+        for sql in [
+            "SELECT query_to_xml('SELECT 1', true, false, '')",
+            "SELECT * FROM ts_stat('SELECT to_tsvector(a) FROM t')",
+            "SELECT * FROM crosstab('SELECT 1, 2, 3') AS c(a int, b int)",
+            "SELECT dblink('x', 'DELETE FROM t')",
+            "SELECT dblink_exec('x', 'DELETE FROM t')",
+            "SELECT sys_exec('id')",
+            "SELECT ts_rewrite('a'::tsquery, 'SELECT pg_terminate_backend(1)::text::tsquery, ''a''::tsquery')",
+            "SELECT * FROM connectby('(SELECT pg_terminate_backend(1)) x', 'k', 'p', 'r', 0) AS c(k text, p text, l int)",
+            "SELECT query_to_xml\x0b('SELECT 1', true, false, '')",
+            // Not only a read statement: it is the text inside that nobody reads.
+            "INSERT INTO t SELECT query_to_xml('SELECT 1', true, false, '')",
+        ] {
+            assert_eq!(kind_everywhere(sql), StatementKind::Unknown, "{sql}");
+            assert!(check(SafeMode::NoDdl, sql).is_err(), "{sql}");
+            assert!(check(SafeMode::ReadOnly, sql).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_column_after_for_is_not_a_row_lock() {
+        for sql in [
+            "SELECT substring(a FROM 1 FOR key) FROM t",
+            "SELECT substring(a FROM 1 FOR no) FROM t",
+            "SELECT substring(a FROM 1 FOR share) FROM t",
+            "SELECT overlay(a PLACING b FROM 1 FOR share) FROM t",
+            "SELECT SUBSTRING (a FROM 2 FOR key) FROM t",
+            "SELECT * FROM t WHERE b = (SELECT substring(c FROM 1 FOR no) FROM u)",
+        ] {
+            assert_eq!(kind_everywhere(sql), StatementKind::ReadOnly, "{sql}");
+        }
+        // The real clauses stay writes, wherever they sit, and a substring around them does not
+        // hide them.
+        for sql in [
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t FOR KEY SHARE",
+            "SELECT * FROM t FOR NO KEY UPDATE",
+            "SELECT * FROM t FOR UPDATE OF t SKIP LOCKED",
+            "SELECT * FROM (SELECT * FROM t FOR SHARE) x",
+            "SELECT substring((SELECT a FROM t FOR SHARE) FROM 1 FOR 2)",
+            "SELECT substring(a FROM 1 FOR 2) FROM t FOR SHARE",
+            "SELECT * FROM t /* c */ FOR /* c */ KEY /* c */ SHARE",
+        ] {
+            assert_eq!(kind_everywhere(sql), StatementKind::Dml, "{sql}");
+        }
+    }
+
+    #[test]
+    fn harmless_text_that_mentions_the_encoding_is_a_read() {
+        for sql in [
+            "SHOW client_encoding",
+            "SELECT current_setting('client_encoding')",
+            "SELECT 'client_encoding'",
+            "SELECT 'set_config'",
+            "SELECT 1 /* client_encoding */",
+            "SELECT 1 -- set_config\n",
+            "SELECT $$client_encoding$$",
+            "SELECT name FROM pg_settings WHERE name = 'client_encoding'",
+            "SELECT my_set_config_table FROM t",
+        ] {
+            for lexer in Dialect::Postgres.readings() {
+                assert_eq!(
+                    classify_dialect(sql, *lexer),
+                    StatementKind::ReadOnly,
+                    "{sql}"
+                );
+            }
+            assert!(pg_read_only(sql).is_ok(), "{sql}");
+        }
+        // What can change the encoding stays refused: the call, however it is spelled, a write
+        // that names the setting in text, and an escaped identifier that can spell anything.
+        for sql in [
+            "SELECT set_config('client_encoding', 'SJIS', false)",
+            "SELECT \"set_config\"('a', 'b', false)",
+            "SELECT ts_rewrite('a'::tsquery, 'SELECT set_config(''client_encoding'',''SJIS'',false)::tsquery, ''a''::tsquery')",
+            "SELECT U&\"set\\005fconfig\"('a', 'b', false)",
+            "UPDATE pg_settings SET setting = 'SJIS' WHERE name = 'client_encoding'",
+            "INSERT INTO t VALUES ('client_encoding')",
+            "SET client_encoding = 'SJIS'",
+            "ALTER ROLE r SET client_encoding = 'SJIS'",
+        ] {
+            for lexer in Dialect::Postgres.readings() {
+                assert_eq!(
+                    classify_dialect(sql, *lexer),
+                    StatementKind::Unknown,
+                    "{sql}"
+                );
+            }
+        }
     }
 }

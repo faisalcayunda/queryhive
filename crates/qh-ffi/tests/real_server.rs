@@ -42,8 +42,10 @@
 
 use std::io;
 
+use qh_driver::{ConnectionConfig, DriverKind, ExecuteOptions, Session, TlsMode};
 use qh_ffi::events::{Capture, Emitter};
-use qh_ffi::{run, CancelFlag, Command, RealEngine, Settings};
+use qh_ffi::host::{EngineHost, Lane};
+use qh_ffi::{run, CancelFlag, Command, Engine, RealEngine, Settings};
 use serde_json::Value as Json;
 
 /// The timing tests measure a server's answer to a Stop in milliseconds, and the mid-stream
@@ -1154,7 +1156,9 @@ async fn a_read_only_postgres_connection_runs_ordinary_reads() {
 
 /// What the guard reads as a plain read but the server runs as a write is stopped by the
 /// server itself under `read_only`: the session is switched to refuse writes before the run's
-/// own statements. `nextval` and a function that writes are the two the guard cannot see.
+/// own statements. A function that writes is the one the guard cannot see (`nextval` was the
+/// other until the side-effect denylist, S-2: the guard now refuses it by name, and the control
+/// below shows the server would have refused it too).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_only_postgres_run_makes_the_server_refuse_what_the_guard_cannot_see() {
     let _turn = TURN.lock().await;
@@ -1198,20 +1202,27 @@ async fn a_read_only_postgres_run_makes_the_server_refuse_what_the_guard_cannot_
     let rows_before = postgres_count(&name).await;
     assert_eq!(rows_before, 1);
 
-    for sql in [
-        format!("SELECT nextval('{name}_seq')"),
-        format!("SELECT {name}_f()"),
-    ] {
-        let (result, events) = postgres_run(&sql, Some("read_only")).await;
-        let error = result.expect_err(&format!(
-            "the server must refuse {sql} under read_only: {events:?}"
-        ));
-        assert!(
-            error.message().contains("read-only transaction"),
-            "{sql}: {}",
-            error.message()
-        );
-    }
+    // The guard refuses `nextval` before the server is reached: no "read-only transaction" here,
+    // because nothing was sent.
+    let nextval = format!("SELECT nextval('{name}_seq')");
+    let (result, events) = postgres_run(&nextval, Some("read_only")).await;
+    let error = result.expect_err(&format!("the guard must refuse {nextval}: {events:?}"));
+    assert!(
+        error.message().contains("SAFE_MODE=read_only refuses"),
+        "{}",
+        error.message()
+    );
+    // The function is a plain read to the guard, and the server refuses its write.
+    let function = format!("SELECT {name}_f()");
+    let (result, events) = postgres_run(&function, Some("read_only")).await;
+    let error = result.expect_err(&format!(
+        "the server must refuse {function} under read_only: {events:?}"
+    ));
+    assert!(
+        error.message().contains("read-only transaction"),
+        "{function}: {}",
+        error.message()
+    );
     assert_eq!(postgres_count(&name).await, 1, "the function wrote nothing");
     let (result, events) = postgres_run(&format!("SELECT last_value FROM {name}_seq"), None).await;
     result.expect("read the sequence");
@@ -1389,5 +1400,337 @@ async fn a_read_only_trino_connection_does_not_run_a_carriage_return_hidden_inse
     result.unwrap_or_else(|error| panic!("a read runs: {} {events:?}", error.message()));
 
     let (result, _) = trino_run(&format!("DROP TABLE {table}"), None).await;
+    result.expect("clean up");
+}
+
+// --------------------------------------------------------------------------- //
+// W13-T2: JSON plans, ANALYZE inside a read-only transaction, and the lease's read-only
+// --------------------------------------------------------------------------- //
+
+/// One command against the dev PostgreSQL, through `engine`, with settings of the caller's.
+async fn postgres_command(
+    engine: &dyn Engine,
+    command: Command,
+    sql: &str,
+    extra: &[(&str, &str)],
+) -> (Result<(), qh_ffi::CliError>, Vec<Json>) {
+    let mut pairs: Vec<(String, String)> = POSTGRES_ENV
+        .iter()
+        .chain(extra)
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    pairs.push(("RETRIES".to_owned(), "0".to_owned()));
+    pairs.push(("SQL".to_owned(), sql.to_owned()));
+    let mut out = Capture::new();
+    let result = run(
+        command,
+        &Settings::from_pairs(pairs),
+        &mut out,
+        engine,
+        &CancelFlag::new(),
+    )
+    .await;
+    (result, out.lines)
+}
+
+/// The plan an `explain` run delivered as its first cell, parsed.
+fn plan_json(events: &[Json]) -> Json {
+    match &data(events)[0][0] {
+        Json::String(text) => {
+            serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"))
+        }
+        other => other.clone(),
+    }
+}
+
+fn done_warnings(events: &[Json]) -> Option<Json> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event["event"] == "done")
+        .and_then(|done| done.get("warnings").cloned())
+}
+
+/// The three forms PostgreSQL can be asked for. Each cell is checked as the server wrote it:
+/// the JSON ones parse, and an ANALYZE says how long the statement took.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_plans_come_back_as_json_and_analyze_reports_its_timing() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let engine = RealEngine::new();
+    let sql = "SELECT g FROM generate_series(1, 3) AS g;";
+
+    let (result, events) = postgres_command(&engine, Command::Explain, sql, &[]).await;
+    result.expect("the plain plan");
+    assert!(
+        data(&events)[0][0]
+            .as_str()
+            .is_some_and(|line| line.contains("Function Scan")),
+        "{}",
+        lines(&events)
+    );
+    assert_eq!(done_warnings(&events), None);
+
+    let (result, events) = postgres_command(
+        &engine,
+        Command::Explain,
+        sql,
+        &[("EXPLAIN_FORMAT", "json")],
+    )
+    .await;
+    result.expect("the JSON plan");
+    let plan = plan_json(&events);
+    assert!(plan[0]["Plan"]["Node Type"].is_string(), "{plan}");
+    assert!(
+        plan[0].get("Execution Time").is_none(),
+        "no ANALYZE: {plan}"
+    );
+    assert_eq!(done_warnings(&events), None);
+
+    let (result, events) = postgres_command(
+        &engine,
+        Command::Explain,
+        sql,
+        &[("EXPLAIN_FORMAT", "json"), ("EXPLAIN_ANALYZE", "1")],
+    )
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}: {}", lines(&events)));
+    let plan = plan_json(&events);
+    assert!(plan[0]["Execution Time"].is_number(), "{plan}");
+    assert_eq!(plan[0]["Plan"]["Actual Rows"], 3, "{plan}");
+    assert!(
+        plan[0]["Plan"].get("Shared Hit Blocks").is_some(),
+        "BUFFERS: {plan}"
+    );
+    assert_eq!(done_warnings(&events), None);
+
+    let (result, events) =
+        postgres_command(&engine, Command::Explain, sql, &[("EXPLAIN_ANALYZE", "1")]).await;
+    result.expect("the text ANALYZE");
+    let text = data(&events)
+        .iter()
+        .map(|row| row[0].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Execution Time"), "{text}");
+}
+
+/// The classifier reads a function that writes as a read, so the ANALYZE of it is allowed and
+/// the *server* is what stops the write (DBX-4): the statement runs in a read-only transaction.
+/// The control shows the write is real without the fence, and the check at the end shows the
+/// fence leaves nothing open on the session it ran on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_analyze_runs_in_a_read_only_transaction_that_is_rolled_back() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let name = format!(
+        "qh_w13t2_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    for setup in [
+        format!("DROP TABLE IF EXISTS {name}"),
+        format!("CREATE TABLE {name} (id INT)"),
+        format!("INSERT INTO {name} VALUES (1)"),
+        format!(
+            "CREATE FUNCTION {name}_f() RETURNS int LANGUAGE sql AS \
+             $$ INSERT INTO {name} VALUES (2) RETURNING id $$"
+        ),
+    ] {
+        let (result, _) = postgres_run(&setup, None).await;
+        result.unwrap_or_else(|error| panic!("{setup}: {}", error.message()));
+    }
+    let function = format!("SELECT {name}_f()");
+
+    // Control: a typed `EXPLAIN ANALYZE` runs the function's write (`full` allows DDL).
+    let (result, _) = postgres_run(&format!("EXPLAIN (ANALYZE) {function}"), None).await;
+    result.expect("the control runs");
+    assert_eq!(
+        postgres_count(&name).await,
+        2,
+        "ANALYZE wrote without the fence"
+    );
+    let (result, _) = postgres_run(&format!("DELETE FROM {name} WHERE id = 2"), None).await;
+    result.expect("remove the control's row");
+
+    // The engine's ANALYZE, on a pooled session so the rollback is seen on the next run.
+    let host = EngineHost::new();
+    let pool = host.pool();
+    let engine = pool.engine(Lane::Query, Settings::from_pairs([("RETRIES", "0")]));
+    for mode in ["full", "confirm"] {
+        let (result, events) = postgres_command(
+            &*engine,
+            Command::Explain,
+            &function,
+            &[
+                ("EXPLAIN_ANALYZE", "1"),
+                ("SAFE_MODE", mode),
+                ("SAFE_MODE_CONFIRMED", "1"),
+            ],
+        )
+        .await;
+        let error = result.expect_err(&format!(
+            "{mode}: the server must refuse the write: {events:?}"
+        ));
+        assert!(
+            error.message().contains("read-only transaction"),
+            "{mode}: {}",
+            error.message()
+        );
+        pool.settle().await;
+        assert_eq!(
+            postgres_count(&name).await,
+            1,
+            "{mode}: the function wrote nothing"
+        );
+    }
+
+    // A good ANALYZE leaves its session as it found it: same backend, writable, no transaction.
+    let (result, _) = postgres_command(
+        &*engine,
+        Command::Explain,
+        "SELECT 1",
+        &[("EXPLAIN_ANALYZE", "1")],
+    )
+    .await;
+    result.expect("the ANALYZE of a read");
+    pool.settle().await;
+    let (result, events) = postgres_command(
+        &*engine,
+        Command::Preview,
+        "SELECT current_setting('transaction_read_only'), pg_current_xact_id_if_assigned() IS NULL",
+        &[],
+    )
+    .await;
+    result.expect("the check runs");
+    let row = &data(&events)[0];
+    assert_eq!(
+        row[0], "off",
+        "the fence's transaction was thrown away: {row}"
+    );
+    pool.settle().await;
+
+    for cleanup in [
+        format!("DROP FUNCTION {name}_f()"),
+        format!("DROP TABLE {name}"),
+    ] {
+        let (result, _) = postgres_run(&cleanup, None).await;
+        result.expect("clean up");
+    }
+}
+
+/// Read one cell of one row from a session.
+async fn session_scalar(
+    session: &mut Box<dyn Session>,
+    sql: &str,
+) -> Result<String, qh_core::EngineError> {
+    let mut cursor = session.execute(sql, &ExecuteOptions::default()).await?;
+    let mut first = None;
+    while let Some(batch) = cursor.next_batch(10).await? {
+        if first.is_none() && batch.rows() > 0 {
+            first = qh_core::render::to_text(batch.value(0, 0).expect("a cell"));
+        }
+    }
+    Ok(first.unwrap_or_default())
+}
+
+/// B-18: a pooled session that had been made read-only, and then lost its connection in the
+/// middle of the run, is read-only again on the replacement the lease opens. Without that the
+/// run would carry on, on a connection that accepts writes, under a mode that promised it did
+/// not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pooled_read_only_session_is_read_only_again_after_a_reconnect_in_the_middle_of_a_run() {
+    let _turn = TURN.lock().await;
+    if std::env::var("QH_TEST_POSTGRES").as_deref() != Ok("1") {
+        eprintln!("{SKIP_HINT}");
+        return;
+    }
+    let config = ConnectionConfig::new(DriverKind::Postgres, "127.0.0.1", 55432, "qh")
+        .password("qh-dev-only")
+        .database("qh")
+        .tls(TlsMode::Disable);
+    let table = format!(
+        "qh_w13t2_b18_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    for setup in [
+        format!("DROP TABLE IF EXISTS {table}"),
+        format!("CREATE TABLE {table} (id INT)"),
+    ] {
+        let (result, _) = postgres_run(&setup, None).await;
+        result.expect("setup");
+    }
+
+    let host = EngineHost::new();
+    let pool = host.pool();
+    let engine = pool.engine(Lane::Query, Settings::from_pairs([("RETRIES", "0")]));
+    let mut run = engine.connect(&config).await.expect("a pooled session");
+    run.enforce_read_only().await.expect("switch it on");
+    let before = session_scalar(&mut run, "SELECT pg_backend_pid()")
+        .await
+        .expect("pid");
+    assert_eq!(
+        session_scalar(&mut run, "SHOW default_transaction_read_only")
+            .await
+            .expect("show"),
+        "on"
+    );
+
+    // The server drops the connection in the middle of the run.
+    let mut admin = RealEngine::new()
+        .connect(&config)
+        .await
+        .expect("an admin session");
+    assert_eq!(
+        session_scalar(
+            &mut admin,
+            &format!("SELECT pg_terminate_backend({before})")
+        )
+        .await
+        .expect("terminate"),
+        "true"
+    );
+    // The client learns of it on its own time: the statement that finds the connection closed
+    // fails and marks the lease broken, and the next one replaces the connection.
+    let mut failures = 0;
+    let after = loop {
+        match session_scalar(&mut run, "SELECT pg_backend_pid()").await {
+            Ok(pid) => break pid,
+            Err(_) => {
+                failures += 1;
+                assert!(failures < 50, "the lease never recovered");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    };
+    assert!(failures >= 1, "the connection was cut under the lease");
+    assert_ne!(after, before, "a new backend, not the old one");
+    assert_eq!(
+        session_scalar(&mut run, "SHOW default_transaction_read_only")
+            .await
+            .expect("show"),
+        "on",
+        "the replacement connection was made read-only again"
+    );
+    let refused = session_scalar(&mut run, &format!("INSERT INTO {table} VALUES (1)")).await;
+    assert!(
+        format!("{refused:?}").contains("read-only transaction"),
+        "{refused:?}"
+    );
+    run.close().await.expect("close");
+    pool.settle().await;
+    assert_eq!(postgres_count(&table).await, 0, "nothing was written");
+    let (result, _) = postgres_run(&format!("DROP TABLE {table}"), None).await;
     result.expect("clean up");
 }

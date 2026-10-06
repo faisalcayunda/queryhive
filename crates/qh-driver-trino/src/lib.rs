@@ -122,7 +122,8 @@ use async_trait::async_trait;
 use qh_core::{offset_of_line_column, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    MetadataSql, ObjectPath, ObjectsPage, Parameter, Session, TlsCa, TlsMode,
+    ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath, ObjectsPage, Parameter,
+    Session, TlsCa, TlsMode,
 };
 use qh_sql::{strip_terminator_dialect, Dialect};
 use serde::Deserialize;
@@ -508,6 +509,20 @@ impl Driver for TrinoDriver {
 
     fn metadata(&self) -> Option<&dyn MetadataSql> {
         Some(&metadata::TrinoMetadata)
+    }
+
+    /// JSON without ANALYZE, ANALYZE as text, and no way to have both (measured on 483, the
+    /// grammar takes no option list after `EXPLAIN ANALYZE`). No fence: the driver has no
+    /// transaction to put an ANALYZE in (`Capabilities::transactions`), so what keeps a write
+    /// out of one is the engine's read-only check.
+    fn explain_support(&self) -> ExplainSupport {
+        ExplainSupport {
+            name: "Trino",
+            json: true,
+            analyze: true,
+            analyze_json: false,
+            analyze_fence: None,
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -1353,6 +1368,14 @@ impl Session for TrinoSession {
         explain_sql(sql)
     }
 
+    fn explain_statement_with(
+        &self,
+        sql: &str,
+        options: ExplainOptions,
+    ) -> Result<String, EngineError> {
+        explain_sql_with(sql, options)
+    }
+
     async fn cancel(&self) -> Result<(), EngineError> {
         self.delete_running().await
     }
@@ -1712,6 +1735,26 @@ fn objects_sql(catalog: &str, schema: &str) -> Result<String, EngineError> {
 /// it. Only a real terminator goes — a `;` inside a literal is data.
 fn explain_sql(sql: &str) -> String {
     format!("EXPLAIN {}", strip_terminator_dialect(sql, Dialect::Trino))
+}
+
+/// [`explain_sql`] under `options`.
+///
+/// `TYPE DISTRIBUTED` is written out although it is the server's default (measured on 483), so
+/// a release that changes the default does not change the shape the app parses. ANALYZE is the
+/// text form only; a caller that did not pass the options through
+/// [`ExplainSupport::resolve`] and asks for JSON with it is told so.
+fn explain_sql_with(sql: &str, options: ExplainOptions) -> Result<String, EngineError> {
+    let statement = strip_terminator_dialect(sql, Dialect::Trino);
+    match (options.analyze, options.format) {
+        (false, ExplainFormat::Text) => Ok(format!("EXPLAIN {statement}")),
+        (false, ExplainFormat::Json) => Ok(format!(
+            "EXPLAIN (TYPE DISTRIBUTED, FORMAT JSON) {statement}"
+        )),
+        (true, ExplainFormat::Text) => Ok(format!("EXPLAIN ANALYZE {statement}")),
+        (true, ExplainFormat::Json) => Err(EngineError::Usage {
+            message: "Trino has no JSON form of EXPLAIN ANALYZE".to_owned(),
+        }),
+    }
 }
 
 /// A string literal with single quotes doubled, which is SQL's own escaping.
@@ -2387,5 +2430,30 @@ mod tests {
                 "{mode:?} should build a client that holds a secret"
             );
         }
+    }
+
+    #[test]
+    fn explain_is_spelled_per_option_and_keeps_its_terminator_rule() {
+        let spelled =
+            |format, analyze, sql: &str| explain_sql_with(sql, ExplainOptions { format, analyze });
+        assert_eq!(
+            spelled(ExplainFormat::Text, false, "SELECT 1;").unwrap(),
+            "EXPLAIN SELECT 1"
+        );
+        assert_eq!(
+            spelled(ExplainFormat::Json, false, "SELECT 'a;b';").unwrap(),
+            "EXPLAIN (TYPE DISTRIBUTED, FORMAT JSON) SELECT 'a;b'"
+        );
+        assert_eq!(
+            spelled(ExplainFormat::Text, true, "SELECT 1;\n").unwrap(),
+            "EXPLAIN ANALYZE SELECT 1"
+        );
+        // The grammar has no such form, so it is refused rather than sent.
+        assert!(spelled(ExplainFormat::Json, true, "SELECT 1").is_err());
+        let support = TrinoDriver.explain_support();
+        assert!(support.json && support.analyze && !support.analyze_json);
+        // No transaction to put an ANALYZE in.
+        assert!(support.analyze_fence.is_none());
+        assert!(!TrinoDriver.capabilities().transactions);
     }
 }
