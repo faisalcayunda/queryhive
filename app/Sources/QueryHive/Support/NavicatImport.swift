@@ -39,6 +39,16 @@ struct ImportedConnection {
     /// What the file had that this import did not bring in, named, for the summary: a method or an
     /// attribute it could not read. Silence about these would be a lie of omission.
     var notImported: [String] = []
+    /// The folder the entry sat in, as one flat group name ("A / B"); empty for none. Navicat has
+    /// none, DBeaver and DataGrip do (W13-T16).
+    var group: String = ""
+    var environment: ConnectionEnvironment?
+    /// Postgres and MySQL: the mode the source named, in this app's words. `nil` when it named none;
+    /// `ssl` above is the yes/no form Navicat has. Either way an import only ever raises the mode.
+    var sslmode: String?
+    /// Trino: the transport and the certificate check the source named. `nil` when it named none.
+    var trinoScheme: String?
+    var trinoVerify: Bool?
     /// True when Navicat had a password saved for this entry and it decrypted.
     var hasPassword: Bool { password?.isEmpty == false }
 }
@@ -214,12 +224,19 @@ enum NavicatImport {
     /// one means the driver's own default. An entry without TLS changes nothing, so re-importing an
     /// old file cannot weaken a connection that has since been tightened.
     static func tlsMode(kind: ConnectionKind, ssl: Bool, current: String) -> String {
-        guard ssl, kind != .trino else { return current }
-        let rank = ["disable": 0, "allow": 1, "prefer": 2, "require": 3, "verify-ca": 4, "verify-full": 5]
+        tlsMode(kind: kind, requested: ssl ? "require" : nil, current: current)
+    }
+
+    private static let tlsRank = ["disable": 0, "allow": 1, "prefer": 2, "require": 3, "verify-ca": 4, "verify-full": 5]
+
+    /// The same rule for a source that names a mode: the result is the stricter of `requested` and
+    /// what the connection already has, and `current` itself when the source says nothing.
+    static func tlsMode(kind: ConnectionKind, requested: String?, current: String) -> String {
+        guard let requested, kind != .trino, let want = tlsRank[requested] else { return current }
         let effective = current.isEmpty ? kind.defaultSSLMode : current
         // A word this build does not know is kept: it may be a stricter one a later build wrote.
-        guard let have = rank[effective] else { return current }
-        return have >= 3 ? current : "require"
+        guard let have = tlsRank[effective] else { return current }
+        return have >= want ? current : requested
     }
 
     /// The database this entry was actually opened on.

@@ -55,6 +55,8 @@ struct ConnectionPickerButton: View {
             Divider()
             Button("Edit Connections…") { model.presentConnectionEditor(selection) }
             Button("New Connection…") { model.presentConnectionEditor(nil) }
+            Button("Export Connection List…") { model.presentConnectionListExport() }
+                .disabled(model.connections.isEmpty)
         } label: {
             HStack(spacing: 7) {
                 if let connection = model.connections.first(where: { $0.id == selection }) {
@@ -323,22 +325,45 @@ struct ConnectionEditorSheet: View {
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
             HStack(spacing: 10) {
                 PillButton(title: "New Connection with URI…", symbol: "link") { step = .url }
-                // This sheet closes first. `presentNavicatImport` runs a modal `NSOpenPanel`, and
+                // Each of these closes this sheet first. They run a modal `NSOpenPanel`, and
                 // starting one from inside a sheet being dismissed puts the panel behind the sheet
                 // on its way out — the wait is the sheet's own dismissal animation, not a guess.
-                PillButton(title: "Import from Navicat…", symbol: "square.and.arrow.down") {
-                    dismiss()
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(350))
-                        model.presentNavicatImport()
-                    }
+                Menu {
+                    Button("From Navicat…") { importAfterDismiss { model.presentNavicatImport() } }
+                    Button("From DBeaver…") { importAfterDismiss { model.presentDBeaverImport() } }
+                    Button("From DataGrip…") { importAfterDismiss { model.presentDataGripImport() } }
+                    Divider()
+                    Button("QueryHive Connection List…") { importAfterDismiss { model.presentConnectionListImport() } }
+                    Button("Export Connection List…") { importAfterDismiss { model.presentConnectionListExport() } }
+                        .disabled(model.connections.isEmpty)
+                } label: {
+                    Label("Import…", systemImage: "square.and.arrow.down")
+                        .font(.ui(12.5, weight: .medium))
+                        .foregroundStyle(Tone.ink)
+                        .padding(.horizontal, 13)
+                        .frame(height: 28)
+                        .background(Tone.ink.opacity(0.10), in: Capsule())
+                        .overlay(Capsule().strokeBorder(Tone.ink.opacity(0.14)))
+                        .contentShape(Capsule())
                 }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 Spacer()
                 PillButton(title: "Cancel", role: .quiet) { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 20)
             .frame(height: 62)
+        }
+    }
+
+    private func importAfterDismiss(_ present: @escaping @MainActor () -> Void) {
+        dismiss()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            present()
         }
     }
 
