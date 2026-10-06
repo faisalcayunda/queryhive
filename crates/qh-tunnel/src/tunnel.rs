@@ -28,7 +28,9 @@
 //! with nothing more specific, because that is all the transport was told; the reason is
 //! in the server's log, not in the protocol.
 
-use std::path::PathBuf;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,14 +38,15 @@ use russh::client::AuthResult;
 use russh::client::{self, Config};
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
+use russh::keys::Algorithm;
 use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::MethodSet;
+use russh::{kex, MethodSet, Preferred};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::known_hosts::{self, HostKeyVerdict};
+use crate::known_hosts::{self, HostKeyVerdict, Origin, StoreFile};
 use crate::{Error, ServerKey};
 
 /// How the server is told who we are.
@@ -67,6 +70,13 @@ pub enum HostKeyPolicy {
     Strict,
     /// Accept this one key and no other: the answer to a previous refusal, replayed.
     TrustNew(ServerKey),
+    /// Trust the key whose `SHA256:…` fingerprint this is, if and only if the server
+    /// presents exactly it and the host is unknown. The key is **recorded first**, in
+    /// [`BastionConfig::record_to`], and only then accepted. Needs `record_to`.
+    ///
+    /// The fingerprint must come from the person who saw it, for this one attempt:
+    /// never from a config file or a saved setting.
+    TrustFingerprint(String),
 }
 
 /// Where the bastion is, how to authenticate to it, and what to check it against.
@@ -76,10 +86,14 @@ pub struct BastionConfig {
     pub port: u16,
     pub user: String,
     pub auth: Auth,
-    /// The `known_hosts` file to check against. Read and written by this crate rather
-    /// than by a transport library, which is why the app ships without a sandbox
-    /// (ADR-0007).
-    pub known_hosts: PathBuf,
+    /// The `known_hosts` files to check against, read only and never written: the
+    /// user's first, then the system's ([`BastionConfig::with_system_known_hosts`]).
+    /// Read by this crate rather than by a transport library, which is why the app
+    /// ships without a sandbox (ADR-0007).
+    pub known_hosts: Vec<PathBuf>,
+    /// The app's own file: checked like the others, and the only one ever written, and
+    /// only by [`HostKeyPolicy::TrustFingerprint`].
+    pub record_to: Option<PathBuf>,
     pub host_key_policy: HostKeyPolicy,
 }
 
@@ -98,9 +112,53 @@ impl BastionConfig {
             port,
             user: user.into(),
             auth,
-            known_hosts: known_hosts.into(),
+            known_hosts: vec![known_hosts.into()],
+            record_to: None,
             host_key_policy: HostKeyPolicy::Strict,
         }
+    }
+
+    /// Also read `/etc/ssh/ssh_known_hosts`, so a host pinned by an administrator is
+    /// not "unknown" here.
+    #[must_use]
+    pub fn with_system_known_hosts(mut self) -> Self {
+        self.known_hosts
+            .push(PathBuf::from(known_hosts::SYSTEM_KNOWN_HOSTS));
+        self
+    }
+
+    /// Where an accepted key is recorded: the app's own file.
+    #[must_use]
+    pub fn record_to(mut self, path: impl Into<PathBuf>) -> Self {
+        self.record_to = Some(path.into());
+        self
+    }
+
+    /// Accept the unknown host key with exactly this fingerprint, recording it first.
+    #[must_use]
+    pub fn trust_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_key_policy = HostKeyPolicy::TrustFingerprint(fingerprint.into());
+        self
+    }
+
+    /// Every file the check reads, with whose it is.
+    fn store_files(&self) -> Vec<StoreFile> {
+        let mut files: Vec<StoreFile> = self
+            .known_hosts
+            .iter()
+            .map(|path| {
+                let origin = if path == Path::new(known_hosts::SYSTEM_KNOWN_HOSTS) {
+                    Origin::System
+                } else {
+                    Origin::User
+                };
+                StoreFile::new(path, origin)
+            })
+            .collect();
+        if let Some(path) = &self.record_to {
+            files.push(StoreFile::new(path, Origin::App));
+        }
+        files
     }
 
     /// Accept one specific key that is not recorded yet, and nothing else.
@@ -161,27 +219,43 @@ impl Tunnel {
     /// [`Error::HostCertificateUnsupported`] from the key check;
     /// [`Error::AuthenticationRejected`] if no authentication method worked.
     pub async fn open(config: &BastionConfig, target: Target) -> Result<Self, Error> {
-        let ssh_config = Arc::new(Config {
-            // A database session can idle for minutes between a reader's batches, so the
-            // SSH session must not be collected for being quiet. `inactivity_timeout`
-            // stays `None` for that reason; keepalives are what notice a bastion that
-            // went away, and three unanswered ones close the connection.
-            keepalive_interval: Some(Duration::from_secs(30)),
-            // Small interactive traffic over a tunnel pays Nagle's delay on every round
-            // trip, which is the same reason the drivers set it on their own sockets.
-            nodelay: true,
-            ..Config::default()
-        });
+        // Everything that can be refused before the network is touched, is.
+        if let HostKeyPolicy::TrustFingerprint(pin) = &config.host_key_policy {
+            if !is_fingerprint(pin) {
+                return Err(Error::Usage(
+                    "the host key to trust must be a SHA256:<43 base64 characters> fingerprint",
+                ));
+            }
+            if config.record_to.is_none() {
+                return Err(Error::Usage(
+                    "a host key cannot be trusted without a file to record it in",
+                ));
+            }
+        }
+        let files = config.store_files();
+        let recorded = known_hosts::recorded_key_types(&files, &config.host, config.port)?;
+        let ssh_config = Arc::new(client_config(&recorded));
 
+        let verified = Arc::new(AtomicBool::new(false));
         let verifier = HostKeyVerifier {
             host: config.host.clone(),
             port: config.port,
-            known_hosts: config.known_hosts.clone(),
+            files,
+            fallback_path: config
+                .record_to
+                .clone()
+                .or_else(|| config.known_hosts.first().cloned())
+                .unwrap_or_default(),
+            record_to: config.record_to.clone(),
             policy: config.host_key_policy.clone(),
+            verified: Arc::clone(&verified),
         };
         let mut handle =
             client::connect(ssh_config, (config.host.as_str(), config.port), verifier).await?;
 
+        // Belt and braces: `russh` skips the handler when a key exchange carries no
+        // host key at all, and nothing authenticating may follow that.
+        require_verified(&verified)?;
         authenticate(&mut handle, config).await?;
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -287,12 +361,179 @@ async fn forward(
     Ok(())
 }
 
+/// `SHA256:` and the 43 base64 characters of an unpadded SHA-256.
+fn is_fingerprint(text: &str) -> bool {
+    text.strip_prefix("SHA256:").is_some_and(|rest| {
+        rest.len() == 43
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
+    })
+}
+
+fn require_verified(verified: &AtomicBool) -> Result<(), Error> {
+    if verified.load(Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Err(Error::HostKeyNotVerified)
+    }
+}
+
+/// The SSH client settings: the default offer, with host-key algorithms the user has
+/// already recorded moved to the front (so a server holding several keys presents the
+/// recorded one instead of looking like a changed key), no `none` key exchange, and no
+/// certificate algorithms.
+fn client_config(recorded_key_types: &[String]) -> Config {
+    let mut key: Vec<Algorithm> = Preferred::DEFAULT.key.to_vec();
+    // Stable: recorded kinds first, the default order otherwise.
+    key.sort_by_key(|algorithm| !is_recorded(algorithm, recorded_key_types));
+    let preferred = Preferred {
+        key: Cow::Owned(key),
+        kex: Cow::Owned(
+            Preferred::DEFAULT
+                .kex
+                .iter()
+                .copied()
+                .filter(|name| *name != kex::NONE)
+                .collect(),
+        ),
+        host_key_certificates: Cow::Borrowed(&[]),
+        ..Preferred::DEFAULT
+    };
+    Config {
+        preferred,
+        // A database session can idle for minutes between a reader's batches, so the
+        // SSH session must not be collected for being quiet. `inactivity_timeout`
+        // stays `None` for that reason; keepalives are what notice a bastion that
+        // went away, and three unanswered ones close the connection.
+        keepalive_interval: Some(Duration::from_secs(30)),
+        // Small interactive traffic over a tunnel pays Nagle's delay on every round
+        // trip, which is the same reason the drivers set it on their own sockets.
+        nodelay: true,
+        ..Config::default()
+    }
+}
+
+fn is_recorded(algorithm: &Algorithm, recorded: &[String]) -> bool {
+    recorded.iter().any(|name| match algorithm {
+        Algorithm::Ed25519 => name == "ssh-ed25519",
+        Algorithm::Ecdsa { curve } => *name == format!("ecdsa-sha2-{}", curve.as_str()),
+        Algorithm::Rsa { .. } => name == "ssh-rsa",
+        _ => false,
+    })
+}
+
 /// The host-key check, run by `russh` during the key exchange.
 struct HostKeyVerifier {
     host: String,
     port: u16,
-    known_hosts: PathBuf,
+    files: Vec<StoreFile>,
+    /// Named in errors that have no file of their own.
+    fallback_path: PathBuf,
+    record_to: Option<PathBuf>,
     policy: HostKeyPolicy,
+    /// Set only when a key was matched or accepted-and-recorded.
+    verified: Arc<AtomicBool>,
+}
+
+impl HostKeyVerifier {
+    /// The decision, with no network in it (blueprint W11 §5.3 and §5.5).
+    fn decide(&self, key: ServerKey) -> Result<bool, Error> {
+        // `check_all` reads the files and walks them. That is blocking work inside the
+        // session loop, and it is deliberate: the files are small, and the alternative
+        // — checking after the exchange — would be checking after authenticating.
+        match known_hosts::check_all(&self.files, &self.host, self.port, key.blob())? {
+            HostKeyVerdict::Matched => {}
+            HostKeyVerdict::Revoked { line, file } => {
+                return Err(Error::HostKeyRevoked {
+                    host: self.host.clone(),
+                    port: self.port,
+                    path: file.unwrap_or_else(|| self.fallback_path.clone()),
+                    line,
+                })
+            }
+            HostKeyVerdict::Mismatch { recorded } => {
+                return Err(Error::HostKeyMismatch {
+                    host: self.host.clone(),
+                    port: self.port,
+                    path: recorded
+                        .first()
+                        .and_then(|record| record.file())
+                        .map_or_else(|| self.fallback_path.clone(), Path::to_path_buf),
+                    key,
+                    recorded,
+                })
+            }
+            // A CA the user trusts covers this host, so a plain key is a downgrade.
+            // No policy, pin or prompt turns that into trust.
+            HostKeyVerdict::Unknown {
+                covered_by_certificate_authority: true,
+                ..
+            } => {
+                return Err(Error::HostKeyCertificateExpected {
+                    host: self.host.clone(),
+                    port: self.port,
+                    key,
+                    path: self.fallback_path.clone(),
+                })
+            }
+            HostKeyVerdict::Unknown { .. } => self.decide_unknown(key)?,
+        }
+        self.verified.store(true, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    fn decide_unknown(&self, key: ServerKey) -> Result<(), Error> {
+        match &self.policy {
+            // The caller answered a previous prompt with these exact bytes.
+            HostKeyPolicy::TrustNew(pinned) if pinned.blob() == key.blob() => Ok(()),
+            HostKeyPolicy::TrustNew(pinned) => Err(Error::HostKeyMismatch {
+                host: self.host.clone(),
+                port: self.port,
+                path: self.fallback_path.clone(),
+                key,
+                recorded: vec![known_hosts::RecordedKey::pinned(pinned)],
+            }),
+            HostKeyPolicy::Strict => Err(Error::HostKeyUnknown {
+                host: self.host.clone(),
+                port: self.port,
+                path: self.fallback_path.clone(),
+                key,
+                covered_by_certificate_authority: false,
+            }),
+            HostKeyPolicy::TrustFingerprint(pin) => {
+                let presented = key.fingerprint();
+                if *pin != presented {
+                    return Err(Error::HostKeyPinMismatch {
+                        host: self.host.clone(),
+                        port: self.port,
+                        key,
+                        presented,
+                        pinned: pin.clone(),
+                    });
+                }
+                // Record first, accept second: no authentication goes to a key that
+                // is not on record.
+                let Some(path) = &self.record_to else {
+                    return Err(Error::Usage(
+                        "a host key cannot be trusted without a file to record it in",
+                    ));
+                };
+                known_hosts::append_if_absent(path, &self.host, self.port, key.blob())
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        error @ Error::HostKeyStoreUnsafe { .. } => error,
+                        other => Error::HostKeyRecordFailed {
+                            host: self.host.clone(),
+                            port: self.port,
+                            key,
+                            path: path.clone(),
+                            reason: other.to_string(),
+                        },
+                    })
+            }
+        }
+    }
 }
 
 impl client::Handler for HostKeyVerifier {
@@ -316,47 +557,20 @@ impl client::Handler for HostKeyVerifier {
                 })
             }
         };
+        self.decide(key)
+    }
 
-        // `check` reads the file and walks it. That is blocking work inside the session
-        // loop, and it is deliberate: the file is small, and the alternative — checking
-        // after the exchange — would be checking after authenticating.
-        match known_hosts::check(&self.known_hosts, &self.host, self.port, key.blob())? {
-            HostKeyVerdict::Matched => Ok(true),
-            HostKeyVerdict::Revoked { line } => Err(Error::HostKeyRevoked {
-                host: self.host.clone(),
-                port: self.port,
-                path: self.known_hosts.clone(),
-                line,
-            }),
-            HostKeyVerdict::Mismatch { recorded } => Err(Error::HostKeyMismatch {
-                host: self.host.clone(),
-                port: self.port,
-                path: self.known_hosts.clone(),
-                key,
-                recorded,
-            }),
-            HostKeyVerdict::Unknown {
-                covered_by_certificate_authority,
-                ..
-            } => match &self.policy {
-                // The caller answered a previous prompt with these exact bytes.
-                HostKeyPolicy::TrustNew(pinned) if pinned.blob() == key.blob() => Ok(true),
-                HostKeyPolicy::TrustNew(pinned) => Err(Error::HostKeyMismatch {
-                    host: self.host.clone(),
-                    port: self.port,
-                    path: self.known_hosts.clone(),
-                    key,
-                    recorded: vec![known_hosts::RecordedKey::pinned(pinned)],
-                }),
-                HostKeyPolicy::Strict => Err(Error::HostKeyUnknown {
-                    host: self.host.clone(),
-                    port: self.port,
-                    path: self.known_hosts.clone(),
-                    key,
-                    covered_by_certificate_authority,
-                }),
-            },
+    async fn kex_done(
+        &mut self,
+        _shared_secret: Option<&[u8]>,
+        names: &russh::Names,
+        _session: &mut client::Session,
+    ) -> Result<(), Error> {
+        // The `none` exchange carries no host key, so `check_server_key` never runs.
+        if names.kex == kex::NONE {
+            return Err(Error::HostKeyNotVerified);
         }
+        Ok(())
     }
 }
 
@@ -496,5 +710,319 @@ fn describe_methods(remaining: &MethodSet, partial_success: bool) -> String {
         "nothing".to_owned()
     } else {
         names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use base64::Engine as _;
+
+    use super::*;
+
+    const KEY_A: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+    const KEY_B: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G2sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X";
+
+    fn key(body: &str) -> ServerKey {
+        ServerKey::from_blob(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("base64"),
+        )
+        .expect("a key")
+    }
+
+    struct Rig {
+        dir: tempfile::TempDir,
+        verifier: HostKeyVerifier,
+    }
+
+    impl Rig {
+        fn app_file(&self) -> PathBuf {
+            self.dir.path().join("app_known_hosts")
+        }
+
+        fn user_file(&self) -> PathBuf {
+            self.dir.path().join("user_known_hosts")
+        }
+    }
+
+    /// A verifier for `bastion.corp:22` over a user file (`user_text`) and an app file
+    /// that does not exist yet, with `policy`.
+    fn rig(user_text: &str, policy: HostKeyPolicy) -> Rig {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let user = dir.path().join("user_known_hosts");
+        let app = dir.path().join("app_known_hosts");
+        std::fs::write(&user, user_text).expect("write user file");
+        let verifier = HostKeyVerifier {
+            host: "bastion.corp".to_owned(),
+            port: 22,
+            files: vec![
+                StoreFile::new(&user, Origin::User),
+                StoreFile::new(&app, Origin::App),
+            ],
+            fallback_path: app.clone(),
+            record_to: Some(app),
+            policy,
+            verified: Arc::new(AtomicBool::new(false)),
+        };
+        Rig { dir, verifier }
+    }
+
+    fn verified(rig: &Rig) -> bool {
+        rig.verifier.verified.load(Ordering::SeqCst)
+    }
+
+    fn pin(key: &ServerKey) -> HostKeyPolicy {
+        HostKeyPolicy::TrustFingerprint(key.fingerprint())
+    }
+
+    #[test]
+    fn an_unknown_host_without_a_pin_is_refused_and_nothing_is_written() {
+        let rig = rig("", HostKeyPolicy::Strict);
+        assert!(matches!(
+            rig.verifier.decide(key(KEY_A)),
+            Err(Error::HostKeyUnknown { .. })
+        ));
+        assert!(!verified(&rig));
+        assert!(!rig.app_file().exists());
+    }
+
+    #[test]
+    fn the_right_pin_records_first_then_accepts() {
+        let presented = key(KEY_A);
+        let rig = rig("", pin(&presented));
+        assert!(rig.verifier.decide(presented.clone()).expect("accepted"));
+        assert!(verified(&rig));
+        let text = std::fs::read_to_string(rig.app_file()).expect("recorded");
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.starts_with(&format!(
+            "bastion.corp ssh-ed25519 {KEY_A} # accepted by QueryHive 20"
+        )));
+        let mode = std::fs::metadata(rig.app_file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // And the very next check, with no pin at all, matches without writing.
+        let again = HostKeyVerifier {
+            policy: HostKeyPolicy::Strict,
+            verified: Arc::new(AtomicBool::new(false)),
+            files: rig.verifier.files.clone(),
+            record_to: rig.verifier.record_to.clone(),
+            fallback_path: rig.verifier.fallback_path.clone(),
+            host: rig.verifier.host.clone(),
+            port: rig.verifier.port,
+        };
+        assert!(again.decide(presented).expect("matched"));
+        assert!(again.verified.load(Ordering::SeqCst));
+        assert_eq!(std::fs::read_to_string(rig.app_file()).unwrap(), text);
+    }
+
+    #[test]
+    fn a_wrong_pin_is_refused_and_nothing_is_recorded() {
+        let rig = rig("", pin(&key(KEY_B)));
+        match rig.verifier.decide(key(KEY_A)) {
+            Err(Error::HostKeyPinMismatch {
+                presented, pinned, ..
+            }) => {
+                assert_eq!(presented, key(KEY_A).fingerprint());
+                assert_eq!(pinned, key(KEY_B).fingerprint());
+            }
+            other => panic!("expected a pin mismatch, got {other:?}"),
+        }
+        assert!(!verified(&rig));
+        assert!(!rig.app_file().exists());
+    }
+
+    #[test]
+    fn a_changed_key_is_never_accepted_with_or_without_the_pin() {
+        let presented = key(KEY_A);
+        let recorded = format!("bastion.corp ssh-ed25519 {KEY_B}\n");
+        for policy in [
+            HostKeyPolicy::Strict,
+            pin(&presented),
+            HostKeyPolicy::TrustNew(presented.clone()),
+        ] {
+            let rig = rig(&recorded, policy);
+            match rig.verifier.decide(presented.clone()) {
+                Err(Error::HostKeyMismatch { recorded, path, .. }) => {
+                    assert_eq!(recorded.len(), 1);
+                    assert_eq!(path, rig.user_file(), "the message names the file to fix");
+                }
+                other => panic!("expected a mismatch, got {other:?}"),
+            }
+            assert!(!verified(&rig));
+            assert!(!rig.app_file().exists());
+        }
+    }
+
+    #[test]
+    fn a_revoked_key_is_never_accepted_even_with_the_pin() {
+        let presented = key(KEY_A);
+        let rig = rig(
+            &format!("@revoked bastion.corp ssh-ed25519 {KEY_A}\n"),
+            pin(&presented),
+        );
+        assert!(matches!(
+            rig.verifier.decide(presented),
+            Err(Error::HostKeyRevoked { line: 1, .. })
+        ));
+        assert!(!verified(&rig));
+        assert!(!rig.app_file().exists());
+    }
+
+    #[test]
+    fn a_plain_key_for_a_ca_managed_host_is_refused_whatever_the_policy() {
+        let presented = key(KEY_A);
+        let ca = format!("@cert-authority *.corp ssh-ed25519 {KEY_B}\n");
+        for policy in [
+            HostKeyPolicy::Strict,
+            pin(&presented),
+            HostKeyPolicy::TrustNew(presented.clone()),
+        ] {
+            let rig = rig(&ca, policy);
+            assert!(
+                matches!(
+                    rig.verifier.decide(presented.clone()),
+                    Err(Error::HostKeyCertificateExpected { .. })
+                ),
+                "a CA-covered host must not reach first-use acceptance"
+            );
+            assert!(!verified(&rig));
+            assert!(!rig.app_file().exists());
+        }
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_recorded_is_not_an_acceptance() {
+        let presented = key(KEY_A);
+        let mut rig = rig("", pin(&presented));
+        let locked = rig.dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let target = locked.join("known_hosts");
+        rig.verifier.record_to = Some(target.clone());
+        rig.verifier.files[1] = StoreFile::new(&target, Origin::App);
+
+        let result = rig.verifier.decide(presented);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(Error::HostKeyRecordFailed { .. })),
+            "{result:?}"
+        );
+        assert!(!verified(&rig));
+    }
+
+    #[test]
+    fn an_app_file_others_can_write_is_unsafe_even_for_a_pinned_unknown_host() {
+        let presented = key(KEY_A);
+        let rig = rig("", pin(&presented));
+        std::fs::write(rig.app_file(), "").unwrap();
+        std::fs::set_permissions(rig.app_file(), std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(
+            rig.verifier.decide(presented),
+            Err(Error::HostKeyStoreUnsafe { .. })
+        ));
+        assert!(!verified(&rig));
+    }
+
+    #[test]
+    fn a_pin_must_look_like_a_fingerprint() {
+        assert!(is_fingerprint(&key(KEY_A).fingerprint()));
+        for bad in [
+            "",
+            "SHA256:",
+            "sha256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuog",
+            "MD5:aa:bb",
+            "SHA256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuog=",
+            "SHA256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuo",
+            "SHA256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuo!",
+        ] {
+            assert!(!is_fingerprint(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn authentication_is_not_started_on_a_connection_nothing_verified() {
+        let flag = AtomicBool::new(false);
+        assert!(matches!(
+            require_verified(&flag),
+            Err(Error::HostKeyNotVerified)
+        ));
+        flag.store(true, Ordering::SeqCst);
+        assert!(require_verified(&flag).is_ok());
+    }
+
+    #[test]
+    fn the_offer_has_no_none_exchange_no_certificates_and_recorded_kinds_first() {
+        let plain = client_config(&[]);
+        assert!(!plain.preferred.kex.contains(&kex::NONE));
+        assert!(plain.preferred.host_key_certificates.is_empty());
+        assert_eq!(
+            plain.preferred.key,
+            Preferred::DEFAULT.key,
+            "no records, default order"
+        );
+
+        let rsa = client_config(&["ssh-rsa".to_owned()]);
+        assert!(
+            matches!(rsa.preferred.key[0], Algorithm::Rsa { .. }),
+            "{:?}",
+            rsa.preferred.key
+        );
+        assert_eq!(rsa.preferred.key.len(), Preferred::DEFAULT.key.len());
+        let rsa_count = rsa
+            .preferred
+            .key
+            .iter()
+            .filter(|a| matches!(a, Algorithm::Rsa { .. }))
+            .count();
+        assert!(rsa.preferred.key[..rsa_count]
+            .iter()
+            .all(|a| matches!(a, Algorithm::Rsa { .. })));
+
+        // A recorded kind that cannot be negotiated changes nothing.
+        let sk = client_config(&[
+            "sk-ssh-ed25519@openssh.com".to_owned(),
+            "ssh-dss".to_owned(),
+        ]);
+        assert_eq!(sk.preferred.key, Preferred::DEFAULT.key);
+    }
+
+    fn bastion() -> BastionConfig {
+        BastionConfig::new(
+            "127.0.0.1",
+            1,
+            "nobody",
+            Auth::Agent,
+            "/nonexistent/known_hosts",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_bad_pin_or_a_pin_with_nowhere_to_record_is_refused_before_the_network() {
+        let target = || Target::new("db", 5432);
+        let good = key(KEY_A).fingerprint();
+        let no_store = bastion().trust_fingerprint(good.clone());
+        assert!(matches!(
+            Tunnel::open(&no_store, target()).await,
+            Err(Error::Usage(_))
+        ));
+        let bad_pin = bastion()
+            .record_to("/nonexistent/app")
+            .trust_fingerprint("SHA256:x");
+        assert!(matches!(
+            Tunnel::open(&bad_pin, target()).await,
+            Err(Error::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn the_system_file_is_read_as_the_system_s() {
+        let config = bastion().with_system_known_hosts().record_to("/app");
+        let origins: Vec<Origin> = config.store_files().iter().map(|f| f.origin).collect();
+        assert_eq!(origins, [Origin::User, Origin::System, Origin::App]);
     }
 }

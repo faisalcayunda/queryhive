@@ -32,6 +32,9 @@ hmac = "0.12"
 # Same reason qh-credentials uses it: a bastion password and a key passphrase are held
 # in a type that cannot be printed by accident and is zeroed on drop.
 secrecy = "0.10"
+# `O_NOFOLLOW` and `geteuid` for the app's own known_hosts file (blueprint W11 §5.2.4):
+# the crate forbids `unsafe`, and rustix has both as safe calls. Already in the lockfile.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 
 [dev-dependencies]
 tempfile = "3"

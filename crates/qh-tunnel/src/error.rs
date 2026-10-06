@@ -62,6 +62,56 @@ pub enum Error {
         recorded: Vec<RecordedKey>,
     },
 
+    /// The host is covered by a `@cert-authority` line in the user's own `known_hosts`
+    /// and presented a plain key. That is a downgrade or a changed configuration, and
+    /// no pin or prompt may turn it into trust: this build cannot verify certificates.
+    #[error("{host}:{port} is covered by a @cert-authority line but presented a plain key ({key}); edit that line if the host is no longer CA-managed")]
+    HostKeyCertificateExpected {
+        host: String,
+        port: u16,
+        key: ServerKey,
+        /// The file and line of a covering `@cert-authority` entry are not tracked; the
+        /// message tells the user which kind of line to look for.
+        path: PathBuf,
+    },
+
+    /// The key to trust was named by fingerprint, and the server presented another.
+    #[error("{host}:{port} presented {presented}, not the pinned {pinned}")]
+    HostKeyPinMismatch {
+        host: String,
+        port: u16,
+        key: ServerKey,
+        presented: String,
+        pinned: String,
+    },
+
+    /// The pinned key matched but could not be recorded, so it was not accepted:
+    /// no authentication is ever sent to a key that is not on record.
+    #[error("could not record the host key for {host}:{port} in {path}: {reason}")]
+    HostKeyRecordFailed {
+        host: String,
+        port: u16,
+        key: ServerKey,
+        path: PathBuf,
+        reason: String,
+    },
+
+    /// The app's own `known_hosts` is a symlink, someone else's, or writable by others,
+    /// so what it says cannot be trusted. Fix it with `chmod 600` and the right owner.
+    #[error("{path} {reason}; it must be a regular file you own with mode 600 (chmod 600 on it)")]
+    HostKeyStoreUnsafe { path: PathBuf, reason: &'static str },
+
+    /// The key exchange finished without the host-key check having accepted anything.
+    /// Authentication is never started on such a connection.
+    #[error(
+        "the bastion connection was not host-key verified, so authentication was not attempted"
+    )]
+    HostKeyNotVerified,
+
+    /// The caller's request cannot be honoured, found before any network use.
+    #[error("{0}")]
+    Usage(&'static str),
+
     /// A `@revoked` line matches this host and this key. Nothing may override it.
     #[error("the key for {host}:{port} is revoked in {path} at line {line}")]
     HostKeyRevoked {
@@ -118,10 +168,11 @@ impl Error {
     #[must_use]
     pub fn fingerprint(&self) -> Option<String> {
         match self {
-            Error::HostKeyUnknown { key, .. } | Error::HostKeyMismatch { key, .. } => {
-                Some(key.fingerprint())
-            }
+            Error::HostKeyUnknown { key, .. }
+            | Error::HostKeyMismatch { key, .. }
+            | Error::HostKeyCertificateExpected { key, .. } => Some(key.fingerprint()),
             Error::HostCertificateUnsupported { fingerprint, .. } => Some(fingerprint.clone()),
+            Error::HostKeyPinMismatch { presented, .. } => Some(presented.clone()),
             _ => None,
         }
     }

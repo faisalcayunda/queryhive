@@ -18,6 +18,15 @@
 //!   for a decision, blocks on one, or accepts a key on its own — the point is that a
 //!   prompt is only shown when a person is actually there to answer it.
 //!
+//! First use can also be a pinned decision: [`HostKeyPolicy::TrustFingerprint`] accepts
+//! an unknown host only when the server presents exactly the `SHA256:` fingerprint a
+//! person was shown, and only after the key is recorded in the app's own file
+//! ([`BastionConfig::record_to`], checked on the open descriptor: no symlink, our
+//! owner, not writable by others). A changed, revoked or CA-covered host is refused
+//! whatever the pin says, and `Tunnel::open` never authenticates on a connection no
+//! host key check accepted ([`Error::HostKeyNotVerified`]). `~/.ssh/config` aliases
+//! resolve through [`ssh_config`], which refuses directives it cannot honour by name.
+//!
 //! The app reads `~/.ssh/known_hosts` itself, which is why it ships without a sandbox
 //! (ADR-0007): the sandbox and this requirement collide directly, not in theory.
 //!
@@ -46,11 +55,13 @@
 mod error;
 mod key;
 pub mod known_hosts;
+mod pattern;
+pub mod ssh_config;
 mod tunnel;
 
 pub use error::Error;
 pub use key::{fingerprint, ServerKey};
-pub use known_hosts::{HostKeyVerdict, RecordedKey};
+pub use known_hosts::{HostKeyVerdict, Origin, RecordedKey, StoreFile};
 pub use tunnel::{Auth, BastionConfig, HostKeyPolicy, Target, Tunnel};
 // The type of the passwords and passphrases in [`Auth`], so a caller does not have to
 // depend on `secrecy` itself to build one.

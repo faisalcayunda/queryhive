@@ -2820,6 +2820,7 @@ dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
  "russh",
+ "rustix",
  "secrecy",
  "sha1 0.10.7",
  "sha2 0.10.9",

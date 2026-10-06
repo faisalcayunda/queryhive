@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use qh_tunnel::known_hosts::{self, HostKeyVerdict};
+use qh_tunnel::ssh_config;
 use qh_tunnel::{Auth, BastionConfig, Error, SecretString, Target, Tunnel};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -439,4 +440,272 @@ async fn agent_authentication_is_used_when_an_agent_is_available() {
         }
         Err(other) => panic!("agent authentication failed unexpectedly: {other}"),
     }
+}
+
+// ---- W11-T2a: first use pinned to a fingerprint, recorded in the app's own file ----
+
+/// `ssh-keyscan` on the container, as an independent source for what it presents.
+fn keyscan(settings: &Settings, key_type: &str) -> Option<(String, Vec<u8>)> {
+    let output = std::process::Command::new("ssh-keyscan")
+        .args([
+            "-t",
+            key_type,
+            "-p",
+            &settings.port.to_string(),
+            &settings.host,
+        ])
+        .output()
+        .expect("run ssh-keyscan");
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let line = text.lines().find(|line| !line.starts_with('#'))?;
+    let body = line.split_whitespace().nth(2)?;
+    use base64::Engine as _;
+    let blob = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .ok()?;
+    Some((qh_tunnel::fingerprint(&blob), blob))
+}
+
+fn app_spelling(settings: &Settings) -> String {
+    known_hosts::host_spelling(&settings.host, settings.port)
+}
+
+#[tokio::test]
+async fn l1_the_reported_fingerprint_is_the_one_ssh_keyscan_sees() {
+    let Some(settings) = settings() else { return };
+    let (_dir, known_hosts) = fresh_known_hosts();
+    let key = unknown_host_key(&settings, &known_hosts).await;
+    let (scanned, _) = keyscan(&settings, key.key_type()).expect("ssh-keyscan found the key");
+    assert_eq!(key.fingerprint(), scanned);
+}
+
+#[tokio::test]
+async fn l2_to_l4_the_right_pin_records_once_and_the_next_connect_matches() {
+    let Some(settings) = settings() else { return };
+    let (dir, user_file) = fresh_known_hosts();
+    let app_file = dir.path().join("app").join("known_hosts");
+    let key = unknown_host_key(&settings, &user_file).await;
+
+    let pinned = settings
+        .bastion(&user_file)
+        .record_to(&app_file)
+        .trust_fingerprint(key.fingerprint());
+    let tunnel = Tunnel::open(&pinned, Target::new("127.0.0.1", 22))
+        .await
+        .expect("the right pin opens the tunnel");
+    // Bytes still flow, so authentication really ran after the record.
+    let mut stream = TcpStream::connect(("127.0.0.1", tunnel.local_port()))
+        .await
+        .expect("connect to the tunnel");
+    let mut banner = Vec::new();
+    timeout(Duration::from_secs(10), stream.read_buf(&mut banner))
+        .await
+        .expect("the forwarded server said nothing")
+        .expect("read through the tunnel");
+    assert!(banner.starts_with(b"SSH-2.0-"));
+    drop(stream);
+    tunnel.close().await;
+
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::metadata(&app_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "the app file is private");
+    let text = std::fs::read_to_string(&app_file).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.starts_with(&app_spelling(&settings)), "{text}");
+    assert!(text.contains("# accepted by QueryHive "), "{text}");
+    assert!(!user_file.exists(), "the user's file is never written");
+
+    // L-4: no pin the second time, and nothing is written.
+    let again = settings.bastion(&user_file).record_to(&app_file);
+    let tunnel = Tunnel::open(&again, Target::new("127.0.0.1", 22))
+        .await
+        .expect("a recorded key matches without a pin");
+    tunnel.close().await;
+    assert_eq!(std::fs::read_to_string(&app_file).unwrap(), text);
+}
+
+#[tokio::test]
+async fn l3_the_wrong_pin_is_refused_and_nothing_is_created() {
+    let Some(settings) = settings() else { return };
+    let (dir, user_file) = fresh_known_hosts();
+    let app_file = dir.path().join("app_known_hosts");
+    let other = qh_tunnel::ServerKey::from_blob(generated_ed25519_blob(dir.path(), "other"))
+        .expect("a real key");
+    let config = settings
+        .bastion(&user_file)
+        .record_to(&app_file)
+        .trust_fingerprint(other.fingerprint());
+    match Tunnel::open(&config, Target::new("127.0.0.1", 22)).await {
+        Err(Error::HostKeyPinMismatch { pinned, .. }) => assert_eq!(pinned, other.fingerprint()),
+        Err(other) => panic!("expected a pin mismatch, got {other}"),
+        Ok(tunnel) => {
+            tunnel.close().await;
+            panic!("a pin for another key was accepted");
+        }
+    }
+    assert!(!app_file.exists());
+}
+
+#[tokio::test]
+async fn l5_a_changed_key_in_the_app_file_is_a_hard_refusal_pin_or_not() {
+    let Some(settings) = settings() else { return };
+    let (dir, user_file) = fresh_known_hosts();
+    let app_file = dir.path().join("app_known_hosts");
+    let presented = unknown_host_key(&settings, &user_file).await;
+    // Another key for the same host, recorded the way the app records one.
+    let second = generated_ed25519_blob(dir.path(), "second");
+    known_hosts::append_if_absent(&app_file, &settings.host, settings.port, &second)
+        .expect("record the other key");
+    let before = std::fs::read_to_string(&app_file).unwrap();
+
+    for pin in [None, Some(presented.fingerprint())] {
+        let mut config = settings.bastion(&user_file).record_to(&app_file);
+        if let Some(pin) = pin {
+            config = config.trust_fingerprint(pin);
+        }
+        match Tunnel::open(&config, Target::new("127.0.0.1", 22)).await {
+            Err(Error::HostKeyMismatch { recorded, path, .. }) => {
+                assert_eq!(path, app_file);
+                assert_eq!(recorded[0].origin(), Some(qh_tunnel::Origin::App));
+            }
+            Err(other) => panic!("expected a mismatch, got {other}"),
+            Ok(tunnel) => {
+                tunnel.close().await;
+                panic!("a changed host key was accepted");
+            }
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&app_file).unwrap(), before);
+}
+
+#[tokio::test]
+async fn l6_a_revoked_key_is_refused_even_with_the_right_pin() {
+    let Some(settings) = settings() else { return };
+    let (dir, user_file) = fresh_known_hosts();
+    let app_file = dir.path().join("app_known_hosts");
+    let presented = unknown_host_key(&settings, &user_file).await;
+    std::fs::write(
+        &user_file,
+        format!(
+            "@revoked {}\n",
+            presented.known_hosts_line(&settings.host, settings.port)
+        ),
+    )
+    .unwrap();
+    let config = settings
+        .bastion(&user_file)
+        .record_to(&app_file)
+        .trust_fingerprint(presented.fingerprint());
+    match Tunnel::open(&config, Target::new("127.0.0.1", 22)).await {
+        Err(Error::HostKeyRevoked { path, .. }) => assert_eq!(path, user_file),
+        Err(other) => panic!("expected a revoked refusal, got {other}"),
+        Ok(tunnel) => {
+            tunnel.close().await;
+            panic!("a revoked key was accepted");
+        }
+    }
+    assert!(!app_file.exists());
+}
+
+#[tokio::test]
+async fn l7_a_pin_without_a_place_to_record_it_is_a_usage_error() {
+    let Some(settings) = settings() else { return };
+    let (_dir, user_file) = fresh_known_hosts();
+    let key = unknown_host_key(&settings, &user_file).await;
+    let config = settings
+        .bastion(&user_file)
+        .trust_fingerprint(key.fingerprint());
+    assert!(matches!(
+        Tunnel::open(&config, Target::new("127.0.0.1", 22)).await,
+        Err(Error::Usage(_))
+    ));
+}
+
+#[tokio::test]
+async fn l8_an_unwritable_record_directory_means_no_acceptance() {
+    let Some(settings) = settings() else { return };
+    use std::os::unix::fs::PermissionsExt as _;
+    let (dir, user_file) = fresh_known_hosts();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let key = unknown_host_key(&settings, &user_file).await;
+    let config = settings
+        .bastion(&user_file)
+        .record_to(locked.join("known_hosts"))
+        .trust_fingerprint(key.fingerprint());
+    let result = Tunnel::open(&config, Target::new("127.0.0.1", 22)).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    match result {
+        Err(Error::HostKeyRecordFailed { .. }) => {}
+        Err(other) => panic!("expected a record failure, got {other}"),
+        Ok(tunnel) => {
+            tunnel.close().await;
+            panic!("a key that could not be recorded was accepted");
+        }
+    }
+}
+
+#[tokio::test]
+async fn l9_a_recorded_rsa_key_is_negotiated_instead_of_reading_as_a_change() {
+    let Some(settings) = settings() else { return };
+    let Some((_, rsa)) = keyscan(&settings, "rsa") else {
+        eprintln!("skipped: the container presents no RSA host key");
+        return;
+    };
+    let (_dir, user_file) = fresh_known_hosts();
+    std::fs::write(
+        &user_file,
+        format!(
+            "{}\n",
+            qh_tunnel::ServerKey::from_blob(rsa)
+                .unwrap()
+                .known_hosts_line(&settings.host, settings.port)
+        ),
+    )
+    .unwrap();
+    let tunnel = Tunnel::open(&settings.bastion(&user_file), Target::new("127.0.0.1", 22))
+        .await
+        .expect("the recorded RSA key is the one negotiated: no false alarm");
+    tunnel.close().await;
+}
+
+#[tokio::test]
+async fn an_ssh_config_alias_opens_the_tunnel() {
+    let Some(settings) = settings() else { return };
+    let (dir, user_file) = fresh_known_hosts();
+    let config_file = dir.path().join("ssh_config");
+    std::fs::write(
+        &config_file,
+        format!(
+            "Host qh-dev\n  HostName {}\n  Port {}\n  User {}\n  IdentityFile {}\n  ServerAliveInterval 30\n",
+            settings.host,
+            settings.port,
+            settings.user,
+            settings.key.display()
+        ),
+    )
+    .unwrap();
+    let resolved = ssh_config::load(&config_file)
+        .expect("load")
+        .resolve("qh-dev")
+        .expect("resolve");
+    assert_eq!(resolved.host_name, settings.host);
+    assert_eq!(resolved.port, Some(settings.port));
+    let key = unknown_host_key(&settings, &user_file).await;
+    known_hosts::append(&user_file, &settings.host, settings.port, key.blob()).unwrap();
+    let bastion = BastionConfig::new(
+        resolved.host_name,
+        resolved.port.unwrap(),
+        resolved.user.unwrap(),
+        Auth::Key {
+            path: resolved.identity_files[0].clone(),
+            passphrase: None,
+        },
+        &user_file,
+    );
+    let tunnel = Tunnel::open(&bastion, Target::new("127.0.0.1", 22))
+        .await
+        .expect("open through the alias");
+    tunnel.close().await;
 }
