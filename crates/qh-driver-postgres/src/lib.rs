@@ -1066,9 +1066,10 @@ fn map_query_error(
             // SQLSTATE, kept as the server spells it so a search for it finds
             // PostgreSQL's own documentation.
             code: Some(db_error.code().code().to_owned()),
-            // PostgreSQL does report a position for syntax errors, and the UI can
-            // hold the caret on it once the field is plumbed through.
-            position: None,
+            // Where in `sql` the server objected, when it said so.
+            position: (!sql.is_empty())
+                .then(|| error_position(db_error))
+                .flatten(),
             kind: FailureKind::Permanent,
         };
     }
@@ -1083,6 +1084,21 @@ fn map_query_error(
         code: None,
         position: None,
         kind: FailureKind::Transient,
+    }
+}
+
+/// The 1-based offset into the statement the server was handed, when it reports one.
+///
+/// PostgreSQL counts characters, not bytes, so on a UTF-8 server this is already the
+/// Unicode scalar offset [`EngineError::Query`] promises. An `Internal` position is an
+/// offset into a query the server built (inside a function body, say), which is not
+/// text the caller sent, so it is dropped rather than pointed at the wrong place.
+fn error_position(db_error: &tokio_postgres::error::DbError) -> Option<u32> {
+    match db_error.position()? {
+        tokio_postgres::error::ErrorPosition::Original(offset) => {
+            Some(*offset).filter(|offset| *offset > 0)
+        }
+        tokio_postgres::error::ErrorPosition::Internal { .. } => None,
     }
 }
 

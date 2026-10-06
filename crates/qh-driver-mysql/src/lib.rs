@@ -94,7 +94,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
-use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
+use qh_core::{offset_of_line, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     MetadataSql, ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session,
@@ -1515,7 +1515,9 @@ fn map_query_error(error: mysql_async::Error, sql: &str, timeout: Option<Duratio
                 // PostgreSQL's SQLSTATE takes. 1317 is "query interrupted", which is
                 // what a `KILL QUERY` produces.
                 code: Some(server.code.to_string()),
-                position: None,
+                // Only a line, so the start of that line: coarse, and the best the
+                // server gives.
+                position: error_position(sql, &server.message),
                 kind: FailureKind::Permanent,
             }
         }
@@ -1530,6 +1532,28 @@ fn map_query_error(error: mysql_async::Error, sql: &str, timeout: Option<Duratio
             kind: FailureKind::Transient,
         },
     }
+}
+
+/// The 1-based scalar offset of the start of the line a MySQL parse error names, in `sql`.
+///
+/// The server strips leading whitespace from the statement before it parses (`alloc_query`), so
+/// "at line N" counts from the first non-space scalar: a statement that starts with a blank line
+/// has its lines numbered one lower than the text the user sees. The stripped run is added back.
+/// Only ASCII is stripped, as `my_isspace` does on a UTF-8 connection, so a leading NBSP stays
+/// part of line 1.
+fn error_position(sql: &str, message: &str) -> Option<u32> {
+    let line = error_line(message).filter(|_| !sql.is_empty())?;
+    let parsed = sql.trim_start_matches([' ', '\t', '\n', '\x0B', '\x0C', '\r']);
+    let stripped = u32::try_from(sql[..sql.len() - parsed.len()].chars().count()).ok()?;
+    offset_of_line(parsed, line)?.checked_add(stripped)
+}
+
+/// The line a MySQL parse error names: its message ends "... near '...' at line N".
+///
+/// Anchored at the end, so a quoted fragment of the user's own text that happens to
+/// say "at line" is not read as the answer.
+fn error_line(message: &str) -> Option<u32> {
+    message.rsplit_once(" at line ")?.1.parse().ok()
 }
 
 /// A failure that came back from a statement whose text has been sent.
@@ -1778,6 +1802,67 @@ mod tests {
         }
         // A bound is the caller's, so a retry would only wait for it again.
         assert_eq!(error.failure_kind(), FailureKind::Permanent);
+    }
+
+    #[test]
+    fn a_parse_error_points_at_the_start_of_the_line_the_server_names() {
+        let server = |message: &str| {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1064,
+                message: message.to_owned(),
+                state: "42000".to_owned(),
+            })
+        };
+        let parse_error = "You have an error in your SQL syntax; check the manual that \
+                           corresponds to your MySQL server version for the right syntax to \
+                           use near 'SELEC 2' at line 2";
+        let sql = "SELECT '\u{1F600}'\nSELEC 2";
+        // Counted in scalars: the emoji is one, and the newline is another.
+        let error = map_query_error(server(parse_error), sql, None);
+        assert_eq!(error.position(), Some(12), "{error:?}");
+        assert_eq!(error.code(), Some("1064"));
+        // A line the text does not have, and a statement the driver did not send.
+        let error = map_query_error(server(parse_error), "SELEC 1", None);
+        assert_eq!(error.position(), None, "{error:?}");
+        let error = map_query_error(server(parse_error), "", None);
+        assert_eq!(error.position(), None, "{error:?}");
+        // The phrase inside the user's text is not the server's answer.
+        let error = map_query_error(
+            server("Unknown column 'at line 3' in 'field list'"),
+            "SELECT 1\n\n\nSELECT 'at line 3'",
+            None,
+        );
+        assert_eq!(error.position(), None, "{error:?}");
+        assert_eq!(error_line("... near 'x at line 9' at line 1"), Some(1));
+    }
+
+    #[test]
+    fn a_parse_error_counts_its_line_from_behind_the_leading_whitespace() {
+        let error = |sql: &str, line: u32| {
+            map_query_error(
+                mysql_async::Error::Server(mysql_async::ServerError {
+                    code: 1064,
+                    message: format!(
+                        "You have an error in your SQL syntax near 'SELEC' at line {line}"
+                    ),
+                    state: "42000".to_owned(),
+                }),
+                sql,
+                None,
+            )
+            .position()
+        };
+        // The server strips the two newlines, so `SELEC` is its line 1 and the 3rd scalar here.
+        assert_eq!(error("\n\nSELEC 1", 1), Some(3));
+        // Blank and indented lines first: `SELECT` is the server's line 1 and `SELEC` its line 2,
+        // the 17th scalar (five stripped, ten on the SELECT line, its newline).
+        assert_eq!(error("  \n  SELECT '\u{1F600}'\nSELEC 2", 2), Some(17));
+        // Tab, vertical tab, form feed and carriage return are stripped, and no more than those.
+        assert_eq!(error("\t\x0B\x0C\r\nSELEC 1", 1), Some(6));
+        assert_eq!(error("\u{A0}\nSELEC 1", 1), Some(1));
+        // Nothing to strip, and a line the stripped text does not have.
+        assert_eq!(error("SELEC 1", 1), Some(1));
+        assert_eq!(error("\n\nSELEC 1", 2), None);
     }
 
     #[test]

@@ -26,6 +26,8 @@ use std::io::{self, Write};
 use qh_result_store::StoreWriter;
 use serde_json::{Map, Value as Json};
 
+use crate::{CliError, Settings};
+
 /// Where events go. A command writes to this and never to stdout directly, so the
 /// same command can be driven by a test that captures the events instead.
 pub trait Emitter {
@@ -130,6 +132,33 @@ impl Event {
     pub fn build(self) -> Json {
         Json::Object(self.object)
     }
+}
+
+/// The `error` event for a failed command, as the CLI and the app's host both write it.
+///
+/// Carries the warnings a failure already earned: a `replace` write that dropped the old table has
+/// more to report than a message, and reporting the failure cannot undo the drop.
+///
+/// `position` (the server's 1-based offset, in Unicode scalar values, into the statement it was
+/// sent) is added only when the run set `ERROR_POSITION`, and only when the server gave one. The
+/// app sets it for Run alone; the CLI, MCP and the golden harness never do, so their output is
+/// unchanged. `explain` is not asked for it, because the drivers wrap the caller's text there.
+pub fn error_event(error: &CliError, settings: &Settings) -> Json {
+    let warnings = error.warnings();
+    event("error")
+        .field("message", error.message())
+        .maybe(
+            "warnings",
+            (!warnings.is_empty())
+                .then(|| Json::Array(warnings.iter().map(|w| Json::from(w.clone())).collect())),
+        )
+        .maybe(
+            "position",
+            error
+                .position()
+                .filter(|_| settings.flag("ERROR_POSITION", false)),
+        )
+        .build()
 }
 
 /// Events kept in memory, for tests and for the golden harness.

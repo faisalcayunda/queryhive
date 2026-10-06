@@ -58,14 +58,20 @@ pub enum EngineError {
     /// The server refused the statement, or the connection failed while it ran.
     ///
     /// `code` and `position` are optional because not every server reports them:
-    /// Trino gives a code, Postgres gives a SQLSTATE plus a 1-based character
-    /// offset, MySQL gives an errno. They are kept as reported rather than
-    /// normalised, so the value in the UI still matches the server's own docs.
+    /// Trino gives a code and a line and column, Postgres gives a SQLSTATE plus a
+    /// 1-based character offset, MySQL gives an errno and, for a syntax error, the
+    /// line. `code` is kept as reported, so the value in the UI still matches the
+    /// server's own docs; `position` is normalised to one unit, below.
     #[error("{message}")]
     Query {
         message: String,
         code: Option<String>,
-        /// 1-based character offset into the statement, when the server said so.
+        /// Where the server objected, as a 1-based offset counted in Unicode scalar
+        /// values (not bytes, not UTF-16 units) into the exact text the driver was
+        /// handed, when the server said so. A line-only report (MySQL) points at the
+        /// start of that line. For `explain` the driver sends its own prefix, so the
+        /// offset is into the wrapped text; callers that map it back to an editor
+        /// must not ask for it there.
         position: Option<u32>,
         kind: FailureKind,
     },
@@ -141,7 +147,8 @@ impl EngineError {
         }
     }
 
-    /// The 1-based offset into the statement the server objected to.
+    /// The 1-based offset, in Unicode scalar values, into the statement the server
+    /// objected to.
     pub fn position(&self) -> Option<u32> {
         match self {
             EngineError::Query { position, .. } => *position,
@@ -186,6 +193,42 @@ impl EngineError {
             limit_ms: limit.and_then(|limit| u64::try_from(limit.as_millis()).ok()),
         }
     }
+}
+
+/// The 1-based offset, in Unicode scalar values, of `line` and `column` in `sql`.
+///
+/// For a server that reports a line and column (Trino's `errorLocation`). Both are
+/// 1-based and counted in scalars; lines end at `\n` only, so a `\r` before it is
+/// the last scalar of its line, as the server's own lexer counts it. A column one
+/// past the last scalar of the line is accepted: the end of input is where "mismatched
+/// input '<EOF>'" points. `None` when the line or column is not in the text.
+pub fn offset_of_line_column(sql: &str, line: u32, column: u32) -> Option<u32> {
+    let (before, width) = line_span(sql, line)?;
+    (1..=width.checked_add(1)?)
+        .contains(&column)
+        .then(|| before + column)
+}
+
+/// The 1-based offset, in Unicode scalar values, of the first scalar of `line`.
+///
+/// For a server that reports only a line (MySQL's "... at line N"): coarse, and
+/// named so. `None` when the text has no such line.
+pub fn offset_of_line(sql: &str, line: u32) -> Option<u32> {
+    line_span(sql, line).map(|(before, _)| before + 1)
+}
+
+/// The scalars before `line` and the scalars in it, for a 1-based `line`.
+fn line_span(sql: &str, line: u32) -> Option<(u32, u32)> {
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    let mut before: u32 = 0;
+    for (number, text) in sql.split('\n').enumerate() {
+        let width = u32::try_from(text.chars().count()).ok()?;
+        if number == index {
+            return Some((before, width));
+        }
+        before = before.checked_add(width)?.checked_add(1)?;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -274,5 +317,63 @@ mod tests {
             "{}",
             error.message()
         );
+    }
+
+    #[test]
+    fn a_line_and_column_map_to_a_scalar_offset() {
+        let sql = "SELECT 1\nFROM t\nWHERE x";
+        // First, middle and last line; the column is 1-based like the offset.
+        assert_eq!(offset_of_line_column(sql, 1, 1), Some(1));
+        assert_eq!(offset_of_line_column(sql, 1, 8), Some(8));
+        assert_eq!(offset_of_line_column(sql, 2, 1), Some(10));
+        assert_eq!(offset_of_line_column(sql, 2, 6), Some(15));
+        assert_eq!(offset_of_line_column(sql, 3, 7), Some(23));
+        // One past the last scalar of the last line is the end of input.
+        assert_eq!(offset_of_line_column(sql, 3, 8), Some(24));
+        assert_eq!(offset_of_line_column(sql, 3, 9), None);
+        // Lines and columns start at 1, and the text has three lines.
+        assert_eq!(offset_of_line_column(sql, 0, 1), None);
+        assert_eq!(offset_of_line_column(sql, 1, 0), None);
+        assert_eq!(offset_of_line_column(sql, 4, 1), None);
+        // A trailing newline leaves a last, empty line.
+        assert_eq!(offset_of_line_column("a\n", 2, 1), Some(3));
+        assert_eq!(offset_of_line_column("", 1, 1), Some(1));
+    }
+
+    #[test]
+    fn offsets_count_scalars_not_bytes_or_utf16_units() {
+        // An emoji is one scalar, four UTF-8 bytes and two UTF-16 units; a CJK
+        // character is one scalar, three bytes and one unit. `FRM` starts at the
+        // 17th scalar, but at byte 21 (0-based) and the 18th UTF-16 unit.
+        let sql = "SELECT '\u{1F600}', '\u{4E2D}' FRM\nx";
+        assert_eq!(sql.find("FRM"), Some(21));
+        assert_eq!(offset_of_line_column(sql, 1, 17), Some(17));
+        // The end of the first line is one past its 19 scalars.
+        assert_eq!(offset_of_line_column(sql, 1, 20), Some(20));
+        assert_eq!(offset_of_line_column(sql, 1, 21), None);
+        // The second line starts after those scalars and the newline.
+        assert_eq!(offset_of_line(sql, 2), Some(21));
+        assert_eq!(offset_of_line_column(sql, 2, 1), Some(21));
+    }
+
+    #[test]
+    fn a_carriage_return_is_the_last_scalar_of_its_line() {
+        // The server's lexer ends a line at `\n` only, so the `\r` is a column.
+        let sql = "ab\r\ncd";
+        assert_eq!(offset_of_line(sql, 2), Some(5));
+        assert_eq!(offset_of_line_column(sql, 1, 3), Some(3));
+        assert_eq!(offset_of_line_column(sql, 1, 4), Some(4));
+        assert_eq!(offset_of_line_column(sql, 1, 5), None);
+        assert_eq!(offset_of_line_column(sql, 2, 2), Some(6));
+    }
+
+    #[test]
+    fn a_line_alone_points_at_its_first_scalar() {
+        let sql = "SELECT 1\n\nFROM t";
+        assert_eq!(offset_of_line(sql, 1), Some(1));
+        assert_eq!(offset_of_line(sql, 2), Some(10));
+        assert_eq!(offset_of_line(sql, 3), Some(11));
+        assert_eq!(offset_of_line(sql, 4), None);
+        assert_eq!(offset_of_line(sql, 0), None);
     }
 }

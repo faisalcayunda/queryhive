@@ -86,7 +86,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
+use qh_core::{offset_of_line_column, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value};
 use qh_driver::{
     BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
     MetadataSql, ObjectPath, ObjectsPage, Parameter, Session, TlsMode,
@@ -220,6 +220,17 @@ struct WireError {
     error_name: Option<String>,
     #[serde(default)]
     error_type: Option<String>,
+    /// Where in the statement the coordinator objected, for a parse or analysis
+    /// error. Both numbers are 1-based, and the column counts code points.
+    #[serde(default)]
+    error_location: Option<WireErrorLocation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireErrorLocation {
+    line_number: u32,
+    column_number: u32,
 }
 
 /// The running query as far as cancel needs to know it.
@@ -767,7 +778,7 @@ impl TrinoSession {
             // reason.
             if let Ok(page) = serde_json::from_str::<Page>(&text) {
                 if let Some(error) = page.error {
-                    return Err(map_error(error, timeout));
+                    return Err(map_error(error, sql, timeout));
                 }
             }
             return Err(EngineError::Query {
@@ -786,7 +797,7 @@ impl TrinoSession {
         })?;
 
         if let Some(error) = page.error {
-            return Err(map_error(error, timeout));
+            return Err(map_error(error, sql, timeout));
         }
         if let Some(running) = running_from(&page) {
             *self.running.lock().expect("running state") = Some(running);
@@ -849,7 +860,9 @@ fn running_from(page: &Page) -> Option<Running> {
 /// the data is wrong and repeating it will produce the same thing, so it is
 /// permanent. Everything else — internal errors, resource exhaustion — is
 /// transient, because those are the ones that can pass on a second attempt.
-fn map_error(error: WireError, timeout: Option<Duration>) -> EngineError {
+///
+/// `sql` is the text the coordinator was sent, which `errorLocation` counts into.
+fn map_error(error: WireError, sql: &str, timeout: Option<Duration>) -> EngineError {
     // The time bound comes first, because it is the one failure that is not the
     // server's opinion of the statement. Trino 483 raises two names for it and both
     // are read: `query_max_run_time` — the property this driver sets — produced
@@ -878,6 +891,11 @@ fn map_error(error: WireError, timeout: Option<Duration>) -> EngineError {
             None => FailureKind::Permanent,
         }
     };
+    let position = error
+        .error_location
+        .as_ref()
+        .and_then(|at| offset_of_line_column(sql, at.line_number, at.column_number))
+        .filter(|_| !sql.is_empty());
     let name = error.error_name.unwrap_or_default();
     let message = if name.is_empty() {
         error.message
@@ -888,7 +906,7 @@ fn map_error(error: WireError, timeout: Option<Duration>) -> EngineError {
         message,
         code: error.error_code.map(|code| code.to_string()),
         kind,
-        position: None,
+        position,
     }
 }
 
@@ -963,6 +981,7 @@ impl Session for TrinoSession {
             // `pending`, so the pause is only spent once a poll comes back empty.
             poll_pause: POLL_INTERVAL_MIN,
             timeout: options.statement_timeout,
+            sql: sql.to_owned(),
         }))
     }
 
@@ -1095,6 +1114,8 @@ struct TrinoCursor {
     poll_pause: Duration,
     /// The bound the query runs under, so a server timeout names it.
     timeout: Option<Duration>,
+    /// The statement this cursor reads, which a later page's error location counts into.
+    sql: String,
 }
 
 impl TrinoCursor {
@@ -1146,7 +1167,7 @@ impl TrinoCursor {
 
         if let Some(error) = page.error {
             self.finished = true;
-            return Err(map_error(error, self.timeout));
+            return Err(map_error(error, &self.sql, self.timeout));
         }
 
         // The columns arrive with the first page that has rows. Taking them here
@@ -1531,7 +1552,9 @@ mod tests {
                 error_code: Some(1),
                 error_name: Some("SYNTAX_ERROR".to_owned()),
                 error_type: Some("USER_ERROR".to_owned()),
+                error_location: None,
             },
+            "",
             None,
         );
         match user {
@@ -1555,7 +1578,9 @@ mod tests {
                     error_code: Some(65537),
                     error_name: None,
                     error_type: Some(error_type.to_owned()),
+                    error_location: None,
                 },
+                "",
                 None,
             );
             match error {
@@ -1563,6 +1588,30 @@ mod tests {
                 other => panic!("expected a query error, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn an_error_location_becomes_a_scalar_offset_into_the_statement() {
+        // The shape Trino sends: `errorLocation` beside the error, 1-based, columns
+        // counted in code points.
+        let wire = || {
+            serde_json::from_str::<Page>(
+                r#"{"id":"q","stats":{},"error":{"message":"line 2:6: mismatched input 'FRM'",
+                   "errorCode":1,"errorName":"SYNTAX_ERROR","errorType":"USER_ERROR",
+                   "errorLocation":{"lineNumber":2,"columnNumber":6}}}"#,
+            )
+            .expect("a failed page")
+            .error
+            .expect("an error")
+        };
+        let sql = "SELECT '\u{1F600}'\n  x FRM t";
+        let error = map_error(wire(), sql, None);
+        // Line 1 is ten scalars and a newline, so column 6 of line 2 is the 17th.
+        assert_eq!(error.position(), Some(17), "{error:?}");
+        assert_eq!(error.code(), Some("1"));
+        // Without the text, or with text that has no such place, there is no mark.
+        assert_eq!(map_error(wire(), "", None).position(), None);
+        assert_eq!(map_error(wire(), "SELECT 1", None).position(), None);
     }
 
     #[test]
@@ -1576,7 +1625,9 @@ mod tests {
                 error_code: Some(3),
                 error_name: Some("USER_CANCELED".to_owned()),
                 error_type: Some("USER_ERROR".to_owned()),
+                error_location: None,
             },
+            "",
             None,
         );
         match error {
@@ -1606,7 +1657,9 @@ mod tests {
                     error_code: Some(131075),
                     error_name: Some(name.to_owned()),
                     error_type: Some("INSUFFICIENT_RESOURCES".to_owned()),
+                    error_location: None,
                 },
+                "",
                 Some(Duration::from_millis(2_000)),
             );
             match &error {
@@ -1738,6 +1791,7 @@ mod tests {
             max_batch_rows: None,
             poll_pause: POLL_INTERVAL_MIN,
             timeout: None,
+            sql: String::new(),
         }
     }
 

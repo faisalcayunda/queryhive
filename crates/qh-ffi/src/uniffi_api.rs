@@ -70,7 +70,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::Value as Json;
 
-use crate::events::{event, Emitter};
+use crate::events::{error_event, event, Emitter};
 use crate::local::SharedStorage;
 use crate::{run_with as run_command, CancelFlag, CliError, Command, Engine, Settings};
 
@@ -346,6 +346,7 @@ pub(crate) fn run_with(
             fail(
                 out,
                 &CliError::Internal(format!("could not start a runtime: {error}")),
+                settings,
             );
             return;
         }
@@ -361,7 +362,7 @@ pub(crate) fn run_with(
     }));
     match outcome {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => fail(out, &error),
+        Ok(Err(error)) => fail(out, &error, settings),
         Err(panic) => {
             let message = panic
                 .downcast_ref::<&str>()
@@ -377,23 +378,14 @@ pub(crate) fn run_with(
     }
 }
 
-/// The one `error` event, carrying the warnings a failure already earned.
+/// The one `error` event, carrying the warnings a failure already earned and, when the run set
+/// `ERROR_POSITION`, where the server said the statement went wrong.
 ///
-/// The same pairing `main.rs` writes for a failure, for the same reason: a `replace` write that
-/// dropped the old table has more to report than a message, and reporting the failure cannot undo
-/// the drop.
-fn fail(out: &mut dyn Emitter, error: &CliError) {
-    let warnings = error.warnings();
-    let _ = out.emit(
-        event("error")
-            .field("message", error.message())
-            .maybe(
-                "warnings",
-                (!warnings.is_empty())
-                    .then(|| Json::Array(warnings.iter().map(|w| Json::from(w.clone())).collect())),
-            )
-            .build(),
-    );
+/// The same event `main.rs` writes for a failure ([`error_event`]), so the app and the CLI cannot
+/// drift. Not a UniFFI surface change: the event is a JSON line, and the setting arrives as one
+/// more `Setting`.
+fn fail(out: &mut dyn Emitter, error: &CliError, settings: &Settings) {
+    let _ = out.emit(error_event(error, settings));
 }
 
 /// The process-wide runtime, built by [`qh_rt::build_main`] the first time a run needs it and
@@ -746,6 +738,73 @@ mod tests {
         ) -> Result<Box<dyn qh_driver::Session>, qh_core::EngineError> {
             panic!("boom in connect")
         }
+    }
+
+    /// An engine whose server refuses the statement and says where, as a syntax error does.
+    struct LocatingEngine;
+
+    #[async_trait::async_trait]
+    impl Engine for LocatingEngine {
+        fn kinds(&self) -> Vec<qh_driver::DriverKind> {
+            qh_driver::DriverKind::ALL.to_vec()
+        }
+
+        fn driver(&self, _kind: qh_driver::DriverKind) -> &dyn qh_driver::Driver {
+            static POSTGRES: qh_driver_postgres::PostgresDriver =
+                qh_driver_postgres::PostgresDriver;
+            &POSTGRES
+        }
+
+        async fn connect(
+            &self,
+            _config: &qh_driver::ConnectionConfig,
+        ) -> Result<Box<dyn qh_driver::Session>, qh_core::EngineError> {
+            Err(qh_core::EngineError::Query {
+                message: "syntax error at or near \"SELEC\"".to_owned(),
+                code: Some("42601".to_owned()),
+                position: Some(1),
+                kind: qh_core::FailureKind::Permanent,
+            })
+        }
+    }
+
+    #[test]
+    fn the_error_event_carries_the_position_only_when_the_run_asked_for_it() {
+        let run_once = |extra: &[(&str, &str)]| {
+            let sink = Recorder::default();
+            let settings = Settings::from_pairs(
+                [
+                    ("DB_KIND", "postgres"),
+                    ("DB_HOST", "127.0.0.1"),
+                    ("RETRIES", "0"),
+                    ("SQL", "SELEC 1"),
+                ]
+                .iter()
+                .chain(extra)
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+            );
+            run_with(
+                Command::Preview,
+                &settings,
+                &mut SinkEmitter {
+                    sink: Arc::new(sink.clone()),
+                },
+                &LocatingEngine,
+                &CancelFlag::new(),
+                None,
+            );
+            sink.events()
+                .last()
+                .expect("something was reported")
+                .clone()
+        };
+        let plain = run_once(&[]);
+        assert_eq!(plain["event"], "error", "{plain}");
+        assert_eq!(plain["message"], "syntax error at or near \"SELEC\"");
+        assert!(plain.get("position").is_none(), "{plain}");
+        let located = run_once(&[("ERROR_POSITION", "1")]);
+        assert_eq!(located["position"], 1, "{located}");
+        assert_eq!(located["message"], plain["message"]);
     }
 
     #[test]

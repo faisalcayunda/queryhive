@@ -17,7 +17,7 @@
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
 
-use qh_ffi::events::{event, Emitter, JsonLines};
+use qh_ffi::events::{error_event, event, Emitter, JsonLines};
 use qh_ffi::{run, usage, CancelFlag, CliError, Command, RealEngine, Settings};
 
 fn main() -> ExitCode {
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(Ok(())) => ExitCode::SUCCESS,
         Ok(Err(error)) => {
-            report(&mut out, &error);
+            report(&mut out, &error, &settings);
             ExitCode::from(1)
         }
         Err(panic) => {
@@ -92,19 +92,8 @@ fn main() -> ExitCode {
 }
 
 /// One `error` event, carrying the warnings a failure already earned.
-fn report(out: &mut dyn Emitter, error: &CliError) {
-    let warnings = error.warnings();
-    let _ = out.emit(
-        event("error")
-            .field("message", error.message())
-            // Only a failure that changed something out of sight has anything to
-            // add: the DROP of a `replace`, which reporting the error cannot undo.
-            .maybe(
-                "warnings",
-                (!warnings.is_empty()).then(|| serde_json::json!(warnings)),
-            )
-            .build(),
-    );
+fn report(out: &mut dyn Emitter, error: &CliError, settings: &Settings) {
+    let _ = out.emit(error_event(error, settings));
 }
 
 /// What a panic said, for the `error` event. A panic payload is almost always a

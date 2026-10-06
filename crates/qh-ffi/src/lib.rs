@@ -159,6 +159,14 @@ pub enum CliError {
     #[error("{0}")]
     Query(String),
 
+    /// A [`CliError::Query`] the server also located: `position` is the 1-based offset, in
+    /// Unicode scalar values, into the text it was sent ([`EngineError::position`]).
+    ///
+    /// Reads like `Query` everywhere (same `Display`, same [`CliError::message`]); only the
+    /// `error` event can tell them apart, and only when the run asked for it.
+    #[error("{message}")]
+    QueryAt { message: String, position: u32 },
+
     /// A failure that already changed something the user has to hear about.
     ///
     /// A `replace` write drops the old table before it creates the new one, so a
@@ -245,6 +253,14 @@ impl CliError {
         }
     }
 
+    /// Where the server said the statement went wrong, when it did.
+    pub fn position(&self) -> Option<u32> {
+        match self {
+            CliError::QueryAt { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
     /// The message, without this enum's own wording.
     pub fn message(&self) -> String {
         match self {
@@ -262,6 +278,10 @@ impl From<EngineError> for CliError {
         match error {
             EngineError::Usage { .. } => CliError::Usage(message),
             EngineError::Connect { .. } => CliError::Connect(message),
+            EngineError::Query {
+                position: Some(position),
+                ..
+            } => CliError::QueryAt { message, position },
             EngineError::Query { .. } => CliError::Query(message),
             // A timeout is the server's refusal to keep running, and it arrives on
             // the same event as any other query failure: the app shows the message,
