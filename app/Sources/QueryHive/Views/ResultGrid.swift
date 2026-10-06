@@ -69,7 +69,13 @@ struct ResultGrid: View {
                 // Only while the setting asks for it and a cell is chosen. A panel on an empty
                 // selection would be a column of nothing, which reads as a grid that could not be
                 // drawn rather than as nothing being selected.
-                if let range = inspectorRange {
+                if tab.recordMode {
+                    // Record mode keeps the panel up with or without a chosen cell, and whatever the
+                    // Data pane says: leaving it hands the panel back to that setting.
+                    Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
+                    RecordPanel(tab: tab, showInGrid: { _ = placeCursor(on: $0) }, openReader: openReader)
+                        .frame(width: inspectorWidth)
+                } else if let range = inspectorRange {
                     Rectangle().fill(Tone.ink.opacity(0.07)).frame(width: 1)
                     inspector(range).frame(width: inspectorWidth)
                 }
@@ -581,6 +587,28 @@ struct ResultGrid: View {
             return nil
         }
         return inspectedRange ?? chosen
+    }
+
+    /// Put the grid's cursor and selection on one field of the Record panel's row, and hand the
+    /// keyboard to the grid. Returns the cell's key, or `nil` for a row the grid has no place for
+    /// (an added row, until the grid draws those).
+    ///
+    /// Not scrolled sideways: the row is the cursor's own and already in view, and the table's
+    /// scrolling is its coordinator's (`ResultGridTable`, W10-T3's file).
+    private func placeCursor(on field: RecordField) -> CellKey? {
+        guard let key = tab.placeCursor(on: field) else { return nil }
+        inspectedRange = tab.cellSelection
+        model.focus(.results)
+        return key
+    }
+
+    /// "Show more" on a value the panel cannot hold: leave Record mode so the Cell reader has the
+    /// cell, as the beside-the-grid panel when the Data pane asks for one and as the popover when
+    /// it does not.
+    private func openReader(_ field: RecordField) {
+        guard let key = placeCursor(on: field) else { return }
+        tab.recordMode = false
+        if !DataPreferences.shared.autoShowInspector { viewingCell = key }
     }
 
     /// The value reader standing beside the grid.

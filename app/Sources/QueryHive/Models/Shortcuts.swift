@@ -27,6 +27,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case nextTab
     case previousTab
     case peekCell
+    case toggleRecord
 
     /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
     enum Scope { case scheme, platform }
@@ -77,6 +78,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .nextTab: "Show Next Tab"
         case .previousTab: "Show Previous Tab"
         case .peekCell: "Peek Cell"
+        case .toggleRecord: "Toggle Record View"
         }
     }
 }
@@ -173,6 +175,8 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         .previousTab: Shortcut("[", [.command, .shift]),
         // Space does the same inside the grid; this is the menu's way to it.
         .peekCell: Shortcut("y", .command),
+        // Xcode's Inspectors key, and the one W9 reserved for this panel.
+        .toggleRecord: Shortcut("i", [.command, .option]),
     ]
 
     private static let dbeaverTable: [ShortcutAction: Shortcut] = [

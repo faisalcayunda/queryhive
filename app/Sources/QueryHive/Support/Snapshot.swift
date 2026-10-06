@@ -555,7 +555,7 @@ enum Snapshot {
         case "connection":
             model.presentConnectionEditor(primary.id)
         case "grid", "grid-selection", "grid-edits", "grid-sorted", "grid-columns", "grid-inspector",
-             "grid-kinds", "grid-counted":
+             "grid-kinds", "grid-counted", "grid-record", "grid-record-edits":
             // Run's whole point: the rows, before anything is written. Deliberately mixed — a
             // long text column, numbers that must right-align, a NULL, a timestamp, and a result
             // the row limit cut short.
@@ -669,6 +669,19 @@ enum Snapshot {
                                    original: "KPM Cibadak")
                 tab.cellEdits.edit("9", at: CellKey(row: 2, column: 2), original: "7")
                 tab.cellSelection = CellRange(from: (row: 5, column: 3), to: (row: 7, column: 4))
+            }
+            // The Record panel on the second row, with `nama` as the cursor cell: every field of the
+            // row under its name and type, a NULL, and a value that is not a plain scalar. The
+            // `-edits` scene adds the staged marks of two changed fields (V-11, no older baseline).
+            if scene == "grid-record" || scene == "grid-record-edits" {
+                tab.recordMode = true
+                tab.sourceTable = "\"hive\".\"analytics\".\"penerima_manfaat\""
+                if scene == "grid-record-edits" {
+                    tab.cellEdits.edit("KPM Cibadak Baru", at: CellKey(row: 1, column: 1),
+                                       original: "KPM Cibadak")
+                    tab.cellEdits.edit("9", at: CellKey(row: 1, column: 2), original: "2")
+                }
+                tab.selectCells(anchor: CellPos(row: 1, column: 1), focus: CellPos(row: 1, column: 1))
             }
             // The footer once the server has been asked how many rows there really are.
             if scene == "grid-counted" {

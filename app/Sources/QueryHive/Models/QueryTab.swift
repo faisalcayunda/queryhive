@@ -956,6 +956,10 @@ final class QueryTab: Identifiable {
     /// The cell cursor (P-24). W10-T1 makes this authoritative and draws the ring.
     var cellCursor: GridCursor?
 
+    /// The panel beside the grid reads the cursor's whole row as fields instead of one cell
+    /// (W10-T5). Per tab and not saved: it is a way of looking, not part of the session.
+    var recordMode = false
+
     /// The cells the user has changed but not yet written.
     ///
     /// The same positional hazard as the selection, and cleared in the same places: a queued edit

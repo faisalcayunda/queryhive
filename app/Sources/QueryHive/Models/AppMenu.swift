@@ -36,6 +36,7 @@ enum AppMenu {
             spec(.focusEditor, .view),
             spec(.focusResults, .view),
             spec(.peekCell, .view),
+            spec(.toggleRecord, .view),
             spec(.nextTab, .tab),
             spec(.previousTab, .tab),
         ]
@@ -79,6 +80,10 @@ enum AppMenu {
         // The responder chain, because the cell lives in the grid and the grid is not the model's:
         // it answers only while it is the first responder, which is when a peek means anything.
         case .peekCell: NSApp.sendAction(#selector(GridTableView.peekCell(_:)), to: nil, from: nil)
+        case .toggleRecord:
+            guard let tab else { break }
+            tab.recordMode.toggle()
+            Announcer.post(tab.recordMode ? "Record view shown" : "Record view hidden")
         default: break
         }
     }
@@ -89,7 +94,7 @@ enum AppMenu {
         let tab = model.selectedTab
         let blocked = tab.map { model.runBlockedReason(for: $0) != nil } ?? true
         switch ShortcutAction(rawValue: spec.id) {
-        case .openFile, .closeTab, .toggleResultPanel, .focusEditor, .focusResults: return tab != nil
+        case .openFile, .closeTab, .toggleResultPanel, .focusEditor, .focusResults, .toggleRecord: return tab != nil
         case .run: return tab?.previewing != true
         case .runScript, .explain, .exportData: return !blocked
         case .countRows: return tab?.previewedSQL?.isEmpty == false && tab?.countingRows == false
