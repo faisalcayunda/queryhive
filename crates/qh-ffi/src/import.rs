@@ -8,10 +8,41 @@
 //! # Rows
 //!
 //! The reverse of `export`, and the same rule applies with the arrow turned
-//! around: a slice is read, a slice is sent, and the file is never held whole —
-//! for CSV. The XLSX reader holds its worksheet because the format leaves no
-//! choice, and this module states that in the `done` event rather than promising
-//! a bound it cannot keep (see [`qh_import`]'s module note).
+//! around: a slice is read, a slice is sent, and the file is never held whole.
+//! The XLSX reader streams its rows but holds the workbook's string table, which is
+//! why it has size limits (see [`qh_import`]'s module note).
+//!
+//! # What reaches the INSERT: values, widths, code pages, sizes
+//!
+//! A value is never written differently from how the file spells it unless the caller said how
+//! the file spells it, and a value that does not fit what was said is a rejected row (under the
+//! `ON_ERROR` policy), never a guess. Everything below is opt-in or a refusal:
+//!
+//! * `NaN`, `inf` and `infinity` are quoted, not written as bare words (DBX-31).
+//! * `DATE_FORMAT` (`dd/MM/yyyy HH:mm`, see [`qh_import::DatePattern`]) reads a `date` or
+//!   timestamp column in the engine and sends ISO, because PostgreSQL's default `DateStyle`
+//!   would read `03/04/2024` as 4 March. It applies to every date and timestamp column of the
+//!   file, so a file with two spellings is imported in two passes.
+//! * `DECIMAL_SEPARATOR` (and, only with it, `GROUPING_SEPARATOR`) reads `1.500,25` as 1500.25 in
+//!   a numeric column. With neither set `1.500,25` is quoted and the server decides.
+//! * A whole-number column refuses `5.5`: both PostgreSQL and MySQL would store 6.
+//! * On MySQL a `Z` suffix on a `datetime`/`timestamp` value becomes `+00:00`, which MySQL reads.
+//! * A format that needs the column's type (`DATE_FORMAT`, `DECIMAL_SEPARATOR`) is refused where
+//!   the driver reports no types before a row (Trino): ignored, it would write the wrong value.
+//! * A CSV row must have as many fields as the header; trailing empty ones are allowed, any
+//!   other difference is `row has N fields, header has M`. `ALLOW_SHORT_ROWS=1` pads a short row
+//!   (PF-4). Without a header the first row sets the width.
+//! * A CSV file is scanned for its encoding before anything is written. UTF-8 is the default;
+//!   `ENCODING=cp1252` (or `latin-1`) is the explicit way in for a Windows file (DBX-7).
+//! * An XLSX file over `IMPORT_XLSX_MAX_BYTES` (128 MiB) or declaring more than
+//!   `IMPORT_XLSX_MAX_CELLS` (50 million) rows times columns is refused with a usage error
+//!   (DBX-32). Its rows stream; its string table does not.
+//! * A connection that fails, or a server fault the driver marks transient, ends the import in
+//!   every `ON_ERROR` mode and says `rows after line N were not attempted`. No `INSERT` is ever
+//!   sent twice, because the first may have landed (PF-3).
+//!
+//! `progress` events carry `bytes` and `bytes_total` for CSV and JSON, and `rows_total` for a
+//! sheet that declares its size (DBX-72).
 //!
 //! # JSON
 //!
@@ -106,10 +137,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use qh_core::{ColumnMeta, EngineError};
+use qh_core::{ColumnMeta, EngineError, FailureKind};
 use qh_driver::{DriverKind, ExecuteOptions, Session};
 use qh_import::{
-    Format as SourceFormat, ImportError, JsonRow, JsonSource, Options as ReadOptions, RowReader,
+    excel_digits, normalize_number, Codec, DatePattern, Format as SourceFormat, ImportError,
+    JsonRow, JsonSource, Options as ReadOptions, RowReader,
 };
 use qh_sql::{quote_ident, Dialect, IdentStyle, SafeMode, StatementKind};
 use serde_json::{json, Value as Json};
@@ -182,12 +214,47 @@ enum Rows {
     Json(JsonSource),
 }
 
+/// A reader's error as the caller sees it: a file over a limit, or in the wrong encoding, is
+/// something the caller can change, so it is a usage error naming the setting, not a broken file.
+fn read_error(error: ImportError) -> CliError {
+    match error {
+        ImportError::Limit { .. } | ImportError::Encoding { .. } => {
+            CliError::Usage(error.to_string())
+        }
+        other => other.into(),
+    }
+}
+
 impl Rows {
-    fn open(path: &Path, format: RowFormat, options: &ReadOptions) -> Result<Self, ImportError> {
+    fn open(path: &Path, format: RowFormat, options: &ReadOptions) -> Result<Self, CliError> {
         Ok(match format {
-            RowFormat::Table(format) => Rows::Table(RowReader::open(path, format, options)?),
-            RowFormat::Json => Rows::Json(JsonSource::open(path, options)?),
+            RowFormat::Table(format) => {
+                Rows::Table(RowReader::open(path, format, options).map_err(read_error)?)
+            }
+            RowFormat::Json => Rows::Json(JsonSource::open(path, options).map_err(read_error)?),
         })
+    }
+
+    /// Whether every row must be as wide as the header (PF-4). Only a delimited text file
+    /// is: a sheet's rows are padded to its width and a JSON row has a cell per key.
+    fn checks_width(&self) -> bool {
+        matches!(self, Rows::Table(RowReader::Csv(_)))
+    }
+
+    /// Bytes of the file consumed so far, when the format can say.
+    fn bytes_read(&self) -> Option<u64> {
+        match self {
+            Rows::Table(reader) => reader.bytes_read(),
+            Rows::Json(source) => Some(source.bytes_read()),
+        }
+    }
+
+    /// The data rows the file declares up front, when it does.
+    fn rows_total(&self) -> Option<u64> {
+        match self {
+            Rows::Table(reader) => reader.rows_total(),
+            Rows::Json(_) => None,
+        }
     }
 
     fn header(&self) -> Option<&[String]> {
@@ -197,14 +264,15 @@ impl Rows {
         }
     }
 
-    fn next_row(&mut self) -> Result<Option<JsonRow>, ImportError> {
+    fn next_row(&mut self) -> Result<Option<JsonRow>, CliError> {
         Ok(match self {
             // A text cell is always a value: whether it means NULL is `NULL_TEXT`'s call.
-            Rows::Table(reader) => reader.next_row()?.map(|row| JsonRow {
+            Rows::Table(reader) => reader.next_row().map_err(read_error)?.map(|row| JsonRow {
                 line: row.line,
                 cells: row.cells.into_iter().map(Some).collect(),
+                numeric: row.numeric,
             }),
-            Rows::Json(source) => source.next_row()?,
+            Rows::Json(source) => source.next_row().map_err(read_error)?,
         })
     }
 
@@ -262,6 +330,100 @@ struct Target {
     sql_name: String,
     /// The target column's declared type, or empty when the server did not say.
     type_name: String,
+    /// What the type means for reading a value into it.
+    kind: Kind,
+}
+
+/// What a target column's type asks of a value before it is written (DBX-31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A whole-number column: `5.5` is refused, because PostgreSQL and MySQL both round it to 6.
+    Integer,
+    /// A decimal or floating column.
+    Number,
+    /// `date`.
+    Date,
+    /// `timestamp`, `timestamptz`, `datetime`.
+    Timestamp,
+    /// Anything else, and a column whose type the server did not report.
+    Other,
+}
+
+fn kind_of(type_name: &str) -> Kind {
+    match base_type(type_name).as_str() {
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "int2" | "int4"
+        | "int8" | "serial" | "bigserial" | "smallserial" => Kind::Integer,
+        _ if is_numeric(type_name) => Kind::Number,
+        "date" => Kind::Date,
+        "timestamp"
+        | "timestamptz"
+        | "datetime"
+        | "timestamp with time zone"
+        | "timestamp without time zone" => Kind::Timestamp,
+        _ => Kind::Other,
+    }
+}
+
+/// How the file's values are read before they are written, all of it opt-in: with none of
+/// it set the text goes through as it always did.
+#[derive(Debug, Clone, Default)]
+struct Rules {
+    /// `DECIMAL_SEPARATOR`: the character that is the decimal point in the file.
+    decimal: Option<char>,
+    /// `GROUPING_SEPARATOR`: the thousands separator, only valid beside a decimal separator.
+    grouping: Option<char>,
+    /// `DATE_FORMAT`, compiled.
+    date: Option<DatePattern>,
+    /// `ALLOW_SHORT_ROWS`: a row with fewer fields than the header is padded, not rejected.
+    allow_short_rows: bool,
+}
+
+impl Rules {
+    /// Whether a value is read in the engine, which needs the column's type.
+    fn reads_values(&self) -> bool {
+        self.decimal.is_some() || self.date.is_some()
+    }
+}
+
+/// One setting that must be a single character, or `None` when unset.
+fn one_char(settings: &Settings, key: &str) -> Result<Option<char>, CliError> {
+    let raw = settings.raw(key, "");
+    let mut chars = raw.chars();
+    match (chars.next(), chars.next()) {
+        (None, _) => Ok(None),
+        (Some(c), None) if !c.is_ascii_digit() && !matches!(c, '+' | '-') => Ok(Some(c)),
+        _ => Err(CliError::Usage(format!(
+            "{key} must be one character that is not a digit or a sign, got '{raw}'"
+        ))),
+    }
+}
+
+fn rules_of(settings: &Settings) -> Result<Rules, CliError> {
+    let decimal = one_char(settings, "DECIMAL_SEPARATOR")?;
+    let grouping = one_char(settings, "GROUPING_SEPARATOR")?;
+    if grouping.is_some() && decimal.is_none() {
+        return Err(CliError::Usage(
+            "GROUPING_SEPARATOR is only read together with DECIMAL_SEPARATOR: without it              '1.500' could be 1500 or 1.5"
+                .to_owned(),
+        ));
+    }
+    if decimal.is_some() && decimal == grouping {
+        return Err(CliError::Usage(
+            "DECIMAL_SEPARATOR and GROUPING_SEPARATOR must be different characters".to_owned(),
+        ));
+    }
+    let date = match optional(settings.text("DATE_FORMAT", "")) {
+        Some(pattern) => {
+            Some(DatePattern::parse(&pattern).map_err(|error| CliError::Usage(error.to_string()))?)
+        }
+        None => None,
+    };
+    Ok(Rules {
+        decimal,
+        grouping,
+        date,
+        allow_short_rows: settings.flag("ALLOW_SHORT_ROWS", false),
+    })
 }
 
 /// The import's plan: the table, the resolved targets, and how NULL is spelled.
@@ -278,6 +440,7 @@ struct Plan {
     /// which have no other way to say "nothing here"; false for JSON.
     blank_is_empty: bool,
     style: SlotStyle,
+    rules: Rules,
 }
 
 /// `import_data`: read a file into a table, as rows or as statements.
@@ -451,6 +614,9 @@ fn txn_after(kind: DriverKind, error: &EngineError) -> Txn {
 struct Failure {
     message: String,
     after: Txn,
+    /// The connection died or the server reported a transient fault: the next statement
+    /// would go to a peer that has just failed (PF-3).
+    lost: bool,
 }
 
 impl Failure {
@@ -459,6 +625,7 @@ impl Failure {
         Failure {
             message: error.message(),
             after: Txn::Alive,
+            lost: false,
         }
     }
 
@@ -466,6 +633,8 @@ impl Failure {
         Failure {
             message: error.message().to_owned(),
             after: txn_after(kind, error),
+            lost: matches!(error, EngineError::Connect { .. })
+                || error.failure_kind() == FailureKind::Transient,
         }
     }
 }
@@ -542,10 +711,23 @@ async fn import_rows_file(
     } else {
         Some(settings.raw("NULL_TEXT", ""))
     };
+    let rules = rules_of(settings)?;
+    // A JSON number is already `.`-decimal and a JSON string is not told apart from it past
+    // the reader, so a locale would multiply `1.234` by a thousand. Refused, like ENCODING.
+    if json && rules.decimal.is_some() {
+        return Err(CliError::Usage(
+            "DECIMAL_SEPARATOR and GROUPING_SEPARATOR apply to CSV and XLSX text; a JSON number \
+             is always written with '.', and a JSON string should be a number in the file"
+                .to_owned(),
+        ));
+    }
     let read_options = ReadOptions {
         delimiter: if json { None } else { delimiter(settings)? },
         header: settings.flag("HEADER", true),
         sheet: optional(settings.raw("SHEET", "")),
+        encoding: encoding_of(settings, format)?,
+        xlsx_max_bytes: limit_of(settings, "IMPORT_XLSX_MAX_BYTES")?,
+        xlsx_max_cells: limit_of(settings, "IMPORT_XLSX_MAX_CELLS")?,
     };
     let (table_catalog, table_schema, table) = target_parts(settings);
     let table_sql = qualified(style, &table_catalog, &table_schema, &table);
@@ -563,6 +745,7 @@ async fn import_rows_file(
     // reads its worksheet here, which is the one place this command is not a
     // stream.
     let mut reader = Rows::open(&path, format, &read_options)?;
+    let file_bytes = std::fs::metadata(&path).ok().map(|meta| meta.len());
     if json {
         // The sheet read this file's keys earlier; a `COLUMNS` that no longer matches
         // them means the file changed under it, and that is refused before connecting.
@@ -588,10 +771,23 @@ async fn import_rows_file(
         &table_reference,
         null_text,
         json,
+        rules,
     )?;
     if let Some(missing) = missing_targets(&plan, &columns) {
         let _ = session.close().await;
         return Err(CliError::Usage(missing));
+    }
+    // A format the engine reads needs the column's type to know where it applies. A driver
+    // that reports none before a row (Trino) cannot say, and a format quietly ignored is the
+    // wrong value this setting exists to prevent.
+    if columns.is_empty() && plan.rules.reads_values() {
+        let _ = session.close().await;
+        return Err(CliError::Usage(
+            "DATE_FORMAT and DECIMAL_SEPARATOR need the target's column types, which this driver \
+             does not report before a row; import without them, or into a table the driver \
+             describes"
+                .to_owned(),
+        ));
     }
 
     out.emit(event("step").field("step", "write").build())?;
@@ -618,6 +814,8 @@ async fn import_rows_file(
     }
 
     let mut progress = Progress::new(settings.number("PROGRESS_MS", PROGRESS_MS_DEFAULT)?);
+    // Bytes only mean something for a format that can say how many it has read.
+    progress.set_totals(reader.bytes_read().and(file_bytes), reader.rows_total());
     let outcome = match import_rows(
         &mut session,
         &mut reader,
@@ -644,6 +842,21 @@ async fn import_rows_file(
             return Err(error);
         }
     };
+
+    if outcome.connection_lost {
+        // Nothing to close: the connection is gone, and with it the transaction it held and
+        // the session settings (the foreign-key switch) it carried.
+        let _ = session.close().await;
+        return Err(CliError::Warned {
+            message: connection_lost_message(
+                &outcome,
+                in_transaction,
+                "rows",
+                &plan.table_reference,
+            ),
+            warnings: outcome.errors,
+        });
+    }
 
     if let Err(error) = finish(&mut session, in_transaction, !outcome.rollback, fk, timeout).await {
         let _ = session.close().await;
@@ -685,7 +898,10 @@ async fn import_rows_file(
     }
 
     if progress.last() != Some(outcome.written) {
-        out.emit(event("progress").field("rows", outcome.written).build())?;
+        if !outcome.cancelled {
+            progress.set_bytes(reader.bytes_read().and(file_bytes));
+        }
+        progress.force(outcome.written, out)?;
     }
 
     let errors: Vec<Json> = outcome
@@ -871,6 +1087,14 @@ async fn import_statements(
         }
     };
 
+    if outcome.connection_lost {
+        let _ = session.close().await;
+        return Err(CliError::Warned {
+            message: connection_lost_message(&outcome, in_transaction, "statements", "the target"),
+            warnings: outcome.errors,
+        });
+    }
+
     if let Err(error) = finish(&mut session, in_transaction, !outcome.rollback, fk, timeout).await {
         let _ = session.close().await;
         return Err(error);
@@ -982,6 +1206,10 @@ async fn import_statements_loop(
         };
         if let Err(failure) = failure {
             outcome.error(statement.line, failure.message);
+            if failure.lost {
+                outcome.lose_connection(statement.line, statement.line);
+                return Ok(outcome);
+            }
             match mode {
                 // A failed statement wrote nothing on its own, so there is nothing
                 // to skip over: the next one runs.
@@ -1020,6 +1248,11 @@ struct Outcome {
     /// Things the user should hear that do not fail the import.
     warnings: Vec<String>,
     disposition: &'static str,
+    /// The connection died, or the server said the fault is transient, while a batch was in
+    /// flight (PF-3). The import ends in every mode: nothing after it is known to land.
+    connection_lost: bool,
+    /// The first and last line of the batch that was in flight when it was lost.
+    lost_lines: (usize, usize),
 }
 
 impl Outcome {
@@ -1029,6 +1262,38 @@ impl Outcome {
         } else {
             self.errors_truncated = true;
         }
+    }
+
+    /// End the import because the connection or the server failed under the lines `first..=last`.
+    fn lose_connection(&mut self, first: usize, last: usize) {
+        self.connection_lost = true;
+        self.failed = true;
+        self.rollback = false;
+        self.stopped_at = Some(first);
+        self.lost_lines = (first, last);
+    }
+
+    /// A failed batch: put it in the list, and say whether the import ends here. `stop` and
+    /// `commit` end it; `skip` goes on, unless the failure means the connection cannot be
+    /// trusted to carry the next batch.
+    fn failed(
+        &mut self,
+        mode: Mode,
+        in_transaction: bool,
+        batch: &[(usize, Cells)],
+        failure: Failure,
+    ) -> bool {
+        let line = line_of(batch);
+        self.error(line, failure.message);
+        if failure.lost {
+            self.lose_connection(line, batch.last().map_or(line, |(last, _)| *last));
+            return true;
+        }
+        if mode != Mode::Skip {
+            self.halt(mode, in_transaction, line, failure.after);
+            return true;
+        }
+        false
     }
 
     /// End the import at `line` under `stop` or `commit`.
@@ -1074,6 +1339,10 @@ async fn import_rows(
         ..Outcome::default()
     };
     let mut batch: Vec<(usize, Cells)> = Vec::new();
+    // PF-4: every row is as wide as the header (or, with none, as the first row).
+    let checks_width = reader.checks_width();
+    let header_width = reader.header().map(<[String]>::len);
+    let mut width = header_width.filter(|_| checks_width);
 
     'read: loop {
         if cancel.is_cancelled() {
@@ -1082,15 +1351,32 @@ async fn import_rows(
             outcome.cancelled = true;
             break 'read;
         }
-        let Some(row) = reader.next_row()? else {
+        let Some(mut row) = reader.next_row()? else {
             break 'read;
         };
-        if row_is_empty(&row, plan) {
-            // A row with nothing in any mapped column is rejected, and what
-            // happens next is the mode's decision. The rows already read are sent
-            // first, so a `commit` keeps everything before this row.
+        progress.set_bytes(reader.bytes_read());
+
+        let mut rejection = None;
+        if checks_width {
+            let width = *width.get_or_insert(row.cells.len());
+            rejection = ragged(
+                &row.cells,
+                width,
+                header_width.is_some(),
+                plan.rules.allow_short_rows,
+            );
+        }
+        if rejection.is_none() && row_is_empty(&row, plan) {
+            rejection = Some("no value reached any mapped column".to_owned());
+        }
+        if rejection.is_none() {
+            rejection = read_values(plan, &mut row.cells, &row.numeric).err();
+        }
+        if let Some(reason) = rejection {
+            // A rejected row, and what happens next is the mode's decision. The rows
+            // already read are sent first, so a `commit` keeps everything before this row.
             outcome.rejected += 1;
-            outcome.error(row.line, "no value reached any mapped column");
+            outcome.error(row.line, reason);
             if mode != Mode::Skip {
                 let mut after = Txn::Alive;
                 if let Some(failure) = flush(
@@ -1106,6 +1392,14 @@ async fn import_rows(
                 )
                 .await?
                 {
+                    if failure.lost {
+                        outcome.error(line_of(&batch), failure.message);
+                        outcome.lose_connection(
+                            line_of(&batch),
+                            batch.last().map_or(row.line, |(last, _)| *last),
+                        );
+                        return Ok(outcome);
+                    }
                     outcome.error(line_of(&batch), failure.message);
                     after = failure.after;
                 }
@@ -1118,7 +1412,6 @@ async fn import_rows(
 
         batch.push((row.line, row.cells));
         if mode == Mode::Skip || batch.len() >= batch_size {
-            let line = line_of(&batch);
             if let Some(failure) = flush(
                 session,
                 plan,
@@ -1132,10 +1425,7 @@ async fn import_rows(
             )
             .await?
             {
-                outcome.error(line, failure.message);
-                // In `skip` the statement is the batch; a failed one writes nothing.
-                if mode != Mode::Skip {
-                    outcome.halt(mode, in_transaction, line, failure.after);
+                if outcome.failed(mode, in_transaction, &batch, failure) {
                     return Ok(outcome);
                 }
             }
@@ -1146,7 +1436,6 @@ async fn import_rows(
     // The tail, and whatever a cancel left behind: both are sent rather than
     // dropped, because a Stop keeps the rows already read.
     if !batch.is_empty() {
-        let line = line_of(&batch);
         if let Some(failure) = flush(
             session,
             plan,
@@ -1160,10 +1449,7 @@ async fn import_rows(
         )
         .await?
         {
-            outcome.error(line, failure.message);
-            if mode != Mode::Skip {
-                outcome.halt(mode, in_transaction, line, failure.after);
-            }
+            outcome.failed(mode, in_transaction, &batch, failure);
         }
     }
 
@@ -1222,6 +1508,7 @@ async fn send_batch(
                     return Err(Failure {
                         message: format!("the server wrote {actual} row(s) but {sent} were sent"),
                         after: Txn::Alive,
+                        lost: false,
                     });
                 }
             }
@@ -1301,6 +1588,7 @@ fn plan_rows(
     table_reference: &str,
     null_text: Option<String>,
     json: bool,
+    rules: Rules,
 ) -> Result<Plan, CliError> {
     let fields = match settings.get("COLUMNS") {
         Some(raw) if !raw.trim().is_empty() => parse_columns(raw)?
@@ -1338,6 +1626,7 @@ fn plan_rows(
         null_text,
         blank_is_empty: !json,
         style,
+        rules,
     })
 }
 
@@ -1354,6 +1643,7 @@ fn resolve(source: usize, name: &str, style: SlotStyle, columns: &[ColumnMeta]) 
         source,
         name: name.to_owned(),
         sql_name: quote_ident(style.style, name),
+        kind: kind_of(&type_name),
         type_name,
     }
 }
@@ -1613,10 +1903,207 @@ fn base_type(type_name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Whether text is an integer or a float, so a numeric column can take it bare.
+/// Whether text is an integer or a finite float, so a numeric column can take it bare.
+///
+/// `NaN`, `inf` and `infinity` parse as floats in Rust but are not number literals in SQL:
+/// bare, `NaN` is a column name and `inf` a syntax error. They are quoted, which PostgreSQL
+/// reads as the special value for a float or `numeric` column and refuses for an integer one.
 fn is_number(text: &str) -> bool {
     let trimmed = text.trim();
-    !trimmed.is_empty() && (trimmed.parse::<i64>().is_ok() || trimmed.parse::<f64>().is_ok())
+    !trimmed.is_empty()
+        && (trimmed.parse::<i64>().is_ok() || trimmed.parse::<f64>().is_ok_and(f64::is_finite))
+}
+
+/// Whether a number is a whole one, in any spelling a SQL literal allows: `5`, `5.0`, `5.`,
+/// `1e3`. `5.5` is not, and an integer column would round it to 6 without a word.
+fn is_whole(text: &str) -> bool {
+    let text = text.trim();
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if let Some((whole, fraction)) = unsigned.split_once('.') {
+        if !fraction.contains(['e', 'E']) {
+            return whole.bytes().all(|b| b.is_ascii_digit())
+                && fraction.bytes().all(|b| b == b'0')
+                && !(whole.is_empty() && fraction.is_empty());
+        }
+    }
+    if unsigned.bytes().all(|b| b.is_ascii_digit()) {
+        return !unsigned.is_empty();
+    }
+    // An exponent: whole if the value is, and small enough that f64 holds it exactly.
+    text.parse::<f64>()
+        .is_ok_and(|value| value.is_finite() && value.fract() == 0.0 && value.abs() < 9.0e15)
+}
+
+/// A trailing `Z` spelled the way MySQL reads it. MySQL refuses `Z` (error 1292) and reads
+/// a numeric offset as a time zone to convert from, so `Z` becomes `+00:00` (DBX-31).
+fn zulu_as_offset(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    let body = trimmed.strip_suffix(['Z', 'z'])?;
+    body.ends_with(|c: char| c.is_ascii_digit())
+        .then(|| format!("{body}+00:00"))
+}
+
+/// A row that does not have as many fields as the header, or `None` if it does.
+///
+/// Only empty extras at the end are let through (a trailing delimiter some tools add to
+/// every line). A stray unquoted comma in a text cell makes a row one field too long, and
+/// importing it anyway writes every later value into the wrong column without a word. A
+/// short row is refused too, unless the caller opted in to padding it.
+fn ragged(cells: &Cells, width: usize, header: bool, allow_short: bool) -> Option<String> {
+    let found = cells.len();
+    let against = if header {
+        "header has"
+    } else {
+        "the first row has"
+    };
+    match found.cmp(&width) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Less if allow_short => None,
+        std::cmp::Ordering::Less => Some(format!(
+            "row has {found} fields, {against} {width} (ALLOW_SHORT_ROWS pads a short row)"
+        )),
+        std::cmp::Ordering::Greater => cells[width..]
+            .iter()
+            .any(|cell| cell.as_deref().is_some_and(|text| !text.is_empty()))
+            .then(|| {
+                format!(
+                    "row has {found} fields, {against} {width} (an unquoted delimiter in a value?)"
+                )
+            }),
+    }
+}
+
+/// Read the values in a row that the target's type says to read (DBX-31): the declared
+/// number format, the declared date format, a whole number for an integer column, and a
+/// zone MySQL can parse. `Err` is the reason the row is rejected; a value is never guessed.
+///
+/// `numeric` marks the cells the file stores as numbers (XLSX): they are already `.`-decimal,
+/// so the number format of the file's text never applies to them, and in a column the server
+/// says is text they get the digits a spreadsheet shows, not the 17 a float can carry.
+fn read_values(plan: &Plan, cells: &mut Cells, numeric: &[bool]) -> Result<(), String> {
+    for target in &plan.targets {
+        let Some(Some(cell)) = cells.get_mut(target.source) else {
+            continue;
+        };
+        let stored_number = numeric.get(target.source).copied().unwrap_or(false);
+        if Some(cell.as_str()) == plan.null_text.as_deref()
+            || (plan.blank_is_empty && cell.is_empty())
+        {
+            continue;
+        }
+        match target.kind {
+            Kind::Integer | Kind::Number => {
+                // `NaN` and `Infinity` are words, not numbers in anyone's locale: they go through
+                // untouched and are quoted at the literal.
+                let word = cell
+                    .trim()
+                    .parse::<f64>()
+                    .is_ok_and(|value| !value.is_finite());
+                if let (Some(decimal), false, false) = (plan.rules.decimal, word, stored_number) {
+                    *cell =
+                        normalize_number(cell, decimal, plan.rules.grouping).ok_or_else(|| {
+                            let grouping = plan.rules.grouping.map_or(String::new(), |group| {
+                                format!(" and '{group}' between thousands")
+                            });
+                            format!(
+                            "column {}: '{cell}' is not a number written with '{decimal}' as the \
+                             decimal point{grouping}",
+                            target.name
+                        )
+                        })?;
+                }
+                if target.kind == Kind::Integer && is_number(cell) && !is_whole(cell) {
+                    return Err(format!(
+                        "column {}: {cell} is not a whole number, and the column is {}; the \
+                         server would round it",
+                        target.name, target.type_name
+                    ));
+                }
+            }
+            Kind::Date | Kind::Timestamp => {
+                if let Some(pattern) = &plan.rules.date {
+                    let read = pattern
+                        .read(cell)
+                        .map_err(|error| format!("column {}: {error}", target.name))?;
+                    *cell = if target.kind == Kind::Date {
+                        read.date().to_owned()
+                    } else {
+                        read.timestamp()
+                    };
+                } else if target.kind == Kind::Timestamp && plan.style.kind == DriverKind::Mysql {
+                    if let Some(offset) = zulu_as_offset(cell) {
+                        *cell = offset;
+                    }
+                }
+            }
+            Kind::Other => {
+                // An unreported type (Trino) stays exact: only a column known to be text is cut.
+                if stored_number && !target.type_name.is_empty() {
+                    *cell = excel_digits(cell);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `ENCODING`, which names a CSV file's code page. For another format it is refused rather
+/// than ignored: a code page that changes nothing would read as honoured.
+fn encoding_of(settings: &Settings, format: RowFormat) -> Result<Option<Codec>, CliError> {
+    let raw = settings.text("ENCODING", "");
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let codec = Codec::resolve("ENCODING", &raw)?;
+    if format != RowFormat::Table(SourceFormat::Csv) && !codec.is_utf8() {
+        return Err(CliError::Usage(format!(
+            "ENCODING={raw} applies to CSV files; a {} file is always UTF-8 or carries its own",
+            format.name()
+        )));
+    }
+    Ok(Some(codec))
+}
+
+/// A size limit the caller may raise, or `None` for the crate's default.
+fn limit_of(settings: &Settings, key: &str) -> Result<Option<u64>, CliError> {
+    let value = settings.number(key, 0)?;
+    match u64::try_from(value) {
+        Ok(0) => Ok(None),
+        Ok(limit) => Ok(Some(limit)),
+        Err(_) => Err(CliError::Usage(format!(
+            "{key} must be a positive number, got {value}"
+        ))),
+    }
+}
+
+/// What a lost connection means for the rows, in words.
+fn connection_lost_message(
+    outcome: &Outcome,
+    in_transaction: bool,
+    unit: &str,
+    table: &str,
+) -> String {
+    let (first, last) = outcome.lost_lines;
+    let lines = if first == last {
+        format!("line {first}")
+    } else {
+        format!("lines {first}-{last}")
+    };
+    let state = if in_transaction {
+        format!(
+            "the open transaction ended with the connection, so no {unit} were written to {table}"
+        )
+    } else {
+        format!(
+            "the {} {unit} already written to {table} remain, and {lines} may not have been written",
+            outcome.written
+        )
+    };
+    format!(
+        "import stopped at line {first}: the connection to the server failed while writing \
+         {lines}; {unit} after line {last} were not attempted, and nothing was sent again \
+         ({state})"
+    )
 }
 
 /// `IMPORT_PATH` or `IMPORT_FILE`, expanded and absolute.
@@ -1786,17 +2273,20 @@ mod tests {
                     name: "id".to_owned(),
                     sql_name: "\"id\"".to_owned(),
                     type_name: "int8".to_owned(),
+                    kind: Kind::Integer,
                 },
                 Target {
                     source: 1,
                     name: "name".to_owned(),
                     sql_name: "\"name\"".to_owned(),
                     type_name: "text".to_owned(),
+                    kind: Kind::Other,
                 },
             ],
             null_text: null_text.map(str::to_owned),
             blank_is_empty,
             style: SlotStyle::of(qh_driver::DriverKind::Postgres),
+            rules: Rules::default(),
         }
     }
 
@@ -1883,6 +2373,7 @@ mod tests {
         let row = |cells: Vec<Option<&str>>| JsonRow {
             line: 3,
             cells: cells.into_iter().map(|c| c.map(str::to_owned)).collect(),
+            numeric: Vec::new(),
         };
         assert!(row_is_empty(&row(vec![Some(""), Some("")]), &plan));
         assert!(!row_is_empty(&row(vec![Some(""), Some("x")]), &plan));
@@ -1897,6 +2388,7 @@ mod tests {
         let row = |cells: Vec<Option<&str>>| JsonRow {
             line: 1,
             cells: cells.into_iter().map(|c| c.map(str::to_owned)).collect(),
+            numeric: Vec::new(),
         };
         assert!(row_is_empty(&row(vec![None, None]), &plan));
         // `""` is a value in JSON, so a row that holds only that is not rejected.
@@ -2125,6 +2617,320 @@ mod tests {
         let mut free = Outcome::default();
         free.halt(Mode::Commit, false, 7, Txn::Gone);
         assert!((free.failed, free.lost) == (false, false));
+    }
+
+    #[test]
+    fn non_finite_numbers_are_quoted_not_written_bare() {
+        // Rust parses these as floats; SQL does not read them as number literals.
+        for word in [
+            "NaN",
+            "nan",
+            "inf",
+            "-inf",
+            "Infinity",
+            "-infinity",
+            "1e999",
+        ] {
+            assert_eq!(
+                text(word, "float8", "", IdentStyle::Ansi),
+                format!("'{word}'"),
+                "{word}"
+            );
+        }
+        assert_eq!(text("1e5", "float8", "", IdentStyle::Ansi), "1e5");
+        assert_eq!(text(".5", "numeric", "", IdentStyle::Ansi), ".5");
+    }
+
+    #[test]
+    fn a_whole_number_is_whole_in_any_spelling_a_literal_allows() {
+        for whole in [
+            "5", "-5", "+5", "5.0", "5.", "-0.000", ".0", "1e3", "2.5e1", "0",
+        ] {
+            assert!(is_whole(whole), "{whole}");
+        }
+        for not in [
+            "5.5", "-0.1", "1.0001", "1e-1", "abc", "", ".", "1e999", "5.5e0",
+        ] {
+            assert!(!is_whole(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_z_becomes_a_numeric_offset() {
+        assert_eq!(
+            zulu_as_offset("2024-03-04T10:00:00Z").as_deref(),
+            Some("2024-03-04T10:00:00+00:00")
+        );
+        assert_eq!(
+            zulu_as_offset("2024-03-04 10:00:00.250z ").as_deref(),
+            Some("2024-03-04 10:00:00.250+00:00")
+        );
+        assert_eq!(zulu_as_offset("2024-03-04 10:00:00+07:00"), None);
+        assert_eq!(zulu_as_offset("Z"), None);
+        assert_eq!(zulu_as_offset("abcZ"), None);
+    }
+
+    fn row(cells: &[&str]) -> Cells {
+        cells.iter().map(|cell| Some((*cell).to_owned())).collect()
+    }
+
+    #[test]
+    fn a_row_must_be_as_wide_as_the_header_but_trailing_empty_extras_pass() {
+        assert_eq!(ragged(&row(&["1", "a"]), 2, true, false), None);
+        assert_eq!(ragged(&row(&["1", "a", ""]), 2, true, false), None);
+        assert_eq!(ragged(&row(&["1", "a", "", ""]), 2, true, false), None);
+        let long = ragged(&row(&["1", "a", "b"]), 2, true, false).expect("a long row is refused");
+        assert!(long.starts_with("row has 3 fields, header has 2"), "{long}");
+        let short = ragged(&row(&["1"]), 2, true, false).expect("a short row is refused");
+        assert!(
+            short.starts_with("row has 1 fields, header has 2"),
+            "{short}"
+        );
+        assert!(
+            ragged(&row(&["1"]), 2, true, true).is_none(),
+            "ALLOW_SHORT_ROWS pads it"
+        );
+        // A long row stays refused under the short-row opt-in: the extra value has no column.
+        assert!(ragged(&row(&["1", "a", "b"]), 2, true, true).is_some());
+        let headerless = ragged(&row(&["1"]), 2, false, false).expect("refused");
+        assert!(headerless.contains("the first row has 2"), "{headerless}");
+    }
+
+    fn typed_plan(style: DriverKind, rules: Rules, types: &[(&str, &str)]) -> Plan {
+        Plan {
+            table_sql: "t".to_owned(),
+            table_reference: "t".to_owned(),
+            targets: types
+                .iter()
+                .enumerate()
+                .map(|(source, (name, type_name))| Target {
+                    source,
+                    name: (*name).to_owned(),
+                    sql_name: (*name).to_owned(),
+                    type_name: (*type_name).to_owned(),
+                    kind: kind_of(type_name),
+                })
+                .collect(),
+            null_text: Some(String::new()),
+            blank_is_empty: true,
+            style: SlotStyle::of(style),
+            rules,
+        }
+    }
+
+    #[test]
+    fn types_decide_which_values_are_read() {
+        for (type_name, kind) in [
+            ("int8", Kind::Integer),
+            ("INTEGER", Kind::Integer),
+            ("mediumint", Kind::Integer),
+            ("numeric(10,2)", Kind::Number),
+            ("float8", Kind::Number),
+            ("date", Kind::Date),
+            ("timestamptz", Kind::Timestamp),
+            ("timestamp(3) with time zone", Kind::Timestamp),
+            ("datetime", Kind::Timestamp),
+            ("time", Kind::Other),
+            ("text", Kind::Other),
+            ("", Kind::Other),
+        ] {
+            assert_eq!(kind_of(type_name), kind, "{type_name}");
+        }
+    }
+
+    #[test]
+    fn an_integer_column_refuses_a_fraction_the_server_would_round() {
+        let plan = typed_plan(DriverKind::Postgres, Rules::default(), &[("n", "int4")]);
+        let mut cells = row(&["5.5"]);
+        let error = read_values(&plan, &mut cells, &[]).expect_err("5.5 is not an int");
+        assert!(
+            error.contains("column n: 5.5 is not a whole number"),
+            "{error}"
+        );
+        for fine in ["5", "5.0", "-12", "1e3", ""] {
+            let mut cells = row(&[fine]);
+            assert!(read_values(&plan, &mut cells, &[]).is_ok(), "{fine}");
+        }
+        // A number column keeps its fraction.
+        let numeric = typed_plan(DriverKind::Postgres, Rules::default(), &[("n", "numeric")]);
+        assert!(read_values(&numeric, &mut row(&["5.5"]), &[]).is_ok());
+    }
+
+    #[test]
+    fn a_declared_date_format_turns_dd_mm_into_iso_and_a_bad_date_into_a_rejection() {
+        let rules = Rules {
+            date: Some(DatePattern::parse("dd/MM/yyyy").unwrap()),
+            ..Rules::default()
+        };
+        let plan = typed_plan(
+            DriverKind::Postgres,
+            rules,
+            &[("d", "date"), ("t", "timestamp"), ("s", "text")],
+        );
+        let mut cells = row(&["03/04/2024", "03/04/2024", "03/04/2024"]);
+        read_values(&plan, &mut cells, &[]).unwrap();
+        assert_eq!(
+            cells,
+            row(&["2024-04-03", "2024-04-03 00:00:00", "03/04/2024"]),
+            "a text column keeps its text"
+        );
+        let mut bad = row(&["31/02/2024", "", ""]);
+        let error = read_values(&plan, &mut bad, &[]).unwrap_err();
+        assert!(error.starts_with("column d: '31/02/2024'"), "{error}");
+        // An empty cell is NULL, not a date that failed to parse.
+        let mut empty = row(&["", "", ""]);
+        assert!(read_values(&plan, &mut empty, &[]).is_ok());
+    }
+
+    #[test]
+    fn mysql_gets_z_as_an_offset_and_postgres_keeps_it() {
+        let mysql = typed_plan(DriverKind::Mysql, Rules::default(), &[("t", "datetime")]);
+        let mut cells = row(&["2024-03-04T10:00:00Z"]);
+        read_values(&mysql, &mut cells, &[]).unwrap();
+        assert_eq!(cells, row(&["2024-03-04T10:00:00+00:00"]));
+        let postgres = typed_plan(
+            DriverKind::Postgres,
+            Rules::default(),
+            &[("t", "timestamptz")],
+        );
+        let mut cells = row(&["2024-03-04T10:00:00Z"]);
+        read_values(&postgres, &mut cells, &[]).unwrap();
+        assert_eq!(cells, row(&["2024-03-04T10:00:00Z"]));
+    }
+
+    #[test]
+    fn grouping_is_read_only_when_the_caller_declares_it() {
+        let plain = typed_plan(DriverKind::Postgres, Rules::default(), &[("n", "numeric")]);
+        let mut cells = row(&["1.500,00"]);
+        read_values(&plain, &mut cells, &[]).unwrap();
+        assert_eq!(
+            cells,
+            row(&["1.500,00"]),
+            "untouched, and quoted at the literal"
+        );
+        assert_eq!(
+            text("1.500,00", "numeric", "", IdentStyle::Ansi),
+            "'1.500,00'"
+        );
+
+        let rules = Rules {
+            decimal: Some(','),
+            grouping: Some('.'),
+            ..Rules::default()
+        };
+        let id = typed_plan(
+            DriverKind::Postgres,
+            rules,
+            &[("n", "numeric"), ("i", "int4")],
+        );
+        let mut cells = row(&["1.500,25", "2.000"]);
+        read_values(&id, &mut cells, &[]).unwrap();
+        assert_eq!(cells, row(&["1500.25", "2000"]));
+        let mut words = row(&["NaN", "-Infinity"]);
+        read_values(&id, &mut words, &[]).expect("a non-finite word is not a locale's number");
+        assert_eq!(words, row(&["NaN", "-Infinity"]));
+        let error = read_values(&id, &mut row(&["1.5", "1"]), &[]).unwrap_err();
+        assert!(
+            error.contains("column n: '1.5' is not a number written with ','"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_number_cell_is_never_read_in_the_files_locale_and_a_text_column_gets_excels_digits() {
+        let rules = Rules {
+            decimal: Some(','),
+            grouping: Some('.'),
+            ..Rules::default()
+        };
+        let plan = typed_plan(
+            DriverKind::Postgres,
+            rules,
+            &[("n", "numeric"), ("s", "numeric"), ("t", "text")],
+        );
+        // Cell 0 is a number cell holding 1.234, cell 1 a text cell spelling 1.234 the
+        // Indonesian way (one thousand two hundred thirty-four), cell 2 a float in a text column.
+        let mut cells = row(&["1.234", "1.234", "3.141592653589793"]);
+        read_values(&plan, &mut cells, &[true, false, true]).unwrap();
+        assert_eq!(cells, row(&["1.234", "1234", "3.14159265358979"]));
+        // A number column keeps the exact digits; so does a column the server did not type.
+        let exact = typed_plan(DriverKind::Postgres, Rules::default(), &[("n", "float8")]);
+        let mut cells = row(&["0.30000000000000004"]);
+        read_values(&exact, &mut cells, &[true]).unwrap();
+        assert_eq!(cells, row(&["0.30000000000000004"]));
+        let untyped = typed_plan(DriverKind::Postgres, Rules::default(), &[("n", "")]);
+        let mut cells = row(&["0.30000000000000004"]);
+        read_values(&untyped, &mut cells, &[true]).unwrap();
+        assert_eq!(cells, row(&["0.30000000000000004"]));
+    }
+
+    #[test]
+    fn separators_are_validated_when_the_settings_are_read() {
+        let set = |pairs: &[(&str, &str)]| {
+            rules_of(&Settings::from_pairs(pairs.iter().copied())).map(|rules| rules.decimal)
+        };
+        assert_eq!(set(&[]).unwrap(), None);
+        assert_eq!(set(&[("DECIMAL_SEPARATOR", ",")]).unwrap(), Some(','));
+        assert!(
+            set(&[("GROUPING_SEPARATOR", ".")]).is_err(),
+            "grouping needs a decimal"
+        );
+        assert!(set(&[("DECIMAL_SEPARATOR", ","), ("GROUPING_SEPARATOR", ",")]).is_err());
+        assert!(set(&[("DECIMAL_SEPARATOR", ",.")]).is_err());
+        assert!(set(&[("DECIMAL_SEPARATOR", "5")]).is_err());
+        assert!(
+            set(&[("DATE_FORMAT", "dd/mm/yyyy")]).is_err(),
+            "mm is minutes, and there is no month"
+        );
+        assert!(set(&[("DECIMAL_SEPARATOR", ","), ("GROUPING_SEPARATOR", " ")]).is_ok());
+    }
+
+    #[test]
+    fn a_lost_connection_is_a_transient_or_connect_failure_and_nothing_else() {
+        let lost = |error: EngineError| Failure::server(DriverKind::Postgres, &error).lost;
+        assert!(lost(EngineError::Connect {
+            message: "gone".to_owned(),
+            kind: FailureKind::Transient,
+        }));
+        assert!(lost(EngineError::Query {
+            message: "reset".to_owned(),
+            code: None,
+            position: None,
+            kind: FailureKind::Transient,
+        }));
+        assert!(
+            !lost(query_error(Some("23505"))),
+            "a constraint violation is a bad row"
+        );
+        assert!(!Failure::local(&CliError::Usage("x".to_owned())).lost);
+    }
+
+    #[test]
+    fn a_lost_connection_says_where_and_what_was_not_attempted() {
+        let mut outcome = Outcome {
+            written: 40,
+            ..Outcome::default()
+        };
+        outcome.lose_connection(41, 41);
+        let skip = connection_lost_message(&outcome, false, "rows", "public.t");
+        assert!(
+            skip.contains("rows after line 41 were not attempted"),
+            "{skip}"
+        );
+        assert!(
+            skip.contains("the 40 rows already written to public.t remain"),
+            "{skip}"
+        );
+        outcome.lose_connection(201, 400);
+        let batch = connection_lost_message(&outcome, true, "rows", "public.t");
+        assert!(
+            batch.contains("while writing lines 201-400; rows after line 400"),
+            "{batch}"
+        );
+        assert!(
+            batch.contains("no rows were written to public.t"),
+            "{batch}"
+        );
     }
 
     #[test]

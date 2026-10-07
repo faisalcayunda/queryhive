@@ -233,7 +233,7 @@ comes back, which is what the app decodes.
 | `objects` `catalogs` `schemas` `tables` | introspection for the object tree |
 | `test` | connect and report, without reading rows |
 | `export` | stream a query into any of the ten formats |
-| `import_data` | stream a CSV, read an XLSX whole, or run a `.sql` file's statements into a table (ADR-0019, ADR-0022) |
+| `import_data` | stream a CSV, JSON or XLSX (its string table is held, and size-limited), or run a `.sql` file's statements into a table (ADR-0019, ADR-0022) |
 | `apply_changes` | run a reviewed INSERT/UPDATE/DELETE plan in one transaction (ADR-0020) |
 | `to_table` | `CREATE TABLE AS` / `DROP + CREATE` / `INSERT INTO … SELECT` |
 | `preview` `count` `explain` | the first N rows, a row count, the plan |
@@ -267,6 +267,11 @@ Batching and output:
 | `COLUMNS` | header row | `[{source,target,include}]`; required when a CSV has no header |
 | `FOREIGN_KEYS` | `on` | `off` disables the server's foreign-key checks for the import, restored at both exits |
 | `IMPORT_BATCH` `NULL_TEXT` `DELIMITER` `HEADER` `SHEET` | | row-import options |
+| `DATE_FORMAT` | unset | `dd/MM/yyyy HH:mm`: read date and timestamp columns in the engine and send ISO (a server's `DateStyle` would read `03/04/2024` as 4 March) |
+| `DECIMAL_SEPARATOR` `GROUPING_SEPARATOR` | unset | read `1.500,25` as 1500.25; grouping is only read together with a decimal separator |
+| `ALLOW_SHORT_ROWS` | off | pad a CSV row that has fewer fields than the header; otherwise it is a rejected row |
+| `ENCODING` | `utf-8` | a CSV file's code page (`cp1252`, `latin-1`...); the file is scanned before the first write |
+| `IMPORT_XLSX_MAX_BYTES` `IMPORT_XLSX_MAX_CELLS` | 128 MiB, 50 million | refuse a larger workbook, or one declaring more rows times columns |
 
 Per-format options: `DELIMITER ENCODING HEADER BOM NULL_TEXT` (txt/csv), `JSONL`,
 `SQL_TABLE`, `SHEET`, `DBF_CHAR_WIDTH DBF_ENCODING`.
@@ -329,7 +334,7 @@ crates/
   qh-driver-postgres/  qh-driver-mysql/    libpq / MySQL protocol clients
   qh-export/        streaming writers — txt, csv, json, xml, html, sql, xls, xlsx, dbf, parquet —
                     part splitting, plan
-  qh-import/        streaming CSV and whole-workbook XLSX readers
+  qh-import/        streaming CSV, XLSX and JSON readers, and the value formats an import reads
   qh-sql/           identifier quoting and the SQL a connection's driver needs
   qh-storage/       connections.json; qh-credentials/ the Keychain side
   qh-tunnel/        the SSH bastion a connection can be reached through

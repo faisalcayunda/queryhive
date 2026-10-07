@@ -2893,6 +2893,7 @@ dependencies = [
  "calamine",
  "csv",
  "qh-core",
+ "qh-export",
  "qh-sql",
  "serde",
  "serde_json",

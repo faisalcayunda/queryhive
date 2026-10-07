@@ -32,6 +32,10 @@ pub struct Progress {
     floor: Duration,
     last: Option<u64>,
     at: Instant,
+    /// How far through its source an import is, put on every event once set.
+    bytes: Option<u64>,
+    bytes_total: Option<u64>,
+    rows_total: Option<u64>,
 }
 
 impl Progress {
@@ -42,7 +46,41 @@ impl Progress {
             floor: Duration::from_millis(u64::try_from(floor_ms).unwrap_or(0)),
             last: None,
             at: Instant::now(),
+            bytes: None,
+            bytes_total: None,
+            rows_total: None,
         }
+    }
+
+    /// What the next events say about the source file: the size of it in bytes (CSV, JSON)
+    /// and the rows a sheet declares (XLSX, whose zip is read by seeking, so a byte count
+    /// would not mean how far through the sheet). A count of rows alone cannot make a bar
+    /// for a file whose row count nobody knows.
+    pub fn set_totals(&mut self, bytes_total: Option<u64>, rows_total: Option<u64>) {
+        self.bytes_total = bytes_total;
+        self.rows_total = rows_total;
+    }
+
+    /// How many bytes of the file have been read, for the next events.
+    pub fn set_bytes(&mut self, bytes: Option<u64>) {
+        self.bytes = bytes;
+    }
+
+    /// Emit the counter now, throttle or not: the closing event of a run, so the last count
+    /// the user sees is the true one.
+    pub fn force(&mut self, rows: u64, out: &mut dyn Emitter) -> io::Result<()> {
+        self.last = Some(rows);
+        self.at = Instant::now();
+        out.emit(self.event("rows", rows))
+    }
+
+    fn event(&self, key: &str, count: u64) -> serde_json::Value {
+        event("progress")
+            .field(key, count)
+            .maybe("bytes", self.bytes)
+            .maybe("bytes_total", self.bytes_total)
+            .maybe("rows_total", self.rows_total)
+            .build()
     }
 
     /// The last count reported, or `None` if nothing has been.
@@ -70,7 +108,7 @@ impl Progress {
         {
             self.last = Some(count);
             self.at = Instant::now();
-            out.emit(event("progress").field(key, count).build())?;
+            out.emit(self.event(key, count))?;
         }
         Ok(())
     }
