@@ -16,33 +16,33 @@ final class FontFloorTests: XCTestCase {
     private static let pending: [String: (lines: Int, task: String)] = [
         "SidebarTree.swift": (2, "W9-T3 (QUERYHIVE and FAVOURITES become DecorativeLabel)"),
         "ResultGrid.swift": (12, "W10-T3 (V-9)"),
-        "Workspace.swift": (1, "W10-T7 (the editor's line count, with the gutter numbers; V-10)"),
-        // The editor's gutter numbers: `numberFont`'s two 10.5 pt (the default and the setter's
-        // initial value). They move with the 16 `editor-*` scenes, which is V-10, not V-9.
-        "SQLEditor.swift": (2, "W10-T7b (the gutter numbers, 11 pt; V-10)"),
     ]
 
     private static let sources = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("Sources/QueryHive")
 
+    private static let literal = try! NSRegularExpression(
+        pattern: #"(?:\.(?:ui|code)\(|codeNSFont\(size:|ofSize:)\s*([0-9]+(?:\.[0-9]+)?)"#)
+
+    /// The sizes under 11 that a line of source writes as a literal in a font call.
+    static func lowSizes(in text: String) -> [Double] {
+        let range = NSRange(text.startIndex..., in: text)
+        return literal.matches(in: text, range: range).compactMap { match in
+            Range(match.range(at: 1), in: text).flatMap { Double(text[$0]) }.flatMap { $0 < 11 ? $0 : nil }
+        }
+    }
+
     /// Every `.ui(` / `.code(` whose first argument is a number below 11, and every AppKit
     /// `codeNSFont(size:` / `ofSize:` literal below 11: (file, line, size, text).
     private func lowCalls() throws -> [(file: String, line: Int, size: Double, text: String)] {
-        let pattern = try NSRegularExpression(
-            pattern: #"(?:\.(?:ui|code)\(|codeNSFont\(size:|ofSize:)\s*([0-9]+(?:\.[0-9]+)?)"#)
         let files = try XCTUnwrap(FileManager.default.enumerator(at: Self.sources,
                                                                  includingPropertiesForKeys: nil))
         var found: [(String, Int, Double, String)] = []
         for case let url as URL in files where url.pathExtension == "swift" {
             let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
             for (index, text) in lines.enumerated() {
-                let range = NSRange(text.startIndex..., in: text)
-                for match in pattern.matches(in: text, range: range) {
-                    guard let number = Range(match.range(at: 1), in: text),
-                          let size = Double(text[number]), size < 11 else { continue }
-                    found.append((url.lastPathComponent, index + 1, size, text))
-                }
+                for size in Self.lowSizes(in: text) { found.append((url.lastPathComponent, index + 1, size, text)) }
             }
         }
         return found
@@ -73,13 +73,20 @@ final class FontFloorTests: XCTestCase {
         XCTAssertGreaterThan(try lowCalls().count, 10, "the scan found the owed lines")
     }
 
-    /// The scan reaches the AppKit fonts: the editor's gutter numbers are in it (they are owed to
-    /// W10-T7b), and the grid's files, whose gutter is 11, are not.
-    func testTheScanSeesTheAppKitFontsAndTheGridIsClean() throws {
+    /// The scan reaches the AppKit fonts, which SwiftUI's `.font` scan could not see.
+    func testTheScanReadsAppKitFontLiterals() {
+        XCTAssertEqual(Self.lowSizes(in: "numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)"), [10.5])
+        XCTAssertEqual(Self.lowSizes(in: ".monospacedSystemFont(ofSize: 10, weight: .regular)"), [10])
+        XCTAssertEqual(Self.lowSizes(in: ".font(.code(9, weight: .semibold))"), [9])
+        XCTAssertEqual(Self.lowSizes(in: ".code(11) .ui(12.5) ofSize: 13"), [])
+    }
+
+    /// Nothing the grid or the editor draws is under 11: the grid's gutter is 11, and so are the
+    /// editor's line numbers and the count in its corner (W10-T7b, D-17).
+    func testTheGridAndTheEditorAreClean() throws {
         let calls = try lowCalls()
-        XCTAssertEqual(calls.filter { $0.file == "SQLEditor.swift" }.count, 2)
         for file in ["GridRowView.swift", "GridHeaderView.swift", "ResultGridTable.swift", "GridMetrics.swift",
-                     "GridTableView.swift"] {
+                     "GridTableView.swift", "SQLEditor.swift", "Workspace.swift"] {
             XCTAssertTrue(calls.filter { $0.file == file }.isEmpty, "\(file) has no text under 11 pt")
         }
     }

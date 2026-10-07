@@ -49,6 +49,8 @@ struct Workspace: View {
             }
         }
         .background(Backdrop(hue: .exporter))
+        // ⌘= for Increase Font Size, the key the menu's ⌘+ does not answer on a US keyboard (once).
+        .onAppear { model.installFontKeys() }
         // As a background, not a wrapper: a GeometryReader around the stack would propose its own
         // (unbounded) size and the layout would collapse. This one only reports.
         .background {
@@ -610,7 +612,7 @@ struct EditorPane: View {
                             .foregroundStyle(Tone.ink.opacity(0.9))
                     }
                 }
-                .font(.code(10.5))
+                .font(.code(LineNumberRulerView.numberPointSize))
                 .padding(.trailing, 12)
                 .padding(.bottom, 7)
                 .allowsHitTesting(false)

@@ -28,6 +28,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case previousTab
     case peekCell
     case toggleRecord
+    case fontBigger
+    case fontSmaller
+    case fontReset
 
     /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
     enum Scope { case scheme, platform }
@@ -79,6 +82,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .previousTab: "Show Previous Tab"
         case .peekCell: "Peek Cell"
         case .toggleRecord: "Toggle Record View"
+        case .fontBigger: "Increase Font Size"
+        case .fontSmaller: "Decrease Font Size"
+        case .fontReset: "Actual Size"
         }
     }
 }
@@ -177,6 +183,12 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         .peekCell: Shortcut("y", .command),
         // Xcode's Inspectors key, and the one W9 reserved for this panel.
         .toggleRecord: Shortcut("i", [.command, .option]),
+        // The size of the text in the region that has the keyboard (W10-T7, D-16). ⌘= is the same
+        // key as ⌘+ without the shift, which `FontKeyRouter` answers on its own
+        // (`EditorFontSizeTests.testEqualsIsAnAliasOfPlusAndNothingElseIs`).
+        .fontBigger: Shortcut("+", .command),
+        .fontSmaller: Shortcut("-", .command),
+        .fontReset: Shortcut("0", .command),
     ]
 
     private static let dbeaverTable: [ShortcutAction: Shortcut] = [
@@ -226,6 +238,18 @@ enum TabKeyRouter {
     static func route(keyCode: UInt16, control: Bool, shift: Bool, command: Bool, option: Bool) -> TabKeyAction? {
         guard keyCode == tabKeyCode, control, !command, !option else { return nil }
         return shift ? .previous : .next
+    }
+}
+
+/// ⌘= as an alias of Increase Font Size (⌘+). SwiftUI binds one key per menu item, and on a US keyboard
+/// ⌘+ is ⇧⌘=, which a person pressing the key they see (=) does not do. Pure, so it is tested without an
+/// `NSEvent`.
+enum FontKeyRouter {
+    static func route(charactersIgnoringModifiers: String?, command: Bool, control: Bool,
+                      option: Bool) -> AppModel.FontStep? {
+        // Shift is allowed: ⇧⌘= is what ⌘+ is, and the menu cannot be relied on to answer it.
+        guard command, !control, !option, charactersIgnoringModifiers == "=" else { return nil }
+        return .bigger
     }
 }
 

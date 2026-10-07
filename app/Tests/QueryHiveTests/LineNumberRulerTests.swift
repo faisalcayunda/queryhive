@@ -134,3 +134,76 @@ final class LineNumberRulerTests: XCTestCase {
         XCTAssertGreaterThan(ruler.ruleThickness, widest + 8, "the widest number does not fit the gutter")
     }
 }
+
+// MARK: W10-T7b: the numbers at 11 pt, and the run mark of a second statement (B-2)
+
+@MainActor
+final class LineNumberRulerGutterTests: XCTestCase {
+    private var host: EditorTestHost?
+
+    override func setUp() {
+        super.setUp()
+        isolateConnectionStore()
+    }
+
+    override func tearDown() {
+        host?.close()
+        host = nil
+        super.tearDown()
+    }
+
+    func testTheGutterWidthIsEightPointsADigitPlusTheMarginAndTheRunColumn() {
+        // Two digits is the least it reserves.
+        XCTAssertEqual(LineNumberRulerView.gutterWidth(forLines: 1), 36)
+        XCTAssertEqual(LineNumberRulerView.gutterWidth(forLines: 99), 36)
+        XCTAssertEqual(LineNumberRulerView.gutterWidth(forLines: 100), 44)
+        XCTAssertEqual(LineNumberRulerView.gutterWidth(forLines: 1, showsRunMarks: true), 50)
+        // The placeholder starts where the text does: the gutter plus the text view's own inset.
+        XCTAssertEqual(LineNumberRulerView.textOriginX(forLines: 1, showsRunMarks: true), 58)
+        XCTAssertEqual(LineNumberRulerView.textOriginX(forLines: 1), 44)
+    }
+
+    private static let wrapped = """
+    SELECT kode_wilayah, nama, jumlah_jiwa, bobot, aktif, diperbarui, catatan, kode_wilayah AS kode_lagi, nama AS nama_lagi, jumlah_jiwa AS jiwa_lagi, bobot AS bobot_lagi FROM hive.analytics.penerima_manfaat WHERE kode_wilayah IN ('32.01.01.2001', '32.01.01.2002', '32.01.01.2003', '32.01.02.1004', '32.01.02.1005', '32.01.03.2010', '32.01.03.2011', '32.01.04.3001');
+    SELECT 1
+    """
+
+    /// A statement's range begins right after the previous `;`, so the second of `a;\nb` begins on `a`'s
+    /// line. Each statement is marked on the line its text starts on, wrapped or not.
+    func testEachStatementIsMarkedOnTheLineItsTextStartsOn() throws {
+        for wrap in [true, false] {
+            var layout = EditorLayout.standard
+            layout.wordWrap = wrap
+            let h = try EditorTestHost(sql: Self.wrapped, layout: layout, theme: .daylight)
+            defer { h.close() }
+            try h.settle()
+            XCTAssertEqual(h.ruler.runMarks.map(\.headerLine), [0, 1], "wrap \(wrap)")
+            let second = (Self.wrapped as NSString).range(of: "SELECT 1").location
+            XCTAssertEqual(h.ruler.runMarks.map(\.headerOffset).last, second, "wrap \(wrap)")
+
+            // And the triangle is drawn: saturated pixels in the run column on the second line's row.
+            let layoutManager = try XCTUnwrap(h.textView.layoutManager)
+            let glyph = layoutManager.glyphIndexForCharacter(at: second)
+            let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let inHost = h.textView.convert(NSRect(x: 0, y: line.minY + h.textView.textContainerOrigin.y,
+                                                   width: 1, height: line.height), to: h.view)
+            let size = h.view.bounds.size
+            let y = h.view.isFlipped ? inHost.midY : size.height - inHost.midY
+            let rep = try h.bitmap()
+            let saturation = (4...12).map { dx -> Double in
+                let c = rep.rgb(atX: 12 + 4 + Double(dx) / 2, y: y, viewSize: size)
+                return max(c.r, c.g, c.b) - min(c.r, c.g, c.b)
+            }.max() ?? 0
+            XCTAssertGreaterThan(saturation, 40, "wrap \(wrap): no run triangle beside the second statement")
+        }
+    }
+
+    /// Whitespace and blank lines before a statement are not where it starts.
+    func testBlankLinesBeforeAStatementAreNotItsStart() throws {
+        let sql = "SELECT 1;\n\n\n   SELECT 2;\n-- note\nSELECT 3"
+        let h = try EditorTestHost(sql: sql)
+        host = h
+        try h.settle()
+        XCTAssertEqual(h.ruler.runMarks.map(\.headerLine), [0, 3, 4])
+    }
+}

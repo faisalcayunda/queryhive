@@ -31,6 +31,8 @@ final class EditorPreferences {
     static let standardFontSize = 12.5
     /// The smallest and largest size the editor offers, in points.
     static let fontSizeRange = 10.0...28.0
+    /// What ⌘+ and ⌘− move the size by, in points (W10-T7, D-16). Settings steps by half a point.
+    static let fontSizeStep = 1.0
 
     /// The store these switches are read from and written to.
     ///
