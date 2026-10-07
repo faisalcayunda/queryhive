@@ -77,9 +77,17 @@ impl ChunkBuilder {
     /// Drop every staged row past the first `rows`. For a caller that asked a cursor for
     /// `max_rows` and was handed more.
     pub fn truncate(&mut self, rows: usize) {
-        for column in &mut self.columns {
-            column.truncate(rows);
+        if rows >= self.rows() {
+            return;
         }
+        // The estimate follows the cut, or `is_full` would seal a short chunk early.
+        let dropped: usize = self
+            .columns
+            .iter_mut()
+            .flat_map(|column| column.drain(rows..))
+            .map(|cell| Self::cell_width(&cell))
+            .sum();
+        self.estimated_bytes -= dropped;
     }
 
     /// True past either seal limit: callers seal and start a new chunk.
@@ -89,7 +97,7 @@ impl ChunkBuilder {
 
     /// Estimated bytes one cell adds to a chunk; shared by the seal check, the
     /// `truncate` adjustment and `split_sealable`.
-    fn cell_width(value: &Value) -> usize {
+    pub fn cell_width(value: &Value) -> usize {
         match value {
             Value::Text(text) | Value::Json(text) => text.len() + 9,
             Value::Bytes(bytes) => bytes.len() + 9,
@@ -207,7 +215,15 @@ impl ChunkBuilder {
             });
         }
         let rows = batch.rows();
-        for (column, cells) in batch.into_columns().into_iter().enumerate() {
+        let columns = batch.into_columns();
+        if self.is_empty() {
+            // The usual case (a fresh builder per fetch): take the batch's columns whole
+            // instead of moving every cell, and only measure them.
+            self.estimated_bytes = columns.iter().flatten().map(Self::cell_width).sum();
+            self.columns = columns;
+            return Ok(rows);
+        }
+        for (column, cells) in columns.into_iter().enumerate() {
             for cell in cells {
                 self.push_value(column, cell);
             }

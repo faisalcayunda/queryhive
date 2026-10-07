@@ -98,9 +98,9 @@ use qh_core::{
     offset_of_line, ColumnBatch, ColumnMeta, EngineError, FailureKind, Value, CONNECT_TIMEOUT,
 };
 use qh_driver::{
-    BrowseLevel, Capabilities, ConnectionConfig, Cursor, Driver, DriverKind, ExecuteOptions,
-    ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath, ObjectsPage, Parameter,
-    ParameterStyle, Session,
+    BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, Cursor, Driver, DriverKind,
+    ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql, ObjectPath,
+    ObjectsPage, Parameter, ParameterStyle, Session,
 };
 use qh_sql::{
     classify_readings, statements_dialect, strip_terminator_dialect, Dialect, StatementKind,
@@ -136,6 +136,13 @@ const BATCH_BACKLOG: usize = 4;
 /// it, so a producer that read 1024 rows does not hand 1024 to a caller who asked
 /// for 100.
 const DEFAULT_PRODUCER_BATCH: usize = 1024;
+
+/// The most estimated bytes one producer batch holds (the store's own cell estimate).
+///
+/// A row count alone lets 1024 wide rows, times the [`BATCH_BACKLOG`] channel and the batch the
+/// cursor is serving, sit in memory outside the result store's budget (W8-F2, the MySQL cold
+/// peak). Bounding bytes as well keeps that staging near `(BATCH_BACKLOG + 2)` times this.
+const BATCH_MAX_BYTES: usize = 512 * 1024;
 
 /// How long a session waits for the producer of its previous statement to hand the
 /// connection back before it calls the cursor still in use.
@@ -1270,7 +1277,7 @@ async fn consume<P: mysql_async::prelude::Protocol>(
             }
         }
         batch.push_row(&row);
-        if batch.rows >= config.batch_rows {
+        if batch.rows >= config.batch_rows || batch.bytes >= BATCH_MAX_BYTES {
             let full = match batch.take() {
                 Ok(full) => full,
                 Err(error) => return (Err(error), false),
@@ -1340,6 +1347,8 @@ struct BatchBuilder {
     binary: Vec<bool>,
     columns: Vec<Vec<Value>>,
     rows: usize,
+    /// Estimated bytes staged, counted like `ChunkBuilder` counts them.
+    bytes: usize,
 }
 
 impl BatchBuilder {
@@ -1357,12 +1366,14 @@ impl BatchBuilder {
             binary,
             columns,
             rows: 0,
+            bytes: 0,
         }
     }
 
     fn push_row(&mut self, row: &mysql_async::Row) {
         for (index, column_type) in self.column_types.iter().enumerate() {
             let value = normalize::from_value(*column_type, row.as_ref(index), self.binary[index]);
+            self.bytes += ChunkBuilder::cell_width(&value);
             self.columns[index].push(value);
         }
         self.rows += 1;
@@ -1382,6 +1393,7 @@ impl BatchBuilder {
                 .collect(),
         );
         self.rows = 0;
+        self.bytes = 0;
         ColumnBatch::new(columns).map_err(|error| EngineError::Internal {
             message: format!("batch shape: {error}"),
         })
