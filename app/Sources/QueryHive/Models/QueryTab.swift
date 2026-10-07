@@ -712,7 +712,10 @@ final class QueryTab: Identifiable {
 
     /// The cell an editor is over and the text typed into it, held here — not in the queue — until
     /// the session ends. Replacing this buffer is the whole cost of a keystroke.
-    @ObservationIgnored private var editSession: CellEditSession?
+    @ObservationIgnored private var editSession: CellEditSession? {
+        // Mirrored into an observed flag only when it flips, never per keystroke.
+        didSet { if (editSession != nil) != hasOpenCellEdit { hasOpenCellEdit = editSession != nil } }
+    }
 
     /// One editing session: the cell, the value it started from, and the text so far.
     private struct CellEditSession {
@@ -725,10 +728,27 @@ final class QueryTab: Identifiable {
 
     /// Open an editing session over a cell, seeded with what it currently shows.
     func beginCellEdit(at key: CellKey) {
+        // A session left open by a grid that has since gone (a panel switch) is committed to its own
+        // cell, not overwritten: its text is the user's, and the new editor would stage it on the
+        // wrong cell.
+        endCellEdit()
         guard !refusedWhileBusy() else { return }
+        if cellEdits.isDeleted(key.row) {
+            note(.warning, "This row is marked for deletion. Restore it to edit it.")
+            return
+        }
         let seed = cellValue(at: key) ?? ""
         editSession = CellEditSession(key: key, original: fetchedValue(at: key), text: seed)
     }
+
+    /// Whether a session is open over a cell. Observed, so the grid drops its editor overlay when a
+    /// session is ended from outside (Save, Review, Apply) and the menu sees text that is typed but
+    /// not yet staged. Also the test hook for the leak a fill used to leave behind.
+    private(set) var hasOpenCellEdit = false
+
+    /// The cell the open session is over, so the editor overlay is only shown when `beginCellEdit`
+    /// really took the session (it refuses a deleted row, an apply in flight and stale rows).
+    var editingCellKey: CellKey? { editSession?.key }
 
     /// A keystroke. The buffer is replaced; nothing reaches the queue and nothing is registered with
     /// undo until the session ends. That is the whole point: typing "hello" is one undo, not five.
@@ -746,46 +766,121 @@ final class QueryTab: Identifiable {
     /// A buffer typed back to the value the cell was fetched with stages nothing, and because the
     /// queue is unchanged between the two snapshots, no undo step is registered either — an undo
     /// that visibly does nothing is worse than no undo.
+    ///
+    /// Only the view being replaced refuses it (D-27), not an apply in flight: the text was typed
+    /// before the apply began, and dropping it would lose what the person wrote. It lands in the
+    /// queue beside the plan being run, and the apply's success keeps it (`CellEdits.removing`, PF-2).
     func endCellEdit() {
         guard let session = editSession else { return }
         editSession = nil
-        guard !refusedWhileBusy() else { return }
+        guard !viewBusyRefusal() else { return }
         let before = cellEdits
-        cellEdits.edit(session.text, at: session.key, original: session.original)
+        if session.key.row < 0 {
+            // An added row's cell: empty text takes the value out (the column is then left out of
+            // the INSERT), and `DEFAULT` is the keyword.
+            cellEdits.setInserted(session.text, row: session.key.row, column: session.key.column)
+        } else {
+            cellEdits.edit(session.text, at: session.key, original: session.original)
+        }
         registerGridEdit(before)
     }
 
     /// Stage the editor's text over a whole selected block as one undo step.
+    ///
+    /// The selection is in table rows, so the block is cut at the border (`GridRowSpace.split`): the
+    /// fetched rows stage UPDATE edits and the added rows take the text as their own values. Nothing
+    /// is ever keyed to a table row that is past the fetched ones.
     func fillCellEdits(_ text: String, over selection: CellRange) {
-        guard !refusedWhileBusy() else { return }
+        guard !refusedWhileBusy(), !exceedsCellCeiling(selection.cellCount) else { return }
         let before = cellEdits
-        cellEdits.fill(text, over: selection, rows: result, columns: visibleColumnSources)
+        let parts = rowSpace.split(selection.top...selection.bottom)
+        if let fetched = parts.fetched {
+            cellEdits.fill(text, over: CellRange(from: (fetched.lowerBound, selection.left),
+                                                 to: (fetched.upperBound, selection.right)),
+                           rows: result, columns: visibleColumnSources)
+        }
+        for (_, id) in parts.inserted {
+            for position in selection.left...selection.right {
+                guard let source = columnLayout.source(at: position) else { continue }
+                cellEdits.setInserted(text, row: id, column: source)
+            }
+        }
         registerGridEdit(before)
     }
 
-    /// Stage a pasted block as one undo step.
+    /// Stage a pasted block as one undo step. `origin` is a table row and a display column; a line
+    /// that lands past the last row is dropped, since a paste adds no rows.
     func pasteCellEdits(_ text: String, at origin: CellKey, columnCount: Int) {
         guard !refusedWhileBusy() else { return }
+        let lines = CellEdits.parse(text)
+        guard !exceedsCellCeiling(lines.reduce(0) { $0 + $1.count }) else { return }
         let before = cellEdits
-        cellEdits.paste(text, at: origin, rows: result, columnCount: columnCount,
-                        columns: visibleColumnSources)
+        let space = rowSpace
+        let fetchedLines = origin.row < space.fetched ? min(lines.count, space.fetched - origin.row) : 0
+        cellEdits.paste(lines: Array(lines.prefix(fetchedLines)), at: origin, rows: result,
+                        columnCount: columnCount, columns: visibleColumnSources)
+        for (down, line) in lines.enumerated().dropFirst(fetchedLines) {
+            guard case .inserted(let id, _) = space.kind(ofTableRow: origin.row + down) else { continue }
+            for (across, field) in line.enumerated() where origin.column + across < columnCount {
+                guard let source = columnLayout.source(at: origin.column + across) else { continue }
+                cellEdits.setInserted(field, row: id, column: source)
+            }
+        }
         registerGridEdit(before)
     }
 
     static let viewBusyMessage = "The grid is updating its rows"
+    static let applyingMessage = "The changes are being applied"
+    static let staleAfterApplyMessage = "These rows changed on the server. Run the query again before editing them"
 
     /// Edits name rows of the view on screen, and a view is on its way out (D-27): refuse, and say so.
-    private func refusedWhileBusy() -> Bool {
+    private func viewBusyRefusal() -> Bool {
         guard viewBusy else { return false }
         note(.warning, Self.viewBusyMessage)
         return true
     }
 
+    /// Everything that stops a new edit: a view being replaced, an apply in flight (PF-2: one apply
+    /// per tab, and nothing new is staged under it), or rows the last apply left behind.
+    private func refusedWhileBusy() -> Bool {
+        if viewBusyRefusal() { return true }
+        if applying { note(.warning, Self.applyingMessage + "…"); return true }
+        if rowsStaleAfterApply { note(.warning, Self.staleAfterApplyMessage + "."); return true }
+        return false
+    }
+
+    /// The most cells one fill, paste or delete may stage (PF-12). Every undo step keeps the queue it
+    /// came from, so an unbounded block would multiply into a hundred copies of itself.
+    static let editCellCeiling = 50_000
+    /// How many steps the undo history keeps (PF-12).
+    static let undoLevels = 100
+
+    func exceedsCellCeiling(_ cells: Int) -> Bool {
+        guard cells > Self.editCellCeiling else { return false }
+        note(.warning, "That is \(cells.formatted()) cells, and the grid stages at most "
+             + "\(Self.editCellCeiling.formatted()) at a time. Select fewer, or change them with a statement.")
+        return true
+    }
+
+    /// An apply is running for this tab (PF-2): a second one, ⌘S, the review sheet and a new edit are
+    /// all refused until it ends.
+    var applying = false
+
+    /// The last apply wrote rows the grid still shows as they were, and the query could not be run
+    /// again to show them (DBX-27's fallback). Edits are refused until a new result replaces them,
+    /// because a plan built from the old values would match nothing.
+    var rowsStaleAfterApply = false
+
+    /// Raised by ⌘S: the grid opens its review sheet and puts this down. A flag rather than a
+    /// counter, so a grid that is not on screen yet (the panel shows the log, or is collapsed) still
+    /// finds the request when it appears.
+    var reviewRequested = false
+
     /// Empty the queue as one undo step.
     func discardCellEdits() {
         let before = cellEdits
         cellEdits.discard()
-        registerGridEdit(before)
+        registerGridEdit(before, actionName: "Discard Changes")
     }
 
     /// Set the selection and cursor from the coordinator.
@@ -801,13 +896,42 @@ final class QueryTab: Identifiable {
 
     /// What one cell shows: its staged text when it has one, the fetched value otherwise.
     func cellValue(at key: CellKey) -> String? {
+        // An added row has no fetched value: what it holds is what the user typed into it.
+        if key.row < 0 { return cellEdits.insertedValue(row: key.row, column: key.column) }
         if let staged = cellEdits.value(at: key) { return staged }
         return fetchedValue(at: key)
     }
 
-    /// The value the server sent for a cell, before any staged edit.
+    /// The value the server sent for a cell, before any staged edit. Never reads the store for an
+    /// added row, whose key is a negative id and not a row of the result.
     func fetchedValue(at key: CellKey) -> String? {
-        result.fullValue(row: key.row, column: key.column, format: .raw)
+        guard key.row >= 0 else { return nil }
+        return result.fullValue(row: key.row, column: key.column, format: .raw)
+    }
+
+    /// The rows the table draws: the result's, then the added ones.
+    var rowSpace: GridRowSpace { GridRowSpace(fetched: result.count, inserted: cellEdits.inserted) }
+
+    /// Keep the selection and the cursor inside the rows that are there. Every change of
+    /// `cellEdits` that moves `inserted.count` calls this, because a table row past the fetched ones
+    /// is an added row and deleting an earlier one shifts the rest (blueprint w10 §5.1).
+    func reconcileSelectionWithRowSpace() {
+        let space = rowSpace
+        guard space.count > 0 else {
+            if cellSelection != nil { cellSelection = nil }
+            cellCursor = nil
+            return
+        }
+        guard cellSelection != nil || cellCursor != nil else { return }
+        func clamp(_ position: CellPos) -> CellPos {
+            CellPos(row: min(max(position.row, 0), space.count - 1), column: position.column)
+        }
+        let selection = cellSelection
+        let anchor = clamp(cellCursor?.anchor ?? CellPos(row: selection?.top ?? 0, column: selection?.left ?? 0))
+        let focus = clamp(cellCursor?.focus ?? CellPos(row: selection?.bottom ?? 0, column: selection?.right ?? 0))
+        let inside = selection.flatMap { space.clamped($0) }
+        guard cellCursor?.anchor != anchor || cellCursor?.focus != focus || selection != inside else { return }
+        selectCells(anchor: anchor, focus: focus)
     }
 
     /// Throw the queued-edit history away, with the queue it describes.
@@ -815,23 +939,32 @@ final class QueryTab: Identifiable {
     /// Called wherever the grid invalidates the queue itself — a filter, a search, a sort, a new
     /// result — because an undo step in that history names rows and columns on a screen that no
     /// longer exists. Restoring such a step would put edits back onto cells the user never touched.
-    private func clearEditUndo() { editUndoManager.removeAllActions() }
+    func clearEditUndo() { editUndoManager.removeAllActions() }
 
     /// Record a queue change as one undo step, with a matching redo. No change means no step.
     ///
     /// Each call is its own group rather than left to the run loop: the session that ends here is
     /// already one user action, and grouping by event would merge two quick actions — a paste and
     /// the next edit — into a single undo.
-    private func registerGridEdit(_ before: CellEdits) {
+    ///
+    /// `actionName` is what Edit > Undo says ("Undo Add Row"). An undo and a redo both put a queue
+    /// back, so both reconcile the selection with the rows that queue draws.
+    func registerGridEdit(_ before: CellEdits, actionName: String = "Edit Cell") {
         guard before != cellEdits else { return }
         editUndoManager.beginUndoGrouping()
         editUndoManager.registerUndo(withTarget: self) { tab in
             let after = tab.cellEdits
             tab.cellEdits = before
-            tab.editUndoManager.registerUndo(withTarget: tab) { redo in redo.cellEdits = after }
+            tab.reconcileSelectionWithRowSpace()
+            tab.editUndoManager.registerUndo(withTarget: tab) { redo in
+                redo.cellEdits = after
+                redo.reconcileSelectionWithRowSpace()
+            }
+            tab.editUndoManager.setActionName(actionName)
         }
-        editUndoManager.setActionName("Edit Cell")
+        editUndoManager.setActionName(actionName)
         editUndoManager.endUndoGrouping()
+        reconcileSelectionWithRowSpace()
     }
 
     /// A counter that changes whenever the rows the grid draws are a different set: a new result,
@@ -847,6 +980,7 @@ final class QueryTab: Identifiable {
             guard oldValue !== activeResult else { return }
             viewGeneration += 1
             viewBusy = false
+            rowsStaleAfterApply = false
         }
     }
 
@@ -1057,6 +1191,7 @@ final class QueryTab: Identifiable {
         // Each registered edit is already one user action, so the manager must not merge two quick
         // actions into one collapse. `registerGridEdit` opens and closes a group per call.
         editUndoManager.groupsByEvent = false
+        editUndoManager.levelsOfUndo = Self.undoLevels
     }
 
     // MARK: Derived

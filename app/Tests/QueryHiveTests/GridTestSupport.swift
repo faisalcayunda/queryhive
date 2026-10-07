@@ -142,7 +142,8 @@ final class GridFixture {
                    filtered: filtered,
                    style: style,
                    filterPopover: nil,
-                   viewing: nil)
+                   viewing: nil,
+                   sessionOpen: tab.hasOpenCellEdit)
     }
 
     /// Lay the panel out and apply once.
@@ -162,7 +163,7 @@ final class GridFixture {
     /// The document's own size: `rows × rowHeight`, which is what AppKit gives the table once it
     /// is laid out inside a scroll view, and the width of the document, which scrolls.
     private func sizeDocument() {
-        let height = CGFloat(rowCount) * style.rowHeight
+        let height = CGFloat(coordinator.tableRowCount) * style.rowHeight
         let width = max(coordinator.geometry.totalWidth, scroll.contentView.bounds.width)
         table.setFrameSize(NSSize(width: width, height: height))
     }

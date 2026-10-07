@@ -15,7 +15,6 @@ final class FontFloorTests: XCTestCase {
     /// at the W10 gate; a count that falls fails here until the entry is lowered.
     private static let pending: [String: (lines: Int, task: String)] = [
         "SidebarTree.swift": (2, "W9-T3 (QUERYHIVE and FAVOURITES become DecorativeLabel)"),
-        "ResultGrid.swift": (12, "W10-T3 (V-9)"),
     ]
 
     private static let sources = URL(fileURLWithPath: #filePath)
@@ -70,7 +69,9 @@ final class FontFloorTests: XCTestCase {
     }
 
     func testTheScanSeesTheCalls() throws {
-        XCTAssertGreaterThan(try lowCalls().count, 10, "the scan found the owed lines")
+        // The list of owed lines has shrunk to the few that remain (the editor's gutter, the sidebar's
+        // labels); what this holds is that the scan still finds some, so it cannot pass by seeing none.
+        XCTAssertGreaterThan(try lowCalls().count, 0, "the scan found the owed lines")
     }
 
     /// The scan reaches the AppKit fonts, which SwiftUI's `.font` scan could not see.
@@ -86,7 +87,7 @@ final class FontFloorTests: XCTestCase {
     func testTheGridAndTheEditorAreClean() throws {
         let calls = try lowCalls()
         for file in ["GridRowView.swift", "GridHeaderView.swift", "ResultGridTable.swift", "GridMetrics.swift",
-                     "GridTableView.swift", "SQLEditor.swift", "Workspace.swift"] {
+                     "GridTableView.swift", "SQLEditor.swift", "Workspace.swift", "ResultGrid.swift"] {
             XCTAssertTrue(calls.filter { $0.file == file }.isEmpty, "\(file) has no text under 11 pt")
         }
     }

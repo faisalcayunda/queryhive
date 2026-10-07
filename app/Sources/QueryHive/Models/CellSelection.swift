@@ -222,8 +222,12 @@ enum GridClipboard {
     /// Throws when the store cannot answer: a copy that put blank cells on the clipboard in place of
     /// values it failed to read would be worse than one that did not happen (`StoreFailure.isStale`
     /// says whether it is worth telling the user).
+    ///
+    /// `inserted` is the queue's added rows: the selection is in table rows, so a block that reaches
+    /// past the fetched rows continues into them, and an added row copies what was typed into it
+    /// (a cell nobody typed in is blank, like a NULL). Fetched and added rows come out in table order.
     static func text(result: any ResultRows, selection: CellRange?, visible: [Int],
-                     withHeaders: Bool) throws -> String? {
+                     withHeaders: Bool, inserted: [CellEdits.InsertedRow] = []) throws -> String? {
         guard let selection else { return nil }
         let sources = (selection.left...selection.right)
             .compactMap { visible.indices.contains($0) ? visible[$0] : nil }
@@ -232,7 +236,20 @@ enum GridClipboard {
         let headers = sources.map { source in
             result.columns.indices.contains(source) ? result.columns[source].name : ""
         }
-        let rows = try result.rowsOrThrow(in: selection.top..<selection.bottom + 1, columns: sources)
+        let parts = GridRowSpace(fetched: result.count, inserted: inserted)
+            .split(selection.top...selection.bottom)
+        var rows: [[String?]] = []
+        if let fetched = parts.fetched {
+            rows = try result.rowsOrThrow(in: fetched.lowerBound..<fetched.upperBound + 1, columns: sources)
+        } else if inserted.isEmpty {
+            // No added rows to continue into: ask the store for the block as it always did, so a
+            // selection past the end reads what the store says about it and not nothing.
+            rows = try result.rowsOrThrow(in: selection.top..<selection.bottom + 1, columns: sources)
+        }
+        for (_, id) in parts.inserted {
+            let added = inserted.first { $0.id == id }
+            rows.append(sources.map { added?.values[$0] })
+        }
         guard !rows.isEmpty else { return withHeaders ? headers.joined(separator: "\t") : nil }
         // The projected rows are already narrowed to the selected columns, so the block this reads
         // is a rectangle from the origin: the range's own offsets would index past every row.

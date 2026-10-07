@@ -185,14 +185,15 @@ struct RecordReadFailure: Error, Equatable {
 
 extension QueryTab {
     /// Put the grid's cursor and selection on one field of the row the Record panel shows, and
-    /// return the cell's key (source column). `nil` for a row the grid has no place for, an added
-    /// row until the grid draws those, in which case nothing moves.
+    /// return the cell's key (source column; an added row's key carries its negative id). `nil` when
+    /// the cursor is on no row of the table, in which case nothing moves.
     @discardableResult
     func placeCursor(on field: RecordField) -> CellKey? {
-        guard let row = cellCursor?.focus.row, row >= 0 else { return nil }
+        guard let row = cellCursor?.focus.row,
+              let key = rowSpace.cellKey(forTableRow: row, source: field.source) else { return nil }
         let position = CellPos(row: row, column: field.position)
         selectCells(anchor: position, focus: position)
-        return CellKey(row: row, column: field.source)
+        return key
     }
 }
 
@@ -236,9 +237,11 @@ struct RecordPanel: View {
     @State private var expanded: Set<Int> = []
     @State private var cache = RecordRowCache()
 
-    /// The row the cursor is on, in the grid's row space: a fetched row's index, or an added row's
-    /// negative id.
-    private var row: Int? { tab.cellCursor?.focus.row }
+    /// The row the cursor is on, as the key it is edited under: a fetched row's index, or an added
+    /// row's negative id. The cursor itself is in table rows (`GridRowSpace`), so it is converted.
+    private var row: Int? {
+        tab.cellCursor.flatMap { tab.rowSpace.cellKey(forTableRow: $0.focus.row, source: 0)?.row }
+    }
 
     var body: some View {
         VStack(spacing: 0) {

@@ -264,11 +264,18 @@ final class GridAccessibilityTests: XCTestCase {
         let other = try XCTUnwrap(fixture.coordinator.ax.cell(row: 4, column: 0))
         XCTAssertEqual(other.accessibilityLabel(), "Row 5, column 1, kode: K-4")
 
+        // A row marked for deletion takes no edit (it would plan an UPDATE after its own DELETE), so
+        // "changed" is a different row's.
+        fixture.tab.beginCellEdit(at: CellKey(row: 5, column: 0))
+        fixture.tab.typeCellEdit("K-5 edited")
+        fixture.tab.endCellEdit()
+        XCTAssertEqual(try XCTUnwrap(fixture.coordinator.ax.cell(row: 5, column: 0)).accessibilityLabel(),
+                       "Row 6, column 1, kode: K-5 edited, changed")
         fixture.tab.beginCellEdit(at: CellKey(row: 3, column: 0))
         fixture.tab.typeCellEdit("K-3 edited")
         fixture.tab.endCellEdit()
         XCTAssertEqual(try XCTUnwrap(fixture.coordinator.ax.cell(row: 3, column: 0)).accessibilityLabel(),
-                       "Row 4, column 1, kode: K-3 edited, changed, marked for deletion")
+                       "Row 4, column 1, kode: K-3, marked for deletion")
     }
 
     // MARK: The focus setter (D-11, P-24)

@@ -93,6 +93,10 @@ struct QueryHiveApp: App {
                     .disabled(model.connections.isEmpty)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
             }
+            // Save is the review of the staged grid changes until the editor's file save arrives
+            // (W12-T2); it is the one item that replaces the system's.
+            CommandGroup(replacing: .saveItem) { items(.save) }
+            CommandGroup(after: .pasteboard) { items(.edit) }
             CommandMenu("Query") { items(.query) }
             CommandGroup(after: .sidebar) { items(.view) }
             CommandGroup(after: .windowArrangement) { items(.tab) }
@@ -130,10 +134,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var tabKeyMonitor: Any?
 
+    /// The model, for the one question that only the app can ask: may it quit (DBX-26). Weak: the
+    /// scene owns it.
+    weak var model: AppModel?
+
     /// ⌃Tab and ⌃⇧Tab, the aliases SwiftUI's one-key menu items cannot carry. Only when the main
     /// window is key with no sheet over it, so Settings and the sheets keep their own Tab.
     @MainActor
     func installTabKeys(for model: AppModel) {
+        self.model = model
         guard tabKeyMonitor == nil else { return }
         tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             MainActor.assumeIsolated {
@@ -155,8 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Under `--bench` a quit request is refused and logged: a benchmark that dies silently
     /// because something asked the app to quit is a lost measurement, not a result.
+    ///
+    /// Otherwise one question when quitting would lose staged changes or stop an import, an export
+    /// or an apply (DBX-26). This is the single path every way out takes: ⌘Q, the Dock, closing the
+    /// last window (`applicationShouldTerminateAfterLastWindowClosed`) and Sparkle's relaunch, which
+    /// ends in `NSApp.terminate`. Cancel keeps the app, and the work, exactly as it was. The session
+    /// is saved synchronously (`DatabaseEngine`), so there is no barrier to wait on.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        PerfSignposts.recording ? BenchMode.refuseTermination() : .terminateNow
+        if PerfSignposts.recording { return BenchMode.refuseTermination() }
+        return MainActor.assumeIsolated { model?.confirmQuit() ?? true } ? .terminateNow : .terminateCancel
     }
 
     // An engine child left running would keep writing after the window is gone.
