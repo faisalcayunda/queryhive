@@ -53,6 +53,9 @@ pub struct JsonRow {
     /// 1-based line where the element starts.
     pub line: usize,
     pub cells: Vec<Option<String>>,
+    /// Which cells were typed numbers in the file, as `RawRow::numeric`. Always empty for a
+    /// JSON file: a number-format setting is refused for JSON instead of being half-applied.
+    pub numeric: Vec<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,6 +166,11 @@ impl JsonSource {
         &self.unmapped
     }
 
+    /// Bytes of the file consumed so far, for progress by bytes.
+    pub fn bytes_read(&self) -> u64 {
+        self.offset as u64
+    }
+
     pub fn next_row(&mut self) -> Result<Option<JsonRow>, ImportError> {
         let (element, obj) = match self.queue.pop_front() {
             Some(entry) => entry,
@@ -193,6 +201,7 @@ impl JsonSource {
         Ok(Some(JsonRow {
             line: element.line,
             cells,
+            numeric: Vec::new(),
         }))
     }
 

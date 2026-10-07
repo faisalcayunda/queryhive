@@ -5,19 +5,21 @@
 //! 5 asks for are here, and the honesty about streaming differs between them,
 //! which is the most important thing this crate says.
 //!
-//! # CSV streams; XLSX cannot, and this crate does not pretend otherwise
+//! # CSV streams; XLSX streams its rows but must hold its string table
 //!
 //! The README's rule is that a result set is never held in memory, and the
 //! source study checked TablePro against the same rule it puts on QueryHive.
 //! TablePro's CSV reader mmaps the file and parses it in ranges, while its XLSX
-//! reader loads the workbook whole — and the reason is in the format: an XLSX
-//! sheet's cells are indices into a `sharedStrings` table, so a streaming read
-//! still has to hold that table, and there is no way to know its size before
-//! parsing it. This crate is stricter for CSV than TablePro ( [`csv::Reader`]
-//! reads one record at a time and the file is never mapped) and equally
-//! whole-file for XLSX, because it has no choice. The XLSX path says so at the
-//! call site rather than promising a bound it cannot keep: `import_data` names
-//! the limitation in `done`, and `README.md` repeats it.
+//! reader loads the workbook whole. This crate is stricter for CSV
+//! ( [`csv::Reader`] reads one record at a time and the file is never mapped).
+//! For XLSX the rows stream (`calamine`'s cell reader, on its own thread, a
+//! bounded queue of rows ahead of the caller) but the format interleaves a sheet
+//! with a `sharedStrings` table whose size is unknown until it is parsed, so that
+//! table is held. What bounds the memory is therefore a guard, not the reader: a
+//! file-size limit and a rows-times-columns limit ([`XLSX_MAX_BYTES`],
+//! [`XLSX_MAX_CELLS`]), refused with a [`ImportError::Limit`] before the first
+//! write. The engine is in-process, so running out of memory would take the app
+//! and its unsaved editor text with it.
 //!
 //! # What a row is
 //!
@@ -35,11 +37,14 @@ use thiserror::Error;
 
 mod csv_source;
 mod json_source;
+mod values;
 mod xlsx_source;
 
 pub use csv_source::CsvSource;
 pub use json_source::{JsonRow, JsonSource};
-pub use xlsx_source::XlsxSource;
+pub use qh_export::Codec;
+pub use values::{normalize_number, DatePattern, IsoDateTime, ValueError};
+pub use xlsx_source::{excel_digits, XlsxSource, XLSX_MAX_BYTES, XLSX_MAX_CELLS};
 
 /// The source formats this crate reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +82,14 @@ pub struct Options {
     pub header: bool,
     /// The worksheet to read, by name. `None` is the first sheet.
     pub sheet: Option<String>,
+    /// The CSV file's code page. `None` is UTF-8, and a file that is not valid in the
+    /// code page is refused before any row is read.
+    pub encoding: Option<Codec>,
+    /// The largest workbook file read, in bytes. `None` is [`XLSX_MAX_BYTES`].
+    pub xlsx_max_bytes: Option<u64>,
+    /// The most cells (rows times columns) a worksheet may declare or hold. `None` is
+    /// [`XLSX_MAX_CELLS`].
+    pub xlsx_max_cells: Option<u64>,
 }
 
 /// One data row: its 1-based line in the source, and its cells as text.
@@ -84,6 +97,10 @@ pub struct Options {
 pub struct RawRow {
     pub line: usize,
     pub cells: Vec<String>,
+    /// Which cells the file stores as a number, not as text (XLSX), so their text is already
+    /// in `.`-decimal form whatever locale the file's text cells are written in. Empty for a
+    /// format with no typed cells (CSV): every cell is text.
+    pub numeric: Vec<bool>,
 }
 
 /// Why a file could not be read.
@@ -123,6 +140,19 @@ pub enum ImportError {
 
     #[error("{path} has no worksheets")]
     NoSheets { path: String },
+
+    /// The file is larger than the caller allowed. A usage problem, not a broken file.
+    #[error("{path} is too large to import: {message}")]
+    Limit { path: String, message: String },
+
+    /// The file is not valid in the encoding it was read as.
+    #[error("{path} line {line}, byte offset {offset}: {message}")]
+    Encoding {
+        path: String,
+        line: usize,
+        offset: usize,
+        message: String,
+    },
 }
 
 impl ImportError {
@@ -136,10 +166,8 @@ impl ImportError {
 
 /// A file open for reading, one row at a time.
 ///
-/// The CSV arm genuinely streams; the XLSX arm holds the worksheet whole and
-/// hands rows out from it. Both present the same shape, so the caller's loop does
-/// not have to know which it has — but the caller should anyway, because the
-/// memory bound differs (see the module note).
+/// Both arms stream their rows and present the same shape; the XLSX arm also holds its
+/// shared-string table, which is why it has size guards (see the module note).
 pub enum RowReader {
     Csv(CsvSource),
     Xlsx(XlsxSource),
@@ -173,12 +201,27 @@ impl RowReader {
         }
     }
 
-    /// Whether this source can be read without holding the file.
-    ///
-    /// `false` for XLSX, and the caller is expected to say so rather than claim a
-    /// bound it cannot keep.
+    /// Whether the rows are read without holding the file. `true` for both formats;
+    /// XLSX still holds its string table, bounded by [`XLSX_MAX_BYTES`].
     pub fn streams(&self) -> bool {
-        matches!(self, RowReader::Csv(_))
+        true
+    }
+
+    /// Bytes of the file consumed so far, when the format can say (CSV). XLSX is a zip
+    /// read by seeking, so a byte count would not mean "how far through the sheet".
+    pub fn bytes_read(&self) -> Option<u64> {
+        match self {
+            RowReader::Csv(source) => source.bytes_read(),
+            RowReader::Xlsx(_) => None,
+        }
+    }
+
+    /// How many data rows the file says it has, when it says (the XLSX `dimension`).
+    pub fn rows_total(&self) -> Option<u64> {
+        match self {
+            RowReader::Csv(_) => None,
+            RowReader::Xlsx(source) => source.rows_total(),
+        }
     }
 }
 
@@ -197,14 +240,12 @@ mod tests {
     }
 
     #[test]
-    fn only_csv_claims_to_stream() {
-        // A file that exists is not needed: the claim is a property of the arm,
-        // and this pins it so the XLSX arm cannot quietly start claiming a bound
-        // the format does not allow.
+    fn a_csv_over_text_streams_and_has_no_byte_count() {
         let csv = RowReader::Csv(CsvSource::from_text(
             "a,b\n1,2\n".to_owned(),
             &Options::default(),
         ));
         assert!(csv.streams());
+        assert_eq!(csv.bytes_read(), None);
     }
 }
