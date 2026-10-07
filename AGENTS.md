@@ -4,13 +4,13 @@ QueryHive is a macOS database client: a SwiftUI app (`app/`) over a Rust engine 
 
 ## Current work: the perf-parity run
 
-Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused again on 2026-10-06 (evening) in the middle of B4. Everything through `ae3b278` is on `main` and `work/perf-parity`; six lane branches hold work not yet integrated.
+Branch `work/perf-parity` carries a long program to beat TablePro on performance, then close design and feature gaps. It was paused on 2026-10-07 after batches B8 and B8-extra, for another AI to continue. Everything through `1708700` is on `main` and `work/perf-parity` with full gates green; eight `lane/*` branches hold work not yet integrated, and no worktrees remain.
 
 Resume in this order:
 
-1. Read `docs/architecture/development-plan.md` (task IDs, files each task owns, gates, review tier) and `target/run/ledger.md`: task status, backlog `B-*`, incidents `I-*`, owner decisions O-14 to O-23, the lane plan O-22, and "PAUSE POINT 4" (the latest).
-2. The lane branches listed in PAUSE POINT 4 (`lane/tabs-on-top`, `lane/w8-f3`, `lane/w11-t5`, `lane/w10-t6a`, `lane/w8-f1`, `lane/w7-t1`) are committed but not integrated; PAUSE POINT 4 says which are reviewed, which are WIP, and how to finish them. The batch plan is `target/run/plan-b1-onward.md` and the W8 decision `target/run/w8t2-decision.md`.
-3. Then the rest of B4 and the batches after it through W14 per `development-plan.md` §5, in parallel lanes where §7 file ownership allows.
+1. Read `docs/handoff.md` (the working method: lanes, SSD targets, live lock, gates, known traps, integration order).
+2. Read `target/run/ledger.md` "PAUSE POINT 5" (the latest): the status of each lane branch (`lane/w13-t14`, `lane/w12-t11`, `lane/w13-t16`, `lane/w10-t7b`, `lane/w10-t3`, `lane/w12-t7a`, `lane/w12-t9`, `lane/w8-f2`, plus `lane/w7-t1` kept for w8-f2), what each still needs, and the owner-bound items. Owner decisions O-14 to O-31b and the lane plan O-22 are in the same ledger.
+3. Use `docs/architecture/development-plan.md` for task IDs, file ownership (§7), gates (§1) and the definition of done (§9); `target/run/debt-register.md` and `target/run/dbx-adoption-backlog.md` list every debt item and the task that owns it. Then continue through W14 per §5, in parallel lanes where §7 allows.
 
 Review policy in force (owner decision O-20): implementation, docs, bench and cleanup run on cheaper models; only review uses the strongest model, for **one** round. After a blocking finding, fix it, verify with the gates, commit, and record "pending review" in the ledger.
 
