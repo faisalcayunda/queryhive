@@ -5,6 +5,7 @@
 //! (the scanner the engine uses), so a bracket inside a string or a comment is never paired,
 //! and an opener left open pairs with nothing.
 
+use crate::paint::Analyzer;
 use qh_sql::{walk, EndState, Lexer, OpaqueKind, Visitor};
 
 /// A statement longer than this many bytes gets no pair: the walk is not free and a band on a
@@ -88,6 +89,25 @@ pub fn bracket_pair(
         out.push(units(&statement_text[start..end]));
     }
     out
+}
+
+/// The delimiter pair at `caret_utf16` of the analyzer's text, as `[start, len, start, len]`
+/// in document UTF-16 units. Only the statement under the caret is read, so the cost follows
+/// the statement and not the document. The analyzer must have replayed the edit log.
+pub fn pair_in(analyzer: &Analyzer, caret_utf16: u32) -> Vec<u32> {
+    let text = analyzer.mirror.as_str();
+    let Ok(caret) = analyzer.mirror.byte_of(caret_utf16) else {
+        return Vec::new();
+    };
+    let at = analyzer.stmts.index_of(caret);
+    let start = analyzer.stmts.list[at].start;
+    let end = analyzer.stmts.end_of(at, text.len());
+    let base = analyzer.mirror.utf16_of(start);
+    let mut pair = bracket_pair(&text[start..end], caret_utf16 - base, analyzer.lexer);
+    for open in pair.iter_mut().step_by(2) {
+        *open += base;
+    }
+    pair
 }
 
 /// The two delimiters of a closed quote-like region, or `None` for a comment or a region
@@ -239,5 +259,19 @@ mod bracket_pair_tests {
         assert_eq!(buffer.as_str(), "select f((0)+1)");
         assert_eq!(pair(buffer.as_str(), 9), vec![8, 1, 14, 1]);
         assert_eq!(pair(buffer.as_str(), 10), vec![9, 1, 11, 1]);
+    }
+
+    #[test]
+    fn a_pair_is_found_in_the_statement_under_the_caret_and_reported_in_document_units() {
+        let analyzer =
+            Analyzer::new("select 'é';\n select f((1)) , (2);", Dialect::Generic).unwrap();
+        // Statement two starts after the first `;`: `f(` opens at unit 21, its inner `(` at 22.
+        assert_eq!(pair_in(&analyzer, 22), vec![21, 1, 25, 1]);
+        assert_eq!(pair_in(&analyzer, 23), vec![22, 1, 24, 1]);
+        // The `é` and the quotes of statement one, whose caret is before the first `;`.
+        assert_eq!(pair_in(&analyzer, 8), vec![7, 1, 9, 1]);
+        // Past the end, and in a statement with nothing to pair.
+        assert_eq!(pair_in(&analyzer, 99), Vec::<u32>::new());
+        assert_eq!(pair_in(&analyzer, 0), Vec::<u32>::new());
     }
 }

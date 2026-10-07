@@ -350,6 +350,23 @@ impl EditorDocument {
         Ok(EditorOutline::from(analysis.outline()))
     }
 
+    /// The delimiter pair touching `offset_utf16`, as `[start, len, start, len]` in UTF-16
+    /// units of the document, opener first; empty when there is none (blueprint w10 §9.1).
+    /// Background thread: replays the log first, like `outline`. `Stale` unless `revision`
+    /// is the newest.
+    pub fn bracket_pair(&self, revision: u64, offset_utf16: u32) -> Result<Vec<u32>, EditorError> {
+        let mut analysis = self.analysis.lock().map_err(|_| EditorError::Malformed)?;
+        let log = {
+            let mut text = self.text.lock().map_err(|_| EditorError::Malformed)?;
+            if revision != text.revision() {
+                return Err(EditorError::Stale);
+            }
+            text.drain_log()
+        };
+        analysis.sync(log)?;
+        Ok(qh_editor::brackets::pair_in(&analysis, offset_utf16))
+    }
+
     /// Re-parse from scratch every statement whose incremental tree holds an error.
     /// Background thread, when typing pauses. Not in blueprint §6's list, which the
     /// idle queue of §7.2 needs but never names: without it §4.4 cannot run.
@@ -812,6 +829,23 @@ mod tests {
             doc.mark_applied(1, vec![0]).unwrap_err(),
             EditorError::Malformed
         );
+    }
+
+    #[test]
+    fn a_bracket_pair_follows_the_edits_and_refuses_a_stale_revision() {
+        let doc = EditorDocument::new("select f(1)".to_owned(), EditorDialect::Generic)
+            .expect("a small document opens");
+        assert_eq!(doc.bracket_pair(1, 9).unwrap(), vec![8, 1, 10, 1]);
+        let revision = doc.replace(9, 0, "(0)+".to_owned()).expect("an edit lands");
+        // The old revision is refused, the new one pairs against the edited text.
+        assert_eq!(doc.bracket_pair(1, 9).unwrap_err(), EditorError::Stale);
+        assert_eq!(doc.bracket_pair(revision, 10).unwrap(), vec![9, 1, 11, 1]);
+        // Nothing to pair, past the end, and inside a surrogate pair.
+        assert_eq!(doc.bracket_pair(revision, 0).unwrap(), Vec::<u32>::new());
+        assert_eq!(doc.bracket_pair(revision, 99).unwrap(), Vec::<u32>::new());
+        let face = EditorDocument::new("('😀')".to_owned(), EditorDialect::Generic).unwrap();
+        assert_eq!(face.bracket_pair(1, 1).unwrap(), vec![0, 1, 5, 1]);
+        assert_eq!(face.bracket_pair(1, 3).unwrap(), Vec::<u32>::new());
     }
 
     #[test]

@@ -274,6 +274,11 @@ void uniffi_qh_ffi_fn_free_editordocument(uint64_t handle, RustCallStatus *_Nonn
 uint64_t uniffi_qh_ffi_fn_constructor_editordocument_new(RustBuffer text, RustBuffer dialect, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_BRACKET_PAIR
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_BRACKET_PAIR
+RustBuffer uniffi_qh_ffi_fn_method_editordocument_bracket_pair(uint64_t ptr, uint64_t revision, uint32_t offset_utf16, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_CONVERGE
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_CONVERGE
 void uniffi_qh_ffi_fn_method_editordocument_converge(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -820,6 +825,12 @@ uint16_t uniffi_qh_ffi_checksum_func_ssh_config_hosts(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_RESOLVE
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SSH_CONFIG_RESOLVE
 uint16_t uniffi_qh_ffi_checksum_func_ssh_config_resolve(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_BRACKET_PAIR
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_BRACKET_PAIR
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_bracket_pair(void
     
 );
 #endif

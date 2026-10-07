@@ -41,6 +41,68 @@ extension AppModel {
         return nil
     }
 
+    /// ⌘+, ⌘− and ⌘0: the size of the text in the region that has the keyboard (D-16). The grid has
+    /// its own size (`DataPreferences.gridFontSize`, 11 to 16, 12 by default); everywhere else it is
+    /// the editor's (`EditorPreferences.fontSize`, 10 to 28, 12.5 by default). One step is one point.
+    enum FontStep { case bigger, smaller, reset }
+
+    /// Where `step` leads from the current size, already inside the setting's range. `region` is the
+    /// one with the keyboard unless a caller (a test) says otherwise.
+    private func fontSizeTarget(_ step: FontStep, in region: FocusRegion?)
+        -> (region: FocusRegion, now: Double, next: Double) {
+        let delta: Double = step == .bigger ? 1 : step == .smaller ? -1 : 0
+        if (region ?? currentRegion) == .results {
+            let now = Double(DataPreferences.shared.gridFontSize)
+            let next = step == .reset ? Double(DataPreferences.standardGridFontSize) : now + delta
+            return (.results, now, Double(DataPreferences.clampedFontSize(Int(next))))
+        }
+        let now = EditorPreferences.shared.fontSize
+        let next = step == .reset ? EditorPreferences.standardFontSize
+                                  : now + delta * EditorPreferences.fontSizeStep
+        return (.editor, now, EditorPreferences.clampedFontSize(next))
+    }
+
+    /// Whether `step` would change anything, which is what the menu item is enabled by: a key that
+    /// does nothing at the end of the range says so by being greyed out.
+    func fontSizeChanges(_ step: FontStep, in region: FocusRegion? = nil) -> Bool {
+        let target = fontSizeTarget(step, in: region)
+        return target.next != target.now
+    }
+
+    private static var fontKeyMonitor: Any?
+
+    /// Hear ⌘= (`FontKeyRouter`) while the main window is key with no sheet over it. Once, whatever
+    /// number of windows ask.
+    func installFontKeys() {
+        guard Self.fontKeyMonitor == nil else { return }
+        Self.fontKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                let flags = event.modifierFlags
+                guard let self,
+                      let step = FontKeyRouter.route(charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+                                                     command: flags.contains(.command),
+                                                     control: flags.contains(.control),
+                                                     option: flags.contains(.option)),
+                      let window = NSApp.keyWindow, MainWindow.isMain(window), window.attachedSheet == nil
+                else { return event }
+                self.adjustFontSize(step)
+                return nil
+            }
+        }
+    }
+
+    func adjustFontSize(_ step: FontStep, in region: FocusRegion? = nil) {
+        let target = fontSizeTarget(step, in: region)
+        guard target.next != target.now else { return }
+        if target.region == .results {
+            DataPreferences.shared.gridFontSize = Int(target.next)
+        } else {
+            EditorPreferences.shared.fontSize = target.next
+        }
+        let size = target.next.rounded() == target.next ? String(Int(target.next)) : String(target.next)
+        Announcer.post("\(target.region == .results ? "Grid" : "Editor") text size \(size) points")
+    }
+
     private static func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let match = view as? T { return match }
         for sub in view.subviews { if let match = firstDescendant(type, in: sub) { return match } }

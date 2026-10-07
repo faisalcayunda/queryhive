@@ -631,6 +631,14 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol EditorDocumentProtocol: AnyObject, Sendable {
     
     /**
+     * The delimiter pair touching `offset_utf16`, as `[start, len, start, len]` in UTF-16
+     * units of the document, opener first; empty when there is none (blueprint w10 §9.1).
+     * Background thread: replays the log first, like `outline`. `Stale` unless `revision`
+     * is the newest.
+     */
+    func bracketPair(revision: UInt64, offsetUtf16: UInt32) throws  -> [UInt32]
+    
+    /**
      * Re-parse from scratch every statement whose incremental tree holds an error.
      * Background thread, when typing pauses. Not in blueprint §6's list, which the
      * idle queue of §7.2 needs but never names: without it §4.4 cannot run.
@@ -752,6 +760,23 @@ public convenience init(text: String, dialect: EditorDialect)throws  {
 
     
 
+    
+    /**
+     * The delimiter pair touching `offset_utf16`, as `[start, len, start, len]` in UTF-16
+     * units of the document, opener first; empty when there is none (blueprint w10 §9.1).
+     * Background thread: replays the log first, like `outline`. `Stale` unless `revision`
+     * is the newest.
+     */
+open func bracketPair(revision: UInt64, offsetUtf16: UInt32)throws  -> [UInt32]  {
+    return try  FfiConverterSequenceUInt32.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_bracket_pair(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),
+        FfiConverterUInt32.lower(offsetUtf16),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Re-parse from scratch every statement whose incremental tree holds an error.
@@ -4969,6 +4994,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_func_ssh_config_resolve() != 45473) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_bracket_pair() != 39267) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_editordocument_converge() != 62221) {

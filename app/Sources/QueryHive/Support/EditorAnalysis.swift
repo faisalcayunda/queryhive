@@ -207,6 +207,25 @@ final class EditorAnalysis: @unchecked Sendable {
         return try Self.convert(packet, length: length)
     }
 
+    /// The delimiters touching `offset`, opener first, for the revision this object holds now: two
+    /// ranges, or none. Background thread. A result that disagrees with the invariants (an odd
+    /// count, a range past the text) is `malformed`, never drawn.
+    func bracketPair(at offset: Int) throws -> (revision: UInt64, ranges: [NSRange]) {
+        let asked = revision
+        let flat: [UInt32] = try get {
+            try document.bracketPair(revision: asked, offsetUtf16: UInt32(clamping: offset))
+        }
+        guard flat.isEmpty || flat.count == 4 else { throw EditorAnalysisError.malformed }
+        let ranges = stride(from: 0, to: flat.count, by: 2).map {
+            NSRange(location: Int(flat[$0]), length: Int(flat[$0 + 1]))
+        }
+        let end = length
+        guard ranges.allSatisfy({ $0.length > 0 && NSMaxRange($0) <= end }) else {
+            throw EditorAnalysisError.malformed
+        }
+        return (asked, ranges)
+    }
+
     /// Re-parse error trees from scratch, when typing pauses. Background thread.
     func converge() throws {
         try get { try document.converge() }

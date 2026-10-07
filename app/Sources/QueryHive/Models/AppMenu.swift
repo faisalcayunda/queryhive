@@ -37,6 +37,9 @@ enum AppMenu {
             spec(.focusResults, .view),
             spec(.peekCell, .view),
             spec(.toggleRecord, .view),
+            spec(.fontBigger, .view),
+            spec(.fontSmaller, .view),
+            spec(.fontReset, .view),
             spec(.nextTab, .tab),
             spec(.previousTab, .tab),
         ]
@@ -84,6 +87,9 @@ enum AppMenu {
             guard let tab else { break }
             tab.recordMode.toggle()
             Announcer.post(tab.recordMode ? "Record view shown" : "Record view hidden")
+        case .fontBigger: model.adjustFontSize(.bigger)
+        case .fontSmaller: model.adjustFontSize(.smaller)
+        case .fontReset: model.adjustFontSize(.reset)
         default: break
         }
     }
@@ -102,6 +108,9 @@ enum AppMenu {
         case .revealOutput: return tab?.files.isEmpty == false
         case .nextTab, .previousTab: return model.tabs.count > 1
         case .peekCell: return tab?.cellCursor != nil
+        case .fontBigger: return model.fontSizeChanges(.bigger)
+        case .fontSmaller: return model.fontSizeChanges(.smaller)
+        case .fontReset: return model.fontSizeChanges(.reset)
         default: return true
         }
     }

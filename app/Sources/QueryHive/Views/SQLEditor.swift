@@ -215,7 +215,7 @@ struct SQLEditor: NSViewRepresentable {
         coordinator.parent = self
         // Before the early return below: the gutter's font follows the code-font setting, and a
         // setting change does not alter the text, so it would otherwise never reach the ruler.
-        coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: 10.5, weight: .regular)
+        coordinator.ruler?.numberFont = FontChoice.codeNSFont(size: LineNumberRulerView.numberPointSize, weight: .regular)
         // The same reason: a switch flipped in Settings changes nothing about the text, so the
         // editor has to be told to re-read the layout rather than waiting for an edit.
         coordinator.applyLayout()
@@ -323,6 +323,12 @@ struct SQLEditor: NSViewRepresentable {
         private var lastEditRange = NSRange(location: 0, length: 0)
         private var visibleScheduled = false
         private var idleItem: DispatchWorkItem?
+        /// The pending bracket request, and which one is newest. The pair is asked for 30 ms after the
+        /// caret stops, on a queue of its own, so a keystroke pays only for cancelling the last ask.
+        private var bracketItem: DispatchWorkItem?
+        private var bracketGeneration = 0
+        private static let bracketDelay: TimeInterval = 0.03
+        private static let bracketQueue = DispatchQueue(label: "qh.editor.brackets", qos: .userInitiated)
         private static let idleDelay: TimeInterval = 0.5
         private static let idleQueue = DispatchQueue(label: "qh.editor.idle", qos: .utility)
         /// This size or smaller paints synchronously, so a tab opens coloured; anything bigger
@@ -507,6 +513,7 @@ struct SQLEditor: NSViewRepresentable {
                          range editedRange: NSRange, changeInLength delta: Int) {
             guard editedMask.contains(.editedCharacters) else { return }
             revision += 1
+            clearBrackets()
             guard !isReplacingText else { return }
             // The server's position described the text before this edit. The underline goes with
             // the next outline; the mark must not come back from the model in the meantime.
@@ -667,22 +674,74 @@ struct SQLEditor: NSViewRepresentable {
             }
             let previous = appliedLayout
             appliedLayout = layout
+            // A larger font moves every line below the first, and the text in view would slide away:
+            // the line at the top of the view is held through the change (D-16). Measured before
+            // anything below touches the layout, which already moves the view (the wrap pass resets
+            // the container).
+            let resized = previous != nil && previous?.fontSize != layout.fontSize
+            let anchor = resized ? topVisibleCharacter() : nil
             scrollView?.hasVerticalRuler = layout.showLineNumbers
             scrollView?.rulersVisible = layout.showLineNumbers
             applyWrap(layout)
             textView.layoutManager?.showsInvisibleCharacters = layout.showInvisibles
             // A size is the one switch that changes the font the tab stops are measured in, so it
             // goes first and the tab pass below re-applies the width and repaints the whole text.
-            let resized = previous != nil && previous?.fontSize != layout.fontSize
             if resized {
-                textView.font = SQLSyntax.font(italic: false)
+                textView.font = wornFont(italic: false)
                 ruler?.needsDisplay = true
             }
             if resized || previous?.tabWidth != layout.tabWidth { applyTabWidth(layout) }
+            if let anchor { scrollToTop(ofCharacter: anchor) }
             // The first pass has no regions to refresh: `recolour` follows it and does the analysis.
             if let previous, previous.codeFolding != layout.codeFolding { runIdle() }
             updateRunMarks()
             updateHighlight(textView)
+        }
+
+        /// The code font at the size the editor is **wearing**, which is the applied layout's, not the
+        /// setting's. A paint that landed between the setting being written and `applyLayout` reading it
+        /// used to put the new size on the text first, and the line held through the change was then
+        /// measured in the new size instead of the old.
+        private func wornFont(italic: Bool) -> NSFont {
+            guard let size = appliedLayout?.fontSize, size != EditorPreferences.shared.fontSize else {
+                return SQLSyntax.font(italic: italic)
+            }
+            let plain = FontChoice.codeNSFont(size: CGFloat(size), weight: .regular)
+            guard italic else { return plain }
+            return NSFont(descriptor: plain.fontDescriptor.withSymbolicTraits(.italic), size: CGFloat(size)) ?? plain
+        }
+
+        /// The first character of the line fragment at the top of the view, or nil when the view is at
+        /// the top (nothing to hold) or has nothing to measure.
+        func topVisibleCharacter() -> Int? {
+            guard let textView, let scrollView, let layoutManager = textView.layoutManager,
+                  let container = textView.textContainer, nsText.length > 0 else { return nil }
+            let top = scrollView.contentView.bounds.origin.y
+            guard top > 0.5 else { return nil }
+            let point = NSPoint(x: 0, y: top - textView.textContainerOrigin.y)
+            let glyph = layoutManager.glyphIndex(for: point, in: container)
+            return layoutManager.characterIndexForGlyph(at: glyph)
+        }
+
+        private static let anchorLayoutLimit = 400_000
+
+        /// Scroll so the line fragment holding `character` is at the top of the view, keeping the
+        /// horizontal position.
+        func scrollToTop(ofCharacter character: Int) {
+            guard let textView, let scrollView, let layoutManager = textView.layoutManager,
+                  character < nsText.length else { return }
+            // Everything above is laid out first: with non-contiguous layout a fragment's y is an
+            // estimate until the lines over it exist, and the estimate was ten lines off in a test.
+            // ponytail: not past `anchorLayoutLimit` characters, where the estimate is what is left and
+            // laying out the whole head of a huge document would stall the main thread.
+            if character <= Self.anchorLayoutLimit {
+                layoutManager.ensureLayout(forCharacterRange: NSRange(location: 0, length: character + 1))
+            }
+            let glyph = layoutManager.glyphIndexForCharacter(at: character)
+            let rect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let clip = scrollView.contentView
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: rect.minY + textView.textContainerOrigin.y))
+            scrollView.reflectScrolledClipView(clip)
         }
 
         /// The gutter's run markers, from the statement ranges the text already gave us.
@@ -693,10 +752,24 @@ struct SQLEditor: NSViewRepresentable {
                 ruler.runMarks = []
                 return
             }
+            // On the line the statement's text starts on. A statement's range begins right after the
+            // previous `;`, so the second of `a;\nb` begins on `a`'s line: marking that line gave two
+            // statements one marker and the second none (B-2).
+            let text = nsText
             ruler.runMarks = statementBounds.map { range in
-                LineNumberRulerView.RunMark(headerLine: ruler.line(containing: range.location),
-                                            headerOffset: range.location)
+                let start = Self.firstNonBlank(in: text, from: range)
+                return LineNumberRulerView.RunMark(headerLine: ruler.line(containing: start),
+                                                   headerOffset: start)
             }
+        }
+
+        /// The first character of `range` that is not whitespace, or its start when it has none.
+        private static func firstNonBlank(in text: NSString, from range: NSRange) -> Int {
+            var at = range.location
+            let end = min(NSMaxRange(range), text.length)
+            while at < end, let scalar = Unicode.Scalar(text.character(at: at)),
+                  CharacterSet.whitespacesAndNewlines.contains(scalar) { at += 1 }
+            return at < end ? at : range.location
         }
 
         /// Run the statement that starts at `offset`.
@@ -732,7 +805,7 @@ struct SQLEditor: NSViewRepresentable {
         /// would otherwise leave stale.
         private func applyTabWidth(_ layout: EditorLayout) {
             guard let textView else { return }
-            let font = textView.font ?? FontChoice.codeNSFont(size: 13, weight: .regular)
+            let font = wornFont(italic: false)
             let space = (" " as NSString).size(withAttributes: [.font: font]).width
             let style = NSMutableParagraphStyle()
             style.defaultTabInterval = space * CGFloat(layout.tabWidth)
@@ -859,8 +932,9 @@ struct SQLEditor: NSViewRepresentable {
                   let layoutManager = textView.layoutManager else { return }
             analysis = try? EditorAnalysis(text: textView.string, dialect: parent.dialect)
             outlineRevision = 0
+            clearBrackets()
             let whole = NSRange(location: 0, length: storage.length)
-            storage.setAttributes(Self.baseAttributes(textView: textView), range: whole)
+            storage.setAttributes(baseAttributes(textView), range: whole)
             layoutManager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: whole)
             // A new analysis means a text the old issues and the old mark were not written for.
             lexicalIssues = []
@@ -868,7 +942,7 @@ struct SQLEditor: NSViewRepresentable {
             diagnostics = []
             diagnosticsPainter.reset(layoutManager, length: storage.length)
             publishIssues()
-            textView.typingAttributes = Self.baseAttributes(textView: textView)
+            textView.typingAttributes = baseAttributes(textView)
             ruler?.needsDisplay = true
             if storage.length <= Self.synchronousPaintLimit, !textView.hasMarkedText() {
                 syncVisiblePaint()
@@ -882,8 +956,11 @@ struct SQLEditor: NSViewRepresentable {
         /// plain text. Token colours are temporary attributes on top of it, and comment italics
         /// arrive through the paint's fonts. The base colour has to be here: text with no
         /// `.foregroundColor` is drawn black, and the paint only ever colours tokens.
-        private static func baseAttributes(textView: NSTextView) -> [NSAttributedString.Key: Any] {
-            [.font: SQLSyntax.font(italic: false),
+        ///
+        /// The font is the worn upright face, never `textView.font`: on plain text that answers with
+        /// the font of character 0, which is italic when the text starts with a painted comment.
+        private func baseAttributes(_ textView: NSTextView) -> [NSAttributedString.Key: Any] {
+            [.font: wornFont(italic: false),
              .foregroundColor: SQLSyntax.baseColour,
              .paragraphStyle: textView.defaultParagraphStyle ?? NSParagraphStyle.default]
         }
@@ -986,8 +1063,8 @@ struct SQLEditor: NSViewRepresentable {
             // redisplays the whole visible rect. That was most of what a keystroke cost.
             let fonts = paint.fonts.filter { NSMaxRange($0.range) <= length }
             if !fonts.isEmpty {
-                let upright = SQLSyntax.font(italic: false)
-                let italic = SQLSyntax.font(italic: true)
+                let upright = wornFont(italic: false)
+                let italic = wornFont(italic: true)
                 let changes = fonts.flatMap { entry -> [(range: NSRange, font: NSFont)] in
                     let wanted = entry.italic ? italic : upright
                     return Self.ranges(of: storage, within: entry.range, notUsing: wanted).map { ($0, wanted) }
@@ -1196,6 +1273,59 @@ struct SQLEditor: NSViewRepresentable {
             updateHighlight(textView)
         }
 
+        // MARK: Matching delimiters
+
+        /// Drop the bands and any ask still on its way.
+        private func clearBrackets() {
+            bracketItem?.cancel()
+            bracketGeneration += 1
+            if let textView, !textView.bracketRanges.isEmpty { textView.bracketRanges = [] }
+        }
+
+        /// Ask for the pair next to the caret once it has been still for `bracketDelay`. A selection
+        /// has no pair: the bands go.
+        private func scheduleBrackets() {
+            guard let textView else { return }
+            guard textView.selectedRange().length == 0 else { return clearBrackets() }
+            bracketItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in self?.requestBrackets() }
+            bracketItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.bracketDelay, execute: item)
+        }
+
+        private func requestBrackets() {
+            guard let textView, let analysis, !textView.hasMarkedText(),
+                  textView.selectedRange().length == 0 else { return }
+            let caret = textView.selectedRange().location
+            bracketGeneration += 1
+            let generation = bracketGeneration
+            Self.bracketQueue.async { [weak self] in
+                let found = try? analysis.bracketPair(at: caret)
+                DispatchQueue.main.async { [weak self] in
+                    self?.adoptBrackets(found, caret: caret, generation: generation, from: analysis)
+                }
+            }
+        }
+
+        /// Wear a pair only if nothing moved since it was asked for: the same ask, the same analysis,
+        /// the same revision and the same caret. A result for a text that has changed is worth nothing.
+        private func adoptBrackets(_ found: (revision: UInt64, ranges: [NSRange])?, caret: Int,
+                                   generation: Int, from asked: EditorAnalysis) {
+            guard let textView, generation == bracketGeneration, asked === analysis,
+                  textView.selectedRange() == NSRange(location: caret, length: 0) else { return }
+            guard let found, found.revision == asked.revision else { return }
+            textView.bracketRanges = found.ranges
+        }
+
+        /// The pair next to the caret, asked for and worn now on this thread, for tests.
+        func syncBracketsForTesting() throws {
+            guard let textView, let analysis else { return }
+            let caret = textView.selectedRange().location
+            bracketGeneration += 1
+            adoptBrackets(try analysis.bracketPair(at: caret), caret: caret,
+                          generation: bracketGeneration, from: analysis)
+        }
+
         // MARK: Diagnostics
 
         /// Merge the lexical issues with the server's mark, underline them, and refresh the rotor and
@@ -1267,6 +1397,7 @@ struct SQLEditor: NSViewRepresentable {
             }
             // The bands follow the caret, which is the whole point of them.
             updateHighlight(textView)
+            scheduleBrackets()
             // A caret moving into a collapsed body would be invisible, and the next keystroke would
             // land somewhere the user cannot see. Opening the fold is the honest answer.
             if !folded.isEmpty {
@@ -2099,6 +2230,38 @@ final class SQLTextView: NSTextView {
     /// them, and how much of the view was dirty. Layout is forced first so `draw` is the drawing
     /// alone; the layout manager would have done the same work inside `super`.
     override func draw(_ dirtyRect: NSRect) {
+        // Nothing under the gutter: it is translucent, so text scrolled beneath it would read through.
+        let covered = gutterCover
+        if covered > 0 {
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: NSRect(x: visibleRect.minX + covered, y: dirtyRect.minY,
+                                      width: max(0, dirtyRect.maxX - visibleRect.minX - covered),
+                                      height: dirtyRect.height)).addClip()
+            drawBody(dirtyRect)
+            NSGraphicsContext.restoreGraphicsState()
+        } else {
+            drawBody(dirtyRect)
+        }
+    }
+
+    /// How much of this view's visible left edge the gutter lies over, in points: the gutter's width
+    /// while text is scrolled under it, else nothing. The scroll view lays its clip view across the
+    /// gutter and offsets the bounds by its width, so with the text at rest that strip is blank, and a
+    /// no-wrap editor scrolled sideways slides text under it (B-9).
+    var gutterCover: CGFloat {
+        guard let scroll = enclosingScrollView, scroll.rulersVisible,
+              let width = scroll.verticalRulerView?.ruleThickness, visibleRect.minX + width > 0.5 else { return 0 }
+        return width
+    }
+
+    /// The caret is never drawn under the gutter. The blink draws it outside `draw(_:)`, so the clip
+    /// there does not cover it.
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        if rect.minX < visibleRect.minX + gutterCover - 0.5, gutterCover > 0 { return }
+        super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
+    }
+
+    private func drawBody(_ dirtyRect: NSRect) {
         guard PerfSignposts.recording else { return super.draw(dirtyRect) }
         let prefix = applyTurnOpen ? "apply." : ""
         if let layoutManager, let textContainer {
@@ -2117,10 +2280,67 @@ final class SQLTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
-        guard !highlightRanges.isEmpty else { return }
-        highlightColour.setFill()
-        for band in bandRects(for: highlightRanges) where band.intersects(rect) {
-            NSBezierPath(rect: band).fill()
+        if !highlightRanges.isEmpty {
+            highlightColour.setFill()
+            for band in bandRects(for: highlightRanges) where band.intersects(rect) {
+                NSBezierPath(rect: band).fill()
+            }
+        }
+        drawBrackets(in: rect)
+    }
+
+    // MARK: Matching delimiters (FR-ED-08, blueprint w10 §9.1)
+
+    /// The two delimiters next to the caret, opener first, or none. Drawn as bands behind the text,
+    /// so they do not compete with the find highlight for `.backgroundColor` and the selection and
+    /// the syntax colours stay readable through them. Empty while anything is selected.
+    var bracketRanges: [NSRange] = [] {
+        didSet {
+            guard bracketRanges != oldValue else { return }
+            // The old geometry is the one remembered, not one recomputed: the ranges it came from
+            // describe a text that may be mid-edit, and clearing them must not ask for a layout.
+            let updated = bracketRects(for: bracketRanges)
+            for rect in paintedBrackets + updated { setNeedsDisplay(rect.insetBy(dx: -2, dy: -2)) }
+            paintedBrackets = updated
+        }
+    }
+
+    /// Where the delimiters were last laid out, in this view's coordinates.
+    private var paintedBrackets: [NSRect] = []
+
+    /// One rectangle per delimiter, in this view's coordinates. A range the layout has no glyph for
+    /// (inside a fold) has no rectangle.
+    func bracketRects(for ranges: [NSRange]) -> [NSRect] {
+        guard let layoutManager, let textContainer else { return [] }
+        let length = textStorage?.length ?? 0
+        let origin = textContainerOrigin
+        return ranges.compactMap { range in
+            let clamped = NSIntersectionRange(range, NSRange(location: 0, length: length))
+            guard clamped.length > 0 else { return nil }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: clamped, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { return nil }
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+            guard !rect.isEmpty else { return nil }
+            rect.origin.x += origin.x
+            rect.origin.y += origin.y
+            return rect
+        }
+    }
+
+    /// Fill and outline, because a colour alone is not a signal: the outline is what stays when the
+    /// accent is close to the surface, and Increase Contrast thickens it (§10).
+    private func drawBrackets(in rect: NSRect) {
+        guard !bracketRanges.isEmpty else { return }
+        let accent = NSColor(Tone.accent)
+        let enhanced = ThemeStore.shared.surface.enhanced
+        for band in bracketRects(for: bracketRanges) where band.insetBy(dx: -2, dy: -2).intersects(rect) {
+            // Half a point in, so the 1 pt line sits on whole pixels of the band's edge.
+            let path = NSBezierPath(roundedRect: band.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+            accent.withAlphaComponent(0.22).setFill()
+            path.fill()
+            accent.withAlphaComponent(0.8).setStroke()
+            path.lineWidth = enhanced ? 1.5 : 1
+            path.stroke()
         }
     }
 }
@@ -2283,7 +2503,7 @@ final class LineNumberRulerView: NSRulerView {
 
     /// The font the numbers are drawn in. Set from the same family as the code, so a font chosen in
     /// Settings reaches the gutter instead of leaving it in the system's monospaced face.
-    var numberFont: NSFont = .monospacedSystemFont(ofSize: 10.5, weight: .regular) {
+    var numberFont: NSFont = .monospacedSystemFont(ofSize: LineNumberRulerView.numberPointSize, weight: .regular) {
         didSet {
             labelSizes = [:]
             needsDisplay = true
@@ -2419,6 +2639,10 @@ final class LineNumberRulerView: NSRulerView {
         if abs(wanted - ruleThickness) > 0.5 { ruleThickness = wanted }
     }
 
+    /// The size of a line number, in points, and of the corner readout beside it (D-17): fixed, not
+    /// the code size, so the gutter keeps its width while the text grows. Not below the 11 pt floor.
+    static let numberPointSize: CGFloat = 11
+
     /// The text's own inset inside the text view. Named because the placeholder overlay in
     /// `EditorPane` has to start at the same x the text does, or it draws under the gutter.
     static let textInset = NSSize(width: 8, height: 9)
@@ -2439,8 +2663,12 @@ final class LineNumberRulerView: NSRulerView {
     /// Internal rather than private so the placeholder can be told where the text starts.
     static func gutterWidth(forLines lines: Int, showsRunMarks: Bool = false) -> CGFloat {
         let digits = CGFloat(max(2, String(max(lines, 1)).count))
-        return digits * 7.5 + 20 + (showsRunMarks ? runColumn : 0)
+        return digits * digitWidth + 20 + (showsRunMarks ? runColumn : 0)
     }
+
+    /// What a digit of `numberPointSize` is given: a monospaced 11 pt digit is about 6.6 wide, and the
+    /// rest is the room a wider family chosen in Settings needs.
+    private static let digitWidth: CGFloat = 8
 
     /// The extra width the run column takes, and where each marker sits inside the gutter.
     ///
@@ -2463,31 +2691,28 @@ final class LineNumberRulerView: NSRulerView {
     /// Overridden here rather than painted over `super`: `super.draw` would fill its grey first and
     /// then the marks on top of it, so the call to draw the marks has to be the whole body.
     override func draw(_ dirtyRect: NSRect) {
-        // A touch brighter than the surface behind it, so the gutter reads as its own strip without
-        // becoming a strip of somebody else's palette — which is what the default fill was.
-        //
-        // White at 3.5% *over* whatever is behind, rather than an absolute colour: the result is the
-        // editor's own themed surface lifted a step, so a theme change moves it too. A fixed grey
-        // was the bug this replaces.
-        //
-        // Only one direction can brighten, and that is white. On a light theme the surface is
-        // already near-white, so the step is necessarily tiny there (measured: 248.1 -> 248.1,
-        // which is to say invisible); on a dark theme it is plain (7.9 -> 15.3). If the strip needs
-        // to be visible on light themes as well, the direction has to flip there — say the word and
-        // it becomes a recess instead of a lift.
-        NSColor.white.withAlphaComponent(0.035).setFill()
+        // The gutter reads as its own strip on every canvas, and the direction is the canvas's: a
+        // dark one is lifted by white at 3.5%, a light one is recessed by black at 4.5% (D-15). A
+        // lift cannot show on a near-white surface (measured 248.1 -> 248.1); the recess is what
+        // `GutterRecessTests` holds at four 8-bit steps of luminance or more on all seven canvases.
+        // Over whatever is behind rather than an absolute colour, so a theme change moves it too.
+        Self.recessFill.setFill()
         bounds.fill()
 
         drawHashMarksAndLabels(in: dirtyRect)
 
-        // And one hairline down its trailing edge, because with only a 3.5% lift the gutter would
-        // otherwise run into the text with no seam at all. The default ruler draws a separator as
-        // part of its background, so replacing that background took the separator with it.
-        //
-        // `Tone.ink` at 7%, the same hairline the panes use between each other, so the seam belongs
-        // to the theme rather than to the system.
-        Tone.inkNS(0.07).setFill()
+        // And one hairline down its trailing edge, because a few percent of tint would otherwise run
+        // into the text with no seam at all. The default ruler draws a separator as part of its
+        // background, so replacing that background took the separator with it. The same hairline the
+        // panes use between each other (`Tone.hairline`: 7%, 20% under Increase Contrast), so the seam
+        // belongs to the theme rather than to the system.
+        Tone.inkNS(ThemeStore.shared.surface.enhanced ? 0.20 : 0.07).setFill()
         NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
+    }
+
+    /// The gutter's tint: white at 3.5% on a dark canvas, black at 4.5% on a light one.
+    static let recessFill = NSColor(name: nil) { appearance in
+        appearance.isDark ? NSColor.white.withAlphaComponent(0.035) : NSColor.black.withAlphaComponent(0.045)
     }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
