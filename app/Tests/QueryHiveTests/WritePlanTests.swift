@@ -52,6 +52,43 @@ final class WritePlanTests: XCTestCase {
         XCTAssertEqual(plan.statements.map(\.kind), [.delete, .update, .insert])
     }
 
+    /// W10-T3: one added row, one deleted and one changed make DELETE, UPDATE, INSERT in that order,
+    /// each with the count it expects.
+    func testOneAddedOneDeletedAndOneChangedRowPlanInOrderWithTheirExpectedCounts() {
+        var edits = CellEdits()
+        let added = edits.insertRow()
+        edits.setInserted("3", row: added, column: 0)
+        edits.setInserted("KPM Baru", row: added, column: 1)
+        edits.deleteRow(1)
+        edits.edit("KPM Berubah", at: CellKey(row: 0, column: 1), original: "KPM Sukamaju")
+
+        let plan = build(edits)
+
+        XCTAssertEqual(plan.statements.map(\.kind), [.delete, .update, .insert])
+        XCTAssertEqual(plan.statements.map(\.expectedRows), [1, 1, 1])
+        XCTAssertTrue(plan.warnings.isEmpty)
+        XCTAssertTrue(plan.statements[2].sql.hasPrefix("INSERT INTO public.penerima"))
+    }
+
+    func testARowThatWasAddedAndThenTakenBackPlansNothing() {
+        var edits = CellEdits()
+        let added = edits.insertRow()
+        edits.setInserted("3", row: added, column: 0)
+        edits.removeInserted(row: added)
+        XCTAssertTrue(build(edits).isEmpty)
+    }
+
+    func testARestoredRowPlansNothingAndADeletedRowTakesNoUpdate() {
+        var edits = CellEdits()
+        edits.deleteRow(1)
+        edits.restoreRow(1)
+        XCTAssertTrue(build(edits).isEmpty)
+
+        edits.deleteRow(0)
+        edits.edit("late", at: CellKey(row: 0, column: 1), original: "KPM Sukamaju")
+        XCTAssertEqual(build(edits).statements.map(\.kind), [.delete], "no UPDATE after its own DELETE")
+    }
+
     func testTheReviewedStatementsAreTheStatementsTheEngineIsHanded() throws {
         var edits = CellEdits()
         edits.edit("KPM Baru", at: CellKey(row: 0, column: 1), original: "KPM Sukamaju")

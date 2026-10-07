@@ -127,12 +127,12 @@ final class GridKeyMapTests: XCTestCase {
     // MARK: Delete
 
     func testDeleteMarksRowsOnlyWhenTheGridAllowsIt() {
-        XCTAssertNil(action(.deleteBackward), "no gesture to mark rows exists before W10-T3")
+        XCTAssertNil(action(.deleteBackward), "the map offers no delete until the grid says rows can be deleted")
         var editable = ready
         editable.canDeleteRows = true
         XCTAssertEqual(action(.deleteBackward, in: editable), .deleteRows)
         XCTAssertEqual(action(.deleteForward, in: editable), .deleteRows)
-        XCTAssertNil(action(.deleteBackward, command: true, in: editable), "Command-Delete is the footer's")
+        XCTAssertNil(action(.deleteBackward, command: true, in: editable), "Command-Delete reaches the table as deleteToBeginningOfLine, not through this map")
         editable.hasSelection = false
         XCTAssertNil(action(.deleteBackward, in: editable))
     }

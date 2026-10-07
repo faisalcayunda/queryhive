@@ -15,7 +15,6 @@ final class FontFloorTests: XCTestCase {
     /// at the W10 gate; a count that falls fails here until the entry is lowered.
     private static let pending: [String: (lines: Int, task: String)] = [
         "SidebarTree.swift": (2, "W9-T3 (QUERYHIVE and FAVOURITES become DecorativeLabel)"),
-        "ResultGrid.swift": (12, "W10-T3 (V-9)"),
         "Workspace.swift": (1, "W10-T7 (the editor's line count, with the gutter numbers; V-10)"),
         // The editor's gutter numbers: `numberFont`'s two 10.5 pt (the default and the setter's
         // initial value). They move with the 16 `editor-*` scenes, which is V-10, not V-9.
@@ -70,7 +69,9 @@ final class FontFloorTests: XCTestCase {
     }
 
     func testTheScanSeesTheCalls() throws {
-        XCTAssertGreaterThan(try lowCalls().count, 10, "the scan found the owed lines")
+        // The list of owed lines has shrunk to the few that remain (the editor's gutter, the sidebar's
+        // labels); what this holds is that the scan still finds some, so it cannot pass by seeing none.
+        XCTAssertGreaterThan(try lowCalls().count, 0, "the scan found the owed lines")
     }
 
     /// The scan reaches the AppKit fonts: the editor's gutter numbers are in it (they are owed to
@@ -79,7 +80,7 @@ final class FontFloorTests: XCTestCase {
         let calls = try lowCalls()
         XCTAssertEqual(calls.filter { $0.file == "SQLEditor.swift" }.count, 2)
         for file in ["GridRowView.swift", "GridHeaderView.swift", "ResultGridTable.swift", "GridMetrics.swift",
-                     "GridTableView.swift"] {
+                     "GridTableView.swift", "ResultGrid.swift"] {
             XCTAssertTrue(calls.filter { $0.file == file }.isEmpty, "\(file) has no text under 11 pt")
         }
     }

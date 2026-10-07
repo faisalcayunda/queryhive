@@ -20,9 +20,9 @@ import AppKit
 ///    by revision, result row and source column, so VoiceOver does not lose its place because an
 ///    element it was on was rebuilt as a different object.
 ///
-/// Coordinates throughout are **result** rows, never table rows (blueprint §5.4). Today the two are
-/// the same; a windowed result over 2^24 pt would change `Coordinator.resultRow(forTableRow:)` and
-/// nothing here.
+/// Rows are **table** rows (`GridRowSpace`: the result's, then the rows the user added), and a cell is
+/// keyed by its `CellKey`, whose row is a negative id for an added row (blueprint w10 §5.1). A
+/// windowed result over 2^24 pt would change `Coordinator.resultRow(forTableRow:)` and nothing here.
 @MainActor
 final class GridAXTree {
 
@@ -162,7 +162,10 @@ final class GridAXTree {
         let page = max(1, range.upperBound - range.lowerBound)
         let keep = (range.lowerBound - page)..<(range.upperBound + page)
         let cursorRow = coordinator.tab.cellCursor?.focus.row
-        cells = cells.filter { key, _ in keep.contains(key.row) || key.row == cursorRow }
+        cells = cells.filter { key, _ in
+            let row = coordinator.tableRow(for: key)
+            return keep.contains(row) || row == cursorRow
+        }
         rows = rows.filter { row, _ in keep.contains(row) }
     }
 
@@ -206,21 +209,26 @@ final class GridAXCell: NSAccessibilityElement {
     /// about the picture, and an empty one would read as a cell with nothing in it.
     override func accessibilityLabel() -> String? {
         let staged = coordinator.stagedValue(at: key)
-        let value = staged ?? coordinator.fullValue(at: key) ?? Self.nullWord
+        // An added row's cell nobody typed in is left to the server, which is "default", not null.
+        let added = key.row < 0
+        let value = staged ?? coordinator.fullValue(at: key) ?? (added ? Self.defaultWord : Self.nullWord)
         var status = ""
-        if staged != nil { status += ", changed" }
+        if added { status += ", new row" } else if staged != nil { status += ", changed" }
         if coordinator.isMarkedForDeletion(row: key.row) { status += ", marked for deletion" }
         let shown = (value as NSString).length > 256
             ? (value as NSString).substring(to: 256) + "…"
             : value
-        return "Row \(key.row + 1), column \(display + 1), \(coordinator.columnName(at: key.column)): \(shown)\(status)"
+        return "Row \(coordinator.tableRow(for: key) + 1), column \(display + 1), \(coordinator.columnName(at: key.column)): \(shown)\(status)"
     }
 
     /// What VoiceOver says for a NULL.
     static let nullWord = "null"
+    /// What it says for a cell of an added row that holds nothing.
+    static let defaultWord = "default"
 
     override func accessibilityValue() -> Any? {
-        coordinator.stagedValue(at: key) ?? coordinator.fullValue(at: key) ?? Self.nullWord
+        coordinator.stagedValue(at: key) ?? coordinator.fullValue(at: key)
+            ?? (key.row < 0 ? Self.defaultWord : Self.nullWord)
     }
 
     /// Whether the cursor is on this cell.
@@ -234,10 +242,10 @@ final class GridAXCell: NSAccessibilityElement {
         coordinator.focusCellFromAX(key)
     }
 
-    /// The position in the result, not in the table: `Coordinator.resultRow(forTableRow:)` converts,
-    /// and in W5 it is the identity.
+    /// The row in the table, which for an added row is past the fetched ones: its key's row is a
+    /// negative id, and that is an identity, not a position.
     override func accessibilityRowIndexRange() -> NSRange {
-        NSRange(location: key.row, length: 1)
+        NSRange(location: coordinator.tableRow(for: key), length: 1)
     }
 
     /// The source column, which is the stable identity a moved or hidden column keeps.
@@ -257,7 +265,7 @@ final class GridAXCell: NSAccessibilityElement {
     override func accessibilityRowCount() -> Int { 1 }
     override func accessibilityColumnCount() -> Int { 1 }
 
-    override func accessibilityParent() -> Any? { coordinator.axRowElement(for: key.row) }
+    override func accessibilityParent() -> Any? { coordinator.axRowElement(for: coordinator.tableRow(for: key)) }
 }
 
 /// One row, whose children are its visible cells.

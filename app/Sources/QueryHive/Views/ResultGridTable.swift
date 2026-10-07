@@ -71,6 +71,9 @@ struct GridInputs: Equatable {
     var filterPopover: Int?
     /// The cell whose value reader is open, keyed by source column.
     var viewing: CellKey?
+    /// Whether the tab holds an editing session. When it ends without the overlay's own Return
+    /// (Save, Review, Apply), this is what takes the overlay down.
+    var sessionOpen = false
 }
 
 /// One column's sort, as the header draws it.
@@ -263,14 +266,32 @@ struct ResultGridTable: NSViewRepresentable {
             DispatchQueue.main.async { MainActor.assumeIsolated { panel?.dismiss() } }
         }
 
-        /// Row index in the rows the grid draws, for a row index in the table.
+        /// The rows the table draws: the result's, then the rows the user added (blueprint w10 D-2).
+        /// Built from the live queue on every ask, so it cannot be out of step with the tab; with no
+        /// added row it costs a count and an empty array.
+        var rowSpace: GridRowSpace { GridRowSpace(fetched: rows.count, inserted: tab.cellEdits.inserted) }
+        var tableRowCount: Int { rows.count + tab.cellEdits.inserted.count }
+
+        /// Row index in the rows the grid draws, for a row index in the table, or `nil` for an added
+        /// row, which is not in the result.
         ///
-        /// The identity today. It exists because every conversion between the two goes through it:
-        /// if a windowed result is ever needed above 2^24 pt (blueprint §5.4), this and its inverse
-        /// are the two functions that change, and nothing else — not the selection, not `CellKey`,
-        /// not the cursor, not the accessibility tree.
-        func resultRow(forTableRow row: Int) -> Int { row }
+        /// Every conversion between the two goes through here: if a windowed result is ever needed
+        /// above 2^24 pt (blueprint §5.4), this and its inverse are the two functions that change.
+        func resultRow(forTableRow row: Int) -> Int? {
+            if case .fetched(let index) = rowSpace.kind(ofTableRow: row) { return index }
+            return nil
+        }
         func tableRow(forResultRow row: Int) -> Int { row }
+
+        /// The key a table row's cell is edited under (a negative id for an added row), or `nil`
+        /// past the last row. The only way from a position to a `CellKey`.
+        func cellKey(forTableRow row: Int, source: Int) -> CellKey? {
+            rowSpace.cellKey(forTableRow: row, source: source)
+        }
+
+        /// The table row a key is drawn on. A key the table does not hold (a row since removed)
+        /// answers its own row, so a caller that must have a number still gets one.
+        func tableRow(for key: CellKey) -> Int { rowSpace.tableRow(for: key) ?? key.row }
 
         // MARK: Applying new inputs
 
@@ -294,10 +315,25 @@ struct ResultGridTable: NSViewRepresentable {
                 noteResultChangedForAX()
                 table?.isPolling = rows.isLive
             } else if let old {
-                let rows = GridPaintDiff.invalidatedRows(old: old, new: inputs,
-                                                         oldRowCount: rowCount(old), newRowCount: rows.count)
-                let columns = GridPaintDiff.invalidatedColumns(old: old, new: inputs)
+                // An added row, or one taken back, changes how many rows the table has.
+                let grew = inputs.edits.inserted.count > old.edits.inserted.count
+                if inputs.edits.inserted.count != old.edits.inserted.count {
+                    table?.noteNumberOfRowsChanged()
+                    if axClientAttached { axTree.invalidate() }
+                }
+                var rows = GridPaintDiff.invalidatedRows(old: old, new: inputs,
+                                                         oldRowCount: rowCount(old), newRowCount: tableRowCount)
+                var columns = GridPaintDiff.invalidatedColumns(old: old, new: inputs)
+                // An added row that appeared, went or took a value is washed across its whole width:
+                // every row past the fetched ones, in the queue before and the queue now.
+                if old.edits.inserted != inputs.edits.inserted {
+                    let first = tableRowCount - inputs.edits.inserted.count
+                    rows.insert(integersIn: first..<max(tableRowCount, first + old.edits.inserted.count))
+                    columns = nil
+                }
                 table?.invalidate(rows: rows, columns: columns, geometry: geometry, paint: paint)
+                // The row the user just added is at the bottom, and it is where the cursor went.
+                if grew, let focus = tab.cellCursor?.focus { scrollToVisible(cell: focus) }
             }
             applySelection(inputs.selection, old: old?.selection)
             // Nothing for a peek to be about once the cursor is gone (a new result, a filter).
@@ -308,7 +344,8 @@ struct ResultGridTable: NSViewRepresentable {
             scheduleTooltips()
         }
 
-        private func rowCount(_ inputs: GridInputs) -> Int { rows.count }
+        /// The table's row count under an earlier input: the rows now, and the added rows it had.
+        private func rowCount(_ inputs: GridInputs) -> Int { rows.count + inputs.edits.inserted.count }
 
         private func refreshRowsAndGeometry(_ inputs: GridInputs) {
             rows = tab.result
@@ -475,9 +512,15 @@ struct ResultGridTable: NSViewRepresentable {
         /// Only the display columns in `columns` (D-23), widened by a viewport either side so a
         /// short horizontal scroll does not rebuild the row. A 500-column result would otherwise
         /// pay 500 cell reads per row drawn, almost all of them off screen.
-        func rowText(_ row: Int, columns: Range<Int>) -> GridRowText {
+        func rowText(_ tableRow: Int, columns: Range<Int>) -> GridRowText {
             let sources = applied?.layout.visibleSources ?? []
             let wanted = widened(columns, count: sources.count)
+            // An added row has no fetched value: each cell is what the user typed, or nothing, which
+            // is a column the INSERT leaves to the server. Built, never cached, like a staged row.
+            if case .inserted(let id, _) = rowSpace.kind(ofTableRow: tableRow) {
+                return insertedRowText(id: id, sources: sources, range: wanted)
+            }
+            let row = tableRow
             let build: (Range<Int>) -> GridRowText = { [self] range in
                 var cells: [String] = []
                 var flags: [CellFlags] = []
@@ -509,6 +552,23 @@ struct ResultGridTable: NSViewRepresentable {
             return textCache.text(at: row, columns: wanted, build: build)
         }
 
+        /// One added row's text for the display columns in `range`. `DEFAULT` the user typed is drawn
+        /// as the word, since it is a value they chose; a cell they left alone is empty.
+        private func insertedRowText(id: Int, sources: [Int], range: Range<Int>) -> GridRowText {
+            var cells: [String] = []
+            var flags: [CellFlags] = []
+            for source in sources[range] {
+                let text = tab.cellEdits.insertedValue(row: id, column: source) ?? ""
+                let format = formats.indices.contains(source) ? formats[source] : .raw
+                var value = CellFlags()
+                if GridMetrics.isNumeric(type: type(ofSource: source)) { value.insert(.numeric) }
+                cells.append(firstLine(text.isEmpty || UpdateStatements.isDefaultKeyword(text)
+                                       ? text : format.render(text, type: type(ofSource: source))))
+                flags.append(value)
+            }
+            return GridRowText(first: range.lowerBound, cells: cells, flags: flags)
+        }
+
         /// `columns` plus the columns one viewport's width to its left and right, clamped to what
         /// exists. A request already wider than the viewport (a full-width dirty rect) gains the
         /// same margin, which is cheap next to the 500 it avoids.
@@ -537,13 +597,19 @@ struct ResultGridTable: NSViewRepresentable {
         /// The row's own state, for the painter: added and deleted rows are washed across, with a
         /// sign, and a deleted row's text is struck. Cheap when nothing is staged, which is nearly
         /// always, so the draw path pays one `isEmpty` for it.
-        func rowState(_ row: Int) -> CellEdits.CellState {
-            tab.cellEdits.isEmpty ? .unchanged : tab.cellEdits.rowState(resultRow(forTableRow: row))
+        func rowState(_ tableRow: Int) -> CellEdits.CellState {
+            guard !tab.cellEdits.isEmpty else { return .unchanged }
+            switch rowSpace.kind(ofTableRow: tableRow) {
+            case .fetched(let row): return tab.cellEdits.rowState(row)
+            case .inserted: return .inserted
+            case nil: return .unchanged
+            }
         }
 
         /// Which drawn columns carry a staged edit on this row, for the painter's wash and dot.
         func stagedColumns(_ row: Int) -> Set<Int> {
-            guard !tab.cellEdits.isEmpty else { return [] }
+            // An added row is washed whole; its cells carry no dot of their own.
+            guard !tab.cellEdits.isEmpty, row < rows.count else { return [] }
             var result = Set<Int>()
             for (display, source) in (applied?.layout.visibleSources ?? []).enumerated()
             where tab.cellEdits.value(at: CellKey(row: row, column: source)) != nil {
@@ -669,17 +735,21 @@ struct ResultGridTable: NSViewRepresentable {
         /// yet there is nothing to extend from, so it is a plain press. A Shift double-click does not
         /// open the editor: the second click of an extension is still an extension.
         func press(at point: CGPoint, clickCount: Int, extend: Bool = false) {
-            guard rows.count > 0, !geometry.widths.isEmpty else { return }
+            guard tableRowCount > 0, !geometry.widths.isEmpty else { return }
             // A click in the grid is the end of a peek (blueprint 3.3).
             closePeek()
-            let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: rows.count)
-            let column = geometry.clampedColumn(atX: point.x, last: geometry.widths.count - 1)
+            let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: tableRowCount)
+            let last = geometry.widths.count - 1
+            // A press on the row numbers chooses the whole row (DBX-63), which is what Delete Row
+            // acts on; a drag that starts there goes on choosing whole rows.
+            gutterPress = geometry.gutter > 0 && point.x < geometry.gutter
+            let column = gutterPress ? last : geometry.clampedColumn(atX: point.x, last: last)
             let position = CellPos(row: row, column: column)
-            var anchor = position
+            var anchor = gutterPress ? CellPos(row: row, column: 0) : position
             if extend, let held = tab.cellCursor?.anchor {
                 // The rows or columns may have shrunk since the cursor was placed.
-                anchor = CellPos(row: min(max(held.row, 0), rows.count - 1),
-                                 column: min(max(held.column, 0), geometry.widths.count - 1))
+                anchor = CellPos(row: min(max(held.row, 0), tableRowCount - 1),
+                                 column: gutterPress ? 0 : min(max(held.column, 0), last))
             }
             dragAnchor = anchor
             // What is on screen, not what SwiftUI last applied: a key may have moved the selection
@@ -689,15 +759,19 @@ struct ResultGridTable: NSViewRepresentable {
             tab.selectCells(anchor: anchor, focus: position)
             commands.selectionChanged()
             syncTable(previousSelection: previousSelection, previousCursor: previousCursor)
-            if clickCount == 2, !extend { doubleClick(at: position) }
+            if clickCount == 2, !extend, !gutterPress { doubleClick(at: position) }
         }
+
+        /// Whether the press that began this drag landed on the row numbers.
+        private var gutterPress = false
 
         /// A drag: extend the block to the cell under the pointer, without waiting for a SwiftUI
         /// pass. A step that lands on the cell the focus is already on writes nothing.
         func drag(to point: CGPoint) {
-            guard let anchor = dragAnchor, rows.count > 0, !geometry.widths.isEmpty else { return }
-            let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: rows.count)
-            let column = geometry.clampedColumn(atX: point.x, last: geometry.widths.count - 1)
+            guard let anchor = dragAnchor, tableRowCount > 0, !geometry.widths.isEmpty else { return }
+            let row = geometry.row(atY: point.y, rowHeight: paint.rowHeight, count: tableRowCount)
+            let last = geometry.widths.count - 1
+            let column = gutterPress ? last : geometry.clampedColumn(atX: point.x, last: last)
             let focus = CellPos(row: row, column: column)
             guard tab.cellCursor?.focus != focus else { return }
             let previous = tab.cellSelection
@@ -743,12 +817,12 @@ struct ResultGridTable: NSViewRepresentable {
             return visible.indices.contains(display) ? visible[display] : nil
         }
 
-        /// A cell key, or `nil` when the position is past the result's shape. The editor, the reader
-        /// and the menus all have to refuse such a position rather than write to a row that is not
-        /// there.
+        /// A cell key for a table row and a source column, or `nil` when the position is past the
+        /// table's shape. The editor, the reader and the menus all have to refuse such a position
+        /// rather than write to a row that is not there. An added row's key carries its negative id.
         func validKey(row: Int, source: Int) -> CellKey? {
-            guard row >= 0, row < rows.count, source >= 0, source < rows.columns.count else { return nil }
-            return CellKey(row: row, column: source)
+            guard source >= 0, source < rows.columns.count else { return nil }
+            return cellKey(forTableRow: row, source: source)
         }
 
         // MARK: The reader popover
@@ -760,11 +834,9 @@ struct ResultGridTable: NSViewRepresentable {
 
         func openReader(at key: CellKey) {
             guard let table, let source = cellSource(key) else { return }
-            let cell = geometry.edges(of: key.column).left
-            _ = cell
             let display = applied?.layout.visibleSources.firstIndex(of: key.column) ?? 0
             let edges = geometry.edges(of: display)
-            let frame = table.rect(ofRow: key.row)
+            let frame = table.rect(ofRow: tableRow(for: key))
             let anchor = CGRect(x: edges.left, y: frame.maxY - paint.rowHeight,
                                 width: edges.right - edges.left, height: paint.rowHeight)
             let column = rows.columns[key.column]
@@ -805,13 +877,16 @@ struct ResultGridTable: NSViewRepresentable {
             // A session still open over another cell is ended rather than abandoned: its text would
             // otherwise be lost without ever reaching the queue or the undo history.
             if let editingKey, editingKey != key { commitEdit(at: editingKey, text: editor?.stringValue ?? "") }
-            self.editingKey = key
             tab.beginCellEdit(at: key)
+            // Refused (a deleted row, an apply in flight, stale rows): no field, or its text would
+            // be typed into nothing, or into another cell's session.
+            guard tab.editingCellKey == key else { return }
+            self.editingKey = key
             commands.beginEdit(key)
 
             let display = applied?.layout.visibleSources.firstIndex(of: key.column) ?? 0
             let edges = geometry.edges(of: display)
-            let rowRect = table.rect(ofRow: key.row)
+            let rowRect = table.rect(ofRow: tableRow(for: key))
             let box = GridMetrics.box(inRow: CGRect(x: edges.left, y: rowRect.minY,
                                                     width: edges.right - edges.left,
                                                     height: rowRect.height),
@@ -869,10 +944,14 @@ struct ResultGridTable: NSViewRepresentable {
         /// typing five times a second while a run streamed (blueprint §8.3).
         private func syncEditor(_ inputs: GridInputs, old: GridInputs?) {
             guard let key = editingKey else { return }
+            // The session was ended from outside, and its text is already staged.
+            if !tab.hasOpenCellEdit { teardownEditor(); return }
             let shapeChanged = old?.layout != inputs.layout
             let orderChanged = old?.sort != inputs.sort || old?.filtered != inputs.filtered
             let replaced = old?.revision != inputs.revision
-            if shapeChanged || key.row >= rows.count || (replaced && orderChanged) {
+            // The row is gone when the table no longer holds it: past the end, or an added row the
+            // user took back (an undo, a delete, a discard) while its cell was open.
+            if shapeChanged || rowSpace.tableRow(for: key) == nil || (replaced && orderChanged) {
                 teardownEditor()
                 tab.cancelCellEdit()
                 return
@@ -881,7 +960,7 @@ struct ResultGridTable: NSViewRepresentable {
                 teardownEditor(); return
             }
             let edges = geometry.edges(of: display)
-            let rowRect = table.rect(ofRow: key.row)
+            let rowRect = table.rect(ofRow: tableRow(for: key))
             let box = GridMetrics.box(inRow: CGRect(x: edges.left, y: rowRect.minY,
                                                     width: edges.right - edges.left,
                                                     height: rowRect.height),
@@ -896,7 +975,8 @@ struct ResultGridTable: NSViewRepresentable {
             do {
                 guard let built = try GridClipboard.text(result: rows, selection: tab.cellSelection,
                                                          visible: applied?.layout.visibleSources ?? tab.visibleColumnSources,
-                                                         withHeaders: withHeaders) else { return }
+                                                         withHeaders: withHeaders,
+                                                         inserted: tab.cellEdits.inserted) else { return }
                 text = built
             } catch {
                 if (error as? StoreFailure)?.isStale != true { tab.note(.error, "Copy failed: \(error)") }
@@ -996,7 +1076,7 @@ struct ResultGridTable: NSViewRepresentable {
         /// rather than by not registering the cell.
         func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
                   userData: UnsafeMutableRawPointer?) -> String {
-            guard let table, let inputs = applied, rows.count > 0, !geometry.widths.isEmpty
+            guard let table, let inputs = applied, tableRowCount > 0, !geometry.widths.isEmpty
             else { return "" }
             let sources = inputs.layout.visibleSources
             guard !sources.isEmpty else { return "" }
@@ -1008,12 +1088,13 @@ struct ResultGridTable: NSViewRepresentable {
             let display = geometry.clampedColumn(atX: local.x, last: geometry.widths.count - 1)
             guard sources.indices.contains(display) else { return "" }
             let source = sources[display]
-            let row = geometry.row(atY: local.y, rowHeight: paint.rowHeight, count: rows.count)
-            guard row >= 0, row < rows.count else { return "" }
+            let row = geometry.row(atY: local.y, rowHeight: paint.rowHeight, count: tableRowCount)
+            guard let key = cellKey(forTableRow: row, source: source) else { return "" }
             let format = formats.indices.contains(source) ? formats[source] : .raw
-            let key = CellKey(row: row, column: source)
-            let value = tab.cellEdits.value(at: key).map { format.render($0, type: type(ofSource: source)) }
-                ?? rows.fullValue(row: row, column: source, format: format)
+            let staged = key.row < 0 ? tab.cellEdits.insertedValue(row: key.row, column: source)
+                                     : tab.cellEdits.value(at: key)
+            let value = staged.map { format.render($0, type: type(ofSource: source)) }
+                ?? (key.row < 0 ? nil : rows.fullValue(row: key.row, column: source, format: format))
             guard let value, !value.isEmpty else { return "" }
             return GridToolTip.cap(value)
         }
@@ -1027,13 +1108,14 @@ struct ResultGridTable: NSViewRepresentable {
                                 hasSelection: selection != nil,
                                 selectionIsBlock: (selection?.cellCount ?? 0) > 1,
                                 peekOpen: isPeekOpen,
-                                editing: editingKey != nil)
+                                editing: editingKey != nil,
+                                canDeleteRows: model.rowEditBlockedReason(for: tab) == nil)
         }
 
         /// Where the cursor can go: the table's rows, the drawn columns, and a page of rows.
         var gridBounds: GridBounds {
             let visible = visibleRowRange()
-            return GridBounds(rows: rows.count, columns: geometry.widths.count,
+            return GridBounds(rows: tableRowCount, columns: geometry.widths.count,
                               page: visible.upperBound - visible.lowerBound)
         }
 
@@ -1052,7 +1134,7 @@ struct ResultGridTable: NSViewRepresentable {
                     place(GridCursor(anchor: focus, focus: focus), extending: false)
                 }
             case .clearSelection: clearSelection()
-            case .deleteRows: break  // W10-T3 draws and stages them; the map never offers it before
+            case .deleteRows: model.deleteRows(in: tab)
             }
             return true
         }
@@ -1062,7 +1144,7 @@ struct ResultGridTable: NSViewRepresentable {
         private func moveCursor(_ motion: GridMotion, extending: Bool) {
             // No cell to land on (no rows, or no drawn columns): Tab must still leave, because
             // `keyDown` swallows a key the coordinator took and the grid always accepts the keyboard.
-            guard rows.count > 0, !geometry.widths.isEmpty else { leaveGrid(motion); return }
+            guard tableRowCount > 0, !geometry.widths.isEmpty else { leaveGrid(motion); return }
             guard let cursor = tab.cellCursor else {
                 let first = CellPos(row: firstUsableRow(), column: 0)
                 place(GridCursor(anchor: first, focus: first), extending: false)
@@ -1089,7 +1171,7 @@ struct ResultGridTable: NSViewRepresentable {
             guard let scroll, paint.rowHeight > 0 else { return 0 }
             let clip = scroll.contentView
             let top = clip.bounds.minY + clip.contentInsets.top
-            return min(max(0, Int(ceil(top / paint.rowHeight))), max(0, rows.count - 1))
+            return min(max(0, Int(ceil(top / paint.rowHeight))), max(0, tableRowCount - 1))
         }
 
         /// Put the cursor (and with it the block) somewhere, the way a click does: the tab's own
@@ -1163,7 +1245,7 @@ struct ResultGridTable: NSViewRepresentable {
 
         /// The least scrolling that shows a cell, once per key press and without animation.
         func scrollToVisible(cell position: CellPos) {
-            guard let scroll, position.row >= 0, position.row < rows.count else { return }
+            guard let scroll, position.row >= 0, position.row < tableRowCount else { return }
             let clip = scroll.contentView
             let target = GridScrollMath.origin(revealing: rect(ofCell: position), in: clip.bounds,
                                                insets: clip.contentInsets)
@@ -1210,7 +1292,14 @@ struct ResultGridTable: NSViewRepresentable {
             peekReadingTimer?.cancel()
             let column = rows.columns[source]
 
-            // A staged edit is what the cell shows, and there is nothing to read for it.
+            // A staged edit is what the cell shows, and there is nothing to read for it. Nor for a
+            // cell of an added row, which no store holds.
+            if key.row < 0 {
+                peekShow(tab.cellEdits.insertedValue(row: key.row, column: source) ?? "",
+                         note: "An added row, not written yet.", position: position, column: column,
+                         announce: opening)
+                return
+            }
             if let staged = tab.cellEdits.value(at: key) {
                 peekShow(staged, note: "A staged edit, not written yet.", position: position, column: column,
                          announce: opening)
@@ -1293,9 +1382,9 @@ struct ResultGridTable: NSViewRepresentable {
         /// passes, so the block is left alone and the cursor may rest outside it. Nothing is
         /// announced, because VoiceOver is already reading the cell it moved to.
         func focusCellFromAX(_ key: CellKey) {
-            guard let display = visibleSources.firstIndex(of: key.column), key.row >= 0,
-                  key.row < rows.count else { return }
-            let position = CellPos(row: key.row, column: display)
+            guard let display = visibleSources.firstIndex(of: key.column),
+                  let row = rowSpace.tableRow(for: key) else { return }
+            let position = CellPos(row: row, column: display)
             let previous = tab.cellCursor?.focus
             guard tab.cellCursor != GridCursor(anchor: position, focus: position) else { return }
             tab.cellCursor = GridCursor(anchor: position, focus: position)
@@ -1308,7 +1397,7 @@ struct ResultGridTable: NSViewRepresentable {
         func isAXFocused(_ key: CellKey) -> Bool {
             guard let focus = tab.cellCursor?.focus, let display = visibleSources.firstIndex(of: key.column)
             else { return false }
-            return focus == CellPos(row: key.row, column: display)
+            return focus == CellPos(row: tableRow(for: key), column: display)
         }
 
         /// Whether the whole row is marked for deletion, for the label (W10-T3 does the marking).
@@ -1360,7 +1449,7 @@ struct ResultGridTable: NSViewRepresentable {
         }
 
         func scrollToVisible(row: Int) {
-            guard let table, row >= 0, row < rows.count else { return }
+            guard let table, row >= 0, row < tableRowCount else { return }
             table.scrollRowToVisible(row)
         }
 
@@ -1378,7 +1467,7 @@ struct ResultGridTable: NSViewRepresentable {
 
         /// Every row there is, for `accessibilityRowCount` — the count must not follow the viewport
         /// that `accessibilityRows` is limited to.
-        var rowCountForAX: Int { rows.count }
+        var rowCountForAX: Int { tableRowCount }
 
         /// The rows on screen, in **result** coordinates, as a half-open range.
         ///
@@ -1389,7 +1478,7 @@ struct ResultGridTable: NSViewRepresentable {
             let visible = table.rows(in: table.visibleRect)
             guard visible.length > 0 else { return 0..<0 }
             let low = max(0, visible.location)
-            let high = min(rows.count, visible.location + visible.length)
+            let high = min(tableRowCount, visible.location + visible.length)
             guard low < high else { return 0..<0 }
             return low..<high
         }
@@ -1465,13 +1554,16 @@ struct ResultGridTable: NSViewRepresentable {
         }
 
         /// The staged text for a cell, or `nil` when it has none.
-        func stagedValue(at key: CellKey) -> String? { tab.cellEdits.value(at: key) }
+        func stagedValue(at key: CellKey) -> String? {
+            key.row < 0 ? tab.cellEdits.insertedValue(row: key.row, column: key.column)
+                        : tab.cellEdits.value(at: key)
+        }
 
         /// The whole value under the column's display format — what an edit, a copy and an export
         /// see. `.raw` for the accessibility value, because a screen reader should hear the value the
         /// database holds, not the one the grid is currently rendering it as.
         func fullValue(at key: CellKey) -> String? {
-            rows.fullValue(row: key.row, column: key.column, format: .raw)
+            key.row < 0 ? nil : rows.fullValue(row: key.row, column: key.column, format: .raw)
         }
 
         /// What a SQL NULL is drawn as, for the accessibility label: a screen reader saying the word
@@ -1498,7 +1590,7 @@ struct ResultGridTable: NSViewRepresentable {
         func frame(of key: CellKey, display: Int) -> NSRect {
             guard let table else { return .zero }
             let edges = geometry.edges(of: display)
-            let rowRect = table.rect(ofRow: key.row)
+            let rowRect = table.rect(ofRow: tableRow(for: key))
             return NSRect(x: edges.left, y: rowRect.minY,
                           width: edges.right - edges.left, height: geometryWidthIfZero(rowRect.height))
         }
@@ -1520,7 +1612,7 @@ struct ResultGridTable: NSViewRepresentable {
 
         // MARK: Data source and delegate
 
-        func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+        func numberOfRows(in tableView: NSTableView) -> Int { tableRowCount }
 
         /// Cell mode requires an object value per cell for its own accessibility, even though the
         /// grid draws everything itself. Handing it `nil` is cheaper than a string per cell and the
@@ -1555,6 +1647,15 @@ struct ResultGridTable: NSViewRepresentable {
             menu.addItem(withTitle: "View Value…", action: #selector(viewValue), keyEquivalent: "")
             menu.addItem(withTitle: "Paste", action: #selector(paste), keyEquivalent: "")
             menu.addItem(.separator())
+            // Rows (blueprint w10 §5.2). The titles name what the selection holds, and a menu that
+            // cannot act says why in the tooltip instead of only going grey.
+            let selected = tab.cellSelection.map { $0.rowCount } ?? 0
+            let deletedInSelection = selectedRowsMarkedForDeletion()
+            menu.addItem(withTitle: "Add Row", action: #selector(addRow), keyEquivalent: "")
+            menu.addItem(withTitle: selected > 1 ? "Delete \(selected) Rows" : "Delete Row",
+                         action: #selector(deleteRows), keyEquivalent: "")
+            menu.addItem(withTitle: "Restore Row", action: #selector(restoreRows), keyEquivalent: "")
+            menu.addItem(.separator())
             let changes = tab.cellEdits.count
             let label = "\(changes) Change\(changes == 1 ? "" : "s")"
             menu.addItem(withTitle: "Review \(label)…", action: #selector(reviewChanges), keyEquivalent: "")
@@ -1566,8 +1667,21 @@ struct ResultGridTable: NSViewRepresentable {
             menu.addItem(withTitle: "Fit All Columns", action: #selector(fitAll), keyEquivalent: "")
             menu.addItem(withTitle: "Reset Column Widths", action: #selector(resetWidths), keyEquivalent: "")
             let hasSelection = tab.cellSelection != nil
+            let rowBlock = model.rowEditBlockedReason(for: tab)
             for item in menu.items {
                 switch item.action {
+                case #selector(addRow):
+                    item.target = self
+                    item.isEnabled = rowBlock == nil
+                    item.toolTip = rowBlock
+                case #selector(deleteRows):
+                    item.target = self
+                    item.isEnabled = rowBlock == nil && hasSelection
+                    item.toolTip = rowBlock
+                case #selector(restoreRows):
+                    item.target = self
+                    item.isEnabled = rowBlock == nil && deletedInSelection
+                    item.toolTip = rowBlock
                 case #selector(copyPlain), #selector(copyWithHeaders), #selector(editCell), #selector(paste):
                     item.target = self
                     item.isEnabled = hasSelection
@@ -1597,6 +1711,14 @@ struct ResultGridTable: NSViewRepresentable {
             return menu
         }
 
+        /// Whether any fetched row of the selection is marked for deletion, which is what makes
+        /// Restore Row mean something.
+        private func selectedRowsMarkedForDeletion() -> Bool {
+            guard !tab.cellEdits.deletedRows.isEmpty, let selection = tab.cellSelection,
+                  let fetched = rowSpace.split(selection.top...selection.bottom).fetched else { return false }
+            return fetched.contains { tab.cellEdits.isDeleted($0) }
+        }
+
         /// The selection's top-left cell as a value the reader can open, or `nil`.
         private func selectionValue() -> (key: CellKey, value: String)? {
             guard let selection = tab.cellSelection,
@@ -1607,6 +1729,9 @@ struct ResultGridTable: NSViewRepresentable {
             return (key, value)
         }
 
+        @objc private func addRow() { model.addRow(in: tab) }
+        @objc func deleteRows() { model.deleteRows(in: tab) }
+        @objc private func restoreRows() { model.restoreRows(in: tab) }
         @objc private func copyPlain() { commands.copy(false) }
         @objc private func copyWithHeaders() { commands.copy(true) }
         @objc private func paste() { commands.paste() }

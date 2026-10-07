@@ -373,7 +373,7 @@ final class GridTableView: NSTableView {
         // idempotence test is what holds this to it.
         cg.setBlendMode(.normal)
 
-        let rowCount = coordinator.rows.count
+        let rowCount = coordinator.tableRowCount
         guard rowCount > 0 else { cg.restoreGState(); return }
         PerfSignposts.stamp(.firstDraw, onlyFirst: true)
 
@@ -517,12 +517,27 @@ final class GridTableView: NSTableView {
         coordinator?.togglePeek()
     }
 
+    /// ⌘Z and ⇧⌘Z (blueprint w10 D-6): the staged edits' own history, found by the responder chain
+    /// while the grid has the keyboard. The system Edit menu names the step ("Undo Add Row") because
+    /// `undoManager` below is the tab's.
+    @objc func undo(_ sender: Any?) { coordinator?.tab.undoCellEdit() }
+    @objc func redo(_ sender: Any?) { coordinator?.tab.redoCellEdit() }
+
+    /// The tab's undo manager rather than the window's, so the Edit menu reads this history and not
+    /// the editor's.
+    override var undoManager: UndoManager? { coordinator?.tab.editUndoManager ?? super.undoManager }
+
+    /// ⌘⌫ reaches a table as "delete to the beginning of the line"; on rows it means delete them.
+    @objc override func deleteToBeginningOfLine(_ sender: Any?) { coordinator?.deleteRows() }
+
     /// ⌘C is only offered when there is a block to copy, and ⌘A is always refused. Without this the
     /// menu items would be enabled on an empty selection and do nothing when chosen.
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(copy(_:)) { return selection != nil }
         if item.action == #selector(selectAll(_:)) { return false }
         if item.action == #selector(peekCell(_:)) { return cursor != nil }
+        if item.action == #selector(undo(_:)) { return coordinator?.tab.canUndoCellEdit ?? false }
+        if item.action == #selector(redo(_:)) { return coordinator?.tab.canRedoCellEdit ?? false }
         return super.validateUserInterfaceItem(item)
     }
 

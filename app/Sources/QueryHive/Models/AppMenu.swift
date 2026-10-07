@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum MenuGroup { case file, query, view, tab }
+enum MenuGroup { case file, query, view, tab, save, edit }
 
 /// One menu item as data, so the menu, the conflict test and Settings read the same list.
 struct MenuSpec: Equatable {
@@ -39,6 +39,9 @@ enum AppMenu {
             spec(.toggleRecord, .view),
             spec(.nextTab, .tab),
             spec(.previousTab, .tab),
+            // Save replaces the system item, and Add Row sits in the Edit menu (App.swift).
+            spec(.saveFile, .save),
+            spec(.addRow, .edit),
         ]
         for position in 1...9 {
             list.append(MenuSpec(id: tabPrefix + String(position),
@@ -80,6 +83,8 @@ enum AppMenu {
         // The responder chain, because the cell lives in the grid and the grid is not the model's:
         // it answers only while it is the first responder, which is when a peek means anything.
         case .peekCell: NSApp.sendAction(#selector(GridTableView.peekCell(_:)), to: nil, from: nil)
+        case .saveFile: model.saveFocused()
+        case .addRow: tab.map { model.addRow(in: $0) }
         case .toggleRecord:
             guard let tab else { break }
             tab.recordMode.toggle()
@@ -102,6 +107,10 @@ enum AppMenu {
         case .revealOutput: return tab?.files.isEmpty == false
         case .nextTab, .previousTab: return model.tabs.count > 1
         case .peekCell: return tab?.cellCursor != nil
+        // From observed state, not the focus (which is asked, never observed): the item is right the
+        // moment an edit is staged. `saveFocused` decides what saving means.
+        case .saveFile: return model.canSaveFocused
+        case .addRow: return tab.map { model.rowEditBlockedReason(for: $0) == nil } ?? false
         default: return true
         }
     }

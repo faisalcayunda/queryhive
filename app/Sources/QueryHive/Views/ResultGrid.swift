@@ -86,11 +86,28 @@ struct ResultGrid: View {
         // reports its ideal height, the row grows past the pane, and the note that explains the value
         // is the part that falls off the bottom.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // ⌘S (`AppModel.saveFocused`) raises a flag on the tab rather than reaching into this view.
+        // Checked on appear as well, because the panel may have been showing the log when it was set.
+        .onChange(of: tab.reviewRequested) { _, _ in takeReviewRequest() }
+        .onAppear { takeReviewRequest() }
         .onChange(of: DataPreferences.shared.autoShowInspector) { _, on in
             // Switching the panel on with a cell already chosen should show it rather than wait for
             // a click that has already happened.
             if on { inspectedRange = tab.cellSelection }
         }
+    }
+
+    private func takeReviewRequest() {
+        guard tab.reviewRequested else { return }
+        tab.reviewRequested = false
+        if model.canSaveFocused { openReview() }
+    }
+
+    /// Open the review sheet. The open cell editor is staged first, so the plan the sheet shows and
+    /// the one that runs contain what has been typed.
+    private func openReview() {
+        tab.endCellEdit()
+        reviewingChanges = true
     }
 
     /// The sentence for a run in flight, or `nil` when nothing is running. A preview and an explain
@@ -305,7 +322,7 @@ struct ResultGrid: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(Tone.coral)
-            Text(text).font(.ui(10.5)).foregroundStyle(Tone.secondary).lineLimit(2)
+            Text(text).font(.ui(11)).foregroundStyle(Tone.secondary).lineLimit(2)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
@@ -349,7 +366,8 @@ struct ResultGrid: View {
                 sortEnabled: !tab.previewing
             ),
             filterPopover: model.filterPopoverColumn,
-            viewing: viewingCell
+            viewing: viewingCell,
+            sessionOpen: tab.hasOpenCellEdit
         )
     }
 
@@ -379,7 +397,7 @@ struct ResultGrid: View {
             },
             openFilter: { source, _ in model.filterPopoverColumn = source },
             rename: { source in beginRename(source) },
-            review: { reviewingChanges = true },
+            review: { openReview() },
             copy: { withHeaders in copySelection(withHeaders: withHeaders) },
             viewValue: { viewSelectedValue() },
             // The editor lives in the table, so these three run over there: every menu action is
@@ -416,7 +434,7 @@ struct ResultGrid: View {
                 Text("In memory over the \(tab.result.fetched.formatted()) rows fetched. "
                      + "“Search Server” runs the query again with a WHERE over every column, so it "
                      + "can find rows this grid never fetched.")
-                    .font(.ui(10.5))
+                    .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Metrics.gutter)
@@ -438,12 +456,12 @@ struct ResultGrid: View {
                 .onChange(of: tab.gridSearch) { _, _ in model.scheduleServerSearch(tab) }
             if tab.hasGridSearch {
                 Text("\(tab.result.count.formatted()) of \(tab.result.fetched.formatted())")
-                    .font(.ui(10.5)).foregroundStyle(Tone.secondary)
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
                 Button {
                     model.searchOnServer(tab, term: tab.gridSearch)
                 } label: {
                     Label("Search Server", systemImage: "arrow.up.right.square")
-                        .font(.ui(10.5))
+                        .font(.ui(11))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Tone.accent)
@@ -478,7 +496,7 @@ struct ResultGrid: View {
             Button("Reset Column Layout") { tab.resetColumnLayout() }
         } label: {
             Label(hidden == 0 ? "Columns" : "Columns (\(hidden) hidden)", systemImage: "tablecells")
-                .font(.ui(10.5))
+                .font(.ui(11))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -509,7 +527,7 @@ struct ResultGrid: View {
         } label: {
             Label(presets.isEmpty ? "Filters" : "Filters (\(presets.count))",
                   systemImage: "line.3.horizontal.decrease.circle")
-                .font(.ui(10.5))
+                .font(.ui(11))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -537,7 +555,8 @@ struct ResultGrid: View {
         do {
             guard let built = try GridClipboard.text(result: tab.result, selection: tab.cellSelection,
                                                      visible: tab.visibleColumnSources,
-                                                     withHeaders: withHeaders) else { return }
+                                                     withHeaders: withHeaders,
+                                                     inserted: tab.cellEdits.inserted) else { return }
             text = built
         } catch {
             if (error as? StoreFailure)?.isStale != true { tab.note(.error, "Copy failed: \(error)") }
@@ -561,8 +580,8 @@ struct ResultGrid: View {
     private func openableSelection() -> CellKey? {
         guard let preview = tab.preview, let selection = tab.cellSelection,
               let source = tab.columnLayout.source(at: selection.left),
-              preview.columns.indices.contains(source) else { return nil }
-        let key = CellKey(row: selection.top, column: source)
+              preview.columns.indices.contains(source),
+              let key = tab.rowSpace.cellKey(forTableRow: selection.top, source: source) else { return nil }
         guard let value = tab.cellValue(at: key),
               GridValue.isOpenable(value: value, type: preview.columns[source].type) else { return nil }
         return key
@@ -590,11 +609,11 @@ struct ResultGrid: View {
     }
 
     /// Put the grid's cursor and selection on one field of the Record panel's row, and hand the
-    /// keyboard to the grid. Returns the cell's key, or `nil` for a row the grid has no place for
-    /// (an added row, until the grid draws those).
+    /// keyboard to the grid. Returns the cell's key (a negative id for an added row), or `nil` when
+    /// the cursor is on no row.
     ///
     /// Not scrolled sideways: the row is the cursor's own and already in view, and the table's
-    /// scrolling is its coordinator's (`ResultGridTable`, W10-T3's file).
+    /// scrolling is its coordinator's (`ResultGridTable`).
     private func placeCursor(on field: RecordField) -> CellKey? {
         guard let key = tab.placeCursor(on: field) else { return nil }
         inspectedRange = tab.cellSelection
@@ -647,7 +666,7 @@ struct ResultGrid: View {
                 .foregroundStyle(Tone.ink.opacity(0.9))
                 .multilineTextAlignment(.center)
             Text(detail)
-                .font(.ui(10.5))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -663,8 +682,8 @@ struct ResultGrid: View {
         -> (key: CellKey, column: Event.Column, value: String?)? {
         guard let preview = tab.preview,
               let source = tab.columnLayout.source(at: range.left),
-              preview.columns.indices.contains(source) else { return nil }
-        let key = CellKey(row: range.top, column: source)
+              preview.columns.indices.contains(source),
+              let key = tab.rowSpace.cellKey(forTableRow: range.top, source: source) else { return nil }
         return (key, preview.columns[source], tab.cellValue(at: key))
     }
 
@@ -788,7 +807,7 @@ struct ResultGrid: View {
                 HStack(spacing: 8) {
                     if browsable {
                         Text("\(values.count) distinct value\(values.count == 1 ? "" : "s")")
-                            .font(.ui(10.5))
+                            .font(.ui(11))
                             .foregroundStyle(Tone.secondary)
                     }
                     Spacer(minLength: 0)
@@ -814,23 +833,29 @@ struct ResultGrid: View {
                 Text(summaryText(preview))
                     .font(.ui(11))
                     .foregroundStyle(preview.truncated || preview.stopped || !tab.columnFilters.isEmpty || tab.hasGridSearch
-                                     ? Tone.amber : Tone.secondary)
+                                     ? Tone.markAmber : Tone.secondary)
                 countControl
                 // The commit pair, beside the count button: the grid's two ways of asking the server
                 // something about what is on screen — how many rows, and "make these changes real".
                 // Both appear only when they have something to act on.
                 if !tab.cellEdits.isEmpty {
+                    // `Tone.markAmber`, not `Tone.amber`: the text is 4.5:1 on the light canvas
+                    // where the plain amber is 1.6:1 (W9 §1.8).
                     Text("· \(changeLabel.lowercased())")
                         .font(.ui(11))
-                        .foregroundStyle(Tone.amber)
-                    IconButton(symbol: "checkmark.circle",
-                               help: tab.viewBusy ? "\(QueryTab.viewBusyMessage)…"
-                                   : "Review and commit the \(changeLabel.lowercased())",
-                               diameter: 22) { reviewingChanges = true }
-                        .disabled(tab.viewBusy)
-                    IconButton(symbol: "arrow.uturn.backward",
-                               help: "Discard the \(changeLabel.lowercased())",
-                               diameter: 22) { tab.discardCellEdits() }
+                        .foregroundStyle(Tone.markAmber)
+                    // No `.keyboardShortcut` here: ⌘S belongs to the menu (blueprint w10 §5.3), and a
+                    // second binding for the same key would fire both.
+                    PillButton(title: "Review \(pluralized(tab.cellEdits.count, "Change"))…",
+                               symbol: "checkmark.circle", compact: true) { openReview() }
+                        .disabled(tab.viewBusy || tab.applying)
+                        .help(tab.applying ? "\(QueryTab.applyingMessage)…"
+                              : tab.viewBusy ? "\(QueryTab.viewBusyMessage)…"
+                              : "Review and run the changes (\(model.shortcutScheme.shortcut(for: .saveFile)?.display ?? "⌘S"))")
+                    PillButton(title: "Discard", symbol: "arrow.uturn.backward", role: .quiet,
+                               compact: true) { tab.discardCellEdits() }
+                        .disabled(tab.applying)
+                        .help("Throw the \(changeLabel.lowercased()) away")
                 }
                 if preview.elapsedMS > 0 {
                     Text("· \(preview.elapsedMS) ms").font(.ui(11)).foregroundStyle(Tone.secondary)
@@ -846,6 +871,19 @@ struct ResultGrid: View {
                                help: "Copy the selected cells as a table (⌘C)",
                                diameter: 22) { copySelection(withHeaders: false) }
                 }
+                // Rows are added and removed only where the app knows the table (blueprint w10
+                // §5.2); a button that cannot act says why in its help.
+                if tab.sourceTable != nil, !tab.showingPlan {
+                    let blocked = model.rowEditBlockedReason(for: tab)
+                    IconButton(symbol: "plus", help: blocked ?? "Add a row", label: "Add row",
+                               diameter: 22) { model.addRow(in: tab) }
+                        .disabled(blocked != nil)
+                    IconButton(symbol: "minus",
+                               help: blocked ?? (tab.cellSelection == nil ? "Select rows to delete them"
+                                                 : "Delete the selected rows"),
+                               label: "Delete selected rows", diameter: 22) { model.deleteRows(in: tab) }
+                        .disabled(blocked != nil || tab.cellSelection == nil)
+                }
             } else {
                 Text("No result yet").font(.ui(11)).foregroundStyle(Tone.secondary)
             }
@@ -856,7 +894,7 @@ struct ResultGrid: View {
             // counting the lines of a plan is not a question anyone has.
             if !tab.showingPlan {
                 HStack(spacing: 5) {
-                    Text("LIMIT").font(.ui(10, weight: .semibold)).tracking(0.6)
+                    Text("LIMIT").font(.ui(11, weight: .semibold)).tracking(0.6)
                         .foregroundStyle(Tone.secondary)
                     TextField("1000", value: $tab.rowLimit, format: .number.grouping(.never))
                         .textFieldStyle(.plain)
@@ -905,7 +943,7 @@ struct PartialOrderNote: View {
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(Tone.accent)
             Text("Partial order over the \(fetched.formatted()) rows fetched.")
-                .font(.ui(10.5))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize()
             Spacer(minLength: 0)
@@ -992,9 +1030,8 @@ private struct SavePresetSheet: View {
 /// visible here or nowhere. A commit that wrote without showing this would be asking the user to
 /// trust a `WHERE` they never saw.
 ///
-/// Running the statements is deliberately not wired here yet: it needs a write command in the engine
-/// (the FFI's command list is a contract, so that is its own change). Until then the statements are
-/// the user's to read and take away, which is the safe half of the feature rather than a stub.
+/// Run applies the plan in one transaction (`AppModel.applyChanges`); Copy SQL takes the same
+/// statements away to run by hand.
 private struct ChangeReview: View {
     let plan: WritePlan
     let onApply: (WritePlan) -> Void
@@ -1031,7 +1068,7 @@ private struct ChangeReview: View {
                     ForEach(Array(statements.enumerated()), id: \.offset) { _, statement in
                         HStack(alignment: .top, spacing: 8) {
                             Text(statement.kind.rawValue)
-                                .font(.code(9, weight: .semibold))
+                                .font(.code(11, weight: .semibold))
                                 .foregroundStyle(Tone.accent)
                                 .frame(width: 52, alignment: .leading)
                             Text(statement.sql)
@@ -1191,7 +1228,7 @@ private struct SearchFilterField: View {
             TextField("Cari", text: binding).field()
             Text("Too many distinct values to list, so this matches text: contains by default. "
                  + "Prefix with =, >, <, >= or <= to compare instead.")
-                .font(.ui(10.5))
+                .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }

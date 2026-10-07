@@ -135,6 +135,43 @@ final class CellEditUndoTests: XCTestCase {
         XCTAssertFalse(tab.canUndoCellEdit)
     }
 
+    func testEachRowGestureIsOneStepWithItsOwnNameAndARedo() {
+        let tab = tab()
+        tab.sourceTable = "public.t"
+        let model = AppModel()
+
+        model.addRow(in: tab)
+        XCTAssertEqual(tab.editUndoManager.undoActionName, "Add Row")
+        tab.selectCells(anchor: CellPos(row: 0, column: 0), focus: CellPos(row: 1, column: 0))
+        model.deleteRows(in: tab)
+        XCTAssertEqual(tab.editUndoManager.undoActionName, "Delete Rows")
+        model.restoreRows(in: tab)
+        XCTAssertEqual(tab.editUndoManager.undoActionName, "Restore Rows")
+
+        tab.undoCellEdit()
+        XCTAssertEqual(tab.cellEdits.deletedRows.sorted(), [0, 1])
+        XCTAssertEqual(tab.editUndoManager.redoActionName, "Restore Rows")
+        tab.undoCellEdit()
+        XCTAssertTrue(tab.cellEdits.deletedRows.isEmpty)
+        XCTAssertEqual(tab.cellEdits.inserted.count, 1, "one undo per gesture, so the added row is still there")
+        tab.undoCellEdit()
+        XCTAssertTrue(tab.cellEdits.isEmpty)
+        XCTAssertFalse(tab.canUndoCellEdit)
+
+        tab.redoCellEdit()
+        tab.redoCellEdit()
+        tab.redoCellEdit()
+        XCTAssertEqual(tab.cellEdits.inserted.count, 1)
+        XCTAssertTrue(tab.cellEdits.deletedRows.isEmpty)
+    }
+
+    func testDiscardingIsNamedAndUndoable() {
+        let tab = tab()
+        tab.cellEdits.edit("9", at: key, original: "3")
+        tab.discardCellEdits()
+        XCTAssertEqual(tab.editUndoManager.undoActionName, "Discard Changes")
+    }
+
     func testABlockFillMapsDisplayPositionsToSourceColumns() {
         // The fill's columns are display positions and `columns` maps them to the source indices a
         // cell is keyed by, so a block filled over a reordered grid edits the columns it covers.

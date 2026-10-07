@@ -3,6 +3,57 @@ import SwiftUI
 
 enum FocusRegion: String { case sidebar, editor, results }
 
+/// What closing a tab or quitting the app would throw away (DBX-26): staged grid changes, which exist
+/// nowhere else, and work that is still running and would be stopped. Pure data, so the sentences
+/// are tested without an alert.
+struct UnsavedWork: Equatable {
+    var stagedChanges = 0
+    var tabsWithChanges = 0
+    /// Changes being applied to the database right now.
+    var applies = 0
+    /// Exports and saves-to-table still running.
+    var exports = 0
+    var imports = 0
+
+    var isEmpty: Bool { stagedChanges == 0 && applies == 0 && exports == 0 && imports == 0 }
+
+    /// One sentence per kind of loss, in the order they matter.
+    var lines: [String] {
+        var lines: [String] = []
+        if stagedChanges > 0 {
+            lines.append("\(pluralized(stagedChanges, "staged change")) in "
+                         + "\(pluralized(tabsWithChanges, "tab")) will be discarded.")
+        }
+        if applies > 0 {
+            lines.append("Changes are being applied to the database. Stopping now can leave the "
+                         + "transaction unfinished; the server rolls it back.")
+        }
+        if exports > 0 { lines.append("\(pluralized(exports, "export")) still running will be stopped.") }
+        if imports > 0 { lines.append("An import is still running and will be stopped.") }
+        return lines
+    }
+}
+
+/// What the confirmation is for, which only changes its words.
+enum DiscardIntent: Equatable {
+    case quit
+    case closeTabs(Int)
+
+    var question: String {
+        switch self {
+        case .quit: "Quit QueryHive?"
+        case .closeTabs(let count): count == 1 ? "Close this query?" : "Close \(count) queries?"
+        }
+    }
+
+    var confirmTitle: String {
+        switch self {
+        case .quit: "Quit"
+        case .closeTabs: "Close"
+        }
+    }
+}
+
 /// Low-frequency navigation state, one stored property on `AppModel` (blueprint D-2).
 struct NavigationState: Equatable {
     var sidebarHidden = false
@@ -151,8 +202,65 @@ extension AppModel {
         if !hasContent { panelExpanded = false }
     }
 
-    func closeTab(_ id: UUID) {
-        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+    // MARK: Unsaved work (DBX-26)
+
+    /// What is at stake in `tabs`: staged changes, an apply, an export. An import is the app's and is
+    /// counted only by `unsavedWork` below, since it does not die with a tab.
+    func unsavedWork(in tabs: [QueryTab]) -> UnsavedWork {
+        var work = UnsavedWork()
+        for tab in tabs {
+            if !tab.cellEdits.isEmpty {
+                work.stagedChanges += tab.cellEdits.count
+                work.tabsWithChanges += 1
+            }
+            if tab.applying { work.applies += 1 }
+            if tab.stage == .running { work.exports += 1 }
+        }
+        return work
+    }
+
+    /// Everything the app would lose by quitting.
+    var unsavedWork: UnsavedWork {
+        var work = unsavedWork(in: tabs)
+        if importDraft?.running == true { work.imports = 1 }
+        return work
+    }
+
+    /// Asks, and answers whether to go on. A seam: the app shows an alert, a test answers for it.
+    static var confirmDiscard: (UnsavedWork, DiscardIntent) -> Bool = { work, intent in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = intent.question
+        alert.informativeText = work.lines.joined(separator: "\n")
+        // Cancel first, so Return keeps the work and the destructive answer is a deliberate click.
+        alert.addButton(withTitle: "Cancel")
+        let confirm = alert.addButton(withTitle: intent.confirmTitle)
+        confirm.hasDestructiveAction = true
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    /// One question for a set of tabs about to close, and `true` when there is nothing to ask or the
+    /// answer is to go on. Asked once however many tabs there are, so "Close Other Tabs" is one
+    /// dialog and not one per tab.
+    private func confirmClosing(_ doomed: [QueryTab]) -> Bool {
+        let work = unsavedWork(in: doomed)
+        return work.isEmpty || Self.confirmDiscard(work, .closeTabs(doomed.count))
+    }
+
+    /// `true` when the app may quit now: nothing is at stake, or the person said to go on. The one
+    /// place ⌘Q, closing the last window and Sparkle's relaunch (which ends in `NSApp.terminate`)
+    /// all ask.
+    func confirmQuit() -> Bool {
+        let work = unsavedWork
+        return work.isEmpty || Self.confirmDiscard(work, .quit)
+    }
+
+    /// Close one tab, after asking when it holds staged changes or a running export. `confirmed` is
+    /// for a caller that has already asked about a set of tabs. Answers whether the tab was closed.
+    @discardableResult
+    func closeTab(_ id: UUID, confirmed: Bool = false) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
+        if !confirmed, !confirmClosing([tabs[index]]) { return false }
         // Both runs, then the stores (§19): `preview` and `explain` live in `previewProcess`, and a
         // query still waiting on the server would otherwise run on for a tab nobody can see.
         tabs[index].process?.terminate()
@@ -169,6 +277,7 @@ extension AppModel {
             syncPanelToSelectedTab()
         }
         saveSession()
+        return true
     }
 
     func closeSelectedTab() {
@@ -182,18 +291,18 @@ extension AppModel {
     /// pointer. Every tab goes through `closeTab`, which terminates a running tab's process — the
     /// same thing the single-tab close does, and the reason these do not edit the array themselves.
     func closeOtherTabs(keeping id: UUID) {
-        for other in tabs where other.id != id {
-            closeTab(other.id)
-        }
+        let others = tabs.filter { $0.id != id }
+        guard confirmClosing(others) else { return }
+        for other in others { closeTab(other.id, confirmed: true) }
         selectTab(id)
     }
 
     /// Close every tab to the right of this one, "right" being the strip's order.
     func closeTabs(after id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
-        for other in tabs.suffix(from: index + 1) {
-            closeTab(other.id)
-        }
+        let after = Array(tabs.suffix(from: index + 1))
+        guard confirmClosing(after) else { return }
+        for other in after { closeTab(other.id, confirmed: true) }
     }
 
     /// Close every tab, leaving the workspace empty.
@@ -201,9 +310,9 @@ extension AppModel {
     /// `tabCounter` is deliberately not reset: `newTab` names from it, and going back to "Query 1"
     /// would give two tabs the same name within one session.
     func closeAllTabs() {
-        for tab in tabs {
-            closeTab(tab.id)
-        }
+        let all = tabs
+        guard confirmClosing(all) else { return }
+        for tab in all { closeTab(tab.id, confirmed: true) }
     }
 
     func selectTab(_ id: UUID) {

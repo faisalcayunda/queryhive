@@ -28,6 +28,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case previousTab
     case peekCell
     case toggleRecord
+    case addRow
 
     /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
     enum Scope { case scheme, platform }
@@ -43,11 +44,11 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     }
 
     /// False for an action that has a key reserved but nothing to run yet, so no menu item exists
-    /// and nothing may claim to bind it. `saveFile` waits for W10-T3 and W12-T2; the other two for
-    /// W12-T2.
+    /// and nothing may claim to bind it. `saveFile` is Save in the grid since W10-T3 (it reviews the
+    /// staged changes) and gains the editor's file save in W12-T2; the other two wait for W12-T2.
     var isAvailable: Bool {
         switch self {
-        case .saveFile, .commentLine, .format: false
+        case .commentLine, .format: false
         default: true
         }
     }
@@ -63,7 +64,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .stop: "Stop"
         case .newQuery: "New Query"
         case .openFile: "Open SQL File"
-        case .saveFile: "Save SQL File"
+        case .saveFile: "Save"
         case .exportData: "Export Data"
         case .toggleResultPanel: "Toggle Result Panel"
         case .commentLine: "Comment / Uncomment"
@@ -79,6 +80,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .previousTab: "Show Previous Tab"
         case .peekCell: "Peek Cell"
         case .toggleRecord: "Toggle Record View"
+        case .addRow: "Add Row"
         }
     }
 }
@@ -177,6 +179,8 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         .peekCell: Shortcut("y", .command),
         // Xcode's Inspectors key, and the one W9 reserved for this panel.
         .toggleRecord: Shortcut("i", [.command, .option]),
+        // The key W10 reserved for adding a row to the grid.
+        .addRow: Shortcut("n", [.command, .option]),
     ]
 
     private static let dbeaverTable: [ShortcutAction: Shortcut] = [

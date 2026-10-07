@@ -82,6 +82,10 @@ struct CellEdits: Equatable {
     mutating func fill(_ text: String, over range: CellRange, rows: some RowReading,
                        columns: [Int]? = nil) {
         for row in range.top...range.bottom {
+            // A row the store cannot read (past the fetched rows, or an added row's table row) has
+            // no original to compare with, and an edit keyed to it would name a row that is not
+            // there: skipped, the way `paste` skips it (blueprint w10 §5.1).
+            guard rows.row(at: row) != nil else { continue }
             for position in range.left...range.right {
                 let key = CellKey(row: row, column: Self.source(position, in: columns))
                 stage(text, at: key, original: Self.value(in: rows, at: key))
@@ -98,7 +102,14 @@ struct CellEdits: Equatable {
     /// the source indices the cells are keyed by.
     mutating func paste(_ text: String, at origin: CellKey, rows: some RowReading, columnCount: Int,
                         columns: [Int]? = nil) {
-        for (down, line) in Self.parse(text).enumerated() {
+        paste(lines: Self.parse(text), at: origin, rows: rows, columnCount: columnCount, columns: columns)
+    }
+
+    /// The same, from a block already read (`parse`), so a caller that cuts the block at the border
+    /// of the fetched rows can hand this the part that is theirs.
+    mutating func paste(lines: [[String]], at origin: CellKey, rows: some RowReading, columnCount: Int,
+                        columns: [Int]? = nil) {
+        for (down, line) in lines.enumerated() {
             for (across, field) in line.enumerated() {
                 let position = origin.column + across
                 guard position < columnCount else { continue }
@@ -143,6 +154,14 @@ struct CellEdits: Equatable {
         values = values.filter { $0.key.row != row }
     }
 
+    /// Mark a block of fetched rows for deletion in one pass. A loop of `deleteRow` is quadratic (each
+    /// call scans the marked rows and the staged values), which a select-all delete would pay in full.
+    mutating func deleteRows(_ rows: ClosedRange<Int>) {
+        let marked = Set(deletedRows)
+        deletedRows.append(contentsOf: rows.filter { !marked.contains($0) })
+        values = values.filter { !rows.contains($0.key.row) }
+    }
+
     /// Stage one cell of an added row — the insert's counterpart of `edit`.
     mutating func setInserted(_ text: String, row id: Int, column: Int) {
         guard let index = inserted.firstIndex(where: { $0.id == id }) else { return }
@@ -153,7 +172,35 @@ struct CellEdits: Equatable {
         }
     }
 
+    /// Take an added row back out of the queue, with every value typed into it. The id is never
+    /// reused: `nextInsertID` only counts down, so an undo that puts the row back finds its own id.
+    mutating func removeInserted(row id: Int) {
+        inserted.removeAll { $0.id == id }
+    }
+
+    /// Let a row marked for deletion go. The edits it held when it was marked are not brought back:
+    /// `deleteRow` dropped them, and a restore that resurrected some of them would be a second
+    /// guess at what the user meant.
+    mutating func restoreRow(_ row: Int) {
+        deletedRows.removeAll { $0 == row }
+    }
+
     func isDeleted(_ row: Int) -> Bool { deletedRows.contains(row) }
+
+    /// What is left of the queue once the part a successful apply wrote (`snapshot`) is taken out:
+    /// a staged cell goes only if it still holds the text the snapshot held, so a change made while
+    /// the apply ran is kept (PF-2). An added row goes when it is in the snapshot with the same
+    /// values, a deleted row when the snapshot deleted it too.
+    func removing(_ snapshot: CellEdits) -> CellEdits {
+        var left = self
+        left.values = values.filter { snapshot.values[$0.key] != $0.value }
+        // An added row the snapshot carried is in the table now, whatever was typed into it since;
+        // keeping it would INSERT it a second time on the next apply.
+        left.inserted = inserted.filter { row in !snapshot.inserted.contains { $0.id == row.id } }
+        left.deletedRows = deletedRows.filter { !snapshot.deletedRows.contains($0) }
+        if left.isEmpty { left.discard() }
+        return left
+    }
 
     /// What the grid says about a cell or a row, so the painter, the accessibility label and a
     /// test read one answer (blueprint w10 §4.2, FR-GRID-09).
@@ -184,6 +231,9 @@ struct CellEdits: Equatable {
     }
 
     private mutating func stage(_ text: String, at key: CellKey, original: String?) {
+        // A row marked for deletion takes no edit: `deleteRow` dropped them, and an UPDATE planned
+        // after its DELETE would match nothing and roll the whole plan back.
+        guard !deletedRows.contains(key.row) else { return }
         if text == original { values[key] = nil } else { values[key] = text }
     }
 
