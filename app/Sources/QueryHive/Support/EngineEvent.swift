@@ -23,6 +23,14 @@ struct Event: Decodable {
     /// is the frozen `{"event": "count", "rows": 4321}`, and neither engine ever writes a `count`
     /// key on it, so a property named `count` would decode a shape that does not exist.
     var rows: Int?
+    /// `import_data` progress on a CSV/JSON file: how many of the file's bytes have been read, and
+    /// how many there are, so the sheet can draw a real bar. Absent for a sheet, whose zip is read
+    /// by seeking (`crates/qh-ffi/src/progress.rs`). Snake-case on the wire: `bytes`/`bytes_total`.
+    var bytes: Int?
+    var bytesTotal: Int?
+    /// `import_data` progress on a sheet: the rows it declares, which is the only total an XLSX
+    /// file can give without reading it all. `rows_total` on the wire.
+    var rowsTotal: Int?
     var columns: [Column]?
     var files: [ExportedFile]?
     var warnings: [String]?

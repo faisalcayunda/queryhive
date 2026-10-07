@@ -73,6 +73,25 @@ enum ImportSourceFormat: String, CaseIterable, Identifiable {
     /// Whether the format has a field separator at all.
     var hasDelimiter: Bool { self == .csv || self == .tsv }
 
+    /// Whether the engine reads this format's values in a locale (`DECIMAL_SEPARATOR`,
+    /// `GROUPING_SEPARATOR`, `DATE_FORMAT`).
+    ///
+    /// The two row formats that carry text a person wrote: a CSV/TSV cell is always text, and an
+    /// XLSX cell is text or a number, told apart per cell. A JSON number is always `.`-decimal, so
+    /// the engine refuses a locale for it rather than multiply `1.234` by a thousand
+    /// (`crates/qh-ffi/src/import.rs`); a `.sql` file has no cells at all.
+    var readsValues: Bool { self == .csv || self == .tsv || self == .xlsx }
+
+    /// Whether a CSV code page can be named (`ENCODING`). UTF-8 is the default for every format; a
+    /// Windows file is the only one the engine lets a code page name, and it refuses one for any
+    /// other format because a file that is already UTF-8 or carries its own encoding would read
+    /// the setting as honoured when it changed nothing (`DBX-7`).
+    var hasCodePage: Bool { self == .csv || self == .tsv }
+
+    /// Whether a short row can be padded (`ALLOW_SHORT_ROWS`, PF-4). Only the row formats whose
+    /// rows are ragged: a JSON object always names its keys and a `.sql` file has no rows.
+    var hasRows: Bool { self == .csv || self == .tsv || self == .xlsx }
+
     /// Whether the first row can be a header. JSON names its columns with its keys and a `.sql`
     /// file has no columns, so neither is asked.
     var hasHeaderRow: Bool { self == .csv || self == .tsv || self == .xlsx }
@@ -178,12 +197,32 @@ struct ImportMapping: Equatable {
     var foreignKeys = true
     /// Rows per `INSERT`. 0 leaves the engine's own default (200) alone.
     var batchSize = 0
+    /// `DATE_FORMAT`: how the file spells a date, e.g. `dd/MM/yyyy`. Empty means the engine reads
+    /// no date itself and the text goes to the server as it is. Opt-in, because the server's own
+    /// `DateStyle` turns `03/04/2024` into 4 March rather than 3 April (DBX-31).
+    var dateFormat = ""
+    /// `DECIMAL_SEPARATOR`: the character that is the decimal point in the file. Empty means the
+    /// engine reads no number itself.
+    var decimalSeparator = ""
+    /// `GROUPING_SEPARATOR`: the thousands separator, only read together with a decimal separator.
+    var groupingSeparator = ""
+    /// `ALLOW_SHORT_ROWS` (PF-4): whether a row with fewer fields than the header is padded with
+    /// empty ones instead of failing. Default off, so a ragged file is a refused row rather than a
+    /// quietly shifted one.
+    var allowShortRows = false
+    /// `ENCODING`: a CSV file's code page, e.g. `cp1252`. Empty means UTF-8, which the engine
+    /// checks first and refuses before writing anything (DBX-7).
+    var encoding = ""
 
     var fileName: String { (path as NSString).lastPathComponent }
 
     var trimmedCatalog: String { targetCatalog.trimmingCharacters(in: .whitespaces) }
     var trimmedSchema: String { targetSchema.trimmingCharacters(in: .whitespaces) }
     var trimmedTable: String { targetTable.trimmingCharacters(in: .whitespaces) }
+    var trimmedDateFormat: String { dateFormat.trimmingCharacters(in: .whitespaces) }
+    var trimmedDecimalSeparator: String { decimalSeparator.trimmingCharacters(in: .whitespaces) }
+    var trimmedGroupingSeparator: String { groupingSeparator.trimmingCharacters(in: .whitespaces) }
+    var trimmedEncoding: String { encoding.trimmingCharacters(in: .whitespaces) }
 
     /// Whether the mapping is the engine's own header-derived one rather than the sheet's.
     var usesHeaderMapping: Bool { targetColumns.isEmpty }
@@ -239,7 +278,38 @@ struct ImportMapping: Equatable {
         }
         if batchSize > 0 { env["IMPORT_BATCH"] = String(batchSize) }
         if let columns = columnsJSON { env["COLUMNS"] = columns }
+        // A format the engine reads values in a locale for. A JSON number is always `.`-decimal and
+        // a JSON string is not told apart from it, so the engine refuses a decimal separator for it;
+        // a `.sql` file has no cells. Sending one anyway would make the sheet claim a reading the
+        // engine does not do (DBX-31).
+        if format.readsValues {
+            if let pattern = valueSetting(trimmedDateFormat) { env["DATE_FORMAT"] = pattern }
+            if let decimal = separator(trimmedDecimalSeparator) { env["DECIMAL_SEPARATOR"] = decimal }
+            // A grouping separator is only read beside a decimal one (the engine refuses it alone),
+            // and the two must differ: `1.500` is otherwise 1500 or 1.5 with nothing to say which.
+            if let grouping = separator(trimmedGroupingSeparator),
+               let decimal = env["DECIMAL_SEPARATOR"], grouping != decimal {
+                env["GROUPING_SEPARATOR"] = grouping
+            }
+        }
+        if format.hasCodePage, let codePage = valueSetting(trimmedEncoding) {
+            env["ENCODING"] = codePage
+        }
+        // A short row is refused by default; the opt-in asks the engine to pad it (PF-4).
+        if format.hasRows, allowShortRows { env["ALLOW_SHORT_ROWS"] = "1" }
         return env
+    }
+
+    /// A setting that is sent only when it spells something. `nil` for blank, so the engine's own
+    /// default stands rather than an empty value that reads as "set to nothing".
+    private func valueSetting(_ trimmed: String) -> String? {
+        trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// A separator, sent only when it is exactly the one character the engine reads. More than one
+    /// is dropped the way the engine refuses it, so the sheet never offers a value it would reject.
+    private func separator(_ trimmed: String) -> String? {
+        trimmed.count == 1 ? trimmed : nil
     }
 
     /// Whether the engine will refuse this import before opening a connection.
@@ -329,20 +399,38 @@ enum ImportHeaderReader {
     }
 
     /// A bounded prefix is enough: the header is the first record, and a file too large to fit the
-    /// cap has a header that came well before it.
-    private static let prefixLimit = 1 << 20
+    /// cap has a header that came well before it. Read by the trim test, which has to land a cut.
+    static let prefixLimit = 1 << 20
 
     /// The first record's fields, or `nil` when the file is not a delimited text file.
-    static func readHeaders(path: String, delimiter: Character) throws -> [String] {
+    ///
+    /// `codePage` is the sheet's `ENCODING`; empty means UTF-8. A byte cap lands the prefix in the
+    /// middle of a multi-byte character as often as not, and handing a decoder a string that ends
+    /// half a character in would report the whole file as unreadable, so the dangling bytes are
+    /// dropped first.
+    static func readHeaders(path: String, delimiter: Character, codePage: String = "") throws -> [String] {
         guard let handle = FileHandle(forReadingAtPath: path) else {
             throw Failure.unreadable(path)
         }
         defer { try? handle.close() }
-        let prefix = (try? handle.read(upToCount: prefixLimit)) ?? Data()
-        guard let text = String(data: prefix, encoding: .utf8) else {
+        let raw = (try? handle.read(upToCount: prefixLimit)) ?? Data()
+        let whole = raw.count < prefixLimit ? raw : raw.dropLastTrailingUTF8Sequence()
+        guard let text = String(data: whole, encoding: encoding(for: codePage)) else {
             throw Failure.notText(path)
         }
         return firstRecord(in: text, delimiter: delimiter)
+    }
+
+    /// The Foundation encoding a sheet's `ENCODING` names. UTF-8 for the empty case and for a name
+    /// this app does not know, so an unknown code page reads as UTF-8 rather than silently as
+    /// something else; the engine still owns which names are valid (`qh_import::Codec`).
+    static func encoding(for codePage: String) -> String.Encoding {
+        switch codePage.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "cp1252", "windows-1252", "win-1252": .windowsCP1252
+        case "latin-1", "latin1", "iso-8859-1", "iso8859-1": .isoLatin1
+        case "utf-8", "utf8", "": .utf8
+        default: .utf8
+        }
     }
 
     /// The first record of a CSV/TSV text, RFC 4180 quoting included.
@@ -492,6 +580,12 @@ final class ImportDraft: Identifiable {
     var columnsError: String?
     /// Set while the engine is importing, so the sheet can disable its own button.
     var running = false
+    /// How many of the source file's bytes the engine has read, and how many there are, for a CSV
+    /// or JSON file: the progress bar's numbers. `nil` before the first event and for a sheet.
+    var bytesRead: Int?
+    var bytesTotal: Int?
+    /// A sheet's declared rows, its only total. `nil` for a file whose size is the total instead.
+    var rowsTotal: Int?
     /// What the engine answered, once it has.
     var outcome: ImportOutcome?
     /// Why the import failed, when it did.
@@ -500,5 +594,41 @@ final class ImportDraft: Identifiable {
     init(mapping: ImportMapping, connectionID: UUID?) {
         self.mapping = mapping
         self.connectionID = connectionID
+    }
+}
+
+extension Data {
+    /// The bytes with a trailing, incomplete UTF-8 sequence dropped.
+    ///
+    /// A file read under a byte cap ends wherever the cap falls, which is inside a multi-byte
+    /// character as often as between two. Decoding such a prefix would fail and read as "not a text
+    /// file" even though every byte the app is about to look at is fine; dropping at most three
+    /// dangling bytes (a UTF-8 character is at most four) leaves a decodable prefix. A complete file
+    /// is returned as it is.
+    func dropLastTrailingUTF8Sequence() -> Data {
+        var end = count
+        // Walk back over continuation bytes (`10xxxxxx`) to the byte that starts the character.
+        var seen = 0
+        while end > 0 {
+            let byte = self[index(startIndex, offsetBy: end - 1)]
+            if byte & 0b1100_0000 == 0b1000_0000, seen < 3 {
+                end -= 1
+                seen += 1
+                continue
+            }
+            // A lead byte: how many bytes the character needs.
+            let needed: Int
+            switch byte {
+            case ..<0b1000_0000: needed = 1
+            case 0b1100_0000..<0b1110_0000: needed = 2
+            case 0b1110_0000..<0b1111_0000: needed = 3
+            case 0b1111_0000..<0b1111_1000: needed = 4
+            default: return self  // Not a lead byte; leave it to the decoder to judge.
+            }
+            // Complete only when the bytes that follow are exactly what the lead byte asked for.
+            // Otherwise the dangling run is the lead byte plus the continuation bytes seen so far.
+            return seen + 1 == needed ? self : dropLast(seen + 1)
+        }
+        return self
     }
 }

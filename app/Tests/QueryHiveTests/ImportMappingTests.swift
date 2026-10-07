@@ -108,6 +108,169 @@ final class ImportMappingTests: XCTestCase {
         XCTAssertEqual(env["IMPORT_BATCH"], "500")
     }
 
+    // MARK: Reading the file's values
+
+    func testNoValueSettingIsSentUntilItIsAskedFor() {
+        var mapping = ImportMapping()
+        mapping.format = .csv
+        let env = mapping.settings()
+        XCTAssertNil(env["DATE_FORMAT"])
+        XCTAssertNil(env["DECIMAL_SEPARATOR"])
+        XCTAssertNil(env["GROUPING_SEPARATOR"])
+        XCTAssertNil(env["ENCODING"])
+        XCTAssertNil(env["ALLOW_SHORT_ROWS"], "a short row is refused unless the sheet opts in (PF-4)")
+    }
+
+    func testTheValueSettingsTravelForTheFormatsThatCarryTextThePersonWrote() {
+        var mapping = ImportMapping()
+        mapping.format = .csv
+        mapping.dateFormat = "dd/MM/yyyy"
+        mapping.decimalSeparator = ","
+        mapping.groupingSeparator = "."
+        mapping.encoding = "cp1252"
+        mapping.allowShortRows = true
+        let env = mapping.settings()
+        XCTAssertEqual(env["DATE_FORMAT"], "dd/MM/yyyy")
+        XCTAssertEqual(env["DECIMAL_SEPARATOR"], ",")
+        XCTAssertEqual(env["GROUPING_SEPARATOR"], ".")
+        XCTAssertEqual(env["ENCODING"], "cp1252")
+        XCTAssertEqual(env["ALLOW_SHORT_ROWS"], "1")
+    }
+
+    func testAGroupingSeparatorIsReadOnlyBesideADifferentDecimalOne() {
+        var mapping = ImportMapping()
+        mapping.format = .csv
+        mapping.groupingSeparator = "."
+        // Alone it means nothing: `1.500` could be 1500 or 1.5. The engine refuses it, so the sheet
+        // must not send it and read as honoured.
+        XCTAssertNil(mapping.settings()["GROUPING_SEPARATOR"])
+        mapping.decimalSeparator = "."
+        // And the two must differ.
+        XCTAssertNil(mapping.settings()["GROUPING_SEPARATOR"])
+        mapping.decimalSeparator = ","
+        XCTAssertEqual(mapping.settings()["GROUPING_SEPARATOR"], ".")
+    }
+
+    func testASeparatorIsSentOnlyWhenItIsExactlyOneCharacter() {
+        var mapping = ImportMapping()
+        mapping.format = .csv
+        mapping.decimalSeparator = ".,"
+        XCTAssertNil(mapping.settings()["DECIMAL_SEPARATOR"], "a two-character separator is not one")
+        mapping.decimalSeparator = ""
+        XCTAssertNil(mapping.settings()["DECIMAL_SEPARATOR"], "blank leaves the engine's default")
+    }
+
+    func testAJSONFileIsNotSentValueReadingsItCannotHonour() {
+        var mapping = ImportMapping()
+        mapping.format = .json
+        mapping.dateFormat = "yyyy-MM-dd"
+        mapping.decimalSeparator = ","
+        mapping.groupingSeparator = "."
+        mapping.encoding = "cp1252"
+        let env = mapping.settings()
+        // A JSON number is always `.`-decimal, so the engine refuses a locale rather than multiply
+        // `1.234` by a thousand; and a code page applies to a CSV file, not a JSON one.
+        XCTAssertNil(env["DECIMAL_SEPARATOR"])
+        XCTAssertNil(env["GROUPING_SEPARATOR"])
+        XCTAssertNil(env["DATE_FORMAT"])
+        XCTAssertNil(env["ENCODING"])
+    }
+
+    func testASQLFileIsSentNoValueReadingsAtAll() {
+        var mapping = ImportMapping()
+        mapping.format = .sql
+        mapping.dateFormat = "dd/MM/yyyy"
+        mapping.decimalSeparator = ","
+        mapping.allowShortRows = true
+        let env = mapping.settings()
+        XCTAssertNil(env["DATE_FORMAT"])
+        XCTAssertNil(env["DECIMAL_SEPARATOR"])
+        XCTAssertNil(env["ALLOW_SHORT_ROWS"], "a statement file has no rows to pad")
+    }
+
+    func testASheetNamesNoCodePageButPadsRowsWhenAsked() {
+        var mapping = ImportMapping()
+        mapping.format = .xlsx
+        mapping.encoding = "cp1252"
+        mapping.allowShortRows = true
+        let env = mapping.settings()
+        XCTAssertNil(env["ENCODING"], "a workbook carries its own encoding")
+        XCTAssertEqual(env["ALLOW_SHORT_ROWS"], "1")
+    }
+
+    // MARK: The running footer's figure
+
+    func testTheProgressFigureUsesTheTotalTheEngineGave() {
+        // A file: the bytes read against the file's size.
+        XCTAssertEqual(ImportSheet.progressLabel(read: 3_000_000, total: 4_000_000, rows: nil),
+                       "Importing… 75%")
+        // A sheet: bytes are absent, so its declared rows stand in.
+        XCTAssertEqual(ImportSheet.progressLabel(read: nil, total: nil, rows: 1200),
+                       "Importing… \(1200.formatted()) rows to read")
+        // Nothing has arrived yet: no figure to invent, so the plain word.
+        XCTAssertEqual(ImportSheet.progressLabel(read: nil, total: nil, rows: nil), "Importing…")
+        // A zero total is not a percentage: guard against a division the file did not ask for.
+        XCTAssertEqual(ImportSheet.progressLabel(read: 10, total: 0, rows: nil), "Importing…")
+    }
+
+    // MARK: Windows on a code page
+
+    func testTheDeclaredCodePageIsTheOneTheHeaderIsReadWith() {
+        XCTAssertEqual(ImportHeaderReader.encoding(for: "cp1252"), .windowsCP1252)
+        XCTAssertEqual(ImportHeaderReader.encoding(for: "windows-1252"), .windowsCP1252)
+        XCTAssertEqual(ImportHeaderReader.encoding(for: "latin-1"), .isoLatin1)
+        XCTAssertEqual(ImportHeaderReader.encoding(for: "UTF-8"), .utf8)
+        // An unknown name reads as UTF-8 rather than as something else the app guessed at; the
+        // engine still owns which names are valid and refuses the rest by name.
+        XCTAssertEqual(ImportHeaderReader.encoding(for: "ebcdic"), .utf8)
+    }
+
+    func testAHeaderReadUnderTheByteCapDropsACharacterTheCapSplitInTwo() throws {
+        // A whole prefix is left alone: only a read cut at the cap can end mid-character.
+        XCTAssertEqual(Data("name,value\n".utf8).dropLastTrailingUTF8Sequence(),
+                       Data("name,value\n".utf8))
+
+        // The trim drops just the dangling bytes of an incomplete trailing character.
+        var split = Data("caf".utf8)
+        split.append(contentsOf: "é".utf8.dropLast())  // `caf` then half of a 2-byte `é`
+        XCTAssertEqual(split.dropLastTrailingUTF8Sequence(), Data("caf".utf8))
+
+        // And the reader uses it: a file longer than the cap whose cut lands mid-character reads
+        // its header rather than failing the decode as "not a text file".
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("import-header-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A header row, then padding up to the cap so the cut is taken, ending half a character in.
+        var padded = Data("name,value\n".utf8)
+        padded.append(contentsOf: Data(repeating: 0x61, count: ImportHeaderReader.prefixLimit))
+        // Trim back to end exactly at the cap with a half `é` as its last byte.
+        padded.removeLast(padded.count - ImportHeaderReader.prefixLimit + 1)
+        padded.append(contentsOf: "é".utf8.dropLast())
+        padded.append(0x62)
+        let path = directory.appendingPathComponent("split.csv")
+        try padded.write(to: path)
+        XCTAssertEqual(try ImportHeaderReader.readHeaders(path: path.path, delimiter: ","),
+                       ["name", "value"])
+    }
+
+    func testAHeaderReadWithACodePageDecodesBytesUTF8WouldNot() throws {
+        // A `0xE9` is `é` in cp1252 and not a byte UTF-8 accepts, so the code page is what makes
+        // the file readable at all (DBX-7).
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("import-header-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var data = Data("caf".utf8)
+        data.append(0xE9)  // `é` in cp1252
+        let path = directory.appendingPathComponent("cp1252.csv")
+        try data.write(to: path)
+        XCTAssertThrowsError(try ImportHeaderReader.readHeaders(path: path.path, delimiter: ","))
+        XCTAssertEqual(try ImportHeaderReader.readHeaders(path: path.path, delimiter: ",",
+                                                         codePage: "cp1252"),
+                       ["café"])
+    }
+
     // MARK: What it refuses to claim
 
     func testTheImportIsRefusedAtConfirmAndReadOnlyAndNowhereElse() {

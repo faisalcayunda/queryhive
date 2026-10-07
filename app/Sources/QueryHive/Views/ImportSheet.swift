@@ -110,6 +110,47 @@ struct ImportSheet: View {
                     .font(.ui(11)).foregroundStyle(Tone.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if draft.mapping.format.readsValues {
+                valueControls
+            } else if draft.mapping.format.hasCodePage {
+                codePageControl
+            }
+        }
+    }
+
+    /// How the file's own values are read, all opt-in: with none of it set the text goes to the
+    /// server as it is and the server decides. These exist so a person's `1.500,25` and
+    /// `03/04/2024` are read the way their file spells them rather than the way the session
+    /// happens to (`crates/qh-ffi/src/import.rs`, DBX-31).
+    @ViewBuilder private var valueControls: some View {
+        Text("Values are read as the file spells them:")
+            .font(.ui(11)).foregroundStyle(Tone.secondary)
+        HStack(alignment: .top, spacing: 10) {
+            LabeledField("Date format") {
+                TextField("as written", text: $draft.mapping.dateFormat).field().frame(width: 130)
+            }
+            LabeledField("Decimal") {
+                TextField(".", text: $draft.mapping.decimalSeparator).field().frame(width: 40)
+            }
+            LabeledField("Thousands") {
+                TextField("none", text: $draft.mapping.groupingSeparator).field().frame(width: 40)
+            }
+        }
+        Text("A date is read only where the target column is a date; a number only in a number "
+             + "column, and never in an XLSX cell the file itself stores as a number. A thousands "
+             + "separator is read only beside a decimal one.")
+            .font(.ui(11)).foregroundStyle(Tone.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if draft.mapping.format.hasCodePage {
+            codePageControl
+        }
+    }
+
+    /// A CSV file's code page (`ENCODING`). UTF-8 is the default; a Windows file is the case this
+    /// names. Anything else is refused before the engine connects (DBX-7).
+    private var codePageControl: some View {
+        LabeledField("Encoding") {
+            TextField("UTF-8", text: $draft.mapping.encoding).field().frame(width: 110)
         }
     }
 
@@ -319,6 +360,14 @@ struct ImportSheet: View {
                 }
             }
             ChipToggle(label: "Keep the server's foreign-key checks on", isOn: $draft.mapping.foreignKeys)
+            if format.hasRows {
+                ChipToggle(label: "Pad a row with fewer fields than the header",
+                           isOn: $draft.mapping.allowShortRows)
+                Text("Off by default: a short row is a refused row, so a ragged file is never written "
+                     + "with its columns shifted left. On, the missing fields become empty.")
+                    .font(.ui(11)).foregroundStyle(Tone.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -363,7 +412,7 @@ struct ImportSheet: View {
         HStack(spacing: 8) {
             if draft.running {
                 ProgressView().controlSize(.small)
-                Text("Importing…").font(.ui(11)).foregroundStyle(Tone.secondary)
+                Text(progressText).font(.ui(11)).foregroundStyle(Tone.secondary)
             } else if let outcome = draft.outcome {
                 Label(ImportSheet.outcomeText(outcome), systemImage: "checkmark.circle.fill")
                     .font(.ui(11)).foregroundStyle(Tone.mint)
@@ -387,6 +436,25 @@ struct ImportSheet: View {
 
     private var canImport: Bool {
         draft.mapping.ready && !draft.running && refusalReason == nil
+    }
+
+    /// What the run is doing, in the words a person reads: a file's bytes when the engine gives a
+    /// total, a sheet's declared rows otherwise, and a plain "Importing…" while nothing has arrived.
+    private var progressText: String {
+        ImportSheet.progressLabel(read: draft.bytesRead, total: draft.bytesTotal, rows: draft.rowsTotal)
+    }
+
+    /// The progress figure for the running footer. Pure so the three cases the engine's events can
+    /// produce are checked without a window: a file's percentage, a sheet's row count, and a run
+    /// that has not answered yet.
+    static func progressLabel(read: Int?, total: Int?, rows: Int?) -> String {
+        if let read, let total, total > 0 {
+            return "Importing… \(Int(Double(read) / Double(total) * 100))%"
+        }
+        if let rows {
+            return "Importing… \(pluralized(rows, "row")) to read"
+        }
+        return "Importing…"
     }
 
     /// What the engine reported, in the words a person reads.
@@ -508,7 +576,9 @@ struct ImportSheet: View {
             delimiter = draft.mapping.format == .tsv ? "\t" : ","
         }
         do {
-            let headers = try ImportHeaderReader.readHeaders(path: draft.mapping.path, delimiter: delimiter)
+            let headers = try ImportHeaderReader.readHeaders(path: draft.mapping.path,
+                                                             delimiter: delimiter,
+                                                             codePage: draft.mapping.trimmedEncoding)
             guard !headers.isEmpty else { return }
             draft.mapping.fields = ImportMapping.mappedFields(headers: headers,
                                                               targetColumns: draft.mapping.targetColumns)

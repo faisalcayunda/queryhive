@@ -394,8 +394,8 @@ mod tests {
     fn a_float_cell_keeps_every_digit_the_file_stores() {
         assert_eq!(cell_text(&Data::Float(0.1 + 0.2)), "0.30000000000000004");
         assert_eq!(
-            cell_text(&Data::Float(3.141592653589793)),
-            "3.141592653589793"
+            cell_text(&Data::Float(1.2345678901234567)),
+            "1.2345678901234567"
         );
         assert_eq!(cell_text(&Data::Float(5.0)), "5");
         assert_eq!(cell_text(&Data::Float(-1234.5)), "-1234.5");

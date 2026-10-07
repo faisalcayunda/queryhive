@@ -50,6 +50,26 @@ final class AppSheetRenderTests: XCTestCase {
     }
 
     @MainActor
+    func testTheImportSheetRendersWhileItReadsTheFile() throws {
+        // The running footer draws a progress figure from the engine's `progress` events: a file's
+        // bytes with their total, or a sheet's declared rows. Rendered so the figure's line is laid
+        // out, not only written.
+        let model = AppModel()
+        var mapping = ImportMapping()
+        mapping.path = "/Users/someone/penerima_manfaat_2026.csv"
+        mapping.format = .csv
+        mapping.targetTable = "penerima_manfaat"
+        mapping.fields = ImportMapping.mappedFields(headers: ["id", "nama"],
+                                                    targetColumns: ["id", "nama"])
+        let draft = ImportDraft(mapping: mapping, connectionID: nil)
+        draft.running = true
+        draft.bytesRead = 3_000_000
+        draft.bytesTotal = 4_000_000
+        try render(ImportSheet(draft: draft).environment(model).background(Tone.canvas),
+                   named: "import-sheet-running.png", size: CGSize(width: 660, height: 520))
+    }
+
+    @MainActor
     func testThePartialOrderNoteRenders() throws {
         // The one thin row for an in-memory order over a cut-short result.
         // Rendered because a row of text is exactly where a layout breaks silently.

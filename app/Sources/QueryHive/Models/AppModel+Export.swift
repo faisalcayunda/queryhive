@@ -137,14 +137,23 @@ extension AppModel {
         draft.running = true
         draft.outcome = nil
         draft.failure = nil
+        draft.bytesRead = nil
+        draft.bytesTotal = nil
+        draft.rowsTotal = nil
         var outcome = ImportOutcome()
         var message: String?
-        _ = Engine.current.run("import_data", env: env, onEvent: { event in
+        _ = Engine.current.run("import_data", env: env, onEvent: { [weak draft] event in
             switch event.event {
             case "done":
                 outcome = ImportOutcome(done: event)
             case "error":
                 message = event.message
+            case "progress":
+                // The engine throttles these, so the numbers move without one event per row. Bytes
+                // and their total come for a CSV or JSON file, rows for a sheet (`DBX-32`).
+                draft?.bytesRead = event.bytes
+                draft?.bytesTotal = event.bytesTotal
+                draft?.rowsTotal = event.rowsTotal
             default:
                 break
             }

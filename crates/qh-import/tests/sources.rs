@@ -177,7 +177,14 @@ fn a_sheet_that_starts_at_c3_reads_from_its_own_first_cell() {
         rows,
         vec![
             (4, vec!["".to_owned(), "".to_owned(), "".to_owned()]),
-            (5, vec!["1".to_owned(), "Ayu".to_owned(), "0.3".to_owned()]),
+            (
+                5,
+                vec![
+                    "1".to_owned(),
+                    "Ayu".to_owned(),
+                    "0.30000000000000004".to_owned(),
+                ]
+            ),
             (6, vec!["2".to_owned(), "Budi".to_owned(), "".to_owned()]),
         ]
     );
