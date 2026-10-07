@@ -335,3 +335,45 @@ fn split_sealable_bounds_each_piece_and_loses_no_row() {
     }
     assert_eq!((seen, pieces > 1), (5_000, true));
 }
+
+#[test]
+fn truncate_takes_the_dropped_rows_out_of_the_size_estimate() {
+    let text = "x".repeat(1024);
+    let mut builder = ChunkBuilder::new(2);
+    for i in 0..3_000i64 {
+        builder.push_i64(0, i);
+        builder.push_str(1, &text);
+    }
+    assert!(builder.is_full(), "3,000 KiB rows pass the 2 MiB limit");
+    builder.truncate(10);
+    assert_eq!(builder.rows(), 10);
+    assert!(!builder.is_full(), "ten rows are not a full chunk");
+    builder.truncate(50); // past the end: a no-op
+    assert_eq!(builder.rows(), 10);
+}
+
+#[test]
+fn push_owned_into_an_empty_builder_counts_like_pushing_cell_by_cell() {
+    let text = "x".repeat(1024);
+    let columns = || {
+        qh_core::ColumnBatch::new(vec![
+            (0..3_000).map(Value::Int).collect(),
+            (0..3_000)
+                .map(|_| Value::Text(text.as_str().into()))
+                .collect(),
+        ])
+        .unwrap()
+    };
+    let mut adopted = ChunkBuilder::new(2);
+    adopted.push_owned(columns()).unwrap();
+    let mut stepped = ChunkBuilder::new(2);
+    stepped.push_i64(0, 0);
+    stepped.push_str(1, "");
+    stepped.push_owned(columns()).unwrap();
+    assert_eq!((adopted.rows(), stepped.rows()), (3_000, 3_001));
+    assert!(adopted.is_full() && stepped.is_full());
+    // Both seal to the same cells.
+    let sealed = adopted.seal().unwrap();
+    let value = value_at(sealed.batch.column(0).as_ref(), sealed.encodings[0], 2_999);
+    assert_eq!(value.unwrap(), Value::Int(2_999));
+}

@@ -151,3 +151,27 @@ async fn many_rows_span_chunks() {
     )
     .await;
 }
+
+/// W8-F2: the producer cuts a batch by estimated bytes as well as rows, so wide rows are
+/// never staged 1024 at a time outside the store's budget.
+#[tokio::test]
+async fn wide_rows_are_cut_by_bytes() {
+    let Some(mut session) = connect().await else {
+        eprintln!("{SKIP_HINT}");
+        return;
+    };
+    // 100 KB per row against a 512 KiB batch bound: about six rows a batch, never 1024.
+    let sql = "SELECT id, REPEAT('x', 100000) AS pad FROM wide_500k ORDER BY id LIMIT 60";
+    let mut cursor = session
+        .execute(sql, &ExecuteOptions::default())
+        .await
+        .expect("execute");
+    let (mut rows, mut largest) = (0, 0);
+    while let Some(batch) = cursor.next_batch(1000).await.expect("next_batch") {
+        rows += batch.rows();
+        largest = largest.max(batch.rows());
+    }
+    assert_eq!(rows, 60);
+    assert!(largest <= 8, "a batch of {largest} wide rows");
+    assert_parity(&mut session, sql, 16384).await;
+}
