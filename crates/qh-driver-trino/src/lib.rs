@@ -1743,12 +1743,32 @@ impl Cursor for TrinoCursor {
             if !self.pending.is_empty() && budget > 0 {
                 // Row by row into the builder: no batch, no transpose. Stops at the seal limit,
                 // and the rest stays pending for the next chunk.
+                //
+                // A row wider than the builder must not be cut here: `decode_rows` keeps a
+                // value past the declared columns as `Unknown` rather than dropping it, and
+                // the `next_batch` path above hands the store the *wider* batch so the store
+                // refuses it (a loud `ColumnCount` error) instead of losing the cell unseen.
+                // This path shares that contract -- it refuses too, rather than truncating.
                 let width = out.width();
                 let mut taken = 0;
                 while taken < budget && !out.is_full() {
                     let Some(row) = self.pending.pop_front() else {
                         break;
                     };
+                    if row.len() > width {
+                        let found = row.len();
+                        // Put the row back so a retry sees the same state, then refuse. The rows
+                        // already staged in this loop are counted, so `emitted` stays truthful
+                        // even though the call ends in an error.
+                        self.pending.push_front(row);
+                        self.emitted += taken;
+                        return Err(EngineError::Internal {
+                            message: format!(
+                                "the server's row has {found} columns, wider than the result's \
+                                 {width}; refusing rather than dropping cells unseen"
+                            ),
+                        });
+                    }
                     let mut cells = row.into_iter();
                     for column in 0..width {
                         out.push_value(column, cells.next().unwrap_or(Value::Null));
@@ -2344,6 +2364,44 @@ mod tests {
         let batch = short.next_batch(0).await.unwrap().unwrap();
         assert_eq!((batch.width(), batch.rows()), (2, 2));
         assert_eq!(batch.value(1, 1), Some(&Value::Null));
+    }
+
+    #[tokio::test]
+    async fn a_chunk_refuses_a_row_wider_than_the_result_rather_than_cutting_it() {
+        // The `next_chunk` path pushes cells positionally into a builder whose width is fixed
+        // by the declared columns, so it cannot widen the way `next_batch` does. It must not
+        // silently drop the extra cell either: it refuses, the same outcome the store gives
+        // when `next_batch` hands it a wider batch. This is the non-gated twin of the live
+        // `chunk_parity` cases and of `a_ragged_row_is_padded_or_kept_never_cut` above.
+        let ints = |values: &[i64]| values.iter().map(|v| Json::from(*v)).collect::<Vec<_>>();
+        let mut cursor = cursor_over(&["a", "b"], &[ints(&[1, 2]), ints(&[3, 4, 5])]);
+        let mut builder = ChunkBuilder::new(2);
+        let error = cursor
+            .next_chunk(&mut builder, 0)
+            .await
+            .expect_err("a row wider than the result is refused, not cut");
+        assert!(
+            format!("{error:?}").contains("wider than the result's 2"),
+            "the refusal names the widths: {error:?}"
+        );
+        // The rows before the too-wide one are already staged (the caller sees them through
+        // the builder), and the too-wide row and everything after it stay pending, so a caller
+        // that widens and retries sees those rows rather than a silently dropped cell.
+        assert_eq!((builder.rows(), cursor.emitted), (1, 1));
+        assert_eq!(cursor.pending.len(), 1, "the too-wide row is still pending");
+    }
+
+    #[tokio::test]
+    async fn a_chunk_pads_a_row_narrower_than_the_result() {
+        // The other half of the same contract: a short row is padded with nulls, exactly as
+        // `next_batch` pads it, so a ragged page reads the same through either path.
+        let ints = |values: &[i64]| values.iter().map(|v| Json::from(*v)).collect::<Vec<_>>();
+        let mut cursor = cursor_over(&["a", "b"], &[ints(&[1, 2]), ints(&[3])]);
+        let mut builder = ChunkBuilder::new(2);
+        let appended = cursor.next_chunk(&mut builder, 0).await.expect("next_chunk");
+        assert_eq!(appended, 2);
+        let chunk = builder.seal().expect("seal");
+        assert_eq!((chunk.batch.num_rows(), chunk.batch.num_columns()), (2, 2));
     }
 
     #[test]
