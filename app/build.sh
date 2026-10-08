@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 # `engineVersion()` in the FFI returns this same string at runtime
 # (`env!("CARGO_PKG_VERSION")`), so a mismatch would be visible in the UI.
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo.toml)}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 BUILD="${BUILD:-$(date +%Y%m%d%H%M)}"
 
 # Where the app looks for releases, and the key every update is checked against. Both are

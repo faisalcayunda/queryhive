@@ -168,7 +168,7 @@ if $ROLLBACK; then
 fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' ../crates/qh-ffi/Cargo.toml)"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 TAG="v$VERSION"
 SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
 

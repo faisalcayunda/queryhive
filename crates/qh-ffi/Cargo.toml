@@ -1,6 +1,6 @@
 [package]
 name = "qh-ffi"
-version = "0.1.0"
+version = "0.2.0"
 description = "The engine entry point: the commands, the UniFFI surface, and the CLI the golden harness runs"
 edition.workspace = true
 rust-version.workspace = true
