@@ -111,7 +111,22 @@ impl ChunkBuilder {
 
     /// Append one cell of any shape. A value the column's encoding cannot
     /// hold makes the whole chunk-column tagged at seal (§5.3).
+    ///
+    /// Contract, trusted rather than returned: `column` must be `< self.width()`,
+    /// and the caller pushes every column of a row before moving to the next one.
+    /// A short row is the caller's to pad — these pushes do not pad. The batch
+    /// entry points (`push_batch`, `push_owned`) *check* width and return
+    /// `ColumnarError::Width`; this typed entry point, one cell at a time, only
+    /// holds the bound in debug builds. A caller with a row it did not build
+    /// itself (a driver decoding a server page) must establish the width itself:
+    /// see `TrinoCursor::next_chunk`, which refuses a row wider than the result
+    /// rather than cutting it.
     pub fn push_value(&mut self, column: usize, value: Value) {
+        debug_assert!(
+            column < self.width,
+            "column {column} is outside the builder's width {}",
+            self.width
+        );
         self.estimated_bytes += Self::cell_width(&value);
         self.columns[column].push(value);
     }

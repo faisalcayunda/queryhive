@@ -2398,7 +2398,10 @@ mod tests {
         let ints = |values: &[i64]| values.iter().map(|v| Json::from(*v)).collect::<Vec<_>>();
         let mut cursor = cursor_over(&["a", "b"], &[ints(&[1, 2]), ints(&[3])]);
         let mut builder = ChunkBuilder::new(2);
-        let appended = cursor.next_chunk(&mut builder, 0).await.expect("next_chunk");
+        let appended = cursor
+            .next_chunk(&mut builder, 0)
+            .await
+            .expect("next_chunk");
         assert_eq!(appended, 2);
         let chunk = builder.seal().expect("seal");
         assert_eq!((chunk.batch.num_rows(), chunk.batch.num_columns()), (2, 2));
