@@ -1389,10 +1389,29 @@ impl Session for TrinoSession {
     }
     /// Nothing on the connection to clean: a Trino session is a client and a few strings.
     /// What a run can leave is a query nobody finished reading (a capped preview), and that
-    /// is stopped here so the coordinator does not keep it. A failed `DELETE` is ignored:
-    /// nothing on our side is dirty, and Trino abandons the query on its own.
+    /// is stopped here so the coordinator does not keep it.
+    ///
+    /// A `DELETE` the server *refuses* is not swallowed. A Trino query is not abandoned because
+    /// a client stopped listening: it keeps scanning until its own run-time ceiling, holding the
+    /// coordinator. Reporting a refused cancel as a clean reset would hand a session with a live
+    /// straggler back to the pool to be reused, which is the leak. When the coordinator answers
+    /// the cancel with an error (`code` is set), that failure is returned so the pool closes the
+    /// session instead of parking it (`host/pool.rs::checkin`), and `running` is left in place
+    /// rather than cleared -- there is nothing clean to forget.
+    ///
+    /// A cancel we deliberately did *not* send is a different thing: a `nextUri` pointing at
+    /// another origin is refused before any request leaves (ADR-0040), `code` is `None`, and
+    /// there is no server to blame and nothing more we may do. That stays the old behaviour --
+    /// `reset` reports success, because a failure it cannot act on would only turn every
+    /// pooled check-in of such a session into a needless close.
     async fn reset(&mut self) -> Result<(), EngineError> {
-        let _ = self.delete_running().await;
+        if let Err(error) = self.delete_running().await {
+            if matches!(&error, EngineError::Query { code: Some(_), .. }) {
+                // The server refused the cancel: the query is still running there. Do not
+                // clear `running`, do not report success.
+                return Err(error);
+            }
+        }
         *self.running.lock().expect("running state") = None;
         self.last_id = None;
         Ok(())
