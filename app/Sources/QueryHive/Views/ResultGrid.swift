@@ -1048,17 +1048,27 @@ private struct ChangeReview: View {
         "\(statements.count) change\(statements.count == 1 ? "" : "s")"
     }
 
+    /// Kept out of `body` on purpose: inlined into `Text(...)` it is a `map` over a closure
+    /// concatenating five string literals behind a `??`, and Swift 6.1's type checker gives up
+    /// on it ("unable to type-check this expression in reasonable time"). A plain property is
+    /// trivial to check and easier to read.
+    private var subtitle: String {
+        if let table = plan.table {
+            return "Against \(table). Each row is matched by every column at the value it "
+                + "was fetched with, so two identical rows would both be changed. The "
+                + "plan runs in one transaction and is rolled back if a statement "
+                + "affects a different number of rows than expected."
+        }
+        return "This tab does not know which table it is showing, so there is nothing to write "
+            + "back to. Open the table from the tree to edit its rows."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.ui(13, weight: .semibold))
                 .foregroundStyle(Tone.ink)
-            Text(plan.table.map { "Against \($0). Each row is matched by every column at the value it "
-                              + "was fetched with, so two identical rows would both be changed. The "
-                              + "plan runs in one transaction and is rolled back if a statement "
-                              + "affects a different number of rows than expected." }
-                 ?? "This tab does not know which table it is showing, so there is nothing to write "
-                    + "back to. Open the table from the tree to edit its rows.")
+            Text(subtitle)
                 .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
                 .fixedSize(horizontal: false, vertical: true)
