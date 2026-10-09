@@ -1,6 +1,6 @@
 # Serah terima: melanjutkan run perf-parity
 
-Dokumen ini untuk AI atau orang yang melanjutkan program perf-parity. Isinya metode kerja, bukan status. Status terbaru ada di `target/run/ledger.md`, bagian "PAUSE POINT 5 (2026-10-07, TERBARU)". Tidak ada alat tertentu yang diasumsikan: semua langkah bisa dikerjakan dengan shell, git, dan editor biasa.
+Dokumen ini untuk AI atau orang yang melanjutkan program perf-parity. Isinya metode kerja, bukan status. Status terbaru ada di `target/run/ledger.md`, bagian "PAUSE POINT 6 (2026-10-08)" dan "LANJUTAN (2026-10-09)". Tidak ada alat tertentu yang diasumsikan: semua langkah bisa dikerjakan dengan shell, git, dan editor biasa.
 
 Bacaan wajib sebelum mulai, berurutan:
 
@@ -23,18 +23,13 @@ Langkah awal setiap sesi:
 2. Nyalakan database dev (bagian 4) bila akan menjalankan tes live atau golden.
 3. Fast-forward `main` lokal ke `origin/main`.
 
-Integrasikan delapan branch dengan urutan ini, karena sebagian berbagi berkas:
+**Integrasi delapan branch: SUDAH SELESAI (per 2026-10-09).** Kedelapan lane (`w13-t14`, `w12-t11`, `w13-t16`, `w10-t7b`, `w10-t3`, `w12-t7a`, `w12-t9`, `w8-f2`) kini ada di `main` lewat commit B9/B10/B11 dan seterusnya, masing-masing dengan gate-nya (lihat `target/run/keep/ledger.md`, PAUSE POINT 6 dan LANJUTAN). Branch `lane/*` lokal sudah dihapus setelah isinya diverifikasi ada di main; salinannya tetap ada di `origin/lane/*`. Jangan ulangi integrasi ini.
 
-1. `lane/w13-t14` (`release.sh --rollback`). Berdiri sendiri. Sisa: cherry-pick, push.
-2. `lane/w12-t11` (parameter array dan daftar). Berdiri sendiri. Sisa: cherry-pick, gate termasuk `cargo test -p qh-editor` di MAIN, push.
-3. `lane/w13-t16` (impor DBeaver/DataGrip). Berdiri sendiri. Sisa: cherry-pick, gate, push.
-4. `lane/w10-t7b` (kurung editor, menu font). Menyentuh UniFFI: regenerasi `app/Generated/` di MAIN dengan `./app/build-ffi.sh` dan komit bersama perubahan Rust. Selesaikan dulu sisa di ledger (bukti re-record `chrome-*`, komentar `fontBigger`, G-BENCHQ eksklusif), lalu squash commit WIP.
-5. `lane/w10-t3` (edit baris, Save, konfirmasi quit). Rebase atau cherry-pick di atas w10-t7b dan selesaikan konflik di `AppModel+Focus.swift`, `AppMenu.swift`, `Shortcuts.swift`, `FontFloorTests`, `ShortcutConflictTests`. File registri yang hanya bertambah (`AppMenu`, `Shortcuts`, `Snapshot`, `EngineEvent`) boleh digabung tangan (keputusan O-25, "R-ADD"); entri lama tidak boleh diubah. Jalankan tes live `apply_changes` PG di MAIN. Baseline grid hasil re-record dikomit sendiri sebagai V-n.
-6. `lane/w12-t7a` (aturan nilai impor, XLSX streaming). Perbaiki dulu tiga temuan blocking di ledger, tambah tes, lalu wiring Swift (`ImportMapping.swift`, `AppModel+Export.swift`, `ImportSheet.swift`), lalu gate dan satu review.
-7. `lane/w12-t9` (ekspor ke tabel dengan replace). Belum terverifikasi: baca baris tugasnya di plan, tinjau diff, selesaikan, gate, review. Bentrok dengan w8-f2 di `crates/qh-ffi/src/commands.rs`; urutan rantai di §7 menaruh W12-T9 lebih dulu.
-8. `lane/w8-f2` (batch MySQL berbatas byte). Jalankan A/B eksklusif X5 dengan aturan keep di plan (>= 10% pada sumbunya, tanpa regresi di sumbu lain). Bila lolos, integrasikan; bila tidak, buang branch dan catat alasannya di ledger. Setelah itu W8-F5 (re-bench).
-
-Setelah itu, lanjutkan sisa §5 sampai W14 mengikuti `plan-b1-onward.md` dan rantai di §7. Rantai FFI (satu pemilik `app/Generated/` dan `uniffi_api.rs` pada satu waktu) yang masih terbuka: W11-T6b, W12-T3, W13-T4, W13-T8b, lalu W13-T9 dan W13-T13 menurut §7. Keputusan bersyarat (W12-T7d, W13-T10, W13-T11, W13-T17, W13-T18, DBX-8, DBX-10, DBX-25) dicatat sebagai O-* di ledger, paling lambat seperti tertulis di W14-T12.
+Yang masih terbuka (lihat §5 `development-plan.md` dan rantai §7):
+- Rantai FFI (satu pemilik `app/Generated/` dan `uniffi_api.rs` pada satu waktu): W11-T6b, W12-T3, W13-T4, W13-T8b, lalu W13-T9 dan W13-T13.
+- Sisa W12/W13 yang belum punya commit: W12-T7b/c/e, W13-T5/T6/T7/T12/T15/T17/T18, W13-D, W13-C.
+- **Seluruh W14 belum dimulai** (lihat §9).
+- Keputusan bersyarat (W12-T7d, W13-T10, W13-T11, W13-T17, W13-T18, DBX-8, DBX-10, DBX-25) dicatat sebagai O-* di ledger, paling lambat seperti tertulis di W14-T12.
 
 ## 3. Metode lajur (keputusan O-22)
 
@@ -42,7 +37,7 @@ Tiga lajur implementer paling banyak berjalan bersamaan. Aturannya:
 
 - **MAIN** (checkout utama): memegang rantai FFI dan menjalankan gate integrasi: `build-ffi`, G-FFI, G-GOLDEN, G-APP, G-LEAK, `cargo test --workspace`, dan slot eksklusif benchmark.
 - **Lajur Swift:** git worktree `../query_hive-wtsN`. Menyalin `target/ffi` dari MAIN (ulangi setiap `app/Generated/` berubah) dan tidak pernah menjalankan `cargo` atau `build-ffi.sh`, karena skrip itu dan `app/Package.swift` mengharapkan `<root>/target`. Menjalankan `swift build` dan `swift test` saja.
-- **Lajur Rust:** git worktree `../query_hive-wtrN`, masing-masing dengan `CARGO_TARGET_DIR` sendiri di SSD eksternal: `/Volumes/Faisal SSD/qh-cargo-targets/t1`, `t2`, `t3` (path memuat spasi, beri kutip). SSD itu exFAT, jadi SwiftPM `.build` tidak boleh di sana. Jangan menyentuh apa pun lain di SSD itu: isinya berkas pribadi pemilik. Saat ini ada juga `t2-analytics` dan `t2-w8f2` di sana; keduanya sisa run ini dan boleh dihapus bila sudah tidak dipakai. Lajur Rust menjalankan `cargo test -p <crate yang disentuh>`, tidak pernah `--workspace` (tiap path worktree membangun ulang semua binary tes, sekitar 5 GB per lajur).
+- **Lajur Rust:** git worktree `../query_hive-wtrN`, masing-masing dengan `CARGO_TARGET_DIR` sendiri di SSD eksternal: `/Volumes/Faisal SSD/qh-cargo-targets/t1`, `t2`, `t3` (path memuat spasi, beri kutip). SSD itu kini **APFS** (diformat ulang 2026-10-09; sebelumnya exFAT, yang lambat untuk ribuan berkas kecil dan pernah menahan lajur cargo dengan I/O tak terputus). APFS kini juga cocok untuk SwiftPM `.build`, tetapi tetap taruh `.build` di disk internal kecuali disk internal sempit. Jangan menyentuh apa pun lain di SSD itu: isinya berkas pribadi pemilik. Lajur Rust menjalankan `cargo test -p <crate yang disentuh>`, tidak pernah `--workspace` (tiap path worktree membangun ulang semua binary tes, sekitar 5 GB per lajur).
 - Jangan menjalankan lebih dari dua lajur cargo di SSD sekaligus (lihat insiden di bagian 7).
 - **Integrasi:** komit di lajur, cherry-pick ke MAIN, jalankan gate tugas itu di MAIN, lalu push fast-forward ke `main` dan `work/perf-parity` (izin tetap O-21 dan O-31b, hanya untuk program ini). Satu komit per tugas yang lulus gate. Sebelum push, baca `gh run list --branch main -L2`; main yang merah dicatat sebagai insiden dan memblokir push berikutnya (DBX-43). Bila `cherry-pick` bentrok di `app/Generated/`, jalankan ulang `./app/build-ffi.sh` di kepala branch dan komit hasilnya bersama tugas itu.
 - Baseline PNG hanya direkam ulang untuk perubahan V-n yang terdaftar, satu per satu, dalam komit sendiri bersubjek `test(visual): re-record <scene> for <V-n>`.
