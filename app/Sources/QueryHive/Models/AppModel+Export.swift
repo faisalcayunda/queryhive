@@ -52,9 +52,13 @@ extension AppModel {
                                 + "\(url.lastPathComponent) is none of those.")
             return
         }
-        let connectionID = node?.connectionID
-            ?? selectedTab.flatMap { connection(for: $0)?.id }
-            ?? connections.first?.id
+        // Broken into steps with explicit types on purpose: as a single `??` chain the type
+        // checker walks the whole expression at once and some Swift toolchains give up with a
+        // misleading "circular reference" (seen on CI's `macos-latest`, not locally).
+        let nodeConnectionID: UUID? = node?.connectionID
+        let tabConnectionID: UUID? = selectedTab.flatMap { connection(for: $0)?.id }
+        let firstConnectionID: UUID? = connections.first?.id
+        let connectionID: UUID? = nodeConnectionID ?? tabConnectionID ?? firstConnectionID
         let connection = connections.first { $0.id == connectionID }
         var mapping = ImportMapping()
         mapping.path = url.path
