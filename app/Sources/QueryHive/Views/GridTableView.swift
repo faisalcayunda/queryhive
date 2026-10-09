@@ -381,6 +381,10 @@ final class GridTableView: NSTableView {
         let overflow = overflowRows(context)
         let first = max(0, Int(floor(dirtyRect.minY / context.rowHeight)) - overflow)
         let last = min(rowCount - 1, Int(floor(dirtyRect.maxY / context.rowHeight)) + overflow)
+        // The rectangle can lie wholly below the rows that exist (an elastic bounce or a result
+        // that just shrank before the view re-laid itself out), which leaves `first` past `last`.
+        // There is nothing to paint there; drawing anyway would trap on the empty range.
+        guard first <= last else { cg.restoreGState(); return }
 
         // The columns it covers, plus the gutter when the rectangle reaches the left edge.
         let columns = context.geometry.columns(in: dirtyRect.minX...max(dirtyRect.maxX, dirtyRect.minX))
