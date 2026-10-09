@@ -118,6 +118,10 @@ impl SpillCipher {
         // Claim the counter before sealing, and refuse *without* wrapping
         // when it is exhausted. A `fetch_add` would roll to 0 and hand the
         // next caller a nonce that has already been used.
+        //
+        // `fetch_update` is renamed `try_update` in Rust 1.95, but the workspace MSRV is 1.85, so
+        // the new name is not available yet. Silence the deprecation until the MSRV moves.
+        #[allow(deprecated)]
         let counter = self
             .counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {

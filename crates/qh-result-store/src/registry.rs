@@ -291,6 +291,10 @@ impl StoreRegistry {
 
     /// Give back budget. Saturating, because a double release or a release
     /// after a failed eviction must never wrap the counter negative.
+    ///
+    /// `fetch_update` is renamed `try_update` in Rust 1.95, but the workspace MSRV is 1.85, so the
+    /// new name is not available yet. Silence the deprecation until the MSRV moves.
+    #[allow(deprecated)]
     pub fn uncharge(&self, bytes: usize) {
         let _ = self
             .resident

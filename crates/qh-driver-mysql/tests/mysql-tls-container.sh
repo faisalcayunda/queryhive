@@ -31,7 +31,6 @@
 #   podman rm -f qh-mysql-tls qh-mysql-plain
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CERT_DIR="${QH_MYSQL_TLS_CERTS:-$HOME/.cache/qh-mysql-tls}"
 TLS_NAME=qh-mysql-tls
 PLAIN_NAME=qh-mysql-plain

@@ -178,7 +178,10 @@ if [ -z "${RELEASE_NOTES:-}" ] && [ -f "../docs/releases/$TAG.md" ]; then
   RELEASE_NOTES="../docs/releases/$TAG.md"
 fi
 
-for tool in generate_appcast; do
+# One entry today; kept as an array so adding a second Sparkle tool stays a one-line change
+# without tripping SC2043, which flags a literal single-item `for` list.
+sparkle_tools=(generate_appcast)
+for tool in "${sparkle_tools[@]}"; do
   if [ ! -x "$SPARKLE_BIN/$tool" ]; then
     echo "$SPARKLE_BIN/$tool is missing — run 'swift package resolve' first" >&2
     exit 1

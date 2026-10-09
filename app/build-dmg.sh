@@ -176,6 +176,8 @@ echo "    minimum macOS $MINOS"
 # artifact, not by exit code: `--snapshot` renders the whole UI, so a PNG is proof that the
 # Swift binary, its resources and the window stack all came up.
 CHECK="$(mktemp -d)"
+# "done" is the name of a snapshot scene, not a shell keyword; shellcheck reads it as SC1010.
+# shellcheck disable=SC1010
 "$BIN" --snapshot "$CHECK/proof.png" --scene done
 [[ -s "$CHECK/proof.png" ]] || { echo "    FAILED to render from the mounted dmg" >&2; exit 1; }
 echo "    runs from the mounted dmg (rendered $(du -h "$CHECK/proof.png" | cut -f1) of UI)"
