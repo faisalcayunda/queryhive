@@ -59,7 +59,11 @@ extension AppModel {
         let tabConnectionID: UUID? = selectedTab.flatMap { connection(for: $0)?.id }
         let firstConnectionID: UUID? = connections.first?.id
         let connectionID: UUID? = nodeConnectionID ?? tabConnectionID ?? firstConnectionID
-        let connection = connections.first { $0.id == connectionID }
+        // Named `targetConnection`, not `connection`: a local `connection` shadows the
+        // `connection(for:)` method for the whole brace scope, and Swift 6.1 then resolves the
+        // call in the closure above to this not-yet-initialised local ("cannot call value of
+        // non-function type 'Connection?'"). Swift 6.4 tolerates it; 6.1 does not.
+        let targetConnection = connections.first { $0.id == connectionID }
         var mapping = ImportMapping()
         mapping.path = url.path
         mapping.format = format
@@ -69,8 +73,8 @@ extension AppModel {
             mapping.targetSchema = node.schema ?? ""
             mapping.targetTable = node.title
         } else {
-            mapping.targetCatalog = connection?.database ?? ""
-            mapping.targetSchema = connection?.schema ?? ""
+            mapping.targetCatalog = targetConnection?.database ?? ""
+            mapping.targetSchema = targetConnection?.schema ?? ""
             mapping.targetTable = url.deletingPathExtension().lastPathComponent
         }
         importDraft = ImportDraft(mapping: mapping, connectionID: connectionID)
