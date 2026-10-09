@@ -356,14 +356,25 @@ mod tests {
             "the interactive pool needs a worker"
         );
 
-        // This machine is Apple Silicon, so the perflevel keys are there and both
-        // kinds are known. On an Intel Mac or another platform `efficiency` is
-        // legitimately zero, which is why the assertion is guarded rather than
-        // general.
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert!(
-            cores.efficiency >= 1,
-            "an Apple Silicon machine reports efficiency cores, got {cores:?}"
+        // Do not assume an aarch64 Mac reports efficiency cores. A GitHub macOS
+        // runner is aarch64 inside Apple Virtualization and does *not* expose
+        // `hw.perflevel1`, so `efficiency` is legitimately 0 there (an Intel Mac
+        // and every non-macOS platform are the same). Assert the contract
+        // instead: whatever `cores()` reports must agree with the perflevel the
+        // machine actually exposes, which checks the parsing rather than the
+        // environment.
+        #[cfg(target_os = "macos")]
+        {
+            let expected_efficiency = sysctl_positive("hw.perflevel1.physicalcpu").unwrap_or(0);
+            assert_eq!(
+                cores.efficiency, expected_efficiency,
+                "efficiency cores must match hw.perflevel1 ({cores:?})"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            cores.efficiency, 0,
+            "a platform without perflevels reports no efficiency cores, got {cores:?}"
         );
 
         // The sum must not exceed the total the standard API reports: this is the
