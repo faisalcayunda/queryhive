@@ -124,21 +124,6 @@ final class ChromeParityTests: XCTestCase {
         return value == "1" || value == "all" ? [] : Set(value.split(separator: ",").map(String.init))
     }()
 
-    /// Whether pixel comparison runs in this environment.
-    ///
-    /// The baselines are recorded on the owner's Mac, and these pictures pin the machine as much as
-    /// the app: the font rasteriser, the Xcode that ships the SDK, and the GPU a headless CI runner
-    /// falls back to all move pixels that nothing in the code changed. On CI a whole scene differs by
-    /// ~20%, far past the 0.1% budget, so comparing there tests the runner, not the shell. Skip on CI
-    /// unless `QH_CHROME=1` asks for it by name — a dedicated snapshot job, or a run against a machine
-    /// whose rendering matches the baselines, can set it.
-    private static let comparisonAllowedHere: Bool = {
-        if recording != nil { return true }
-        let explicit = ProcessInfo.processInfo.environment["QH_CHROME"]
-        if let explicit, !explicit.isEmpty { return true }
-        return (ProcessInfo.processInfo.environment["CI"] ?? "").isEmpty
-    }()
-
     /// `__Baselines__` beside this file, so the path is the repository's and not the build's.
     private static let baselineDirectory = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().appendingPathComponent("__Baselines__", isDirectory: true)
@@ -458,8 +443,7 @@ final class ChromeParityTests: XCTestCase {
     // MARK: Record / compare
 
     func testChromeScenesMatchTheirBaselines() throws {
-        try XCTSkipIf(!Self.comparisonAllowedHere,
-                      "chrome baselines are recorded on the owner's Mac; this environment's rendering differs")
+        try requireRenderComparison()
         let directory = Self.baselineDirectory
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

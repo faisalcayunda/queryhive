@@ -1176,16 +1176,19 @@ final class VisualParityTests: XCTestCase {
     }
 
     func testGridScenesMatchTheirBaselines() throws {
+        try requireRenderComparison()
         try check(gridScenes())
     }
 
     func testEditorScenesMatchTheirBaselines() throws {
+        try requireRenderComparison()
         try check(editorScenes())
     }
 
     /// A machine with Increase Contrast on must still match the baselines: the scene setup pins
     /// the surface, and the pin wins over what the system says.
     func testBaselinesIgnoreTheMachinesAccessibilitySettings() throws {
+        try requireRenderComparison()
         let plain = editorScenes().filter { $0.name.hasPrefix("editor-plain") }
         XCTAssertFalse(plain.isEmpty)
         let scenes = plain.map { scene in

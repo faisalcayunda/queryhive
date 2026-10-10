@@ -12,6 +12,20 @@ import XCTest
 /// belongs to no theme.
 @MainActor
 final class ReadoutColourTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // Pin the surface to its plain colours. This test asserts the readout's opacity (0.55) and the
+        // app's ink, both of which the "enhanced" surface — on when the machine has Reduce
+        // Transparency or Increase Contrast — swaps for a heavier 0.75. The colour is the app's
+        // choice; which of the two is in force is the machine's, and CI leaves contrast on.
+        ThemeStore.shared.pin(reduceMotion: false, reduceTransparency: false, increaseContrast: false)
+    }
+
+    override func tearDown() {
+        ThemeStore.shared.unpinSurface()
+        super.tearDown()
+    }
+
     private func resolved(_ colour: NSColor, _ appearance: NSAppearance.Name) throws -> NSColor {
         let aqua = try XCTUnwrap(NSAppearance(named: appearance))
         var out = colour

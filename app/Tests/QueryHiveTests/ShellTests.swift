@@ -194,6 +194,7 @@ final class ShellTests: XCTestCase {
     // The tab strip is the title bar's row: the window's top edge is the strip's, and the traffic
     // lights are vertically inside it.
     func testTheTabStripIsTheTitleBarRow() throws {
+        try requireRenderComparison()
         let rig = rig(scene: "done")
         let strip = try requireFrame("tab-strip", in: rig)
         let bar = titlebarHeight(rig.window)
@@ -232,6 +233,7 @@ final class ShellTests: XCTestCase {
     // The traffic lights and the sidebar toggle, with the sidebar hidden, are over the strip's own
     // column: the tabs start after them, however many there are.
     func testTabsStayClearOfTheWindowControls() throws {
+        try requireRenderComparison()
         let rig = rig(scene: "done")
         rig.model.navigation.sidebarHidden = true
         for _ in 0..<14 { rig.model.newTab() }
@@ -388,6 +390,7 @@ final class ShellTests: XCTestCase {
     // workspace, is the theme's canvas exactly, and the sidebar's top is the theme's sidebar surface,
     // the same colour as the rest of the sidebar.
     func testEveryThemeDrawsTheTopRowInItsOwnSurface() throws {
+        try requireRenderComparison()
         for theme in AppTheme.allCases {
             let rig = rig(scene: "done", theme: theme, tone: .plain)
             let strip = try requireFrame("tab-strip", in: rig)

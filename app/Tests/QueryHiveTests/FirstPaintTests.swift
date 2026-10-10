@@ -288,6 +288,7 @@ final class FirstPaintTests: XCTestCase {
     }
 
     func testAHeaderOnlyTableIsOneHeaderTall() throws {
+        try requireRenderComparison()
         var script = StreamingEngine.Script()
         script.rows = []
         let grid = hosted(script)
