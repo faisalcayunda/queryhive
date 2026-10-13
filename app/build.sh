@@ -54,7 +54,7 @@ cp "$(swift build -c release --disable-sandbox --show-bin-path)/QueryHive" "$app
 # kills it cannot touch the app, and the app never spawns it — the user's MCP client
 # does, pointing at this path. `build-ffi.sh` above already built it, because that is a
 # plain `cargo build -p qh-ffi --release` and the binary is one of the package's targets.
-MCP_BIN="../target/release/queryhive-mcp"
+MCP_BIN="${CARGO_TARGET_DIR:-../target}/release/queryhive-mcp"
 if [ ! -x "$MCP_BIN" ]; then
     echo "queryhive-mcp was not built — app/build-ffi.sh should have produced $MCP_BIN"
     exit 1

@@ -35,8 +35,13 @@ PROFILE="${1:-release}"
 # subshell's cwd. A relative value lands in a stray `Generated/` beside target/ at the repo
 # root instead, and the renames below then fail with "No such file or directory".
 GENERATED="$(pwd)/Generated"
-LIBRARY="$ROOT/target/$PROFILE/libqh_ffi.dylib"
-ARCHIVE="$ROOT/target/$PROFILE/libqh_ffi.a"
+# Cargo's output directory. Honour CARGO_TARGET_DIR (the lanes build into the external SSD):
+# otherwise cargo builds there while the bindings are generated from a stale local dylib and
+# silently overwrite Generated/. Staging below stays under $ROOT/target because Package.swift
+# reads it from there.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+LIBRARY="$TARGET_DIR/$PROFILE/libqh_ffi.dylib"
+ARCHIVE="$TARGET_DIR/$PROFILE/libqh_ffi.a"
 # Where `app/Package.swift` links from, and the reason it is its own directory rather
 # than `target/$PROFILE`: a linker handed `-L target/release -lqh_ffi` finds
 # `libqh_ffi.dylib` beside the archive and prefers the dylib, which puts the absolute
