@@ -96,8 +96,10 @@ final class CompletionEditorTests: XCTestCase {
     func testAnAliasQualifierOffersItsTablesColumnsOnceTheyAreRead() throws {
         let host = try editor("SELECT w FROM wilayah w")
         let engine = MockEngine()
-        engine.answer("preview", with: .events([
-            Event(event: "columns", columns: ["kode_wilayah", "nama"].map { Event.Column(name: $0, type: "varchar") }),
+        engine.answer("columns", with: .events([
+            Event(event: "table_columns", fields: ["kode_wilayah", "nama"].map {
+                Event.ColumnField(name: $0, type: "varchar", nullable: nil, default: nil, extra: "")
+            }),
         ]))
         host.model.engine = engine
         host.textView.setSelectedRange(NSRange(location: 8, length: 0))
@@ -108,7 +110,7 @@ final class CompletionEditorTests: XCTestCase {
         XCTAssertTrue(host.pump(until: { host.model.completion.active }),
                       "the columns never showed up after `w.`")
         XCTAssertEqual(host.model.completion.items.map(\.text), ["nama", "kode_wilayah"])
-        XCTAssertEqual(engine.calls.filter { $0.command == "preview" }.count, 1)
+        XCTAssertEqual(engine.calls.filter { $0.command == "columns" }.count, 1)
         XCTAssertTrue(key(48, in: host))
         XCTAssertEqual(host.textView.string, "SELECT w.nama FROM wilayah w")
     }
@@ -137,7 +139,9 @@ final class CompletionEditorTests: XCTestCase {
     private func hyphenated(_ sql: String, caret: Int? = nil) throws -> EditorTestHost {
         let made = try editor(sql)
         let hive = try XCTUnwrap(made.model.tree[0].children?.first)
-        hive.children?.append(TreeNode.schema("prod-ops-aktivitas-produksi-harian-ro", parent: hive))
+        let hyphen = TreeNode.schema("prod-ops-aktivitas-produksi-harian-ro", parent: hive)
+        hyphen.children = [TreeNode.table("kegiatan_harian", parent: hyphen)]
+        hive.children?.append(hyphen)
         hive.children?.append(TreeNode.schema("prod_datalake_pii_ro", parent: hive))
         if let caret { made.textView.setSelectedRange(NSRange(location: caret, length: 0)) }
         return made
@@ -205,5 +209,153 @@ final class CompletionEditorTests: XCTestCase {
         XCTAssertTrue(key(48, in: host))
         XCTAssertEqual(host.textView.string, "SELECT * FROM wilayah tail",
                        "the tail of the word was left behind the inserted name")
+    }
+
+    // MARK: A list that no longer matches the text
+
+    func testAListTheCaretHasLeftIsClosedAndTabIsNotWrittenOverTheWrongWord() throws {
+        let sql = "SELECT * FROM hive.\"prod-o"
+        let host = try hyphenated(sql)
+        host.textView.insertText("p", replacementRange: NSRange(location: (sql as NSString).length, length: 0))
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+
+        // ← reaches the editor (the list does not take it) and the caret moves off the word.
+        XCTAssertFalse(key(123, in: host))
+        host.textView.setSelectedRange(NSRange(location: host.textView.selectedRange().location - 1, length: 0))
+        XCTAssertFalse(host.model.completion.active, "the list stayed open over a caret that moved")
+        let before = host.textView.string
+        XCTAssertFalse(key(48, in: host), "Tab was taken by a list that was closed")
+        XCTAssertEqual(host.textView.string, before)
+    }
+
+    func testTheSameWithoutAQuoteLeavesTheTextAlone() throws {
+        let sql = "SELECT * FROM hive.prod-o"
+        let host = try hyphenated(sql)
+        host.textView.insertText("p", replacementRange: NSRange(location: (sql as NSString).length, length: 0))
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        host.textView.setSelectedRange(NSRange(location: host.textView.selectedRange().location - 2, length: 0))
+        let before = host.textView.string
+        XCTAssertFalse(key(48, in: host))
+        XCTAssertEqual(host.textView.string, before)
+    }
+
+    func testTabWithinThePauseAfterAKeyDoesNotWriteTheOldRowOverTheNewWord() throws {
+        let host = try editor("SELECT * FROM ")
+        let analytics = try XCTUnwrap(host.model.tree[0].children?.first?.children?.first)
+        analytics.children?.append(TreeNode.table("My Table", parent: analytics))
+        type("\"My", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+
+        type(" T", into: host)          // the list for `"My` is still up: the pause has not passed
+        XCTAssertFalse(host.coordinator.listMatchesForTesting)
+        XCTAssertFalse(key(48, in: host), "Tab accepted a row that was built for the previous key")
+        XCTAssertEqual(host.textView.string, "SELECT * FROM \"My T")
+        XCTAssertFalse(host.model.completion.active)
+    }
+
+    func testAnAnswerForTextThatHasMovedOnIsDropped() throws {
+        let host = try editor("SELECT * FROM wil")
+        host.coordinator.refreshForTesting()           // asks the analysis for the statement...
+        type("x", into: host)                           // ...and the text moves before it answers
+        host.pump(for: 0.05)                            // long enough to answer, too short for the pause
+        XCTAssertFalse(host.model.completion.active,
+                       "an answer for `wil` opened a list over `wilx`")
+    }
+
+    // MARK: A list nobody asked for
+
+    func testAPassiveListLetsTabAndUpThroughAndOnlyDownStepsIntoIt() throws {
+        let host = try editor("SELECT * FROM")
+        type(" ", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(host.model.completion.passive)
+        XCTAssertFalse(key(48, in: host), "Tab was taken by a list nobody asked for")
+        XCTAssertFalse(key(126, in: host), "↑ was taken by a list nobody asked for")
+        XCTAssertTrue(host.model.completion.passive)
+        XCTAssertTrue(key(125, in: host))
+        XCTAssertFalse(host.model.completion.passive)
+    }
+
+    // MARK: The catalog answers while the person is on a row
+
+    func testASelectionSurvivesTheCatalogAnswering() throws {
+        let host = try editor("SELECT * FROM ")
+        host.model.engine = MockEngine()      // every load fails quietly: no network
+        let analytics = try XCTUnwrap(host.model.tree[0].children?.first?.children?.first)
+        analytics.children = nil              // the cold connection: tables not read yet
+        type("o", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(125, in: host))
+        XCTAssertTrue(key(125, in: host))
+        let chosen = host.model.completion.items[host.model.completion.selected].id
+        XCTAssertGreaterThan(host.model.completion.selected, 0)
+
+        // The tables level lands and the list is built again, tables first.
+        analytics.children = ["orders", "object_log"].map { TreeNode.table($0, parent: analytics) }
+        host.model.completion.catalogLoaded()
+        XCTAssertTrue(host.pump(until: { host.model.completion.items.contains { $0.kind == .table } }))
+        XCTAssertEqual(host.model.completion.items[host.model.completion.selected].id, chosen,
+                       "the row the person was on moved when the tables arrived")
+        XCTAssertFalse(host.model.completion.passive)
+    }
+
+    func testAListSteppedIntoStaysActiveWhenTheCatalogAnswers() throws {
+        let host = try editor("SELECT * FROM")
+        host.model.engine = MockEngine()
+        let analytics = try XCTUnwrap(host.model.tree[0].children?.first?.children?.first)
+        analytics.children = nil
+        type(" ", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(125, in: host))
+        analytics.children = [TreeNode.table("orders", parent: analytics)]
+        host.model.completion.catalogLoaded()
+        XCTAssertTrue(host.pump(until: { host.model.completion.items.contains { $0.kind == .table } }))
+        XCTAssertFalse(host.model.completion.passive, "Return became a newline again under the person's hand")
+    }
+
+    // MARK: Hyphens and quotes around the word
+
+    func testAHyphenatedWordIsReplacedWholeEvenWithItsTailAfterTheCaret() throws {
+        let sql = "SELECT * FROM hive.prod-ops-aktivitas-produksi-harian-ro"
+        let host = try hyphenated(sql)
+        // The caret sits after `prod-o`, and typing `p` makes `prod-op|s-aktivitas-...`.
+        host.textView.setSelectedRange(NSRange(location: 25, length: 0))
+        host.textView.insertText("p", replacementRange: NSRange(location: 25, length: 0))
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM hive.\"prod-ops-aktivitas-produksi-harian-ro\"")
+    }
+
+    func testAnUnquotedHyphenatedSchemaThenADotListsItsTables() throws {
+        let host = try hyphenated("SELECT * FROM hive.prod-ops-aktivitas-produksi-harian-ro")
+        type(".", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }),
+                      "a hyphen in the qualifier made the path resolve to `ro` and offer nothing")
+        XCTAssertEqual(host.model.completion.items.count, 1)
+        XCTAssertTrue(host.model.completion.items.first?.text.hasPrefix("kegiatan_harian") == true)
+    }
+
+    func testControlSpaceInsideAQuotedNameWithASpaceDoesNotRepeatItsTail() throws {
+        let host = try editor("SELECT * FROM \"My Table\"")
+        let analytics = try XCTUnwrap(host.model.tree[0].children?.first?.children?.first)
+        analytics.children?.append(TreeNode.table("My Table", parent: analytics))
+        host.textView.setSelectedRange(NSRange(location: 17, length: 0))      // `"My|` and ` Table"` after
+        host.coordinator.refreshForTesting(manual: true)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        let written = host.textView.string
+        XCTAssertFalse(written.contains("Table\" Table"), written)
+        XCTAssertEqual(written.components(separatedBy: "\"My Table\"").count - 1, 1, written)
+    }
+
+    func testControlSpaceBeforeAnotherQuotedNameKeepsThatNameApart() throws {
+        let host = try editor("SELECT * FROM \"prod-o from \"x\"")
+        let analytics = try XCTUnwrap(host.model.tree[0].children?.first?.children?.first)
+        analytics.children?.append(TreeNode.table("prod-orders", parent: analytics))
+        host.textView.setSelectedRange(NSRange(location: 21, length: 0))       // `"prod-o|`
+        host.coordinator.refreshForTesting(manual: true)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertTrue(host.textView.string.hasSuffix(" from \"x\""), host.textView.string)
     }
 }

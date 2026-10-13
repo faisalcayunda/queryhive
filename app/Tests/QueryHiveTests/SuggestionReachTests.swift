@@ -206,14 +206,6 @@ final class SuggestionReachTests: XCTestCase {
         XCTAssertFalse(completion.active)
     }
 
-    func testALoadedLevelTellsTheEditorToAskAgain() {
-        let completion = EditorCompletion()
-        var asked = 0
-        completion.onCatalogLoaded = { asked += 1 }
-        completion.catalogLoaded()
-        XCTAssertEqual(asked, 1)
-    }
-
     // MARK: Where the caret is
 
     func testAnApostropheInACommentDoesNotSwitchSuggestionsOffForTheRestOfTheFile() {

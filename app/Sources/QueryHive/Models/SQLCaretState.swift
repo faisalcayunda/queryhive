@@ -44,20 +44,37 @@ struct SQLCaretState: Equatable {
             case 0x3B:                                           // ;
                 statementStart = index + 1
                 index += 1
-            case 0x2D where index + 1 < end && units[index + 1] == 0x2D,   // --
+            case 0x2D where index + 1 < end && units[index + 1] == 0x2D
+                    && (!mysql || Self.endsDashes(at: index, in: text)),   // --
                  0x23 where mysql:                                         // # (MySQL)
                 var stop = index
                 while stop < end, units[stop] != 0x0A { stop += 1 }
                 if stop >= end { return SQLCaretState(context: .text, statementStart: statementStart) }
                 index = stop + 1
             case 0x2F where index + 1 < end && units[index + 1] == 0x2A:   // /*
+                // PostgreSQL nests block comments; the others end at the first `*/`.
+                var depth = 1
                 var stop = index + 2
-                while stop + 1 < end, !(units[stop] == 0x2A && units[stop + 1] == 0x2F) { stop += 1 }
-                if stop + 1 >= end { return SQLCaretState(context: .text, statementStart: statementStart) }
-                index = stop + 2
+                while stop + 1 < end, depth > 0 {
+                    if units[stop] == 0x2A, units[stop + 1] == 0x2F {
+                        depth -= 1
+                        stop += 2
+                    } else if dialect == .postgres, units[stop] == 0x2F, units[stop + 1] == 0x2A {
+                        depth += 1
+                        stop += 2
+                    } else {
+                        stop += 1
+                    }
+                }
+                if depth > 0 { return SQLCaretState(context: .text, statementStart: statementStart) }
+                index = stop
             case 0x27, 0x22 where mysql:                          // ' (and " as a string in MySQL)
+                // PostgreSQL's `E'...'` takes a backslash as an escape; MySQL's strings always do.
+                let escapes = mysql || (dialect == .postgres && index > 0
+                    && (units[index - 1] | 0x20) == 0x65
+                    && (index < 2 || !isTagBody(units[index - 2])))
                 guard let after = closing(of: unit, from: index + 1, in: units, end: end,
-                                          backslash: mysql) else {
+                                          backslash: escapes) else {
                     return SQLCaretState(context: .text, statementStart: statementStart)
                 }
                 index = after
@@ -81,6 +98,14 @@ struct SQLCaretState: Equatable {
             }
         }
         return SQLCaretState(context: .code, statementStart: statementStart)
+    }
+
+    /// MySQL reads `--` as a comment only when a blank or a control character follows it (or the
+    /// text ends), so `1--1` is arithmetic. The text after the caret decides, which is why this
+    /// looks at the whole text and not at the units copied.
+    private static func endsDashes(at index: Int, in text: NSString) -> Bool {
+        guard index + 2 < text.length else { return true }
+        return text.character(at: index + 2) <= 0x20
     }
 
     /// The index just past the quote that closes a run opened before `from`, or nil when the run is

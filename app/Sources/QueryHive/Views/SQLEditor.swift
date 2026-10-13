@@ -320,6 +320,13 @@ struct SQLEditor: NSViewRepresentable {
         private(set) var paintsAppliedForTesting = 0
         /// The revision keystrokes have reached; tests wait for `appliedRevision` to catch up.
         var pendingRevisionForTesting: UInt64 { analysis?.revision ?? appliedRevision }
+
+        /// Asks for the suggestion list for the caret now, without the pause after a key, so a test
+        /// can put an edit between the question and its answer.
+        func refreshForTesting(manual: Bool = false) { refresh(manual: manual) }
+
+        /// The list on screen was built for the text and caret as they are now.
+        var listMatchesForTesting: Bool { textView.map(listMatches) ?? false }
         /// The edit's range, for the neighbour-colour inheritance in `textDidChange`.
         private var lastEditRange = NSRange(location: 0, length: 0)
         private var visibleScheduled = false
@@ -1415,6 +1422,12 @@ struct SQLEditor: NSViewRepresentable {
             // `SQLTextView.onClick`, and a keystroke rebuilds it against the new caret in `refresh`.
             guard parent.completion.active else { return }
             if nsText.length == 0 { closeList() }
+            // A caret that moved without an edit (arrow keys, Home, End, a programmatic move) is
+            // not on the word the list was built for. An edit moves it too, and then the list
+            // is rebuilt for the new word on the next pause, so that one is left alone.
+            if revision == activeRevision, textView.selectedRange().location != activeCaret {
+                closeList()
+            }
         }
 
         /// Tell SwiftUI how many lines there are, when that changed. Deferred a turn: this is also
@@ -1483,20 +1496,34 @@ struct SQLEditor: NSViewRepresentable {
                 }
             }
             guard parent.completion.active else { return false }
-            switch event.keyCode {
-            case 53:                                    // esc
+            if event.keyCode == 53 {                    // esc
                 if let site = activeSite { dismissal.dismiss(at: site.replaceStart) }
                 closeList()
                 return true
+            }
+            // The list is for the text it was built from. If a key (or the caret) has moved on since,
+            // a row would be written over a word that is no longer the one it was made for, so the
+            // key is the editor's own and the list goes.
+            if let textView, !listMatches(textView), [125, 126, 36, 76, 48].contains(event.keyCode) {
+                closeList()
+                return false
+            }
+            switch event.keyCode {
             case 125 where !event.modifierFlags.contains(.command):   // ↓
                 parent.completion.move(1)
                 return true
+            case 126 where parent.completion.passive:
+                // A list nobody asked for is not in the way of the caret: only ↓ steps into it.
+                return false
             case 126 where !event.modifierFlags.contains(.command):   // ↑
                 parent.completion.move(-1)
                 return true
             case 36 where parent.completion.passive, 76 where parent.completion.passive:
                 // A list nobody asked for, on an empty word: Return is a newline, as it was.
                 closeList()
+                return false
+            case 48 where parent.completion.passive:
+                // Nor is Tab: it indents, until the list has been stepped into.
                 return false
             case 36, 76, 48:                            // return, keypad enter, tab
                 accept()
@@ -1747,6 +1774,14 @@ struct SQLEditor: NSViewRepresentable {
         /// What the list on screen was asked about, so that picking a row replaces the same word.
         private var activeSite: CompletionSite?
         private var activeCaret = 0
+        /// The document revision the list was built for.
+        private var activeRevision = -1
+
+        /// Whether the list on screen was built for the text and the caret as they are now.
+        private func listMatches(_ textView: NSTextView) -> Bool {
+            activeSite != nil && activeRevision == revision
+                && activeCaret == textView.selectedRange().location
+        }
         private var dismissal = CompletionDismissal()
         /// The head the caret scope is read from is cut at the statement start; a statement longer
         /// than this has no scope rather than a wrong one (the reader gives up on giants too).
@@ -1757,7 +1792,7 @@ struct SQLEditor: NSViewRepresentable {
         /// The hyphenated reading of the word comes first (`prod-o` is one word), because a
         /// hyphen is also a minus: when nothing is called what that reading says, the plain word
         /// is asked about instead, so `a-b` still completes `b`.
-        private func refresh(manual: Bool) {
+        private func refresh(manual: Bool, fromCatalog: Bool = false) {
             guard let textView else { return }
             let text = nsText
             let caret = textView.selectedRange().location
@@ -1793,6 +1828,7 @@ struct SQLEditor: NSViewRepresentable {
             // and then it is asked again.
             lastManual = manual
             awaitCatalog(caret: caret, length: text.length, manual: manual)
+            keepSelectionOnNextShow = fromCatalog
             generation &+= 1
             let mine = generation
             // The statement's tables and aliases come from the analysis, off the main thread: a
@@ -1821,9 +1857,15 @@ struct SQLEditor: NSViewRepresentable {
             site.path.count == 1 || (scope.map { $0.clause != .other } ?? false)
         }
 
+        /// Set by a refresh the catalog asked for: the list is rebuilt for the same word, and the
+        /// row the person is on is the row they stay on.
+        private var keepSelectionOnNextShow = false
+
         private func show(_ plan: [(site: CompletionSite, scope: EditorCaretScope?)],
                           references: EditorReferences?, caret: Int) {
             guard let textView else { return }
+            let keeping = keepSelectionOnNextShow
+            keepSelectionOnNextShow = false
             let text = nsText
             for (site, scope) in plan {
                 // A table named here that is already followed by an alias (`FROM us| u`) gets none
@@ -1833,10 +1875,14 @@ struct SQLEditor: NSViewRepresentable {
                                                                 scope: scope, references: references,
                                                                 aliasable: aliasable, quoted: site.quoted))
                 guard !items.isEmpty else { continue }
+                // The same word as the list on screen: only then is its selection still meaningful.
+                let sameWord = keeping && parent.completion.active && activeSite == site
                 activeSite = site
                 activeCaret = caret
+                activeRevision = revision
                 parent.completion.present(items, anchor: caretRect(in: textView),
-                                          passive: CompletionTrigger.isPassive(site, manual: lastManual))
+                                          passive: CompletionTrigger.isPassive(site, manual: lastManual),
+                                          keepingSelection: sameWord)
                 return
             }
             activeSite = nil
@@ -1854,10 +1900,11 @@ struct SQLEditor: NSViewRepresentable {
         /// were: a list that was empty because a level of the tree was still loading then fills
         /// in without another keystroke.
         private func awaitCatalog(caret: Int, length: Int, manual: Bool) {
+            let asked = revision
             parent.completion.onCatalogLoaded = { [weak self] in
-                guard let self, let textView = self.textView,
+                guard let self, let textView = self.textView, self.revision == asked,
                       textView.selectedRange().location == caret, self.nsText.length == length else { return }
-                self.refresh(manual: manual)
+                self.refresh(manual: manual, fromCatalog: true)
             }
         }
 
@@ -1891,13 +1938,27 @@ struct SQLEditor: NSViewRepresentable {
             let text = nsText
             var end = caret
             if site.quoted {
+                // The first quote after the caret closes this name when the quotes left on the
+                // line are odd in number: `"My| Table"` has one, `"prod-o| from "x"` has two, and
+                // the first of those belongs to the next name.
                 let quote = text.character(at: site.replaceStart)
                 var probe = caret
-                while probe < text.length, text.character(at: probe) != quote,
-                      !CompletionTrigger.isBlank(text.character(at: probe)) { probe += 1 }
-                if probe < text.length, text.character(at: probe) == quote { end = probe + 1 }
+                var first: Int?
+                var count = 0
+                while probe < text.length, text.character(at: probe) != 0x0A {
+                    if text.character(at: probe) == quote {
+                        if first == nil { first = probe }
+                        count += 1
+                    }
+                    probe += 1
+                }
+                if let first, count % 2 == 1 { end = first + 1 }
             } else {
-                while end < text.length, WordScope.isWordCharacter(text.character(at: end)) { end += 1 }
+                // A name that has a hyphen in it goes on past one: `prod-o|ps-x` is one word.
+                let hyphenated = site.prefix.contains("-")
+                while end < text.length,
+                      WordScope.isWordCharacter(text.character(at: end))
+                        || (hyphenated && text.character(at: end) == 0x2D) { end += 1 }
             }
             return end
         }
@@ -2532,7 +2593,10 @@ enum WordScope {
                 continue
             }
             var begin = end
-            while begin > 0, isWordCharacter(text.character(at: begin - 1)) { begin -= 1 }
+            // With hyphens read as part of a name, a schema called `prod-ops-x` is one segment.
+            while begin > 0, isWordCharacter(text.character(at: begin - 1))
+                    || (hyphens && text.character(at: begin - 1) == 0x2D) { begin -= 1 }
+            while hyphens, begin < end, text.character(at: begin) == 0x2D { begin += 1 }
             // A `.` with no name before it — `t.` where `t` is not a name, or a leading dot —
             // ends the walk rather than inventing an empty segment.
             guard begin < end else { break }

@@ -45,6 +45,30 @@ final class CompletionTriggerTests: XCTestCase {
         XCTAssertEqual(site("select 1 -- ; \n from a")?.statementStart, 0)
     }
 
+    // MARK: Lexical corners
+
+    func testPostgreSQLBlockCommentsNestAndTheOthersDoNot() {
+        let nested = "select 1 /* a /* b */ don't */ select ab"
+        XCTAssertNotNil(site(nested, dialect: .postgres), "a nested comment switched suggestions off for the rest")
+        XCTAssertNil(site("select 1 /* a /* b */ still comment", dialect: .postgres))
+        // Elsewhere the first `*/` ends it, so `don't */ ...` opens a string.
+        XCTAssertNil(site(nested, dialect: .trino))
+    }
+
+    func testPostgreSQLEscapeStringsTakeABackslashAndPlainOnesDoNot() {
+        XCTAssertNil(site("select E'it\\'s ab", dialect: .postgres))
+        XCTAssertNotNil(site("select E'it\\'s' || ab", dialect: .postgres))
+        XCTAssertNotNil(site("select 'it\\' || ab", dialect: .postgres))
+        XCTAssertNotNil(site("select name'it' ab", dialect: .postgres), "an e that ends a longer word is no prefix")
+    }
+
+    func testMySQLDashesNeedABlankToBeAComment() {
+        XCTAssertNotNil(site("select 1--1 + ab", dialect: .mysql), "`1--1` is arithmetic in MySQL")
+        XCTAssertNil(site("select 1-- ab", dialect: .mysql))
+        XCTAssertNil(site("select 1 --\tab", dialect: .mysql))
+        XCTAssertNil(site("select 1--1 + ab", dialect: .postgres))
+    }
+
     // MARK: The word
 
     func testAnOpenQuoteIsTheStartOfTheWord() {
