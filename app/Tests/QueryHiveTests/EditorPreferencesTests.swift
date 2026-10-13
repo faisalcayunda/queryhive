@@ -146,7 +146,7 @@ final class EditorPreferencesTests: XCTestCase {
         func editor(_ layout: EditorLayout) -> SQLEditor {
             SQLEditor(text: .constant("select 1"), focused: .constant(false), caret: .constant(0),
                       selection: .constant(NSRange(location: 0, length: 0)),
-                      completion: EditorCompletion(), candidates: { _, _ in [] },
+                      completion: EditorCompletion(), candidates: { _ in [] },
                       layout: layout, onRunStatement: nil)
         }
         let coordinator = editor(.current).makeCoordinator()

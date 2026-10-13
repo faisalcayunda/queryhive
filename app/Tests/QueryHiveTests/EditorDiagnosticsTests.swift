@@ -34,7 +34,7 @@ struct EditorRig {
         count = EditorLineCount(text: text)
         editor = SQLEditor(text: .constant(text), focused: .constant(false), caret: .constant(0),
                            selection: .constant(NSRange(location: 0, length: 0)),
-                           completion: EditorCompletion(), candidates: { _, _ in [] },
+                           completion: EditorCompletion(), candidates: { _ in [] },
                            layout: .standard, onRunStatement: nil, lineCount: count, dialect: dialect)
         coordinator = editor.makeCoordinator()
         coordinator.textView = view

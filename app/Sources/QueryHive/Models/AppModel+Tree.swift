@@ -506,7 +506,7 @@ extension AppModel {
         // Postgres connection only reaches it through "show all databases", and what it lists is
         // databases, so it belongs on the database side of this the same way MySQL does.
         let catalogNode = connection.kind == .trino ? TreeNode.catalog : TreeNode.database
-        Engine.current.run(command, env: env, onEvent: { event in
+        engine.run(command, env: env, onEvent: { event in
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
             case "schemas": node.children = (event.names ?? []).map { TreeNode.schema($0, parent: node) }
@@ -514,8 +514,10 @@ extension AppModel {
             case "error": message = event.message
             default: break
             }
-        }, onExit: { status, log in
+        }, onExit: { [weak self] status, log in
             node.loading = false
+            // Whatever the editor was waiting on, it can ask again now.
+            defer { self?.completion.catalogLoaded() }
             guard status == 0 else {
                 node.error = message ?? log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)"
                 return

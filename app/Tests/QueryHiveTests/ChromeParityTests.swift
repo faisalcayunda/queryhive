@@ -405,7 +405,7 @@ final class ChromeParityTests: XCTestCase {
         let text = "SELECT 1\nFROM t;\nSELECT 2"
         let editor = SQLEditor(text: .constant(text), focused: .constant(false), caret: .constant(0),
                                selection: .constant(NSRange(location: 0, length: 0)),
-                               completion: EditorCompletion(), candidates: { _, _ in [] },
+                               completion: EditorCompletion(), candidates: { _ in [] },
                                layout: .standard, onRunStatement: nil)
         // The first editor of a process pays for fonts and TextKit and settles late, after its idle
         // pass; the second is the one that settles early, so it is the one looked at.

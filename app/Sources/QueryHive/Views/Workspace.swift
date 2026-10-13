@@ -540,8 +540,10 @@ struct EditorPane: View {
         // button was its only entry point and the only holder of the shortcut.
         SQLEditor(text: $tab.sql, focused: $focused, caret: $tab.caret, selection: $tab.selection,
                   completion: model.completion,
-                  candidates: { prefix, path in
-                      model.suggestions(for: tab, prefix: prefix, path: path)
+                  candidates: { request in
+                      model.suggestions(for: tab, prefix: request.prefix, path: request.path,
+                                        scope: request.scope, references: request.references,
+                                        aliasable: request.aliasable)
                   },
                   // Read here rather than inside the editor so this body depends on the switches:
                   // that is what makes flipping one in Settings re-apply the editor.

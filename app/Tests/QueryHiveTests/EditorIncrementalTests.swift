@@ -86,7 +86,7 @@ final class EditorIncrementalTests: XCTestCase {
         let editor = SQLEditor(
             text: Binding(get: { model.text }, set: { model.text = $0; model.writes += 1 }),
             focused: .constant(false), caret: .constant(0), selection: .constant(NSRange(location: 0, length: 0)),
-            completion: EditorCompletion(), candidates: { _, _ in [] }, layout: .standard, onRunStatement: nil)
+            completion: EditorCompletion(), candidates: { _ in [] }, layout: .standard, onRunStatement: nil)
         let coordinator = editor.makeCoordinator()
         coordinator.textView = textView
         textView.delegate = coordinator

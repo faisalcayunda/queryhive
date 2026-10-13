@@ -20,7 +20,14 @@ final class SuggestionScopeTests: XCTestCase {
 
 
     private func model() -> AppModel {
-        AppModel()
+        let model = AppModel()
+        // A bare word asks for its connection's default scope, and a path for an unloaded node. The
+        // answers are empty and arrive a turn later, so nothing here reaches a real engine and a
+        // test that checks `loading` right after the call still sees it.
+        let engine = MockEngine()
+        for command in ["catalogs", "schemas", "tables"] { engine.answer(command, with: .events([])) }
+        model.engine = engine
+        return model
     }
 
     /// A Trino connection with two catalogs, two schemas in one of them, and tables in each.

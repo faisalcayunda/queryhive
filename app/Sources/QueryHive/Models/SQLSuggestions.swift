@@ -39,10 +39,34 @@ struct SQLSuggestion: Identifiable, Equatable {
         }
     }
 
+    /// What the popup shows.
     let text: String
     let kind: Kind
+    /// What picking the row writes: `text` unless the name has to be quoted to be read back.
+    let insert: String
+
+    init(text: String, kind: Kind, insert: String? = nil) {
+        self.text = text
+        self.kind = kind
+        self.insert = insert ?? text
+    }
 
     var id: String { "\(kind.rawValue):\(text)" }
+}
+
+/// What the editor asks the model about the word under the caret.
+struct CompletionRequest {
+    /// What was typed of the word, without its opening quote.
+    var prefix: String
+    /// The names the word is qualified by, outermost first, without quotes.
+    var path: [String]
+    /// What the text before the word says about the caret; nil when it was not read.
+    var scope: EditorCaretScope?
+    /// The statement's last analysis; nil when it was not asked for or has not landed.
+    var references: EditorReferences?
+    /// Whether a table written here may get an alias. False when the word is already followed by
+    /// one (`FROM us| u`), which would otherwise be written twice.
+    var aliasable = true
 }
 
 /// The suggestion list the editor is showing right now.
@@ -52,23 +76,53 @@ struct SQLSuggestion: Identifiable, Equatable {
 /// being rebuilt by every keystroke.
 @Observable
 final class EditorCompletion {
+    /// How many rows the popup shows at once; the list scrolls past that.
+    static let visibleRows = 8
+
     var items: [SQLSuggestion] = []
     var selected = 0
+    /// The first row on screen.
+    private(set) var top = 0
+    /// The list was opened by itself on an empty word (after `FROM `), so it is there to be read:
+    /// Return still inserts a newline until the user steps into it with an arrow key.
+    var passive = false
     /// Caret position in the editor container's coordinate space, top-left origin.
     var anchor: CGRect = .zero
+    /// Called when the catalog learned something (a level of the tree arrived). The editor that
+    /// opened the list sets it to re-ask for it, so a list that was empty because it was waiting
+    /// fills in without another keystroke.
+    @ObservationIgnored var onCatalogLoaded: (() -> Void)?
 
     var active: Bool { !items.isEmpty }
+
+    /// The rows on screen.
+    var visible: ArraySlice<SQLSuggestion> { items[top..<min(top + Self.visibleRows, items.count)] }
+
+    func present(_ items: [SQLSuggestion], anchor: CGRect, passive: Bool) {
+        self.items = items
+        self.selected = 0
+        self.top = 0
+        self.passive = passive
+        self.anchor = anchor
+    }
 
     func dismiss() {
         if !items.isEmpty { items = [] }
         selected = 0
+        top = 0
+        passive = false
     }
 
     /// Wraps around at both ends, the way every completion list does.
     func move(_ delta: Int) {
         guard !items.isEmpty else { return }
+        passive = false
         selected = ((selected + delta) % items.count + items.count) % items.count
+        if selected < top { top = selected }
+        if selected >= top + Self.visibleRows { top = selected - Self.visibleRows + 1 }
     }
+
+    func catalogLoaded() { onCatalogLoaded?() }
 }
 
 enum SQLSuggestions {
@@ -89,6 +143,32 @@ enum SQLSuggestions {
         "ANALYZE", "VARCHAR", "BIGINT", "INTEGER", "DOUBLE", "DECIMAL", "BOOLEAN",
         "DATE", "TIMESTAMP", "ARRAY", "MAP", "ROW", "JSON", "INTERVAL", "FILTER",
     ]
+
+    /// How well `name` answers what was typed: 0 for a prefix, 1 for the start of a word inside it
+    /// (`kpm` in `rekap_kpm_harian`, `net` in `grossNet`), 2 for any other stretch of three or more
+    /// characters; nil for no match. A keyword is only ever matched by its prefix, because a word
+    /// from the middle of `GROUP BY` is not what anyone types.
+    static func match(_ name: String, typed: String, keyword: Bool = false) -> Int? {
+        let needle = Array(typed.lowercased())
+        guard !needle.isEmpty else { return 0 }
+        let letters = Array(name)
+        let lowered = Array(name.lowercased())
+        // Case mapping can change the length (a few non-Latin letters); the positions below
+        // assume it did not, so such a name is only matched by its prefix.
+        func hasPrefix(at start: Int) -> Bool {
+            start + needle.count <= lowered.count && Array(lowered[start..<(start + needle.count)]) == needle
+        }
+        if hasPrefix(at: 0) { return 0 }
+        guard !keyword, letters.count == lowered.count else { return nil }
+        for index in 1..<max(letters.count, 1) {
+            let here = letters[index], before = letters[index - 1]
+            let isWord = here.isLetter || here.isNumber
+            let startsWord = isWord && (!(before.isLetter || before.isNumber)
+                || (before.isLowercase && here.isUppercase))
+            if startsWord, hasPrefix(at: index) { return 1 }
+        }
+        return needle.count >= 3 && String(lowered).contains(String(needle)) ? 2 : nil
+    }
 
     // MARK: Position-dependent policy (blueprint w11 section 12, T6b)
 
@@ -123,10 +203,13 @@ enum SQLSuggestions {
     ///
     /// A caller whose caret word is already followed by an alias (`FROM us| u`) passes no scope,
     /// or the alias would be written twice.
-    static func tableText(_ table: String, in clause: EditorClause?,
+    ///
+    /// `name` is what is written for the table, which may be qualified (`sales.orders`); the alias
+    /// is made from `base`, the table's own name, when it differs.
+    static func tableText(_ name: String, base: String? = nil, in clause: EditorClause?,
                           references: EditorReferences?) -> String {
-        guard clause == .queryTable, let references else { return table }
-        return "\(table) \(sqlTableAlias(table: table, taken: takenNames(references)))"
+        guard clause == .queryTable, let references else { return name }
+        return "\(name) \(sqlTableAlias(table: base ?? name, taken: takenNames(references)))"
     }
 
     /// An alias as the select list spelled it, without its quotes: what a column of the same

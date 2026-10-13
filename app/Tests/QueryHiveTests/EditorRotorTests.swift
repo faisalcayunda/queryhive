@@ -33,7 +33,7 @@ final class EditorRotorTests: XCTestCase {
         let editor = SQLEditor(text: .constant("select 1"), focused: .constant(false),
                                caret: .constant(0),
                                selection: .constant(NSRange(location: 0, length: 0)),
-                               completion: EditorCompletion(), candidates: { _, _ in [] },
+                               completion: EditorCompletion(), candidates: { _ in [] },
                                layout: .standard, onRunStatement: nil)
         let coordinator = editor.makeCoordinator()
         coordinator.textView = view

@@ -5,21 +5,29 @@ import SwiftUI
 extension AppModel {
     /// Candidates for the word under the caret.
     ///
-    /// Sources, in the order they are ranked: the children of the node the typed path names, the
-    /// columns the last run reported, then SQL keywords. A bare word with no path is offered
-    /// objects from the whole tree, which is right for `FROM ta…`; a word under a path is offered
-    /// **only that node's children**, which is the part that was missing.
+    /// Sources, in the order they are ranked for the position: the children of the node the typed
+    /// path names, the objects of this tab's connection, the columns the last run reported, then
+    /// SQL keywords. A bare word with no path is offered the objects of **the tab's own
+    /// connection**, the ones in its default database and schema first and written bare, the rest
+    /// written with the qualifier the server needs to find them; a word under a path is offered
+    /// **only that node's children**.
     ///
-    /// It used to ignore the path entirely and sweep every node in the tree for every position. So
-    /// `hive.analytics.` offered `penerima_manfaat` (correct), `raw_kpm` from the *bronze* schema,
-    /// and tables from other connections — a list that looked plausible and was mostly wrong. The
-    /// fix is to resolve the path first and list one node's children.
+    /// It used to sweep every node in the tree for every position. So `hive.analytics.` offered
+    /// `penerima_manfaat` (correct), `raw_kpm` from the *bronze* schema, and tables from other
+    /// connections — a list that looked plausible and was mostly wrong. The fix is to resolve the
+    /// path first and list one node's children, and to keep a bare word inside its connection.
+    ///
+    /// A name matches by its start, by the start of a word inside it (`kpm` finds
+    /// `rekap_kpm_harian`) and, from three characters, by any stretch of it; a prefix always
+    /// ranks above the others (`SQLSuggestions.match`).
     ///
     /// `scope` is what the text before the word says about the caret (`sqlCaretScope`, asked of
     /// the text up to where the word starts), and `references` is the statement's last analysis
     /// (`EditorDocument.references`, which runs in the background). Both are optional and the
     /// list without them is the one above. With them:
     ///
+    /// - The kinds are ranked for the clause: tables before everything at a `FROM` or `JOIN`,
+    ///   columns and keywords before tables in a `WHERE` or a select list.
     /// - A table offered in a `FROM` or `JOIN` of a query carries a free alias
     ///   (`SQLSuggestions.tableText`); one named by `UPDATE`, `DELETE FROM` or `INSERT INTO`
     ///   never does. Without `references` the statement's aliases are unknown, so none is made.
@@ -27,96 +35,229 @@ extension AppModel {
     ///   (`SQLSuggestions.offersSelectAliases`), and where it does not, an output column of the
     ///   last run that is only an alias is not offered either.
     ///
+    /// A level of the tree that is not loaded is asked for here and fills in later; the caller
+    /// learns of it through `completion.onCatalogLoaded` and asks again. A level that failed to
+    /// load is not asked for again until it is invalidated, or this would be a request per key.
+    ///
     /// The editor is flushed (`AppModel.flushEditors`) by whoever reads the tab's SQL to make
     /// the `head` this is given; nothing here reads `tab.sql`.
     func suggestions(for tab: QueryTab, prefix: String, path: [String],
-                     scope: EditorCaretScope? = nil,
-                     references: EditorReferences? = nil) -> [SQLSuggestion] {
-        let needle = prefix.lowercased()
-        func matches(_ name: String) -> Bool {
-            needle.isEmpty || name.lowercased().hasPrefix(needle)
-        }
+                     scope: EditorCaretScope? = nil, references: EditorReferences? = nil,
+                     aliasable: Bool = true) -> [SQLSuggestion] {
+        let connection = connection(for: tab)
+        let driver = connection?.kind
+        let clause = scope?.clause
+        let tableClause = clause == .queryTable || clause == .writeTable
+        let columnClauses: [EditorClause] = [.selectList, .joinCondition, .where, .groupBy, .having,
+                                             .orderBy, .setList]
+        let columnClause = clause.map(columnClauses.contains) ?? false
+        let aliasing = aliasable ? references : nil
 
-        let driver = connection(for: tab)?.kind
-        func tableText(_ name: String) -> String {
-            SQLSuggestions.tableText(name, in: scope?.clause, references: references)
+        struct Hit {
+            let suggestion: SQLSuggestion
+            let quality: Int
+            /// 0 for a name that can be written bare where the caret is, 1 for one that needs its
+            /// qualifier.
+            let away: Int
         }
-
-        var found: [SQLSuggestion] = []
+        var hits: [Hit] = []
         var seen = Set<String>()
-        func add(_ text: String, _ kind: SQLSuggestion.Kind) {
-            guard !text.isEmpty, seen.insert(text.lowercased()).inserted else { return }
-            found.append(SQLSuggestion(text: text, kind: kind))
+        func add(_ text: String, _ kind: SQLSuggestion.Kind, name: String? = nil, away: Int = 0) {
+            guard !text.isEmpty,
+                  let quality = SQLSuggestions.match(name ?? text, typed: prefix, keyword: kind == .keyword),
+                  seen.insert("\(kind.rawValue):\(text.lowercased())").inserted else { return }
+            hits.append(Hit(suggestion: SQLSuggestion(text: text, kind: kind), quality: quality, away: away))
         }
 
-        // A node whose children are not loaded yet is asked for them, so `FROM hive.` fills in
-        // without the user having to expand that catalog in the sidebar first. The list cannot be
-        // patched when the answer arrives — the popup is not holding a reference to this array —
-        // so the next keystroke re-runs this and finds them. That is the same bargain the tree
-        // itself makes, and it beats blocking a keystroke on a network round trip.
-        func offerChildren(of node: TreeNode) {
-            guard let children = node.children else {
-                loadChildren(of: node)
-                return
-            }
-            for child in children where matches(child.title) {
-                switch child.kind {
-                case .catalog, .database: add(child.title, .catalog)
-                case .schema: add(child.title, .schema)
-                case .table: add(tableText(child.title), .table)
-                case .group, .connection: break
+        /// A table written bare under a path, or with the qualifier its place needs.
+        func addTable(_ parts: [String], away: Int) {
+            guard let last = parts.last else { return }
+            let name = parts.joined(separator: ".")
+            add(SQLSuggestions.tableText(name, base: last, in: clause, references: aliasing), .table,
+                name: last, away: away)
+        }
+
+        func offer(_ node: TreeNode) {
+            switch node.kind {
+            case .catalog, .database: add(node.title, .catalog)
+            case .schema: add(node.title, .schema)
+            case .table:
+                if let connection {
+                    let placed = qualifier(of: node, for: connection.kind, tab: tab)
+                    addTable(placed.parts, away: placed.home ? 0 : 1)
+                } else {
+                    addTable([node.title], away: 0)
                 }
+            // A group is how the side bar files connections; it is not a name a statement can
+            // use, so it is never a suggestion.
+            case .group, .connection: break
             }
         }
 
         if path.isEmpty {
-            for node in allNodes() where matches(node.title) {
-                switch node.kind {
-                case .catalog, .database: add(node.title, .catalog)
-                case .schema: add(node.title, .schema)
-                case .table: add(tableText(node.title), .table)
-                // A group is how the side bar files connections; it is not a name a statement can
-                // use, so it is never a suggestion.
-                case .group, .connection: break
+            if let connection, let root = connectionNode(for: connection.id) {
+                loadDefaultScope(for: tab, connection: connection, root: root)
+                func walk(_ nodes: [TreeNode]) {
+                    for node in nodes {
+                        offer(node)
+                        walk(node.children ?? [])
+                    }
                 }
+                walk(root.children ?? [])
             }
         } else if let scope = node(atPath: path, connectionID: tab.connectionID) {
-            offerChildren(of: scope)
+            // A node whose children are not loaded yet is asked for them, so `FROM hive.` fills in
+            // without the user having to expand that catalog in the sidebar first.
+            if let children = scope.children {
+                for child in children {
+                    switch child.kind {
+                    case .catalog, .database: add(child.title, .catalog)
+                    case .schema: add(child.title, .schema)
+                    case .table: addTable([child.title], away: 0)
+                    case .group, .connection: break
+                    }
+                }
+            } else {
+                requestLoad(of: scope)
+            }
         }
         // A path that resolves to nothing offers nothing. Falling back to the whole tree would
         // reproduce the bug this method exists to fix: a wrong table from another schema is worse
         // than no suggestion at all.
 
         // A column is only in scope where a bare name could be one — never after a path, where the
-        // next word is an object and a column name would be noise.
+        // next word is an object and a column name would be noise, and never where a table is
+        // being named.
         if path.isEmpty {
-            // The select list's own names, where this clause and driver accept them. Where they
-            // are refused, a column of the last run that is one of them is not offered either:
-            // `HAVING total > 1` fails on PostgreSQL even though `total` was a column last time.
-            let aliases = scope?.selectAliases ?? []
-            let accepted = scope.map { SQLSuggestions.offersSelectAliases(in: $0.clause, for: driver) } ?? false
-            if accepted {
-                for alias in aliases where matches(SQLSuggestions.unquoted(alias)) {
-                    add(alias, .column)
+            if !tableClause {
+                // The select list's own names, where this clause and driver accept them. Where they
+                // are refused, a column of the last run that is one of them is not offered either:
+                // `HAVING total > 1` fails on PostgreSQL even though `total` was a column last time.
+                let aliases = scope?.selectAliases ?? []
+                let accepted = scope.map { SQLSuggestions.offersSelectAliases(in: $0.clause, for: driver) } ?? false
+                if accepted {
+                    for alias in aliases { add(alias, .column, name: SQLSuggestions.unquoted(alias)) }
+                }
+                let refused = accepted ? [] : Set(aliases.map { SQLSuggestions.unquoted($0).lowercased() })
+                for column in tab.columns where !refused.contains(column.name.lowercased()) {
+                    add(column.name, .column)
                 }
             }
-            let refused = accepted ? [] : Set(aliases.map { SQLSuggestions.unquoted($0).lowercased() })
-            for column in tab.columns where matches(column.name) && !refused.contains(column.name.lowercased()) {
-                add(column.name, .column)
-            }
-            for keyword in SQLSuggestions.keywords where matches(keyword) {
-                add(keyword, .keyword)
-            }
+            for keyword in SQLSuggestions.keywords { add(keyword, .keyword) }
         }
 
-        return found
-            .sorted { lhs, rhs in
-                if lhs.kind != rhs.kind { return lhs.kind.rawValue < rhs.kind.rawValue }
-                if lhs.text.count != rhs.text.count { return lhs.text.count < rhs.text.count }
-                return lhs.text < rhs.text
+        /// The order the kinds are shown in for the clause the caret is in.
+        func group(_ kind: SQLSuggestion.Kind) -> Int {
+            if tableClause {
+                switch kind {
+                case .table: return 0
+                case .schema: return 1
+                case .catalog: return 2
+                case .keyword: return 3
+                case .column: return 4
+                }
             }
-            .prefix(8)
-            .map { $0 }
+            if columnClause {
+                switch kind {
+                case .column: return 0
+                case .keyword: return 1
+                case .table: return 2
+                case .schema: return 3
+                case .catalog: return 4
+                }
+            }
+            return kind.rawValue
+        }
+
+        return hits
+            .sorted { lhs, rhs in
+                // A name the typed text starts always beats one it only occurs in.
+                let lhsPrefix = lhs.quality == 0 ? 0 : 1, rhsPrefix = rhs.quality == 0 ? 0 : 1
+                if lhsPrefix != rhsPrefix { return lhsPrefix < rhsPrefix }
+                let lhsGroup = group(lhs.suggestion.kind), rhsGroup = group(rhs.suggestion.kind)
+                if lhsGroup != rhsGroup { return lhsGroup < rhsGroup }
+                if lhs.away != rhs.away { return lhs.away < rhs.away }
+                if lhs.quality != rhs.quality { return lhs.quality < rhs.quality }
+                if lhs.suggestion.text.count != rhs.suggestion.text.count {
+                    return lhs.suggestion.text.count < rhs.suggestion.text.count
+                }
+                return lhs.suggestion.text < rhs.suggestion.text
+            }
+            .prefix(Self.suggestionLimit)
+            .map(\.suggestion)
+    }
+
+    /// How many suggestions are kept. The popup shows `EditorCompletion.visibleRows` of them and
+    /// scrolls: cutting the list at eight hid the keywords and the columns behind the tables.
+    static let suggestionLimit = 40
+
+    /// The name a table node is written under at the caret: bare when it is in the tab's default
+    /// database and schema (where the server looks for a bare name), otherwise with as much
+    /// qualifier as it needs.
+    func qualifier(of node: TreeNode, for kind: ConnectionKind, tab: QueryTab)
+        -> (parts: [String], home: Bool) {
+        func same(_ name: String?, _ home: String) -> Bool {
+            guard let name, !home.isEmpty else { return false }
+            return name.compare(home, options: .caseInsensitive) == .orderedSame
+        }
+        let title = node.title
+        switch kind {
+        case .trino:
+            let sameCatalog = same(node.database, database(for: tab))
+            if sameCatalog, same(node.schema, schema(for: tab)) { return ([title], true) }
+            guard let schemaName = node.schema else { return ([title], false) }
+            if sameCatalog { return ([schemaName, title], false) }
+            return (([node.database, schemaName].compactMap { $0 }) + [title], false)
+        case .postgres:
+            if same(node.schema, schema(for: tab)) { return ([title], true) }
+            return ((node.schema.map { [$0] } ?? []) + [title], false)
+        case .mysql:
+            if same(node.database, database(for: tab)) { return ([title], true) }
+            return ((node.database.map { [$0] } ?? []) + [title], false)
+        }
+    }
+
+    /// Asks for a level of the tree unless it already failed once. `loadChildren` itself skips a
+    /// node that is loaded or loading.
+    func requestLoad(of node: TreeNode) {
+        guard node.error == nil else { return }
+        loadChildren(of: node)
+    }
+
+    /// Walks down the tab's default database and schema and asks for the first level that is not
+    /// loaded, so a bare `FROM wil` finds its tables without the sidebar having been expanded. One
+    /// level per call: the answer arrives through `completion.catalogLoaded()`, the editor asks
+    /// again, and the next call takes the next step.
+    private func loadDefaultScope(for tab: QueryTab, connection: Connection, root: TreeNode) {
+        var wanted: [String] = switch connection.kind {
+        case .trino: [database(for: tab), schema(for: tab)]
+        case .postgres: [schema(for: tab)]
+        case .mysql: [database(for: tab)]
+        }
+        if let blank = wanted.firstIndex(where: \.isEmpty) { wanted.removeSubrange(blank...) }
+        var current = root
+        while true {
+            guard let children = current.children else {
+                requestLoad(of: current)
+                return
+            }
+            // "Show all databases" puts the database level back under a Postgres connection.
+            if connection.kind == .postgres, current.kind == .connection,
+               children.contains(where: { $0.kind == .database }) {
+                guard let own = children.first(where: {
+                    $0.kind == .database
+                        && $0.title.compare(connection.database, options: .caseInsensitive) == .orderedSame
+                }) else { return }
+                current = own
+                continue
+            }
+            guard let name = wanted.first else { return }
+            guard let next = children.first(where: {
+                $0.title.compare(name, options: .caseInsensitive) == .orderedSame
+            }) else { return }
+            wanted.removeFirst()
+            current = next
+        }
     }
 
     /// The node a typed path names, or nil when the tree cannot answer for it.

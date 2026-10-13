@@ -11,7 +11,8 @@ struct SuggestionPopup: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(completion.items.enumerated()), id: \.element.id) { index, item in
+            ForEach(Array(completion.visible.enumerated()), id: \.element.id) { row, item in
+                let index = completion.top + row
                 HStack(spacing: 8) {
                     Image(systemName: item.kind.symbol)
                         .font(.system(size: 10, weight: .semibold))
@@ -49,7 +50,7 @@ struct SuggestionOverlay: View {
     var body: some View {
         GeometryReader { geometry in
             if completion.active {
-                let height = SuggestionPopup.height(for: completion.items.count)
+                let height = SuggestionPopup.height(for: completion.visible.count)
                 let below = completion.anchor.maxY + 6
                 let y = below + height <= geometry.size.height
                     ? below

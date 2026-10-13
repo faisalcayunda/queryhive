@@ -44,11 +44,12 @@ struct SQLEditor: NSViewRepresentable {
     @Binding var selection: NSRange
     /// Shared with the popup overlay drawn by the parent.
     let completion: EditorCompletion
-    /// Candidates for a typed prefix. `path` is the `.`-separated qualifier the word is being
-    /// written under — empty for a bare word, `["hive", "analytics"]` for `hive.analytics.` — which
-    /// is what decides whether the answer is a table in that schema, a schema in that catalog, or
-    /// a catalog in that connection. Without it the list is every object in the tree.
-    let candidates: (_ prefix: String, _ path: [String]) -> [SQLSuggestion]
+    /// Candidates for the word under the caret. The request carries the typed prefix and its
+    /// `.`-separated qualifier — empty for a bare word, `["hive", "analytics"]` for
+    /// `hive.analytics.` — which is what decides whether the answer is a table in that schema, a
+    /// schema in that catalog, or a catalog in that connection, and what the text before the word
+    /// says about the caret.
+    let candidates: (_ request: CompletionRequest) -> [SQLSuggestion]
     /// The editor's own switches, passed as a value: SwiftUI re-applies a representable when the
     /// value it was given changes, and a reference to the store would never change.
     let layout: EditorLayout
@@ -1473,7 +1474,10 @@ struct SQLEditor: NSViewRepresentable {
                     unfoldAtCaret()
                     return true
                 case .dismiss:
-                    guard findVisible else { return false }
+                    // Esc closes the find bar when it is open and is the suggestion list's
+                    // otherwise. It used to return here, so with the bar closed the key never
+                    // reached the list, and a list could only be closed by clicking away.
+                    guard findVisible else { break }
                     closeFind()
                     return true
                 }
@@ -1481,7 +1485,8 @@ struct SQLEditor: NSViewRepresentable {
             guard parent.completion.active else { return false }
             switch event.keyCode {
             case 53:                                    // esc
-                parent.completion.dismiss()
+                if let site = activeSite { dismissal.dismiss(at: site.replaceStart) }
+                closeList()
                 return true
             case 125 where !event.modifierFlags.contains(.command):   // ↓
                 parent.completion.move(1)
@@ -1489,6 +1494,10 @@ struct SQLEditor: NSViewRepresentable {
             case 126 where !event.modifierFlags.contains(.command):   // ↑
                 parent.completion.move(-1)
                 return true
+            case 36 where parent.completion.passive, 76 where parent.completion.passive:
+                // A list nobody asked for, on an empty word: Return is a newline, as it was.
+                closeList()
+                return false
             case 36, 76, 48:                            // return, keypad enter, tab
                 accept()
                 return true
@@ -1501,8 +1510,8 @@ struct SQLEditor: NSViewRepresentable {
             guard let textView, parent.completion.active else { return }
             let item = parent.completion.items[parent.completion.selected]
             suppressAutoTrigger = true
-            textView.insertText(item.text, replacementRange: wordRange(in: textView))
-            parent.completion.dismiss()
+            textView.insertText(item.insert, replacementRange: replacementRange(in: textView))
+            closeList()
         }
 
         // MARK: Find
@@ -1735,88 +1744,115 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: Candidates
 
+        /// What the list on screen was asked about, so that picking a row replaces the same word.
+        private var activeSite: CompletionSite?
+        private var activeCaret = 0
+        private var dismissal = CompletionDismissal()
+        /// The head the caret scope is read from is cut at the statement start; a statement longer
+        /// than this has no scope rather than a wrong one (the reader gives up on giants too).
+        private static let scopeHeadLimit = 65_536
+
+        /// Asks the model for a list for the word under the caret and shows it, or closes it.
+        ///
+        /// The hyphenated reading of the word comes first (`prod-o` is one word), because a
+        /// hyphen is also a minus: when nothing is called what that reading says, the plain word
+        /// is asked about instead, so `a-b` still completes `b`.
         private func refresh(manual: Bool) {
             guard let textView else { return }
-            guard let context = wordContext(in: textView) else {
-                parent.completion.dismiss()
-                return
-            }
-            // Two characters is the floor for typing; ⌃Space and the word after a dot are
-            // explicit enough to offer the whole list.
-            if !manual, context.prefix.count < context.minimumPrefix {
-                parent.completion.dismiss()
-                return
-            }
-            let items = parent.candidates(context.prefix, context.path)
-            guard !items.isEmpty else {
-                parent.completion.dismiss()
-                return
-            }
-            parent.completion.items = items
-            parent.completion.selected = 0
-            parent.completion.anchor = caretRect(in: textView)
-        }
-
-        private struct WordContext {
-            let prefix: String
-            /// The `.`-separated segments the word is being qualified *by*, outermost first. Typing
-            /// `hive.analytics.` gives `["hive", "analytics"]` with an empty prefix; typing
-            /// `hive.analytics.pen` gives the same path with the prefix `pen`. Empty when the word
-            /// stands alone.
-            let path: [String]
-            let minimumPrefix: Int
-        }
-
-        private func wordContext(in textView: NSTextView) -> WordContext? {
             let text = nsText
             let caret = textView.selectedRange().location
-            guard caret <= text.length else { return nil }
-            // No SQL suggestions inside a string literal: the user is writing data, not code.
-            guard !insideStringLiteral(text, upTo: caret) else { return nil }
-            guard let parsed = WordScope.parse(text, upTo: caret) else { return nil }
-            return WordContext(prefix: parsed.prefix, path: parsed.path,
-                               minimumPrefix: parsed.path.isEmpty ? 2 : 0)
-        }
-
-        private func wordRange(in textView: NSTextView) -> NSRange {
-            let text = nsText
-            let caret = textView.selectedRange().location
-            var start = caret
-            while start > 0, Self.isWordCharacter(text.character(at: start - 1)) { start -= 1 }
-            return NSRange(location: start, length: caret - start)
-        }
-
-        private static func isWordCharacter(_ character: unichar) -> Bool {
-            guard let scalar = Unicode.Scalar(character) else { return false }
-            return CharacterSet.alphanumerics.contains(scalar) || character == 0x5F  // _
-        }
-
-        /// The quote characters the three drivers use for identifiers: `"` for Trino and Postgres,
-        /// a backtick for MySQL.
-        private static func isQuote(_ character: unichar) -> Bool {
-            character == 0x22 || character == 0x60
-        }
-
-        /// An odd number of unescaped quotes before the caret means the caret is inside one.
-        private func insideStringLiteral(_ text: NSString, upTo caret: Int) -> Bool {
-            guard caret > 0 else { return false }
-            // One bulk copy and a plain loop: reading up to the caret a unit at a time through an
-            // `NSString` is a call per character, and this runs on every pause in typing.
-            var units = [unichar](repeating: 0, count: caret)
-            text.getCharacters(&units, range: NSRange(location: 0, length: caret))
-            var open = false
-            var index = 0
-            while index < caret {
-                if units[index] == 0x27 {                    // '
-                    if index + 1 < caret, units[index + 1] == 0x27 {
-                        index += 2                            // '' is an escaped quote
-                        continue
-                    }
-                    open.toggle()
+            var sites: [CompletionSite] = []
+            if let joined = CompletionTrigger.site(in: text, caret: caret, dialect: parent.dialect,
+                                                   hyphens: true) { sites.append(joined) }
+            if let plain = CompletionTrigger.site(in: text, caret: caret, dialect: parent.dialect),
+               plain != sites.first { sites.append(plain) }
+            // Nothing to complete in a string or a comment: the user is not writing code there.
+            guard !sites.isEmpty else {
+                closeList()
+                return
+            }
+            // Esc closed the list for this word; it may open again at the next one.
+            if !manual, dismissal.suppresses(sites.map(\.replaceStart)) {
+                closeList()
+                return
+            }
+            // ⌃Space and a quote just opened are explicit; the rest follows the trigger rules.
+            var waiting = false
+            for site in sites {
+                let scope = caretScope(for: site, in: text)
+                guard CompletionTrigger.shouldOpen(site, clause: scope?.clause, manual: manual) else {
+                    continue
                 }
-                index += 1
+                waiting = true
+                let items = parent.candidates(CompletionRequest(prefix: site.prefix, path: site.path,
+                                                                scope: scope))
+                guard !items.isEmpty else { continue }
+                activeSite = site
+                activeCaret = caret
+                parent.completion.present(items, anchor: caretRect(in: textView),
+                                          passive: CompletionTrigger.isPassive(site, manual: manual))
+                awaitCatalog(caret: caret, length: text.length, manual: manual)
+                return
             }
-            return open
+            closeList()
+            // An empty answer to a question worth asking may be an answer still on its way.
+            if waiting { awaitCatalog(caret: caret, length: text.length, manual: manual) }
+        }
+
+        private func closeList() {
+            activeSite = nil
+            parent.completion.dismiss()
+            parent.completion.onCatalogLoaded = nil
+        }
+
+        /// Asks again when the catalog learns something, if the caret and the text are where they
+        /// were: a list that was empty because a level of the tree was still loading then fills
+        /// in without another keystroke.
+        private func awaitCatalog(caret: Int, length: Int, manual: Bool) {
+            parent.completion.onCatalogLoaded = { [weak self] in
+                guard let self, let textView = self.textView,
+                      textView.selectedRange().location == caret, self.nsText.length == length else { return }
+                self.refresh(manual: manual)
+            }
+        }
+
+        /// What the text before the word says about the caret, read from the start of its
+        /// statement so the reader never begins mid-statement.
+        private func caretScope(for site: CompletionSite, in text: NSString) -> EditorCaretScope? {
+            let length = site.replaceStart - site.statementStart
+            guard length >= 0, length <= Self.scopeHeadLimit else { return nil }
+            let head = text.substring(with: NSRange(location: site.statementStart, length: length))
+            return sqlCaretScope(head: head, dialect: parent.dialect)
+        }
+
+        /// The range picking a row replaces: from the start of the typed word (its opening quote
+        /// included) to the end of the word the caret is in, and a closing quote that is already
+        /// there. Replacing only up to the caret left the tail of the word behind it.
+        private func replacementRange(in textView: NSTextView) -> NSRange {
+            let text = nsText
+            let caret = textView.selectedRange().location
+            guard let site = activeSite, activeCaret == caret else {
+                var start = caret
+                while start > 0, WordScope.isWordCharacter(text.character(at: start - 1)) { start -= 1 }
+                return NSRange(location: start, length: caret - start)
+            }
+            var end = caret
+            if site.quoted {
+                let quote = text.character(at: site.replaceStart)
+                var probe = caret
+                while probe < text.length, text.character(at: probe) != quote,
+                      text.character(at: probe) != 0x0A { probe += 1 }
+                if probe < text.length, text.character(at: probe) == quote { end = probe + 1 }
+            } else {
+                while end < text.length, WordScope.isWordCharacter(text.character(at: end)) { end += 1 }
+            }
+            return NSRange(location: site.replaceStart, length: end - site.replaceStart)
+        }
+
+        /// Whether the caret is inside text that is not code: a string, a comment, a `$$` body.
+        static func insideStringLiteral(_ text: NSString, upTo caret: Int,
+                                        dialect: EditorDialect = .generic) -> Bool {
+            SQLCaretState.scan(text, upTo: caret, dialect: dialect).isText
         }
 
         /// Where the caret is, in the container's coordinate space — which is flipped, so the
@@ -2371,21 +2407,58 @@ struct HighlightBand {
 /// `NSTextView` wiring around it.
 enum WordScope {
     struct Parsed: Equatable {
-        /// The partial word being typed, which the candidate list filters by.
+        /// The partial word being typed, which the candidate list filters by. Without its quote,
+        /// when it was typed inside one.
         let prefix: String
         /// The `.`-separated names the word is qualified by, outermost first and without quotes.
         /// `hive.analytics.pen` gives `["hive", "analytics"]` and the prefix `pen`.
         let path: [String]
+        /// Where the typed word begins, its opening quote included: what picking a suggestion
+        /// replaces from.
+        let start: Int
+        /// The word was typed inside an identifier quote that is still open.
+        let quoted: Bool
+
+        init(prefix: String, path: [String], start: Int = 0, quoted: Bool = false) {
+            self.prefix = prefix
+            self.path = path
+            self.start = start
+            self.quoted = quoted
+        }
     }
 
     /// Parse the word that would be completed at `caret`.
     ///
+    /// `quotedOpen` is the offset of an identifier quote opened before the caret and not closed:
+    /// the word is then everything after it, spaces and hyphens included, and its replacement
+    /// starts at the quote.
+    ///
+    /// `hyphens` reads a run of name characters and hyphens as one word (`prod-ops-x`). A hyphen
+    /// is also a minus, so a caller asks for it and falls back to the plain word when nothing is
+    /// called what the run says.
+    ///
     /// Returns nil when there is nothing to complete at that position.
-    static func parse(_ text: NSString, upTo caret: Int) -> Parsed? {
+    static func parse(_ text: NSString, upTo caret: Int, hyphens: Bool = false,
+                      quotedOpen: Int? = nil) -> Parsed? {
         guard caret <= text.length else { return nil }
         var start = caret
-        while start > 0, isWordCharacter(text.character(at: start - 1)) { start -= 1 }
-        let prefix = text.substring(with: NSRange(location: start, length: caret - start))
+        let prefix: String
+        var quoted = false
+        if let open = quotedOpen, open < caret {
+            quoted = true
+            prefix = text.substring(with: NSRange(location: open + 1, length: caret - open - 1))
+            start = open
+        } else {
+            while start > 0, isWordCharacter(text.character(at: start - 1)) { start -= 1 }
+            if hyphens {
+                var run = start
+                while run > 0, isWordCharacter(text.character(at: run - 1))
+                        || text.character(at: run - 1) == 0x2D { run -= 1 }
+                while run < start, text.character(at: run) == 0x2D { run += 1 }
+                if run < start { start = run }
+            }
+            prefix = text.substring(with: NSRange(location: start, length: caret - start))
+        }
 
         // Walk back over the qualifier. This is what tells the candidate list which schema's tables
         // to offer: without it every table in the tree is a candidate for every position, so
@@ -2413,7 +2486,7 @@ enum WordScope {
             path.insert(text.substring(with: NSRange(location: begin, length: end - begin)), at: 0)
             cursor = begin
         }
-        return Parsed(prefix: prefix, path: path)
+        return Parsed(prefix: prefix, path: path, start: start, quoted: quoted)
     }
 
     static func isWordCharacter(_ character: unichar) -> Bool {
