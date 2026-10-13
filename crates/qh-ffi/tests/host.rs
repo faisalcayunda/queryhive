@@ -2767,3 +2767,205 @@ async fn ssh_alias_and_pinned_first_use_through_the_engines_settings() {
         .await;
     assert_eq!(std::fs::read_to_string(&user_file).unwrap(), "");
 }
+
+// --------------------------------------------------------------------------- //
+// W13-T20: the engine of a second connection
+// --------------------------------------------------------------------------- //
+
+/// A connector that remembers the settings every tunnel was opened with, which is where the
+/// bastion's password and key passphrase are read from.
+struct TunnelSettingsRecorder {
+    inner: FakeConnector,
+    opened_with: Arc<Mutex<Vec<Settings>>>,
+}
+
+#[async_trait]
+impl Connector for TunnelSettingsRecorder {
+    fn driver(&self, kind: DriverKind) -> &dyn Driver {
+        self.inner.driver(kind)
+    }
+
+    async fn open_tunnel(
+        &self,
+        config: &ConnectionConfig,
+        settings: &Settings,
+    ) -> Result<Arc<dyn TunnelHandle>, EngineError> {
+        self.opened_with
+            .lock()
+            .expect("settings")
+            .push(settings.clone());
+        self.inner.open_tunnel(config, settings).await
+    }
+
+    async fn connect(
+        &self,
+        config: &ConnectionConfig,
+        tunnel: Option<&Arc<dyn TunnelHandle>>,
+    ) -> Result<Box<dyn Session>, EngineError> {
+        self.inner.connect(config, tunnel).await
+    }
+}
+
+/// A PostgreSQL connection through a bastion that authenticates with a key file, so the key's
+/// passphrase (a setting, not part of the config) is part of the pool's credential.
+fn keyed_bastion_config() -> ConnectionConfig {
+    let mut config = pg_config("p1");
+    config.tunnel = Some(TunnelConfig {
+        host: "bastion.example".to_owned(),
+        port: 22,
+        user: "jump".to_owned(),
+        auth: TunnelAuth::Key("/keys/id_ed25519".into()),
+        known_hosts: None,
+        app_known_hosts: None,
+        host_key_accept: None,
+        alias: None,
+    });
+    config
+}
+
+fn recording_pool() -> (
+    Arc<World>,
+    Arc<Mutex<Vec<Settings>>>,
+    Arc<qh_ffi::host::SessionPool>,
+) {
+    let world = World::new();
+    let opened_with = Arc::new(Mutex::new(Vec::new()));
+    let pool = qh_ffi::host::SessionPool::new(Arc::new(TunnelSettingsRecorder {
+        inner: FakeConnector(Arc::clone(&world)),
+        opened_with: Arc::clone(&opened_with),
+    }));
+    (world, opened_with, pool)
+}
+
+#[tokio::test]
+async fn a_second_engine_opens_its_own_tunnel_with_its_own_passphrase() {
+    let (world, opened_with, pool) = recording_pool();
+    let config = keyed_bastion_config();
+    let source_engine = pool.long_op_engine(settings(&[("SSH_KEY_PASSPHRASE", "source-phrase")]));
+    let mut source = source_engine.connect(&config).await.expect("the source");
+
+    // Same bastion, same database, same user: only the settings differ.
+    let second = source_engine
+        .for_settings(settings(&[("SSH_KEY_PASSPHRASE", "dest-phrase")]))
+        .expect("a long operation can open a second connection");
+    let mut dest = second.connect(&config).await.expect("the destination");
+
+    let phrases: Vec<String> = opened_with
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|settings| settings.raw("SSH_KEY_PASSPHRASE", ""))
+        .collect();
+    assert_eq!(
+        phrases,
+        ["source-phrase", "dest-phrase"],
+        "each tunnel was opened with its own connection's passphrase"
+    );
+    assert_eq!(
+        world.tunnels_opened.load(Ordering::SeqCst),
+        2,
+        "a different credential is a different key and a different tunnel"
+    );
+    assert_eq!(world.probe(0).tunnel_port, Some(40_000));
+    assert_eq!(world.probe(1).tunnel_port, Some(40_001));
+
+    // The second key retired the first's pool entry; the source's own session and its tunnel
+    // belong to the run and are untouched.
+    pool.settle().await;
+    assert!(!world.probe(0).closed.load(Ordering::SeqCst));
+    assert_eq!(world.tunnels_dropped.load(Ordering::SeqCst), 0);
+    let rows = query(&mut source, "SELECT 1", &no_options()).await;
+    assert!(rows.is_ok(), "{rows:?}");
+    assert!(query(&mut dest, "SELECT 1", &no_options()).await.is_ok());
+    source.close().await.expect("close");
+    dest.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_second_engine_with_no_passphrase_does_not_borrow_the_sources() {
+    let (world, opened_with, pool) = recording_pool();
+    let config = keyed_bastion_config();
+    let source_engine = pool.long_op_engine(settings(&[
+        ("SSH_KEY_PASSPHRASE", "source-phrase"),
+        ("SSH_PASSWORD", "source-bastion-password"),
+    ]));
+    let source = source_engine.connect(&config).await.expect("the source");
+    let second = source_engine
+        .for_settings(settings(&[("DB_HOST", "b.internal")]))
+        .expect("a second engine");
+    let dest = second.connect(&config).await.expect("the destination");
+
+    let seen = opened_with.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].raw("SSH_KEY_PASSPHRASE", ""), "");
+    assert_eq!(seen[1].raw("SSH_PASSWORD", ""), "");
+    assert_eq!(
+        world.tunnels_opened.load(Ordering::SeqCst),
+        2,
+        "the key without the passphrase is not the key with it"
+    );
+    source.close().await.expect("close");
+    dest.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_second_connection_with_the_same_identity_shares_the_tunnel_and_not_the_session() {
+    let (world, opened_with, pool) = recording_pool();
+    let config = keyed_bastion_config();
+    let env = settings(&[("SSH_KEY_PASSPHRASE", "phrase")]);
+    let first_engine = pool.long_op_engine(env.clone());
+    let first = first_engine.connect(&config).await.expect("first");
+    let second_engine = first_engine.for_settings(env).expect("second");
+    let second = second_engine.connect(&config).await.expect("second");
+
+    assert_eq!(opened_with.lock().unwrap().len(), 1, "one tunnel");
+    assert_eq!(world.connects(), 2, "two sessions of their own");
+    assert_eq!(world.probe(0).tunnel_port, world.probe(1).tunnel_port);
+    first.close().await.expect("close");
+    second.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn only_an_engine_that_owns_its_sessions_offers_a_second_connection() {
+    struct Bare;
+
+    #[async_trait]
+    impl Engine for Bare {
+        fn kinds(&self) -> Vec<DriverKind> {
+            Vec::new()
+        }
+
+        fn driver(&self, kind: DriverKind) -> &dyn Driver {
+            real_driver(kind)
+        }
+
+        async fn connect(
+            &self,
+            _config: &ConnectionConfig,
+        ) -> Result<Box<dyn Session>, EngineError> {
+            unreachable!("nothing connects through this engine")
+        }
+    }
+
+    let (_, _, pool) = recording_pool();
+    let env = settings(&[("DB_HOST", "b.internal")]);
+    // Leased sessions re-send after a reconnect and go back to the pool: not for a
+    // destination.
+    assert!(pool
+        .engine(Lane::Query, env.clone())
+        .for_settings(env.clone())
+        .is_none());
+    assert!(pool
+        .engine(Lane::Metadata, env.clone())
+        .for_settings(env.clone())
+        .is_none());
+    assert!(pool
+        .long_op_engine(env.clone())
+        .for_settings(env.clone())
+        .is_some());
+    assert!(qh_ffi::RealEngine::new()
+        .for_settings(env.clone())
+        .is_some());
+    // The default is "no", so an engine written for something else cannot be mistaken for one.
+    assert!(Bare.for_settings(env).is_none());
+}

@@ -377,6 +377,23 @@ pub trait Engine: Send + Sync {
     fn keeps_sessions(&self) -> bool {
         false
     }
+
+    /// An engine of the same kind for a **second connection**, described by `settings` alone.
+    ///
+    /// A transfer reads on one connection and writes on another, and the two must not share an
+    /// identity: the SSH key passphrase and password are read from the settings at the moment
+    /// the tunnel opens, and the pool keys a connection by them. An engine built over the
+    /// first connection's settings would open the second through the first's bastion and
+    /// credentials. The engine this returns reads nothing from `self`, and a session it opens
+    /// is its own: never pooled, never re-sent.
+    ///
+    /// `None` is the default, and the answer of an engine that cannot promise that (a pooled
+    /// engine hands out leased sessions that re-send a statement after a reconnect and go
+    /// back to the pool). A command that needs the seam fails with an internal error that
+    /// names it, rather than opening the second connection through the wrong engine.
+    fn for_settings(&self, _settings: Settings) -> Option<Box<dyn Engine>> {
+        None
+    }
 }
 
 /// The three drivers, wired together.
@@ -458,6 +475,12 @@ impl Engine for RealEngine {
         // arrive through the tunnel. The session owns it now, and its drop stops the forwarding.
         let tunnel: Arc<dyn host::TunnelHandle> = Arc::new(tunnel);
         Ok(Box::new(host::lease::Held::new(session, Some(tunnel))))
+    }
+
+    fn for_settings(&self, settings: Settings) -> Option<Box<dyn Engine>> {
+        // A fresh engine over the second connection's own settings: its tunnel reads that
+        // connection's passphrase and password, never this engine's.
+        Some(Box::new(Self::with_settings(settings)))
     }
 }
 

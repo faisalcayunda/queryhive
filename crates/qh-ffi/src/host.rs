@@ -186,6 +186,12 @@ impl Engine for PooledEngine {
     fn keeps_sessions(&self) -> bool {
         true
     }
+
+    // `for_settings` is left at its default, `None`, on purpose. A leased session re-sends a
+    // statement after a reconnect (`lease.rs`) and is reset and returned to the pool, and a
+    // transfer's second connection may do neither: the destination's writes are not safe to
+    // re-send, and its session state (the MySQL `sql_mode` and character set a transfer sets)
+    // must not outlive the run (W13-T20 N-2).
 }
 
 /// The engine of a long operation: a session of its own, never pooled, on the shared tunnel.
@@ -207,6 +213,14 @@ impl Engine for LongOpEngine {
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Session>, EngineError> {
         let held = self.pool.open_unleased(config, &self.settings).await?;
         Ok(held)
+    }
+
+    /// A long operation of its own for the second connection: the same pool, so a tunnel
+    /// that connection's key already shares is shared, and `settings` are all it reads. The
+    /// key is `PoolKey::of(config, settings)` with these settings, so the key passphrase and
+    /// the credential hash are the second connection's, never `self.settings`'.
+    fn for_settings(&self, settings: Settings) -> Option<Box<dyn Engine>> {
+        Some(self.pool.long_op_engine(settings))
     }
 }
 
