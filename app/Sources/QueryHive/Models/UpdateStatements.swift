@@ -259,8 +259,19 @@ struct MatchOutcome: Equatable {
     /// A comment naming the columns left out, for the statement text the review sheet shows. It is
     /// part of the *reviewed* SQL on purpose: the predicate is weaker than the whole row, and the
     /// user should see that before approving it.
-    var note: String? {
-        excluded.isEmpty ? nil : "/* not matched: \(excluded.joined(separator: "; ")) */"
+    var note: String? { Self.note(naming: excluded) }
+
+    /// The comment for a list of excluded columns. The names come from the server and sit inside a
+    /// `/* … */`, where no quoting applies, so a name holding `*/` would end the comment and the rest
+    /// of it would run as SQL. A space is put inside each `*/` and `/*` a name holds: the name stays
+    /// readable, it cannot close the comment, and it cannot open a nested one (PostgreSQL and Trino
+    /// nest them, so an opener would leave the statement unterminated).
+    static func note(naming excluded: [String]) -> String? {
+        guard !excluded.isEmpty else { return nil }
+        let safe = excluded.map {
+            $0.replacingOccurrences(of: "*/", with: "* /").replacingOccurrences(of: "/*", with: "/ *")
+        }
+        return "/* not matched: \(safe.joined(separator: "; ")) */"
     }
 }
 
@@ -277,8 +288,6 @@ struct Match: Equatable {
     var isEmpty: Bool { sql.isEmpty }
 
     /// A comment naming the columns left out, for the statement text the review sheet shows.
-    var note: String? {
-        excluded.isEmpty ? nil : "/* not matched: \(excluded.joined(separator: "; ")) */"
-    }
+    var note: String? { MatchOutcome.note(naming: excluded) }
 }
 

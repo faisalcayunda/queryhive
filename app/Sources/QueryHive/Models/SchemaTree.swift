@@ -235,13 +235,13 @@ func qualifiedName(database: String?, schema: String?, table: String,
     switch kind {
     case .trino:
         guard let database, let schema else { return nil }
-        return "\"\(database)\".\"\(schema)\".\"\(table)\""
+        return [database, schema, table].map { quotedIdent($0, for: kind) }.joined(separator: ".")
     case .postgres:
         guard let schema else { return nil }
-        return "\"\(schema)\".\"\(table)\""
+        return [schema, table].map { quotedIdent($0, for: kind) }.joined(separator: ".")
     case .mysql:
         guard let database else { return nil }
-        return "`\(database)`.`\(table)`"
+        return [database, table].map { quotedIdent($0, for: kind) }.joined(separator: ".")
     }
 }
 
@@ -250,11 +250,11 @@ func qualifiedName(database: String?, schema: String?, table: String,
 /// `qualifiedName` is the same rule for a whole table; this is its one-part case, for the statements
 /// this app builds itself rather than ones the user wrote. Sharing the rule is the point: a column
 /// the grid edits and the same column in a hand-written statement have to be spelled the same way.
+///
+/// A quote character inside the name is doubled (`SQLIdentifierQuoting.alwaysQuoted`): the name comes
+/// from a server, and one that holds a quote must still be one identifier.
 func quotedIdent(_ name: String, for kind: ConnectionKind) -> String {
-    switch kind {
-    case .trino, .postgres: "\"\(name)\""
-    case .mysql: "`\(name)`"
-    }
+    SQLIdentifierQuoting.alwaysQuoted(name, for: kind)
 }
 
 /// The statement the object screen's inspector runs to learn one table's columns.
@@ -271,6 +271,7 @@ func quotedIdent(_ name: String, for kind: ConnectionKind) -> String {
 /// rather than refusing to answer at all.
 func objectColumnsSQL(database: String?, schema: String?, table: String,
                       for kind: ConnectionKind) -> String {
-    let name = qualifiedName(database: database, schema: schema, table: table, for: kind) ?? table
+    let name = qualifiedName(database: database, schema: schema, table: table, for: kind)
+        ?? SQLIdentifierQuoting.quoted(table, for: kind)
     return "SELECT * FROM \(name)"
 }

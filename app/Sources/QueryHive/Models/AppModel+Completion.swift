@@ -76,8 +76,7 @@ extension AppModel {
         func spell(_ name: String, typedQuote: Bool = false) -> String {
             guard let driver else { return name }
             guard typedQuote else { return SQLIdentifierQuoting.quoted(name, for: driver) }
-            let mark = driver == .mysql ? "`" : "\""
-            return mark + name.replacingOccurrences(of: mark, with: mark + mark) + mark
+            return SQLIdentifierQuoting.alwaysQuoted(name, for: driver)
         }
 
         /// `identifier` is a name from the server or from a result, which gets quoted when it must

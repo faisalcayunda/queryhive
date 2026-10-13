@@ -20,8 +20,9 @@ import Foundation
 /// A word that is only non-reserved (`date`, `status`, `type`, `name`, `value`) stays bare: every one
 /// of these servers accepts it as a column.
 ///
-/// Not the same thing as `quotedIdent`, which always quotes and does not escape: that one is how the
-/// grid's write-back spells a column it already knows is safe to quote, and it is left as it is.
+/// `quotedIdent` and `qualifiedName` (`SchemaTree.swift`) always quote, which is `alwaysQuoted` here:
+/// the grid's write-back and the inspector keep their quotes on every name, and the doubling is the
+/// same rule as above.
 enum SQLIdentifierQuoting {
     static func needsQuotes(_ name: String, for kind: ConnectionKind) -> Bool {
         guard isPlain(name) else { return true }
@@ -32,6 +33,15 @@ enum SQLIdentifierQuoting {
     /// quote character (doubled inside the name) when it cannot.
     static func quoted(_ name: String, for kind: ConnectionKind) -> String {
         guard needsQuotes(name, for: kind) else { return name }
+        return alwaysQuoted(name, for: kind)
+    }
+
+    /// The name inside its dialect's quote character, whether it needs one or not, with a quote
+    /// character inside the name doubled. This is the one place the doubling is written: `quoted`
+    /// above, `quotedIdent` and `qualifiedName` all go through it, so a name from a server (a
+    /// catalog, schema, table or column) cannot close its own quotes and carry SQL after them. Only
+    /// the dialect's own quote doubles; the other dialect's is an ordinary character.
+    static func alwaysQuoted(_ name: String, for kind: ConnectionKind) -> String {
         let mark = kind == .mysql ? "`" : "\""
         return mark + name.replacingOccurrences(of: mark, with: mark + mark) + mark
     }
