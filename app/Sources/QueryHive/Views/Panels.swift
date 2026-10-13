@@ -40,7 +40,10 @@ struct BottomPanel: View {
         }
         .frame(height: stackedHeight)
         .frame(maxHeight: fills ? .infinity : nil)
-        .background(Tone.recess.opacity(0.20))
+        // Inside its own frame only. A `Color` background runs into the safe area by default, and
+        // with the rows filling the window the panel sits right under the tab strip, which is the
+        // title bar's row: the fill reached up over the tabs, sat above them and took their clicks.
+        .background(Tone.recess.opacity(0.20), ignoresSafeAreaEdges: [])
         .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
     }
 

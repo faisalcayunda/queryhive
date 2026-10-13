@@ -889,7 +889,9 @@ struct ObjectsPane: View {
         }
         .padding(.horizontal, Metrics.gutter)
         .frame(height: Metrics.panelTabs)
-        .background(Tone.recess.opacity(0.22))
+        // Inside its own frame only: this row is right under the tab strip, and a fill that ran up
+        // into the title bar's safe area would cover the tabs and take their clicks (`BottomPanel`).
+        .background(Tone.recess.opacity(0.22), ignoresSafeAreaEdges: [])
     }
 
     @ViewBuilder

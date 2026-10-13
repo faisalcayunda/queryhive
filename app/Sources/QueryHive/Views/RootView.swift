@@ -170,10 +170,14 @@ struct RootView: View {
 private struct BareTitlebar: ViewModifier {
     func body(content: Content) -> some View {
         let bare = content.toolbarBackground(.hidden, for: .windowToolbar)
+        // In full screen the toolbar moves into a window of the system's own, which paints its
+        // material over the tab strip (the title bar's row) and takes its clicks. Shown on hover
+        // at the top edge only, as with any app whose tabs are in that row.
         if #available(macOS 26, *) {
             bare.scrollEdgeEffectHidden(true, for: .top).toolbar(removing: .title)
+                .windowToolbarFullScreenVisibility(.onHover)
         } else if #available(macOS 15, *) {
-            bare.toolbar(removing: .title)
+            bare.toolbar(removing: .title).windowToolbarFullScreenVisibility(.onHover)
         } else {
             bare
         }

@@ -336,6 +336,37 @@ final class ShellTests: XCTestCase {
         }
     }
 
+    /// A real click, as the window gets it: down and up at a point in window coordinates.
+    private func click(_ point: CGPoint, in window: NSWindow) {
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil,
+                                           eventNumber: 0, clickCount: 1, pressure: 1)!
+            window.sendEvent(event)
+            spin(0.1)
+        }
+    }
+
+    // A tab can be clicked whatever is directly under the strip: the editor's query row, the panel
+    // with the rows filling the window, or an object tab's header. Both of the last two used to
+    // paint a colour with `.background(Color)`, which runs into the safe area by default, so it
+    // reached up over the strip (the title bar's row), sat above it and took the click.
+    func testATabCanBeClickedWhateverIsUnderTheStrip() throws {
+        for (scene, expanded) in [("done", false), ("done", true), ("objects", false)] {
+            let rig = rig(scene: scene)
+            if scene == "done" { rig.model.newTab() }
+            rig.model.panelCollapsed = false
+            rig.model.panelExpanded = expanded
+            spin(1)
+            let first = rig.model.tabs[0].id
+            XCTAssertNotEqual(rig.model.selectedTabID, first, "\(scene): the first tab is already selected")
+            let tabs = try requireFrame("tab-strip.tabs", in: rig)
+            click(CGPoint(x: tabs.minX + 40, y: tabs.midY), in: rig.window)
+            XCTAssertTrue(wait(2) { rig.model.selectedTabID == first },
+                          "\(scene), panelExpanded=\(expanded): the click on the first tab did not select it")
+        }
+    }
 
     func testTheWindowTitleFollowsTheSelectedTab() {
         let rig = rig(scene: "done")
