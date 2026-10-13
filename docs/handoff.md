@@ -1,19 +1,20 @@
 # Serah terima: melanjutkan run perf-parity
 
-Dokumen ini untuk AI atau orang yang melanjutkan program perf-parity. Isinya metode kerja, bukan status. Status terbaru ada di `target/run/ledger.md`, bagian "PAUSE POINT 6 (2026-10-08)" dan "LANJUTAN (2026-10-09)". Tidak ada alat tertentu yang diasumsikan: semua langkah bisa dikerjakan dengan shell, git, dan editor biasa.
+Dokumen ini untuk AI atau orang yang melanjutkan program perf-parity. Isinya metode kerja, bukan status. Status terbaru ada di `target/run/keep/ledger.md`, bagian "PAUSE POINT 7 (2026-10-10)" (paling baru), lalu "LANJUTAN (2026-10-09)" dan "PAUSE POINT 6 (2026-10-08)". Tidak ada alat tertentu yang diasumsikan: semua langkah bisa dikerjakan dengan shell, git, dan editor biasa.
 
 Bacaan wajib sebelum mulai, berurutan:
 
 1. `AGENTS.md`: aturan kerja, gate, tingkat review, jebakan mesin.
-2. `target/run/ledger.md`: PAUSE POINT 5, daftar keputusan pemilik O-14 sampai O-31b, backlog B-*, insiden I-*, "MENUNGGU PEMILIK", dan "DEFINITION OF DONE FOR THE WHOLE RUN".
+2. `target/run/keep/ledger.md`: PAUSE POINT 7 (langkah lanjut bernomor), daftar keputusan pemilik O-14 sampai O-31b, backlog B-*, insiden I-*, "MENUNGGU PEMILIK", dan "DEFINITION OF DONE FOR THE WHOLE RUN".
 3. `docs/architecture/development-plan.md`: §1 gate, §5 tugas per gelombang, §7 kepemilikan berkas dan urutan rantai, §9 gelombang akhir dan definisi selesai.
-4. `target/run/plan-b1-onward.md` (rencana batch B1 sampai B20), `target/run/w8t2-decision.md` (keputusan performa W8), `target/run/debt-register.md` dan `target/run/dbx-adoption-backlog.md` (daftar utang dan pemilik tugasnya).
+4. `target/run/plan-b1-onward.md`, `target/run/w8t2-decision.md`, `target/run/debt-register.md` dan `target/run/dbx-adoption-backlog.md` sudah tidak ada di disk (`target/run/` kini hanya berisi `keep/`). Bangun ulang daftar utang dari §5 `development-plan.md`, bagian "Register utang" dan "Adopsi dbx".
 
 ## 1. Status singkat
 
-- `main` dan `work/perf-parity` di `origin` ada di `1708700`, dengan gate penuh hijau. Branch lokal `main` masih tertinggal di `a8c60d1`; fast-forward dulu.
-- Delapan branch `lane/*` berisi kerja yang sudah dikomit tetapi belum diintegrasikan (plus `lane/w7-t1`, dipertahankan karena sudah di-merge ke `lane/w8-f2`). Tidak ada worktree lane yang tersisa.
-- Ledger tidak punya baris tabel untuk B4 sampai B8. Untuk tahu apa yang sudah mendarat, cocokkan ID tugas di §5 dengan `git log` (misalnya `git log --format='%h %s' ae3b278..1708700`). Jangan menebak status.
+- `origin/main` ada di `74bb9cd` (rilis 0.2.1, CI `verify` dan `repo hygiene` hijau); `main` punya empat komit perbaikan di atasnya (skrip build, W11-T6b bagian 1, perbaikan shell, anchor Export); cek `git log origin/main..main` untuk tahu apakah sudah di-push. Rilis 0.2.2 ditunda: kenaikan versi dan catatannya belum dikomit. `work/perf-parity` tertinggal di `7c8f1b5` (0.2.0); fast-forward bersama push berikutnya.
+- Kedelapan branch `lane/*` sudah terintegrasi dan dihapus lokal (salinan di `origin/lane/*`). Tidak ada worktree lane yang tersisa.
+- W11-T6b bagian 1 sudah dikomit, tetapi perbaikan pasca-review di `crates/qh-editor/src/refs.rs` masih "pending review" dan pembaca fallback belum disambungkan ke `Workspace.swift`. Rinciannya di bagian "LANJUTAN 2" ledger.
+- Ledger tidak punya baris tabel untuk B4 sampai B8, dan daftar sisanya terbukti kekecilan: W11-T4, W11-T8, W12-T12, dan W12-T2 tidak disebut padahal kodenya belum ada. Cocokkan tiap ID tugas §5 dengan artefak di kode, jangan dengan `git log --grep` saja (T6a mendarat sebagai `fd98744` tanpa ID di subjek). Jangan menebak status.
 
 ## 2. Urutan lanjut
 
