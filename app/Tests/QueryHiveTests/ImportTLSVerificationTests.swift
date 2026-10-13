@@ -142,16 +142,31 @@ final class ImportTLSVerificationTests: XCTestCase {
         }
     }
 
-    func testAStoredUnverifiedConnectionThatTheImportDoesNotRaiseIsLeftAsItIs() {
-        // Made by an older import: `verify-full` stored with `verify: false`. Turning it on here would
-        // make a connection that works today start failing the check with no warning, so it is not
-        // touched; the connection sheet already shows it as "verify-full · unverified".
-        for asked in [nil, "disable", "require", "verify-ca", "verify-full"] as [String?] {
+    func testAStoredUnverifiedConnectionIsVerifiedWhenTheSourceAsksForAVerifyingModeAtOrAboveIt() {
+        // Made by an older import: `verify-full` stored with `verify: false`. Re-importing the same
+        // source is the owner asking for that check again, so it goes on. A rejected certificate then
+        // fails loudly at connect: the drivers name it.
+        for (stored, asked) in [("verify-full", "verify-full"), ("verify-ca", "verify-ca"), ("verify-ca", "verify-full")] {
+            var connection = self.stored(.postgres, sslmode: stored, verify: false)
+            AppModel.applyTLS(imported(.postgres, sslmode: asked), to: &connection, isNew: false)
+            XCTAssertEqual(connection.sslmode, asked == "verify-full" ? "verify-full" : stored, "\(stored) asked \(asked)")
+            XCTAssertTrue(connection.verify, "\(stored) asked \(asked)")
+            XCTAssertEqual(EngineTLSMode(connection), .require, "\(stored) asked \(asked)")
+        }
+    }
+
+    func testAStoredUnverifiedConnectionIsLeftAloneWhenTheSourceAsksForLessThanItHas() {
+        // The source asks for less than the stored mode, or for a mode that does not check a
+        // certificate, or for nothing: nothing about the stored connection changes.
+        for asked in [nil, "disable", "prefer", "require", "verify-ca"] as [String?] {
             var connection = stored(.postgres, sslmode: "verify-full", verify: false)
             AppModel.applyTLS(imported(.postgres, sslmode: asked), to: &connection, isNew: false)
             XCTAssertEqual(connection.sslmode, "verify-full", "asked \(asked ?? "nothing")")
             XCTAssertFalse(connection.verify, "asked \(asked ?? "nothing")")
         }
+        var requireOnly = stored(.postgres, sslmode: "require", verify: false)
+        AppModel.applyTLS(imported(.postgres, sslmode: "require"), to: &requireOnly, isNew: false)
+        XCTAssertFalse(requireOnly.verify, "require checks nothing, so there is nothing to turn on")
         let unverified = ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "verify-full")
         XCTAssertEqual(unverified.title, "verify-full · unverified")
     }
@@ -353,7 +368,32 @@ final class ImportTLSVerificationTests: XCTestCase {
         XCTAssertEqual(after["pg-require"]?.sslmode, "verify-full", "a looser file never lowers it")
         XCTAssertEqual(after["pg-require"]?.verify, true)
         XCTAssertEqual(after["pg-ca"]?.sslmode, "verify-full", "verify-ca is below what it has")
-        XCTAssertEqual(after["pg-ca"]?.verify, false, "an older unverified connection is not rewritten")
+        XCTAssertEqual(after["pg-ca"]?.verify, false, "asking for less than the stored mode changes nothing")
+    }
+
+    @MainActor
+    func testTheSummaryWarnsThatAVerifyingImportBringsNoCAFile() throws {
+        let model = model()
+        let batch = try dbeaver([
+            ("pg-full", "postgres-jdbc", "jdbc:postgresql://h.corp:5432/d?sslmode=verify-full"),
+            ("pg-ca", "postgres-jdbc", "jdbc:postgresql://h.corp:5432/d?sslmode=verify-ca"),
+            ("pg-require", "postgres-jdbc", "jdbc:postgresql://h.corp:5432/d?sslmode=require"),
+            ("pg-none", "postgres-jdbc", "jdbc:postgresql://h.corp:5432/d"),
+        ])
+        model.applyImport(batch, source: "DBeaver")
+        let message = try XCTUnwrap(model.notice?.message)
+        let line = try XCTUnwrap(message.components(separatedBy: "\n\n").first { $0.hasPrefix("Certificate check on for: ") }, message)
+        XCTAssertTrue(line.contains("pg-full"), line)
+        XCTAssertTrue(line.contains("pg-ca"), line)
+        XCTAssertFalse(line.contains("pg-require"), line)
+        XCTAssertFalse(line.contains("pg-none"), line)
+        XCTAssertTrue(line.contains("host name"), line)
+        XCTAssertTrue(line.contains("CA file"), line)
+
+        let quiet = self.model()
+        quiet.applyImport(try dbeaver([("pg-require", "postgres-jdbc", "jdbc:postgresql://h.corp:5432/d?sslmode=require")]),
+                          source: "DBeaver")
+        XCTAssertFalse(try XCTUnwrap(quiet.notice?.message).contains("Certificate check on"))
     }
 
     // MARK: QueryHive's own list carries `verify` verbatim

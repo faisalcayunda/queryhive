@@ -408,6 +408,7 @@ extension AppModel {
         var keptSecrets: [String] = []
         var notImported: [String] = []
         var keychainFailures: [String] = []
+        var verifying: [String] = []
 
         /// Writes one imported secret under the rules above. `overwrite` is false for a connection
         /// that already exists: a slot with something in it is left alone and reported.
@@ -458,6 +459,7 @@ extension AppModel {
                 // with — see `NavicatImport` — so the only thing this could do is overwrite a value
                 // the user set by hand with nothing.
                 Self.applyTLS(imported, to: &next[index], isNew: false)
+                if Self.leavesCheckWithoutCA(imported, next[index]) { verifying.append(imported.name) }
                 // Filing and the label are the person's once set; an import only fills a blank.
                 if next[index].group == nil { next[index].group = groupID(named: imported.group) }
                 if next[index].environment == nil { next[index].environment = imported.environment }
@@ -513,6 +515,7 @@ extension AppModel {
             // `applyTLS` turns it on for `require` and above, which is what makes `verify-full`
             // check the certificate.
             Self.applyTLS(imported, to: &connection, isNew: true)
+            if Self.leavesCheckWithoutCA(imported, connection) { verifying.append(name) }
             connection.group = groupID(named: imported.group)
             connection.environment = imported.environment
             if !imported.sshHost.isEmpty {
@@ -548,6 +551,7 @@ extension AppModel {
                                                noDatabase: noDatabase, tunnelled: tunnelled,
                                                keptSecrets: keptSecrets, notImported: notImported,
                                                keychainFailures: keychainFailures,
+                                               verifying: verifying,
                                                skipped: batch.skipped,
                                                createdGroups: createdGroups, notes: batch.notes,
                                                source: source))
@@ -571,17 +575,35 @@ extension AppModel {
             return
         }
         let before = connection.sslmode
-        connection.sslmode = NavicatImport.tlsMode(kind: connection.kind,
-                                                   requested: imported.sslmode ?? (imported.ssl ? "require" : nil),
-                                                   current: before)
+        let requested = imported.sslmode ?? (imported.ssl ? "require" : nil)
+        connection.sslmode = NavicatImport.tlsMode(kind: connection.kind, requested: requested, current: before)
         // The engine reads `verify == false` as `DB_INSECURE`, which turns every mode but `disable`
         // into "encrypt, never check" — `verify-ca` and `verify-full` included. So the check goes on
-        // together with a raise to `require` or above, and only then: never to `false`, and a stored
-        // connection the import does not raise (an older import left it `verify-full` and unchecked)
-        // is not rewritten, because turning its check on would make it start failing silently.
-        if connection.sslmode != before, NavicatImport.isRequireOrStricter(connection.sslmode) {
+        // in two cases, and only then: the import raised the mode to `require` or above, or the
+        // source asks for a mode that checks the certificate and the connection already has exactly
+        // that mode with the check off (an older import left it so; asking again is the owner asking
+        // for the check). Never to `false`, and not for a source that asks for less than the stored
+        // mode. Turning a check on can make a connection fail, but loudly: the drivers report a
+        // rejected certificate by name.
+        let raised = connection.sslmode != before && NavicatImport.isRequireOrStricter(connection.sslmode)
+        let askedAgain = requested.map { $0 == connection.sslmode && Self.checksCertificate($0) } ?? false
+        if raised || askedAgain {
             connection.verify = true
         }
+    }
+
+    /// Whether this import asked for a mode that checks the certificate and the connection now checks
+    /// it with no CA file of its own, which is when a private CA or an address instead of a name will
+    /// fail: the summary says so.
+    static func leavesCheckWithoutCA(_ imported: ImportedConnection, _ connection: Connection) -> Bool {
+        connection.kind != .trino && connection.verify && connection.caFile.isEmpty
+            && (imported.sslmode.map(checksCertificate) ?? false)
+            && checksCertificate(connection.sslmode)
+    }
+
+    /// The two PostgreSQL modes that check the server's certificate.
+    static func checksCertificate(_ mode: String) -> Bool {
+        mode == "verify-ca" || mode == "verify-full"
     }
 
     private func noticeTitle(added: Int, refreshed: Int, skipped: Int, source: String) -> String {
@@ -601,6 +623,7 @@ extension AppModel {
                                noPassword: [String], noDatabase: [String], tunnelled: [String],
                                keptSecrets: [String], notImported: [String],
                                keychainFailures: [String],
+                               verifying: [String],
                                skipped: [NavicatImport.Skipped],
                                createdGroups: [String], notes: [String], source: String) -> String {
         var lines: [String] = []
@@ -619,6 +642,11 @@ extension AppModel {
         }
         if !keychainFailures.isEmpty {
             lines.append("Password couldn't be saved to Keychain for: " + keychainFailures.joined(separator: ", ") + ".")
+        }
+        if !verifying.isEmpty {
+            lines.append("Certificate check on for: " + verifying.joined(separator: ", ")
+                         + ". QueryHive checks the server's host name too, and an import brings no CA file, "
+                         + "so a private CA or an IP address will fail to connect until you set a CA file in the connection editor.")
         }
         if !noDatabase.isEmpty {
             lines.append("No database in the export for: " + noDatabase.joined(separator: ", ") + ". Pick one in the connection editor before browsing.")
