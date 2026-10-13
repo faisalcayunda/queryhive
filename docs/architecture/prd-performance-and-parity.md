@@ -1,6 +1,6 @@
 # PRD: performa dan paritas QueryHive terhadap TablePro
 
-- **Status:** disetujui untuk dieksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan. Keputusan O-14 sampai O-18 dan P-27 sampai P-31 ditambahkan 30 Sep 2026 (§11).
+- **Status:** disetujui untuk dieksekusi, 29 Sep 2026. W0 sampai W2 sudah mendarat di branch `work/perf-parity` (`3ba01ae..2e6f7ef`, 30 Sep 2026); W3-T0 (celah Safe Mode MySQL) sedang dikerjakan. Keputusan O-14 sampai O-18 dan P-27 sampai P-31 ditambahkan 30 Sep 2026 (§11). O-33, UC-19, FR-RUN-08, dan V-14 sampai V-17 ditambahkan 14 Okt 2026.
 - **Pasangan:** `docs/architecture/development-plan.md` (siapa mengerjakan apa, dalam urutan apa, dan dengan gate apa). Dokumen ini menjawab *apa* dan *seberapa baik*.
 - **Sumber:** `docs/architecture/performance-plan.md` (Fase 0–8, sumbu, ADR 0030–0036), `docs/architecture/tablepro-feature-map.md` (peta fitur, 18 use case, must/should/later/skip), `docs/architecture/tablepro-design-audit.md` (P0/P1/P2), `docs/architecture/tablepro-adoption-plan.md` (§0 gate berat, §12, §13), `docs/architecture/remaining-work-plan.md` (Batch 7), `docs/architecture/tablepro-feature-analysis.md`, `docs/invariants.md`, `docs/benchmarks.md`, `app/DESIGN.md`. Di akar repo tidak ada `DESIGN.md`. Kontrak desainnya adalah `app/DESIGN.md`.
 - **Batas lisensi:** TablePro berlisensi AGPL-3.0, sedangkan QueryHive MIT (`LICENSE`, ADR-0002, `deny.toml`). TablePro hanya dibaca untuk mempelajari ide dan angka. Kode, aset, dan string UI-nya tidak pernah masuk ke pohon ini.
@@ -83,6 +83,7 @@ Diambil dari `tablepro-feature-map.md` §3 dan dipertajam. Kolom **Lingkup**: *M
 | UC-16 | Melanjutkan kerja setelah restart | Masuk | Tab yang terikat berkas membuka berkasnya lagi. Tidak ada SQL yang hilang. Tidak ada eksekusi ulang otomatis. | FR-ED-03, PR-16 |
 | UC-17 | Mencari siapa yang mengunci tabel | Masuk | Sesi, wait, dan pid pemblokir terlihat dalam < 1 menit tanpa menulis query. Cancel query berjalan di bawah Safe Mode. Terminate tidak ditawarkan. | FR-SAFE-03 |
 | UC-18 | Trino dengan JWT dan CA internal | Masuk (MySQL CA keluar, §12.1) | Konek tanpa mematikan verifikasi TLS. CA yang terpasang di Keychain sistem sudah dipercaya hari ini untuk PostgreSQL dan Trino. Berkas CA per koneksi ditambahkan untuk keduanya. | FR-CON-07…08 |
+| UC-19 | Menyimpan hasil query ke tabel di koneksi lain | Masuk (PostgreSQL, MySQL, atau Trino ke PostgreSQL atau MySQL; mode create dan replace; append, tujuan Trino, dan `COPY BINARY` keluar) | Query berjalan di koneksi A yang hanya dibaca, dan tabelnya dibuat di koneksi B yang berbeda. Lembar transfer selalu tampil dan menyebut kedua koneksi beserta host-nya. Safe Mode B menggerbangi setiap statement tulis, dan Safe Mode A tidak berubah. Tipe dipetakan setia atau ditolak, tanpa nilai yang berubah diam-diam. Jumlah baris yang dibaca dari A sama dengan yang diakui B sebelum swap atau `COMMIT`. Stop sampai ke server A, dan B tidak berubah. Koneksi yang sama tetap `CREATE TABLE … AS` di server (UC-12, PR-02). | FR-RUN-08, PR-02, PR-04 |
 
 ## 5. Kebutuhan fungsional
 
@@ -138,6 +139,7 @@ Kolom **Tugas** menunjuk ID di `development-plan.md`.
 | FR-RUN-05 | `NSProgress` per berkas ekspor, sehingga progres terlihat di Finder, plus progres atau badge di Dock untuk export dan `to_table`. | UC-11 | audit HIG P1 | W12-T6 |
 | FR-RUN-06 | Galat tampil sebagai banner inline di atas hasil sebelumnya. Teksnya bisa diseleksi, dengan tombol Copy, Dismiss, dan "Tampilkan di Log". | UC-07 | audit §12 P0 | W9-T5 |
 | FR-RUN-07 | Lembar konfirmasi write: Esc membatalkan, gaya destruktif coral, kata kerja bernama ("Jalankan 2 Write"), dan Return tidak menjadi default bila prompt dimunculkan engine. Aturan yang sama berlaku untuk Truncate dan Drop. | UC-08 | audit §11 P0 | W9-T5, W9-T3 |
+| FR-RUN-08 | `to_table` boleh menyeberang koneksi. Bila setelan berprefiks `DEST_` ada, engine membaca tepat satu statement bacaan dari koneksi sumber dan menulis ke koneksi tujuan lewat sesinya sendiri (PostgreSQL `COPY`, MySQL INSERT terikat), seluruhnya di proses engine dan tanpa lewat Swift. Gagal-tertutup: setelan tujuan yang tidak lengkap menjadi galat pemakaian, dan CTAS tidak pernah jalan diam-diam di koneksi sumber. Safe Mode tujuan memutuskan setiap statement nyata yang dikirim ke sana, dan sumber hanya dibaca. Tipe setia atau ditolak. Mode create dan replace atomik, dengan verifikasi jumlah baris. Tanpa perintah FFI baru, dan MCP tidak mendapatkannya. Keputusan rinci di ADR-0046. | UC-19 | O-33 (permintaan pemilik 14 Okt 2026) | W13-T20 |
 
 ### 5.5 Grid hasil
 
@@ -300,6 +302,10 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 | V-11 | Permukaan baru tanpa baseline lama: record, pohon plan, aktivitas, audit, footer paginasi, tab hasil skrip, bagian SSH, tab DDL | W10–W13 |
 | V-12 | Warna sintaks dan lipatan editor dari tree-sitter, dengan warna sebagai atribut sementara (butir 1–11 di blueprint 4B §5.3, termasuk kontras Nord yang diperbaiki) | W4-T2 commit B |
 | V-13 | Grid digambar `NSTableView` + `draw(_:)`, bukan `LazyVStack` SwiftUI. Tiga sebab terukur, ketiganya di luar kendali dari dalam `draw(_:)`: tepi kolom fraksional membulat ke piksel yang berbeda dari layout `HStack` yang menerus (56 assertion layout, 1 pt); teks SwiftUI ber-antialias subpiksel dan `CTLineDraw` ke bitmap `cacheDisplay` ber-antialias grayscale, dan delapan kombinasi `shouldSmoothFonts`/`shouldSubpixelPositionFonts`/`shouldSubpixelQuantizeFonts`/`setShouldAntialias`/baseline fraksional/x bulat/alpha tinta penuh tidak satu pun turun di bawah 4,998% dari anggaran 0,1% (30 assertion piksel); chevron sort 10×6 px sementara `Image(systemName:)` dengan `.font(.system(size:8,weight:.bold))` menghasilkan 6×4 (14 assertion marker). Geometri kolom dan tinggi header sudah direproduksi (lihat §14 blueprint 5B). Bukan V-9: V-9 milik W10 dan hanya menyentuh kursor, kontras, staged, funnel. | W5-T1 commit 5b |
+| V-14 | Teks polos editor memakai warna teks tema di mode gelap (16 scene editor), dan tab pindah ke baris atas tanpa pita judul di ketujuh tema (22 scene chrome) | lane `tabs-on-top`, VERIFY-V14 di W8-T6 (`c0daa99`) |
+| V-15 | Lembar koneksi: empat bagian di samping sidebar, kontrol enkripsi di samping Host, penjelasan panjang menjadi petunjuk "?", dan footer menyebut yang masih kurang. Empat scene `chrome-connection*` pindah dari 620×660 ke 820×620, dan sepuluh scene baru | W13-T19 (`c9d82c3`) |
+| V-16 | Tint header panel objek tidak lagi menimpa strip tab (`chrome-objects` terang dan gelap) | perbaikan klik strip tab (`81d37d2`) |
+| V-17 | Tujuan tabel lintas koneksi: pemilih koneksi di wizard Save to Table, serta scene baru `table-target-cross`, `table-target-cross-refused`, dan `transfer-sheet` (prod ke tanpa label). Sakelar Experimental di Settings menggeser scene `chrome-settings*` dari pane yang memuatnya (pane ditentukan di langkah 8); scene lain tidak bergeser | W13-T20 langkah 10 |
 
 - Setiap rekam ulang punya commit sendiri. Baseline lama tetap bisa diambil dari riwayat git. Pemilik meninjau pasangan berdampingan di laporan akhir (keputusan O-10, P-01).
 
@@ -365,7 +371,7 @@ Target diambil dari `performance-plan.md` §2. Angka hari ini ada di sana dan di
 Hal-hal berikut didokumentasikan tetapi tidak dibangun.
 
 - **Later di peta fitur:**
-  - query insights, rutin dan UDT, maintenance, backup/restore, copy object;
+  - query insights, rutin dan UDT, maintenance, backup/restore, copy object (menyalin objek skema antar koneksi atau engine; menyimpan hasil query ke tabel di koneksi lain dikeluarkan dari daftar ini oleh O-33 dan masuk lingkup lewat FR-RUN-08);
   - shortcut yang bisa di-rebind, Vim;
   - credential profiles, SSH profiles;
   - UI token MCP, retensi history;
@@ -423,6 +429,9 @@ Hal-hal berikut didokumentasikan tetapi tidak dibangun.
 | O-16 | **Panduan agen repo (30 Sep 2026):** tugas terakhir W14-T7 menulis panduan untuk agen AI di repo ini. `AGENTS.md` menjadi sumbernya, `CLAUDE.md` menunjuk ke sana, supaya AI mana pun yang bekerja di codebase ini menjaga kualitasnya: gate, invariant, anggaran performa, gate paritas, batas lisensi, dan pelajaran yang didapat. Ditulis dengan skill `writing-for-agents` dan ditinjau sebelum merge. |
 | O-17 | **Kebijakan review berjenjang menurut risiko (30 Sep 2026):** risiko tinggi memakai reviewer opus, spesialis hanya yang relevan, maksimal 3 putaran. Risiko sedang: satu reviewer, maksimal 2 putaran. Risiko rendah (dokumen, ADR, tooling, hanya tes, hanya pemindahan, pembersihan): satu reviewer sonnet atau cukup gate, 1 putaran. Hanya temuan yang memblokir memicu putaran. Implementer sonnet secara default, opus hanya untuk W3-T0, W3-T1, W5-T1, W6-T1, W13-T8a, dan W13-T8b. Diterapkan di `development-plan.md` §6 dan §8. |
 | O-18 | **DataFusion sebagai komponen terpisah (30 Sep 2026):** DataFusion adalah komponen opsional yang diunduh saat pertama dipakai, bukan bagian bundel. App tetap sekitar 30 MB dan store Arrow ada di app. Semua fungsi di luar analitik berjalan tanpa komponen ini. |
+| O-33 | **Save to Table lintas koneksi (14 Okt 2026):** masuk lingkup. Query berjalan di koneksi A dan tabelnya dibuat di koneksi B yang berbeda (FR-RUN-08, UC-19). Fitur ini keluar dari "copy object: Later" di §10, khusus untuk hasil query. Pertanyaan terbuka OQ-1 sampai OQ-13 di blueprint `blueprints/w13-save-to-table-across-connections.md` dijawab orkestrator atas delegasi pemilik, dicatat sebagai diputuskan 14 Okt 2026 (tabelnya di ADR-0046 dan `target/run/keep/ledger.md`). Pemilik juga meminta UI-nya dibangun sekarang: pemilih koneksi tujuan ada di belakang sakelar Settings "Experimental: save to a table on another connection", bawaannya mati sampai satu run live terhadap server nyata lulus (menggantikan OQ-11). |
+
+O-19 sampai O-32b dicatat di ledger (`target/run/keep/ledger.md`), bukan di tabel ini.
 
 ### 11.2 Keputusan perencana
 

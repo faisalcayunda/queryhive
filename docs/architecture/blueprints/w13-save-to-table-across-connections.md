@@ -4,7 +4,11 @@
   - Ditulis 14 Okt 2026.
   - Direview sekali oleh `architect-reviewer` (opus, putaran 1). Verdict-nya "perubahan diperlukan": tujuh temuan memblokir (B-1..B-7) dan tujuh belas tidak memblokir (N-1..N-17).
   - Direvisi 14 Okt 2026 (revisi 2). Pemetaan temuan ke bagian ada di paragraf "Revisi 2" di akhir.
-  - **Menunggu review putaran 2, hanya untuk B-1..B-7.** Belum ada kode.
+  - Review putaran 2 (14 Okt 2026): **disetujui dengan syarat C-1..C-5** (lihat Verdict, subbagian "Putaran 2").
+  - **Catatan 14 Okt 2026 (pemilik: "lanjutkan dengan UI").** Dua hal menimpa teks di bawah:
+    - **OQ-11 diganti.** UI (langkah 8 sampai 11) dibangun sekarang dan boleh masuk `main`, tetapi pemilih koneksi tujuan hanya tampil di balik saklar "Experimental" di Settings yang **default-nya mati** sampai ada satu uji nyata terhadap database asli (langkah 12). Semua kalimat di bawah yang bilang UI tidak masuk `main` sebelum langkah 12 dibaca sebagai: *saklar tidak boleh dinyalakan secara default* sebelum langkah 12. Rincian ada di ADR-0046 keputusan 13.
+    - **C-1..C-5 menang atas badan teks.** Teks lama di §4.3 (`money`), §4.4 (ejaan PostgreSQL), dan §7.2 (allowlist berbasis string, bentuk `sql_mode`, empat `SET` sisi sumber) digantikan oleh ADR-0046. Kalau ada selisih, ADR-0046 yang berlaku.
+  - Implementasi dimulai 14 Okt 2026: langkah 0 (dokumen) selesai, langkah 1, 2, 3, dan 5 sedang dikerjakan di worktree.
   - OQ-1..OQ-13 sudah diputuskan orkestrator lewat delegasi pemilik (tabel di Verdict). Keputusannya diterapkan di badan dokumen.
 - **Untuk:** W13-T20 (ID usulan, XFER). Permintaan pemilik: "Save to Table" boleh menyeberang koneksi. Query dijalankan di koneksi A, tabelnya dibuat di koneksi B yang **berbeda**. Contohnya hasil Trino disimpan ke PostgreSQL atau MySQL, PostgreSQL ke PostgreSQL, atau MySQL ke PostgreSQL.
 - **Sumber:** `AGENTS.md`; `development-plan.md` §1, §4, §5 (W12-T7c, W12-T9), §7; PRD §5.4, §6.4, §6.6, §7, §10; `docs/invariants.md` #1, #7, #11; ADR-0026, ADR-0027, ADR-0028; `blueprints/w13-connection-form.md` sebagai model format; `target/run/keep/ledger.md`.
