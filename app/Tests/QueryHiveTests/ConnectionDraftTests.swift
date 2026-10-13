@@ -1,0 +1,307 @@
+import XCTest
+
+@testable import QueryHive
+
+/// The connection sheet's one value: what it makes of a saved connection and what Save stores
+/// back, and the rules that tie its fields together. The sheet's own Save/Test paths are driven
+/// from these same members, so a rule proven here is the rule the sheet applies.
+final class ConnectionDraftTests: XCTestCase {
+    private let id = UUID()
+
+    /// A connection as the form would save it: nothing the form would have blanked or defaulted.
+    private func saved(_ kind: ConnectionKind, tunnel: Bool = false, auth: SSHAuthMethod = .agent,
+                       jwt: Bool = false, ca: Bool = false, timeoutMS: Int? = nil) -> Connection {
+        Connection(id: id, name: "wh", color: .violet, kind: kind, host: "db.internal", port: kind.defaultPort,
+                   scheme: kind == .trino ? "https" : "", sslmode: kind.defaultSSLMode,
+                   user: "u", database: "app", schema: kind.hasSchemaLevel ? "public" : "", verify: false,
+                   showAllSchemas: true, showAllDatabases: kind == .postgres,
+                   safeMode: .confirm, environment: .staging,
+                   sshHost: tunnel ? "bastion" : "", sshUseConfig: tunnel && auth == .agent,
+                   sshPort: tunnel ? 2222 : 0, sshUser: tunnel ? "deploy" : "",
+                   sshAuth: tunnel ? auth : .agent,
+                   sshKeyPath: tunnel && auth == .key ? "/k/id" : "",
+                   dbAuth: jwt && kind == .trino ? .jwt : .password,
+                   caFile: ca && kind != .mysql ? "/ca.pem" : "", statementTimeoutMS: timeoutMS)
+    }
+
+    func testEveryKindRoundTripsThroughTheDraft() {
+        for kind in ConnectionKind.allCases {
+            for tunnel in [false, true] {
+                for auth in tunnel ? SSHAuthMethod.allCases : [.agent] {
+                    for jwt in [false, true] {
+                        for ca in [false, true] {
+                            for timeout in [nil, 0, 45_000] as [Int?] {
+                                let c = saved(kind, tunnel: tunnel, auth: auth, jwt: jwt, ca: ca, timeoutMS: timeout)
+                                let back = ConnectionDraft(c).connection(id: c.id, group: c.group)
+                                XCTAssertEqual(back, c, "\(kind) tunnel=\(tunnel) \(auth) jwt=\(jwt) ca=\(ca) timeout=\(String(describing: timeout))")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testTheGroupIsTheSavedOnesAndNotTheDrafts() {
+        let group = UUID()
+        var c = saved(.postgres)
+        c.group = group
+        XCTAssertEqual(ConnectionDraft(c).connection(id: c.id, group: group), c)
+        XCTAssertNil(ConnectionDraft(c).connection(id: c.id, group: nil).group)
+    }
+
+    func testTextFieldsAreTrimmedOnSaveButNotInTheDraft() {
+        var draft = ConnectionDraft.new()
+        draft.name = "  wh  "; draft.host = " db "; draft.user = " u "; draft.database = " app "; draft.schema = " s "
+        draft.caFile = " /ca.pem "
+        let c = draft.connection(id: id, group: nil)
+        XCTAssertEqual([c.name, c.host, c.user, c.database, c.schema, c.caFile], ["wh", "db", "u", "app", "s", "/ca.pem"])
+        XCTAssertEqual(draft.name, "  wh  ")
+    }
+
+    func testTurningTheTunnelOffClearsItsFieldsOnSaveButKeepsThemInTheDraft() {
+        var draft = ConnectionDraft(saved(.postgres, tunnel: true, auth: .key))
+        XCTAssertTrue(draft.sshEnabled)
+        draft.sshEnabled = false
+        let off = draft.connection(id: id, group: nil)
+        XCTAssertEqual([off.sshHost, off.sshUser, off.sshKeyPath], ["", "", ""])
+        XCTAssertEqual(off.sshPort, 0)
+        XCTAssertEqual(off.sshAuth, .agent)
+        XCTAssertFalse(off.sshUseConfig)
+        XCTAssertFalse(off.usesTunnel)
+        // Still there, so turning it back on finds what was typed.
+        XCTAssertEqual([draft.sshHost, draft.sshUser, draft.sshKeyPath], ["bastion", "deploy", "/k/id"])
+        draft.sshEnabled = true
+        XCTAssertEqual(draft.connection(id: id, group: nil), saved(.postgres, tunnel: true, auth: .key))
+    }
+
+    func testOnlyTheKeyMethodStoresAKeyPath() {
+        var draft = ConnectionDraft(saved(.postgres, tunnel: true, auth: .key))
+        draft.sshAuth = .password
+        XCTAssertEqual(draft.connection(id: id, group: nil).sshKeyPath, "")
+    }
+
+    func testWhatOnlyBelongsToAnotherDriverIsLeftOutOnSave() {
+        var draft = ConnectionDraft(saved(.trino, jwt: true, ca: true))
+        draft.kind = .postgres
+        XCTAssertEqual(draft.connection(id: id, group: nil).dbAuth, .password, "JWT is Trino's")
+        draft.kind = .mysql
+        XCTAssertEqual(draft.connection(id: id, group: nil).caFile, "", "MySQL has no CA setting")
+        XCTAssertEqual(draft.formState.caFile, "", "and validation does not read one")
+    }
+
+    func testAStatementTimeoutIsSecondsOnTheFormAndMillisecondsInTheConnection() {
+        var draft = ConnectionDraft.new()
+        XCTAssertNil(draft.timeoutMS, "blank inherits")
+        draft.timeoutText = " 30 "
+        XCTAssertEqual(draft.timeoutMS, 30_000)
+        draft.timeoutText = "0"
+        XCTAssertEqual(draft.timeoutMS, 0, "0 is 'no bound', which is not the same as inheriting")
+        for bad in ["601", "-1", "x", "1.5"] {
+            draft.timeoutText = bad
+            XCTAssertNil(draft.timeoutMS, bad)
+        }
+    }
+
+    func testASavedBlankSSLModeShowsAsTheDriversDefault() {
+        // How the sheet has always loaded it. It reads as a change (blueprint T-1), which the
+        // later step that fixes it will turn around; until then this pins the behaviour.
+        var c = saved(.postgres)
+        c.sslmode = ""
+        let draft = ConnectionDraft(c)
+        XCTAssertEqual(draft.sslmode, "prefer")
+        XCTAssertTrue(draft.isDirty(against: c))
+    }
+
+    // MARK: Rules
+
+    func testChoosingADriverMovesTheDefaultPortOnlyWhileItIsStillTheDefault() {
+        var draft = ConnectionDraft.new()
+        draft.choose(.postgres)
+        XCTAssertEqual(draft.kind, .postgres)
+        XCTAssertEqual(draft.port, 5432)
+        draft.port = 6543
+        draft.choose(.mysql)
+        XCTAssertEqual(draft.port, 6543, "a port the person typed stays")
+    }
+
+    func testChoosingADriverFillsABlankSSLModeForDriversThatHaveOne() {
+        var draft = ConnectionDraft.new()
+        draft.sslmode = ""
+        draft.choose(.mysql)
+        XCTAssertEqual(draft.sslmode, "disable")
+        draft.sslmode = ""
+        draft.choose(.trino)
+        XCTAssertEqual(draft.sslmode, "", "Trino has no SSL modes")
+    }
+
+    func testChoosingADriverResetsTheJWTAndTheCAThatDoNotApply() {
+        var draft = ConnectionDraft.new()
+        draft.dbAuth = .jwt
+        draft.secrets.jwt = "token"
+        draft.caFile = "/ca.pem"
+        draft.choose(.postgres)
+        XCTAssertEqual(draft.dbAuth, .password)
+        XCTAssertEqual(draft.secrets.jwt, "")
+        XCTAssertEqual(draft.caFile, "/ca.pem", "PostgreSQL can use a CA")
+        draft.choose(.mysql)
+        XCTAssertEqual(draft.caFile, "", "MySQL cannot")
+    }
+
+    func testChoosingTrinoKeepsItsOwnJWT() {
+        var draft = ConnectionDraft.new()
+        draft.dbAuth = .jwt
+        draft.secrets.jwt = "token"
+        draft.choose(.trino)
+        XCTAssertEqual(draft.dbAuth, .jwt)
+        XCTAssertEqual(draft.secrets.jwt, "token")
+    }
+
+    func testApplyingAURLFillsTheFieldsItSpeaksAbout() throws {
+        var draft = ConnectionDraft.new()
+        draft.color = .red
+        draft.safeMode = .readOnly
+        let parsed = try XCTUnwrap(try ConnectionURL.parse("postgresql://ann:p%40ss@db.corp:6543/sales?sslmode=verify-full"))
+        draft.apply(parsed)
+        XCTAssertEqual(draft.kind, .postgres)
+        XCTAssertEqual([draft.host, draft.user, draft.database], ["db.corp", "ann", "sales"])
+        XCTAssertEqual(draft.port, 6543)
+        XCTAssertEqual(draft.sslmode, "verify-full")
+        XCTAssertEqual(draft.scheme, "https", "a driver with no scheme keeps the form's default")
+        XCTAssertEqual(draft.secrets.password, "p@ss")
+        XCTAssertEqual(draft.name, "db.corp/sales", "a blank name is filled from the URL")
+        XCTAssertEqual(draft.color, .red)
+        XCTAssertEqual(draft.safeMode, .readOnly, "what the URL does not say is left alone")
+    }
+
+    func testApplyingAURLKeepsANameAlreadyTyped() throws {
+        var draft = ConnectionDraft.new()
+        draft.name = "mine"
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("mysql://u@h/db")))
+        XCTAssertEqual(draft.name, "mine")
+        XCTAssertEqual(draft.kind, .mysql)
+        XCTAssertEqual(draft.sslmode, "disable", "no mode in the URL is the driver's default")
+        XCTAssertEqual(draft.secrets.password, "", "no password in the URL is blank")
+    }
+
+    func testApplyingATrinoURLReadsItsTransportAndVerification() throws {
+        var draft = ConnectionDraft.new()
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("trino://u@h:8443/hive?sslmode=require")))
+        XCTAssertEqual(draft.kind, .trino)
+        XCTAssertEqual(draft.scheme, "https")
+        XCTAssertFalse(draft.verifyTLS, "require encrypts and does not verify")
+    }
+
+    func testAPickedCAFileForcesAModeThatChecksTheCertificate() {
+        var pg = ConnectionDraft.new()
+        pg.choose(.postgres)
+        pg.setCAFile("/ca.pem")
+        XCTAssertEqual(pg.sslmode, "verify-full")
+        pg.sslmode = "verify-ca"
+        pg.setCAFile("/other.pem")
+        XCTAssertEqual(pg.sslmode, "verify-ca", "a mode that already verifies stays")
+
+        var trino = ConnectionDraft.new()
+        trino.scheme = "http"
+        trino.verifyTLS = false
+        trino.setCAFile("/ca.pem")
+        XCTAssertEqual(trino.scheme, "https")
+        XCTAssertTrue(trino.verifyTLS)
+    }
+
+    func testAPickedCAFileOnTrinoMovesTheStandardHTTPPortWithTheScheme() {
+        var trino = ConnectionDraft.new()
+        trino.scheme = "http"
+        trino.port = 8080
+        trino.setCAFile("/ca.pem")
+        XCTAssertEqual(trino.port, 8443)
+    }
+
+    func testABlankOrNoCAAsksForNothing() {
+        var pg = ConnectionDraft.new()
+        pg.choose(.postgres)
+        pg.setCAFile("   ")
+        XCTAssertEqual(pg.sslmode, "prefer")
+        var mysql = ConnectionDraft.new()
+        mysql.choose(.mysql)
+        mysql.sslmode = "require"
+        mysql.setCAFile("/ca.pem")
+        XCTAssertEqual(mysql.sslmode, "require", "MySQL's mode is not tied to a CA")
+    }
+
+    func testTheSchemeMovesTheStandardPortAndNothingElse() {
+        var draft = ConnectionDraft.new()
+        draft.scheme = "http"
+        draft.port = 8080
+        draft.setScheme("https")
+        XCTAssertEqual(draft.port, 8443)
+        draft.setScheme("http")
+        XCTAssertEqual(draft.port, 8080)
+        draft.port = 9000
+        draft.setScheme("https")
+        XCTAssertEqual(draft.port, 9000, "a port the person chose stays")
+        draft.setScheme("http")
+        XCTAssertEqual(draft.port, 9000)
+    }
+
+    func testPreferMovesNoPort() {
+        var draft = ConnectionDraft.new()
+        draft.scheme = "http"
+        draft.port = 8080
+        draft.setScheme("prefer")
+        XCTAssertEqual(draft.port, 8080)
+        draft.scheme = "https"
+        draft.port = 8443
+        draft.setScheme("prefer")
+        XCTAssertEqual(draft.port, 8443)
+    }
+
+    func testFollowPortReadsTheTransitionTheSheetObserved() {
+        var draft = ConnectionDraft.new()
+        draft.scheme = "https"
+        draft.port = 8080
+        draft.followPort(from: "http", to: "https")
+        XCTAssertEqual(draft.port, 8443)
+    }
+
+    // MARK: Dirty
+
+    func testANewDraftIsDirtyOnceAnythingIsInIt() {
+        var draft = ConnectionDraft.new()
+        XCTAssertFalse(draft.isDirty(against: nil))
+        draft.secrets.password = "x"
+        XCTAssertTrue(draft.isDirty(against: nil))
+        draft = .new()
+        draft.sshEnabled = true
+        XCTAssertTrue(draft.isDirty(against: nil))
+        draft = .new()
+        draft.color = .red
+        XCTAssertFalse(draft.isDirty(against: nil), "colour and the driver alone do not make a new connection worth saving")
+    }
+
+    func testASavedConnectionIsDirtyForATypedSecretAStagedRemovalOrAChangedField() {
+        let c = saved(.postgres)
+        var draft = ConnectionDraft(c)
+        XCTAssertFalse(draft.isDirty(against: c))
+        draft.secrets.sshPassword = "s"
+        XCTAssertTrue(draft.isDirty(against: c))
+        draft = ConnectionDraft(c)
+        draft.secrets.removals = [.database]
+        XCTAssertTrue(draft.isDirty(against: c))
+        draft = ConnectionDraft(c)
+        draft.host = c.host + " "
+        XCTAssertFalse(draft.isDirty(against: c), "trailing space is trimmed before the comparison")
+        draft.host = "other"
+        XCTAssertTrue(draft.isDirty(against: c))
+    }
+
+    func testTheDraftsSecretsAreTheSavePlansInput() {
+        var draft = ConnectionDraft(saved(.postgres, tunnel: true, auth: .password))
+        draft.secrets.password = "db"
+        draft.secrets.sshPassword = "ssh"
+        draft.secrets.sshPassphrase = "unused"
+        let c = draft.connection(id: id, group: nil)
+        XCTAssertEqual(ConnectionSecretPlan.operations(draft: draft.secrets, old: saved(.postgres, tunnel: true, auth: .password), new: c),
+                       [.set(.database, "db"), .set(.sshPassword, "ssh")])
+    }
+}

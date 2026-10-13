@@ -168,7 +168,7 @@ enum ConnectionSecretPlan {
     }
 
     /// What the form holds for each slot: what was typed, and which slots were explicitly removed.
-    struct Draft {
+    struct Draft: Equatable {
         var password = ""
         var sshPassword = ""
         var sshPassphrase = ""

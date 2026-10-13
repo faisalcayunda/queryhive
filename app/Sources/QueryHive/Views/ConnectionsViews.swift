@@ -127,47 +127,8 @@ struct ConnectionEditorSheet: View {
     @State private var urlText = ""
     @State private var urlError: String?
     @State private var editingID: UUID?
-    @State private var name = ""
-    @State private var color = ConnectionColor.blue
-    @State private var kind = ConnectionKind.trino
-    @State private var host = ""
-    @State private var port = ConnectionKind.trino.defaultPort
-    @State private var scheme = "https"
-    @State private var sslmode = ConnectionKind.postgres.defaultSSLMode
-    @State private var user = ""
-    @State private var credential = ""
-    @State private var database = ""
-    @State private var schema = ""
-    @State private var verifyTLS = true
-    /// Postgres only: list system schemas too. Meaningful nowhere else, so the field is shown
-    /// only for that driver, mirroring the tree's own context-menu toggle.
-    @State private var showAllSchemas = false
-    /// Postgres only, and the same deal one level up: draw a database level under the connection
-    /// instead of starting at the schemas of the database named above.
-    @State private var showAllDatabases = false
-    /// What the engine refuses on this connection. Chosen here, enforced there: the picker
-    /// only records the level, and `AppModel.connectionEnvironment` sends it as `SAFE_MODE`.
-    @State private var safeMode = ConnectionSafeMode.full
-    /// A label shown in the tab, breadcrumb and status bar. It changes nothing else.
-    @State private var environment: ConnectionEnvironment?
-    // The W11 fields. Secrets are typed here and written on Save; a saved one is never shown.
-    @State private var sshEnabled = false
-    @State private var sshHost = ""
-    @State private var sshUseConfig = false
-    /// `0` is "not set": 22, or the alias's own port.
-    @State private var sshPort = 0
-    @State private var sshUser = ""
-    @State private var sshAuth = SSHAuthMethod.agent
-    @State private var sshKeyPath = ""
-    @State private var sshPassword = ""
-    @State private var sshPassphrase = ""
-    @State private var dbAuth = DatabaseAuth.password
-    @State private var jwt = ""
-    @State private var caFile = ""
-    /// Seconds, as typed; blank inherits the app-wide setting.
-    @State private var timeoutText = ""
-    /// Slots the person pressed "Remove saved…" for. Staged: nothing leaves the Keychain until Save.
-    @State private var removals: Set<ConnectionKeychain.Slot> = []
+    /// Every field of the connection and the secrets typed beside it (`ConnectionDraft`).
+    @State private var draft = ConnectionDraft.new()
     @State private var aliasPreview: Result<SSHAliasInfo, SSHAliasError>?
     /// What the URL step read and left out, for one line on the form.
     @State private var urlNote: String?
@@ -188,63 +149,8 @@ struct ConnectionEditorSheet: View {
 
     private var original: Connection? { model.connections.first { $0.id == editingID } }
 
-    private var isDirty: Bool {
-        guard let original else {
-            return !(name.isEmpty && host.isEmpty && user.isEmpty && credential.isEmpty
-                     && database.isEmpty && schema.isEmpty && !sshEnabled && sshPassword.isEmpty
-                     && sshPassphrase.isEmpty && jwt.isEmpty && caFile.isEmpty && timeoutText.isEmpty)
-        }
-        return !credential.isEmpty || !sshPassword.isEmpty || !sshPassphrase.isEmpty || !jwt.isEmpty
-            || !removals.isEmpty || draftConnection(id: original.id) != original
-    }
+    private var isDirty: Bool { draft.isDirty(against: original) }
 
-    /// The connection the form describes, secrets aside. Compared against the saved one for the
-    /// "Unsaved changes" mark, and saved as it is.
-    private func draftConnection(id: UUID) -> Connection {
-        Connection(id: id,
-                   name: name.trimmingCharacters(in: .whitespaces),
-                   color: color,
-                   kind: kind,
-                   host: host.trimmingCharacters(in: .whitespaces),
-                   port: port,
-                   scheme: scheme,
-                   sslmode: sslmode,
-                   user: user.trimmingCharacters(in: .whitespaces),
-                   database: database.trimmingCharacters(in: .whitespaces),
-                   schema: schema.trimmingCharacters(in: .whitespaces),
-                   verify: verifyTLS,
-                   showAllSchemas: showAllSchemas,
-                   showAllDatabases: showAllDatabases,
-                   group: original?.group,
-                   safeMode: safeMode,
-                   environment: environment,
-                   // Turning the tunnel off clears its fields on Save, as the blueprint says; the
-                   // values stay in the form until then so turning it back on finds them.
-                   sshHost: sshEnabled ? sshHost.trimmingCharacters(in: .whitespaces) : "",
-                   sshUseConfig: sshEnabled && sshUseConfig,
-                   sshPort: sshEnabled ? sshPort : 0,
-                   sshUser: sshEnabled ? sshUser.trimmingCharacters(in: .whitespaces) : "",
-                   sshAuth: sshEnabled ? sshAuth : .agent,
-                   sshKeyPath: sshEnabled && sshAuth == .key ? sshKeyPath.trimmingCharacters(in: .whitespaces) : "",
-                   dbAuth: kind == .trino ? dbAuth : .password,
-                   caFile: kind == .mysql ? "" : caFile.trimmingCharacters(in: .whitespaces),
-                   statementTimeoutMS: timeoutMS)
-    }
-
-    /// The per-connection bound in milliseconds, `nil` when the field is blank (inherit) or not a
-    /// number (which `ConnectionFormIssues` reports).
-    private var timeoutMS: Int? {
-        guard let seconds = Int(timeoutText.trimmingCharacters(in: .whitespaces)), (0...600).contains(seconds)
-        else { return nil }
-        return seconds * 1000
-    }
-
-    private var formState: ConnectionFormState {
-        ConnectionFormState(kind: kind, name: name, host: host, port: port, user: user, database: database,
-                            sshEnabled: sshEnabled, sshHost: sshHost, sshUseConfig: sshUseConfig,
-                            sshPort: sshPort, sshUser: sshUser, sshAuth: sshAuth, sshKeyPath: sshKeyPath,
-                            caFile: kind == .mysql ? "" : caFile, timeoutText: timeoutText)
-    }
 
     private var resolvedAlias: SSHAliasInfo? {
         if case .success(let info)? = aliasPreview { return info }
@@ -256,7 +162,7 @@ struct ConnectionEditorSheet: View {
     /// key file count when it is on (an alias may supply the user and the key). Port and encryption
     /// always carry a value; a blank password simply means "connect without one".
     private var issues: [ConnectionField] {
-        ConnectionFormIssues.fields(for: formState, resolved: resolvedAlias)
+        ConnectionFormIssues.fields(for: draft.formState, resolved: resolvedAlias)
     }
 
     private var missingRequired: Set<String> { Set(issues.map(\.rawValue)) }
@@ -278,7 +184,7 @@ struct ConnectionEditorSheet: View {
         // theme had already drawn light, so every label came out white on white. The sheet now
         // inherits the appearance of the window that presents it, which is what every other surface
         // in the app does.
-        .confirmationDialog("Delete \(name.isEmpty ? "this connection" : name)?", isPresented: $confirmDelete) {
+        .confirmationDialog("Delete \(draft.name.isEmpty ? "this connection" : draft.name)?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { delete() }
         } message: {
             Text("This removes the saved connection and its Keychain password. This can't be undone.")
@@ -431,14 +337,10 @@ struct ConnectionEditorSheet: View {
     /// Picking a tile is the only place the driver is chosen; the form then has no type control,
     /// because changing it would invalidate half of what is already filled in.
     private func choose(_ option: ConnectionKind) {
-        if port == kind.defaultPort { port = option.defaultPort }
-        kind = option
-        if option.hasSSLModes, sslmode.isEmpty { sslmode = option.defaultSSLMode }
-        // What only applied to the other driver goes with it: a JWT is Trino's, and MySQL has no CA.
-        if option != .trino { dbAuth = .password; jwt = "" }
-        if option == .mysql { caFile = "" }
+        draft.choose(option)
         step = .form
     }
+
 
     private func applyURL() {
         let parsed: ConnectionURL.Parsed
@@ -456,30 +358,18 @@ struct ConnectionEditorSheet: View {
         }
         urlError = nil
         urlNote = parsed.ignored.isEmpty ? nil : "Ignored from the URL: " + parsed.ignored.joined(separator: ", ") + "."
-        kind = parsed.kind
-        host = parsed.host
-        port = parsed.port
-        scheme = parsed.scheme.isEmpty ? "https" : parsed.scheme
-        sslmode = parsed.sslmode ?? parsed.kind.defaultSSLMode
-        verifyTLS = parsed.verify ?? true
-        user = parsed.user
-        credential = parsed.password ?? ""
-        database = parsed.database
-        schema = parsed.schema
-        if name.isEmpty {
-            name = parsed.host + (parsed.database.isEmpty ? "" : "/\(parsed.database)")
-        }
+        draft.apply(parsed)
         step = .form
     }
 
     private var header: some View {
         HStack(spacing: 14) {
-            ConnectionBrandTile(kind: kind, size: 56)
+            ConnectionBrandTile(kind: draft.kind, size: 56)
             VStack(alignment: .leading, spacing: 2) {
-                Text(editingID == nil ? "New Connection" : (name.isEmpty ? "Connection" : name))
+                Text(editingID == nil ? "New Connection" : (draft.name.isEmpty ? "Connection" : draft.name))
                     .font(.ui(18, weight: .bold, rounded: true))
                     .lineLimit(1)
-                Text(editingID == nil ? "Not saved yet." : "Saved \(kind.label) connection.")
+                Text(editingID == nil ? "Not saved yet." : "Saved \(draft.kind.label) connection.")
                     .font(.ui(12))
                     .foregroundStyle(Tone.secondary)
             }
@@ -491,7 +381,7 @@ struct ConnectionEditorSheet: View {
                     .labelStyle(.titleAndIcon)
             }
             PillButton(title: "Change Type…", symbol: "arrow.triangle.2.circlepath", compact: true) { step = .typePicker }
-                .help("Pick a different driver — this clears the fields that only applied to \(kind.label)")
+                .help("Pick a different driver — this clears the fields that only applied to \(draft.kind.label)")
         }
         .padding(.horizontal, 20)
         .frame(height: 84)
@@ -500,17 +390,17 @@ struct ConnectionEditorSheet: View {
     private var form: some View {
         VStack(alignment: .leading, spacing: 14) {
             LabeledField("Name · Required") {
-                TextField("\(kind.label) production", text: $name)
+                TextField("\(draft.kind.label) production", text: $draft.name)
                     .field(invalid: attemptedSave && missingRequired.contains("name"))
                 requiredHint("name")
             }
-            LabeledField("Color") { ColorSwatchPicker(selection: $color) }
+            LabeledField("Color") { ColorSwatchPicker(selection: $draft.color) }
             LabeledField("Host · Required") {
-                TextField("db.internal", text: $host).field(invalid: attemptedSave && missingRequired.contains("host"))
+                TextField("db.internal", text: $draft.host).field(invalid: attemptedSave && missingRequired.contains("host"))
                 requiredHint("host")
             }
             HStack(alignment: .top, spacing: 12) {
-                if kind == .trino {
+                if draft.kind == .trino {
                     // Three options, not two, because Trino's encryption decision has four
                     // outcomes and the two scheme words can only spell three of them. The
                     // fourth — "https when the coordinator offers it, http otherwise" — is
@@ -519,7 +409,7 @@ struct ConnectionEditorSheet: View {
                     // exact outcome. See `TrinoTransport` for how it reaches the engine.
                     LabeledField("Transport") {
                         Segmented(selection: trinoTransport,
-                                  options: caFile.isEmpty ? TrinoTransport.allCases : [.https]) { $0.label }
+                                  options: draft.caFile.isEmpty ? TrinoTransport.allCases : [.https]) { $0.label }
                     }
                     .frame(width: 235)
                     .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
@@ -527,30 +417,23 @@ struct ConnectionEditorSheet: View {
                           + "the certificate is not checked either way.")
                 }
                 LabeledField("Port · Required") {
-                    TextField(String(kind.defaultPort), value: $port, format: .number.grouping(.never))
+                    TextField(String(draft.kind.defaultPort), value: $draft.port, format: .number.grouping(.never))
                         .field(invalid: attemptedSave && missingRequired.contains("port"))
                     requiredHint("port")
                 }
             }
-            .onChange(of: scheme) { old, new in
-                // Follow the standard port for the scheme, but only while the user is still on
-                // the other scheme's standard one.
-                if old == "http", new == "https", port == 8080 { port = 8443 }
-                if old == "https", new == "http", port == 8443 { port = 8080 }
-                // `prefer` moves nothing. It tries HTTPS and falls back to clear on whatever
-                // port it was given, which is the only port that can answer the question the
-                // transport exists to leave open; rewriting the port would answer it for the
-                // coordinator instead of asking it.
+            .onChange(of: draft.scheme) { old, new in
+                draft.followPort(from: old, to: new)
             }
             LabeledField("User · Required") {
-                TextField("faisal", text: $user).field(invalid: attemptedSave && missingRequired.contains("user"))
+                TextField("faisal", text: $draft.user).field(invalid: attemptedSave && missingRequired.contains("user"))
                 requiredHint("user")
             }
             LabeledField(editingID == nil ? "Password" : "Password · leave blank to keep") {
-                if kind == .trino, dbAuth == .jwt {
+                if draft.kind == .trino, draft.dbAuth == .jwt {
                     tlsNote("Not used: this connection logs in with a JWT, set under Authentication below.")
                 } else {
-                    SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $credential)
+                    SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.password)
                         .field()
                     Text(passwordHint)
                         .font(.ui(11))
@@ -560,8 +443,8 @@ struct ConnectionEditorSheet: View {
                 }
             }
             HStack(alignment: .bottom, spacing: 12) {
-                LabeledField(kind.databaseLabel + (kind.requiresDatabase ? " · Required" : "")) {
-                    TextField(kind == .trino ? "hive" : "mydb", text: $database)
+                LabeledField(draft.kind.databaseLabel + (draft.kind.requiresDatabase ? " · Required" : "")) {
+                    TextField(draft.kind == .trino ? "hive" : "mydb", text: $draft.database)
                         .field(invalid: attemptedSave && missingRequired.contains("database"))
                     requiredHint("database")
                 }
@@ -576,42 +459,42 @@ struct ConnectionEditorSheet: View {
                 //
                 // `fixedSize`, because this is the only row with two checkboxes on it and the
                 // flexible fields would otherwise squeeze both labels.
-                if kind == .postgres {
-                    InlineCheckbox(label: "All Databases", isOn: $showAllDatabases)
+                if draft.kind == .postgres {
+                    InlineCheckbox(label: "All Databases", isOn: $draft.showAllDatabases)
                         .fixedSize()
                         .padding(.bottom, 5)
                         .help("List every database on the server in the object tree, not just the one above.")
                 }
-                if kind.hasSchemaLevel {
-                    LabeledField("Schema") { TextField("public", text: $schema).field() }
+                if draft.kind.hasSchemaLevel {
+                    LabeledField("Schema") { TextField("public", text: $draft.schema).field() }
                 }
                 // Beside the schema it modifies, not in a section of its own: it is a property of
                 // that field, and reading it as anything else was the previous layout's mistake.
                 // Postgres only — it is the one driver that hides anything.
-                if kind == .postgres {
-                    InlineCheckbox(label: "Show System Schemas", isOn: $showAllSchemas)
+                if draft.kind == .postgres {
+                    InlineCheckbox(label: "Show System Schemas", isOn: $draft.showAllSchemas)
                         .fixedSize()
                         .padding(.bottom, 5)
                         .help("List pg_catalog, information_schema and pg_* schemas in the object tree too.")
-                } else if kind == .mysql {
+                } else if draft.kind == .mysql {
                     // Same switch, opposite default story: MySQL's system databases are always
                     // returned by the server, so this one starts hidden and the box reveals them.
                     //
                     // `fixedSize` and a layout priority, because MySQL has no schema field and a
                     // lone Database field expands to the full row width -- which pushed the
                     // checkbox off the edge entirely rather than sharing the row with it.
-                    InlineCheckbox(label: "Show All", isOn: $showAllSchemas)
+                    InlineCheckbox(label: "Show All", isOn: $draft.showAllSchemas)
                         .fixedSize()
                         .layoutPriority(1)
                         .padding(.bottom, 5)
                         .help("List information_schema, mysql, performance_schema and sys in the object tree too.")
                 }
             }
-            if kind.hasSSLModes {
+            if draft.kind.hasSSLModes {
                 LabeledField("SSL mode") {
                     // With a CA file chosen only the modes that check the certificate make sense.
-                    Segmented(selection: $sslmode,
-                              options: kind == .postgres && !caFile.isEmpty ? ["verify-ca", "verify-full"] : kind.sslModes) { $0 }
+                    Segmented(selection: $draft.sslmode,
+                              options: draft.kind == .postgres && !draft.caFile.isEmpty ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
                 }
             } else {
                 // HTTPS is the only Trino transport with a verification answer to give, so it is
@@ -624,10 +507,10 @@ struct ConnectionEditorSheet: View {
                 // reads as a mistake, and an unchecked box reads as an answer. The stored value
                 // stays stored either way, so going back to HTTPS offers the user's last choice
                 // again.
-                switch TrinoTransport(stored: scheme) {
+                switch TrinoTransport(stored: draft.scheme) {
                 case .https:
-                    ChipToggle(label: "Verify the TLS certificate", isOn: $verifyTLS)
-                        .disabled(!caFile.isEmpty)
+                    ChipToggle(label: "Verify the TLS certificate", isOn: $draft.verifyTLS)
+                        .disabled(!draft.caFile.isEmpty)
                 case .prefer:
                     tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
                             + "The certificate is not checked.")
@@ -648,8 +531,8 @@ struct ConnectionEditorSheet: View {
             // the MCP server go through the same guard, and neither has this control.
             LabeledField("Safe Mode") {
                 VStack(alignment: .leading, spacing: 5) {
-                    Segmented(selection: $safeMode, options: ConnectionSafeMode.allCases) { $0.title }
-                    Text(safeMode.detail)
+                    Segmented(selection: $draft.safeMode, options: ConnectionSafeMode.allCases) { $0.title }
+                    Text(draft.safeMode.detail)
                         .font(.ui(11))
                         .foregroundStyle(Tone.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -660,7 +543,7 @@ struct ConnectionEditorSheet: View {
 
             LabeledField("Environment") {
                 VStack(alignment: .leading, spacing: 5) {
-                    Segmented(selection: $environment,
+                    Segmented(selection: $draft.environment,
                               options: [ConnectionEnvironment?.none] + ConnectionEnvironment.allCases.map { Optional($0) }) {
                         $0?.title ?? "None"
                     }
@@ -675,14 +558,14 @@ struct ConnectionEditorSheet: View {
             if let urlNote { tlsNote(urlNote) }
             LabeledField("Statement timeout (seconds)") {
                 VStack(alignment: .leading, spacing: 5) {
-                    TextField("Follow the app setting (\(model.statementTimeoutMS / 1000) s)", text: $timeoutText)
+                    TextField("Follow the app setting (\(model.statementTimeoutMS / 1000) s)", text: $draft.timeoutText)
                         .field(invalid: attemptedSave && missingRequired.contains("timeout"))
                     tlsNote("Blank follows Settings. 0 means no bound. A statement that overruns is cancelled "
                             + "on the server. The MCP server never runs unbounded: it uses this, or 60 s.")
                 }
             }
-            if kind == .trino { authenticationSection }
-            if kind != .mysql { caSection } else {
+            if draft.kind == .trino { authenticationSection }
+            if draft.kind != .mysql { caSection } else {
                 tlsNote("MySQL can't check a certificate against a CA file of your own in this build, "
                         + "so there is no CA setting for it.")
             }
@@ -696,9 +579,9 @@ struct ConnectionEditorSheet: View {
     @ViewBuilder private var authenticationSection: some View {
         LabeledField("Authentication") {
             VStack(alignment: .leading, spacing: 8) {
-                Segmented(selection: $dbAuth, options: DatabaseAuth.allCases) { $0.title }
-                if dbAuth == .jwt {
-                    SecureField(editingID == nil ? "Paste the token" : "Unchanged", text: $jwt).field()
+                Segmented(selection: $draft.dbAuth, options: DatabaseAuth.allCases) { $0.title }
+                if draft.dbAuth == .jwt {
+                    SecureField(editingID == nil ? "Paste the token" : "Unchanged", text: $draft.secrets.jwt).field()
                     removeSavedRow(.jwt)
                     tlsNote("JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved.")
                 }
@@ -711,43 +594,40 @@ struct ConnectionEditorSheet: View {
         LabeledField("CA certificate") {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    TextField("Use the system trust store", text: $caFile)
+                    TextField("Use the system trust store", text: $draft.caFile)
                         .field(invalid: attemptedSave && missingRequired.contains("caFile"))
-                    PillButton(title: "Choose…", compact: true) { chooseFile(into: $caFile, title: "Choose the CA certificate") }
-                    PillButton(title: "Clear", role: .quiet, compact: true) { caFile = "" }
-                        .disabled(caFile.isEmpty)
+                    PillButton(title: "Choose…", compact: true) { chooseFile(into: $draft.caFile, title: "Choose the CA certificate") }
+                    PillButton(title: "Clear", role: .quiet, compact: true) { draft.caFile = "" }
+                        .disabled(draft.caFile.isEmpty)
                 }
                 requiredHint("caFile", "File not found")
                 tlsNote("The server certificate is checked against this file only, and its name must match. "
                         + "For an IP address the certificate needs an IP SAN.")
             }
         }
-        .onChange(of: caFile) { _, new in
-            // A CA only means something to a mode that checks the certificate (blueprint 9.1).
-            guard !new.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-            if kind == .postgres, sslmode != "verify-ca", sslmode != "verify-full" { sslmode = "verify-full" }
-            if kind == .trino { scheme = TrinoTransport.https.rawValue; verifyTLS = true }
+        .onChange(of: draft.caFile) { _, _ in
+            draft.enforceCA()
         }
     }
 
     @ViewBuilder private var tunnelSection: some View {
-        ChipToggle(label: "Connect through an SSH tunnel", isOn: $sshEnabled)
+        ChipToggle(label: "Connect through an SSH tunnel", isOn: $draft.sshEnabled)
             .id("tunnel")
-        if sshEnabled {
+        if draft.sshEnabled {
             VStack(alignment: .leading, spacing: 14) {
                 tlsNote("The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it.")
                 LabeledField("SSH host · Required") {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
                             TextField("bastion.corp, or an alias from ~/.ssh/config",
-                                      text: Binding(get: { sshHost },
+                                      text: Binding(get: { draft.sshHost },
                                                     // Typing a host of your own is not picking an alias.
-                                                    set: { sshHost = $0; sshUseConfig = false; refreshAliasPreview() }))
+                                                    set: { draft.sshHost = $0; draft.sshUseConfig = false; refreshAliasPreview() }))
                                 .field(invalid: attemptedSave && missingRequired.contains("sshHost"))
                             aliasMenu
                         }
                         requiredHint("sshHost")
-                        if sshUseConfig, let aliasPreview {
+                        if draft.sshUseConfig, let aliasPreview {
                             switch aliasPreview {
                             case .success(let info): tlsNote(info.summary)
                             case .failure(let failure):
@@ -759,39 +639,39 @@ struct ConnectionEditorSheet: View {
                 }
                 HStack(alignment: .top, spacing: 12) {
                     LabeledField("SSH user · Required") {
-                        TextField(resolvedAlias?.user ?? "deploy", text: $sshUser)
+                        TextField(resolvedAlias?.user ?? "deploy", text: $draft.sshUser)
                             .field(invalid: attemptedSave && missingRequired.contains("sshUser"))
                         requiredHint("sshUser")
                     }
                     LabeledField("SSH port") {
-                        TextField("22", value: Binding(get: { sshPort == 0 ? nil : sshPort }, set: { sshPort = $0 ?? 0 }),
+                        TextField("22", value: Binding(get: { draft.sshPort == 0 ? nil : draft.sshPort }, set: { draft.sshPort = $0 ?? 0 }),
                                   format: .number.grouping(.never))
                             .field(invalid: attemptedSave && missingRequired.contains("sshPort"))
                     }
                     .frame(width: 120)
                 }
                 LabeledField("SSH authentication") {
-                    Segmented(selection: $sshAuth, options: SSHAuthMethod.allCases) { $0.title }
+                    Segmented(selection: $draft.sshAuth, options: SSHAuthMethod.allCases) { $0.title }
                 }
-                switch sshAuth {
+                switch draft.sshAuth {
                 case .agent:
                     tlsNote("Uses the keys your ssh-agent offers. Nothing is stored.")
                 case .key:
                     LabeledField("SSH key file · Required") {
                         HStack(spacing: 8) {
-                            TextField(resolvedAlias?.identityFiles.first ?? "~/.ssh/id_ed25519", text: $sshKeyPath)
+                            TextField(resolvedAlias?.identityFiles.first ?? "~/.ssh/id_ed25519", text: $draft.sshKeyPath)
                                 .field(invalid: attemptedSave && missingRequired.contains("sshKeyFile"))
-                            PillButton(title: "Choose…", compact: true) { chooseFile(into: $sshKeyPath, title: "Choose the SSH private key") }
+                            PillButton(title: "Choose…", compact: true) { chooseFile(into: $draft.sshKeyPath, title: "Choose the SSH private key") }
                         }
                         requiredHint("sshKeyFile")
                     }
                     LabeledField(editingID == nil ? "Key passphrase" : "Key passphrase · leave blank to keep") {
-                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $sshPassphrase).field()
+                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.sshPassphrase).field()
                         removeSavedRow(.sshPassphrase)
                     }
                 case .password:
                     LabeledField(editingID == nil ? "SSH password" : "SSH password · leave blank to keep") {
-                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $sshPassword).field()
+                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.sshPassword).field()
                         removeSavedRow(.sshPassword)
                     }
                 }
@@ -806,7 +686,7 @@ struct ConnectionEditorSheet: View {
         if !aliases.isEmpty {
             Menu {
                 ForEach(aliases, id: \.self) { alias in
-                    Button(alias) { sshHost = alias; sshUseConfig = true; refreshAliasPreview() }
+                    Button(alias) { draft.sshHost = alias; draft.sshUseConfig = true; refreshAliasPreview() }
                 }
             } label: {
                 Text("Aliases")
@@ -817,7 +697,7 @@ struct ConnectionEditorSheet: View {
     }
 
     private func refreshAliasPreview() {
-        aliasPreview = sshUseConfig && !sshHost.isEmpty ? SSHConfigAliases.current.resolve(sshHost) : nil
+        aliasPreview = draft.sshUseConfig && !draft.sshHost.isEmpty ? SSHConfigAliases.current.resolve(draft.sshHost) : nil
     }
 
     /// "Remove saved…" for one secret, shown only when the Keychain has one and the person has not
@@ -825,14 +705,14 @@ struct ConnectionEditorSheet: View {
     /// deletes anything: the form cannot show a saved secret, so blank can only mean "keep".
     @ViewBuilder private func removeSavedRow(_ slot: ConnectionKeychain.Slot) -> some View {
         if let id = editingID, AppModel.secretStore.contains(slot: slot, for: id) {
-            if removals.contains(slot) {
+            if draft.secrets.removals.contains(slot) {
                 HStack(spacing: 8) {
                     Text("The saved \(AppModel.secretName(slot)) is removed when you save.")
                         .font(.ui(11)).foregroundStyle(Tone.amber)
-                    PillButton(title: "Undo", role: .quiet, compact: true) { removals.remove(slot) }
+                    PillButton(title: "Undo", role: .quiet, compact: true) { draft.secrets.removals.remove(slot) }
                 }
             } else {
-                PillButton(title: "Remove saved…", role: .destructive, compact: true) { removals.insert(slot) }
+                PillButton(title: "Remove saved…", role: .destructive, compact: true) { draft.secrets.removals.insert(slot) }
                     .help("Takes the saved \(AppModel.secretName(slot)) out of the Keychain when you save")
             }
         }
@@ -850,8 +730,8 @@ struct ConnectionEditorSheet: View {
     /// The picker's own binding over the string the connection stores, so the third option
     /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
     private var trinoTransport: Binding<TrinoTransport> {
-        Binding(get: { TrinoTransport(stored: scheme) },
-                set: { scheme = $0.rawValue })
+        Binding(get: { TrinoTransport(stored: draft.scheme) },
+                set: { draft.scheme = $0.rawValue })
     }
 
     /// One spoken line where a control would be, for a transport with no verification to answer.
@@ -863,7 +743,7 @@ struct ConnectionEditorSheet: View {
     }
 
     private var passwordHint: String {
-        switch kind {
+        switch draft.kind {
         case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https. Prefer is the exception: it starts on HTTPS and falls back to clear only when the coordinator has no TLS."
         case .postgres: "Postgres accepts a password over any SSL mode, including \"prefer\"."
         case .mysql: "MySQL accepts a password over either SSL mode."
@@ -886,7 +766,7 @@ struct ConnectionEditorSheet: View {
             // Nothing to add: the button beside this says "Testing…" while it works.
             EmptyView()
         case .success(let level):
-            statusLine("Connected · \(pluralized(level, kind == .postgres ? "schema" : "catalog"))",
+            statusLine("Connected · \(pluralized(level, draft.kind == .postgres ? "schema" : "catalog"))",
                        tint: Tone.mint, truncation: .tail)
         case .failure(let message):
             // Middle, not tail: a connection error's cause is at the end of the sentence
@@ -968,54 +848,16 @@ struct ConnectionEditorSheet: View {
         testState = .idle
         // After the reset, not before: this line used to sit above it and was silently wiped.
         if let count = target.previewTestCount { testState = .success(count) }
-        credential = ""
+        // Nothing typed and nothing staged for removal carries over: the form never holds a saved
+        // secret, so there is nothing else it could start with.
+        aliasPreview = nil; urlNote = nil; lastTestWasHostKey = false
         guard let connection = original else {
             draftID = UUID()
-            name = ""; color = .blue; kind = .trino; host = ""
-            port = ConnectionKind.trino.defaultPort; scheme = "https"
-            sslmode = ConnectionKind.postgres.defaultSSLMode
-            user = ""; database = ""; schema = ""; verifyTLS = true
-            showAllSchemas = false
-            showAllDatabases = false
-            resetSecuredFields()
+            draft = .new()
             return
         }
-        name = connection.name
-        color = connection.color
-        kind = connection.kind
-        host = connection.host
-        port = connection.port
-        scheme = connection.scheme
-        sslmode = connection.sslmode.isEmpty ? connection.kind.defaultSSLMode : connection.sslmode
-        user = connection.user
-        database = connection.database
-        schema = connection.schema
-        verifyTLS = connection.verify
-        showAllSchemas = connection.showAllSchemas
-        showAllDatabases = connection.showAllDatabases
-        safeMode = connection.safeMode
-        environment = connection.environment
-        resetSecuredFields()
-        sshEnabled = connection.usesTunnel
-        sshHost = connection.sshHost
-        sshUseConfig = connection.sshUseConfig
-        sshPort = connection.sshPort
-        sshUser = connection.sshUser
-        sshAuth = connection.sshAuth
-        sshKeyPath = connection.sshKeyPath
-        dbAuth = connection.dbAuth
-        caFile = connection.caFile
-        timeoutText = connection.statementTimeoutMS.map { String($0 / 1000) } ?? ""
+        draft = ConnectionDraft(connection)
         refreshAliasPreview()
-    }
-
-    /// Everything typed but not yet saved, and everything staged for removal, starts empty: the form
-    /// never holds a saved secret, so there is nothing else it could start with.
-    private func resetSecuredFields() {
-        sshEnabled = false; sshHost = ""; sshUseConfig = false; sshPort = 0; sshUser = ""
-        sshAuth = .agent; sshKeyPath = ""; sshPassword = ""; sshPassphrase = ""
-        dbAuth = .password; jwt = ""; caFile = ""; timeoutText = ""
-        removals = []; aliasPreview = nil; urlNote = nil; lastTestWasHostKey = false
     }
 
     private func save() {
@@ -1026,10 +868,8 @@ struct ConnectionEditorSheet: View {
             return
         }
         let id = editingID ?? draftID
-        let connection = draftConnection(id: id)
-        let draft = ConnectionSecretPlan.Draft(password: credential, sshPassword: sshPassword,
-                                               sshPassphrase: sshPassphrase, jwt: jwt, removals: removals)
-        let operations = ConnectionSecretPlan.operations(draft: draft, old: original, new: connection)
+        let connection = draft.connection(id: id, group: original?.group)
+        let operations = ConnectionSecretPlan.operations(draft: draft.secrets, old: original, new: connection)
         // Keychain first: if it throws, the JSON never claims a secret exists that isn't there.
         do {
             try AppModel.apply(operations, for: id)
@@ -1096,22 +936,21 @@ struct ConnectionEditorSheet: View {
         lastTestWasHostKey = false
         let run = UUID()
         testRun = run
-        let candidate = draftConnection(id: editingID ?? draftID)
+        let candidate = draft.connection(id: editingID ?? draftID, group: original?.group)
         // What was typed wins over what is saved (and a secret staged for removal is not saved any
         // more); a slot the connection does not use is not read at all.
         var secrets = ConnectionSecrets()
         do {
             for slot in ConnectionKeychain.Slot.allCases where ConnectionSecretPlan.uses(slot, candidate) {
-                let typed = ConnectionSecretPlan.Draft(password: credential, sshPassword: sshPassword,
-                                                       sshPassphrase: sshPassphrase, jwt: jwt).typed(slot)
+                let typed = draft.secrets.typed(slot)
                 if !typed.isEmpty {
                     secrets[slot] = typed
-                } else if let id = editingID, !removals.contains(slot) {
+                } else if let id = editingID, !draft.secrets.removals.contains(slot) {
                     secrets[slot] = try AppModel.storedSecret(slot, for: id)
                 }
             }
         } catch {
-            testState = .failure("Couldn't read the saved secret for \(name.isEmpty ? "this connection" : name) from Keychain: \(error.localizedDescription)")
+            testState = .failure("Couldn't read the saved secret for \(draft.name.isEmpty ? "this connection" : draft.name) from Keychain: \(error.localizedDescription)")
             return
         }
         let vars = AppModel.connectionEnvironment(candidate, secrets: secrets)
