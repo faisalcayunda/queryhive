@@ -509,7 +509,9 @@ extension AppModel {
             // `require` (encrypted, certificate not checked, the lowest rung that is TLS at all)
             // and no leaves the driver's own default. A source that names a mode (DBeaver,
             // DataGrip) gets that mode. Guessing a stricter mapping would be a connection failure,
-            // and a looser one would be the downgrade PF-6 forbids.
+            // and a looser one would be the downgrade PF-6 forbids. `verify` starts off and
+            // `applyTLS` turns it on for `require` and above, which is what makes `verify-full`
+            // check the certificate.
             Self.applyTLS(imported, to: &connection, isNew: true)
             connection.group = groupID(named: imported.group)
             connection.environment = imported.environment
@@ -554,6 +556,8 @@ extension AppModel {
     /// The TLS an import writes. Never lower than what the connection has (PF-6, DBX-29): a source
     /// that names a mode raises to it, one that names nothing changes nothing, and for Trino an
     /// existing plain `http` connection is lifted to `https` while an `https` one is left alone.
+    /// For PostgreSQL and MySQL a raise to `require` or above also turns `verify` on, so
+    /// `verify-ca` and `verify-full` reach the engine as modes that check the certificate.
     static func applyTLS(_ imported: ImportedConnection, to connection: inout Connection, isNew: Bool) {
         if connection.kind == .trino {
             guard let scheme = imported.trinoScheme else { return }
@@ -566,9 +570,18 @@ extension AppModel {
             }
             return
         }
+        let before = connection.sslmode
         connection.sslmode = NavicatImport.tlsMode(kind: connection.kind,
                                                    requested: imported.sslmode ?? (imported.ssl ? "require" : nil),
-                                                   current: connection.sslmode)
+                                                   current: before)
+        // The engine reads `verify == false` as `DB_INSECURE`, which turns every mode but `disable`
+        // into "encrypt, never check" — `verify-ca` and `verify-full` included. So the check goes on
+        // together with a raise to `require` or above, and only then: never to `false`, and a stored
+        // connection the import does not raise (an older import left it `verify-full` and unchecked)
+        // is not rewritten, because turning its check on would make it start failing silently.
+        if connection.sslmode != before, NavicatImport.isRequireOrStricter(connection.sslmode) {
+            connection.verify = true
+        }
     }
 
     private func noticeTitle(added: Int, refreshed: Int, skipped: Int, source: String) -> String {

@@ -358,22 +358,9 @@ final class ConnectionDraftTests: XCTestCase {
         XCTAssertFalse(draft.verifyTLS, "choosing Trino again keeps Trino's own answer")
     }
 
-    /// What the engine makes of a PostgreSQL or MySQL draft: `crates/qh-ffi/src/config.rs` maps the
-    /// mode word, and `DB_INSECURE` turns any mode but `disable` into one that encrypts and never
-    /// checks. Only `prefer` can fall back to clear (`qh-driver-postgres/src/tls.rs`,
-    /// `qh-driver-mysql/src/tls.rs`).
-    private enum EngineMode { case disable, prefer, require, requireNoVerify }
-
-    private func engineMode(_ draft: ConnectionDraft) -> EngineMode {
-        let env = AppModel.connectionEnvironment(draft.connection(id: id, group: nil), secrets: ConnectionSecrets())
-        let required: EngineMode
-        switch env["DB_SSLMODE"] ?? "" {
-        case "disable": required = .disable
-        case "require": required = .requireNoVerify
-        case "verify-ca", "verify-full": required = .require
-        default: required = .prefer
-        }
-        return env["DB_INSECURE"] == "1" && required != .disable ? .requireNoVerify : required
+    /// What the engine makes of a PostgreSQL or MySQL draft (`EngineTLSMode`).
+    private func engineMode(_ draft: ConnectionDraft) -> EngineTLSMode {
+        EngineTLSMode(draft.connection(id: id, group: nil))
     }
 
     func testPickingTheSameDriverAgainChangesNothingAboutTheModeTheEngineRuns() {

@@ -239,6 +239,14 @@ enum NavicatImport {
         return have >= want ? current : requested
     }
 
+    /// Whether a mode is `require` or stricter, the rungs at which an import turns the certificate
+    /// check on. `prefer` and below are not: for `prefer` a set check would hand the engine the real
+    /// `prefer` (it may fall back to clear text), which is looser than the must-encrypt connection an
+    /// unchecked import runs as today.
+    static func isRequireOrStricter(_ mode: String) -> Bool {
+        ["require", "verify-ca", "verify-full"].contains(mode)
+    }
+
     /// The database this entry was actually opened on.
     ///
     /// `Advance.Database` first, then the top-level `Database`. See `Collector` for why the child

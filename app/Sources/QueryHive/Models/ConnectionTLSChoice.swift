@@ -20,8 +20,9 @@ import Foundation
 /// - **`verify` belongs to every driver.** The engine sends `DB_INSECURE` whenever it is off, and any
 ///   mode other than `disable` then runs as "always encrypt, never check", `verify-full` included,
 ///   and `prefer` loses its fallback to clear. A stored word with `verify` off is therefore its own
-///   case, `sslmodeUnverified`. It is read as stored and never normalised. (Imports write
-///   `verify: false` for every driver, which is how such connections exist.)
+///   case, `sslmodeUnverified`. It is read as stored and never normalised. (Imports made before
+///   `AppModel.applyTLS` set `verify` with the mode wrote `verify: false` for every driver, which is
+///   how such connections exist; they are shown honestly and not rewritten.)
 /// - So "· unverified" is shown exactly when the engine will not check the certificate: `prefer` and
 ///   `require` always, and `verify-ca` or `verify-full` stored with `verify` off. Trino follows the
 ///   same rule: HTTPS with `verify` off and Prefer say so; HTTP has nothing to verify, but is not
