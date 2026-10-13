@@ -1202,14 +1202,24 @@ final class QueryTab: Identifiable {
     var trimmedSchema: String { targetSchema.trimmingCharacters(in: .whitespaces) }
     var trimmedTable: String { targetTable.trimmingCharacters(in: .whitespaces) }
 
+    private func targetValue(_ part: TargetPart) -> String {
+        switch part {
+        case .catalog: trimmedCatalog
+        case .schema: trimmedSchema
+        case .table: trimmedTable
+        }
+    }
+
     /// The target's dotted name with exactly the parts this driver has. Postgres writes inside
     /// the database its connection already opened, so it has no catalog part; MySQL has no schema.
     func target(for kind: ConnectionKind) -> String {
-        switch kind {
-        case .trino: "\(trimmedCatalog).\(trimmedSchema).\(trimmedTable)"
-        case .postgres: "\(trimmedSchema).\(trimmedTable)"
-        case .mysql: "\(trimmedCatalog).\(trimmedTable)"
-        }
+        kind.targetParts.map(targetValue).joined(separator: ".")
+    }
+
+    /// The first part this driver has and the tab leaves empty, in the word its wizard uses
+    /// ("database" for MySQL). A part the driver does not have is never asked for.
+    func missingTargetPart(for kind: ConnectionKind) -> String? {
+        kind.targetParts.first { targetValue($0).isEmpty }.map(kind.targetWord)
     }
 
     /// True when a run would drop a table: the toolbar turns coral and the orb asks first.

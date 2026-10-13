@@ -640,17 +640,15 @@ extension AppModel {
     /// the output name, so the common case needs no typing.
     func prepareTableDestination(_ tab: QueryTab) {
         guard let connection = connection(for: tab) else { return }
-        // The three drivers do not share a target shape: Postgres writes inside the database it
-        // is already connected to, so its catalog field is meaningless, and MySQL has no schema
-        // at all. Only the fields the driver actually has get a default.
-        switch connection.kind {
-        case .trino:
-            if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.database }
-            if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
-        case .postgres:
-            if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
-        case .mysql:
-            if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.database }
+        // The three drivers do not share a target shape (`ConnectionKind.targetParts`): Postgres
+        // writes inside the database it is already connected to, so it has no catalog part, and
+        // MySQL has no schema. Only the parts the driver actually has get a default.
+        for part in connection.kind.targetParts {
+            switch part {
+            case .catalog: if tab.trimmedCatalog.isEmpty { tab.targetCatalog = connection.database }
+            case .schema: if tab.trimmedSchema.isEmpty { tab.targetSchema = connection.schema }
+            case .table: break
+            }
         }
         if tab.trimmedTable.isEmpty { tab.targetTable = tab.trimmedName }
     }

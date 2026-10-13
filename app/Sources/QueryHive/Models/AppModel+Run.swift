@@ -42,9 +42,10 @@ extension AppModel {
             if tab.trimmedName.isEmpty { return "Name the output file" }
             if tab.outputDirectory == nil { return "Choose an output folder" }
         case .table:
-            if tab.trimmedCatalog.isEmpty { return "Name the target catalog" }
-            if tab.trimmedSchema.isEmpty { return "Name the target schema" }
-            if tab.trimmedTable.isEmpty { return "Name the target table" }
+            // Only the parts this driver's wizard shows; see `ConnectionKind.targetParts`.
+            if let kind = connection(for: tab)?.kind, let part = tab.missingTargetPart(for: kind) {
+                return "Name the target \(part)"
+            }
         }
         return nil
     }

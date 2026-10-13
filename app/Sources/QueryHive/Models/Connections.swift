@@ -56,6 +56,26 @@ enum ConnectionKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// The parts of a table's name this driver has, outermost first, for the table destination.
+    /// The engine's `to_table` requires exactly these (`TARGET_*` slots in `sql_ident.rs`).
+    var targetParts: [TargetPart] {
+        switch self {
+        case .trino: [.catalog, .schema, .table]
+        case .postgres: [.schema, .table]
+        case .mysql: [.catalog, .table]
+        }
+    }
+
+    /// What this driver's wizard calls a part of the target. MySQL's catalog slot holds its
+    /// database, and that is the word its field shows.
+    func targetWord(_ part: TargetPart) -> String {
+        switch part {
+        case .catalog: self == .mysql ? "database" : "catalog"
+        case .schema: "schema"
+        case .table: "table"
+        }
+    }
+
     /// The object-tree levels this driver actually has, outermost first.
     ///
     /// Postgres cannot query across databases, so its database is fixed by the connection and
@@ -1048,4 +1068,9 @@ struct SystemKeychain: SecretStoring {
     func delete(slot: ConnectionKeychain.Slot, for id: UUID) throws {
         try ConnectionKeychain.delete(slot: slot, for: id)
     }
+}
+
+/// One part of the table destination's dotted name. `catalog` is also where MySQL keeps its database.
+enum TargetPart {
+    case catalog, schema, table
 }
