@@ -613,7 +613,7 @@ struct ImportSheet: View {
         guard !table.isEmpty, let kind = connectionKind else { return nil }
         return qualifiedName(database: draft.mapping.trimmedCatalog.isEmpty ? nil : draft.mapping.trimmedCatalog,
                              schema: draft.mapping.trimmedSchema.isEmpty ? nil : draft.mapping.trimmedSchema,
-                             table: table, for: kind) ?? table
+                             table: table, for: kind) ?? SQLIdentifierQuoting.quoted(table, for: kind)
     }
 
     private func chooseFile() {

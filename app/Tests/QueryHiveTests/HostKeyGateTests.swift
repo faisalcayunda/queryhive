@@ -310,7 +310,9 @@ final class HostKeyGateTests: XCTestCase {
     }
 
     func testShellQuotingSurvivesAShellForEveryAwkwardValue() throws {
-        for value in ["plain", "o'brien", "a b", "x;rm -rf ~", "$(id)", "`id`", "-flag", "line\nbreak", "*", "'"] {
+        for value in ["plain", "o'brien", "a b", "x;rm -rf ~", "$(id)", "`id`", "-flag", "line\nbreak", "*", "'",
+                      // A quote with a combining mark on it is one Character and two scalars to a shell.
+                      "a'\u{301}; echo PWNED #", "'\u{200D}'\u{FE0F}; id", "x'\u{202E}y"] {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = ["-c", "printf %s \(HostKeyPrompt.shellQuote(value))"]
@@ -319,7 +321,8 @@ final class HostKeyGateTests: XCTestCase {
             try process.run()
             process.waitUntilExit()
             let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            XCTAssertEqual(text, value, "quoting \(value.debugDescription)")
+            XCTAssertEqual(text.unicodeScalars.map(\.value), value.unicodeScalars.map(\.value),
+                           "quoting \(value.debugDescription)")
         }
     }
 

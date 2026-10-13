@@ -265,9 +265,10 @@ enum GridClipboard {
     /// A NULL is the empty string: the paste target has no NULL to receive one, and a literal
     /// "null" would be a claim that the database stored those four letters.
     private static func escape(_ value: String) -> String {
-        let needsQuoting = value.contains("\t") || value.contains("\n")
-            || value.contains("\r") || value.contains("\"")
+        // Scalars and `.literal`: a quote with a combining mark on it is one Character to Swift and a
+        // quote to the spreadsheet that reads the paste.
+        let needsQuoting = value.unicodeScalars.contains { "\t\n\r\"".unicodeScalars.contains($0) }
         guard needsQuoting else { return value }
-        return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"", options: .literal) + "\""
     }
 }

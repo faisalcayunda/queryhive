@@ -9,32 +9,32 @@ import XCTest
 /// the SQL that ran.
 final class UpdateLiteralTests: XCTestCase {
     func testANumberColumnTakesANumberBare() {
-        XCTAssertEqual(UpdateStatements.literal("42", type: "int"), "42")
-        XCTAssertEqual(UpdateStatements.literal("-3.5", type: "double"), "-3.5")
-        XCTAssertEqual(UpdateStatements.literal("1e9", type: "bigint"), "1e9")
-        XCTAssertEqual(UpdateStatements.literal("+7", type: "numeric"), "+7")
+        XCTAssertEqual(UpdateStatements.literal("42", type: "int", kind: .trino), "42")
+        XCTAssertEqual(UpdateStatements.literal("-3.5", type: "double", kind: .trino), "-3.5")
+        XCTAssertEqual(UpdateStatements.literal("1e9", type: "bigint", kind: .trino), "1e9")
+        XCTAssertEqual(UpdateStatements.literal("+7", type: "numeric", kind: .trino), "+7")
     }
 
     func testANumberColumnQuotesWhatIsNotANumber() {
         // The whole point of the change: this used to reach the server as a word, which is either a
         // syntax error or a reference to a column called `abc`.
-        XCTAssertEqual(UpdateStatements.literal("abc", type: "int"), "'abc'")
-        XCTAssertEqual(UpdateStatements.literal("1,5", type: "decimal"), "'1,5'")
-        XCTAssertEqual(UpdateStatements.literal("", type: "int"), "''")
-        XCTAssertEqual(UpdateStatements.literal("1 2", type: "int"), "'1 2'")
-        XCTAssertEqual(UpdateStatements.literal("1'; DROP TABLE t --", type: "int"),
+        XCTAssertEqual(UpdateStatements.literal("abc", type: "int", kind: .trino), "'abc'")
+        XCTAssertEqual(UpdateStatements.literal("1,5", type: "decimal", kind: .trino), "'1,5'")
+        XCTAssertEqual(UpdateStatements.literal("", type: "int", kind: .trino), "''")
+        XCTAssertEqual(UpdateStatements.literal("1 2", type: "int", kind: .trino), "'1 2'")
+        XCTAssertEqual(UpdateStatements.literal("1'; DROP TABLE t --", type: "int", kind: .trino),
                        "'1''; DROP TABLE t --'")
     }
 
     func testABooleanColumnTakesTrueOrFalseBare() {
-        XCTAssertEqual(UpdateStatements.literal("true", type: "boolean"), "true")
-        XCTAssertEqual(UpdateStatements.literal("FALSE", type: "bool"), "FALSE")
-        XCTAssertEqual(UpdateStatements.literal("yes", type: "boolean"), "'yes'")
+        XCTAssertEqual(UpdateStatements.literal("true", type: "boolean", kind: .trino), "true")
+        XCTAssertEqual(UpdateStatements.literal("FALSE", type: "bool", kind: .trino), "FALSE")
+        XCTAssertEqual(UpdateStatements.literal("yes", type: "boolean", kind: .trino), "'yes'")
     }
 
     func testTextIsQuotedAndItsOwnQuotesAreDoubled() {
-        XCTAssertEqual(UpdateStatements.literal("O'Brien", type: "varchar"), "'O''Brien'")
-        XCTAssertEqual(UpdateStatements.literal("42", type: "varchar"), "'42'")
+        XCTAssertEqual(UpdateStatements.literal("O'Brien", type: "varchar", kind: .trino), "'O''Brien'")
+        XCTAssertEqual(UpdateStatements.literal("42", type: "varchar", kind: .trino), "'42'")
     }
 
     func testTheNumberGrammarRefusesWhatADoubleParseWouldAccept() {

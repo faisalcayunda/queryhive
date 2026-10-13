@@ -236,6 +236,6 @@ extension HostKeyPrompt {
     /// POSIX single-quote quoting: `'` becomes `'\''`, so the result is one word whatever the value
     /// holds (spaces, `;`, `$(…)`, a leading `-`).
     static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''", options: .literal) + "'"
     }
 }

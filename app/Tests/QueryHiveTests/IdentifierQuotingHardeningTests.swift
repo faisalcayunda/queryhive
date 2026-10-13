@@ -13,13 +13,23 @@ import XCTest
 /// implementation: a small reader that undoes the quoting and must consume the whole name, and the
 /// engine's own statement splitter, which must still see a single statement.
 final class IdentifierQuotingHardeningTests: XCTestCase {
-    private let hostile = [
-        #"a"b"#, "a`b", "my table", "UPPER", "1st", "select", "ünïcode_名",
-        #"x"; DROP TABLE x --"#, "x`; DROP TABLE x --", "x\"", "x`", "\"", "`", "\"\"", "a.b",
-    ]
-    private let kinds: [ConnectionKind] = [.trino, .postgres, .mysql]
+    /// Combining and format scalars that Swift fuses with the scalar before them into one `Character`,
+    /// so a `"` followed by one is no longer `"` to a Character-level comparison while every server
+    /// still reads the quote byte.
+    static let marks = ["\u{301}", "\u{200D}", "\u{200C}", "\u{FE0F}", "\u{202E}", "\u{0300}\u{0301}"]
 
-    private func mark(_ kind: ConnectionKind) -> Character { kind == .mysql ? "`" : "\"" }
+    private let hostile: [String] = {
+        var names = [
+            #"a"b"#, "a`b", "my table", "UPPER", "1st", "select", "ünïcode_名",
+            #"x"; DROP TABLE x --"#, "x`; DROP TABLE x --", "x\"", "x`", "\"", "`", "\"\"", "a.b",
+        ]
+        for mark in IdentifierQuotingHardeningTests.marks {
+            names += ["x\"\(mark); DROP TABLE t; --", "x`\(mark); DROP TABLE t; --",
+                      "x\"\(mark) WHERE public.evil() IS NULL --", "\"\(mark)", "`\(mark)", mark, "a\(mark)b"]
+        }
+        return names
+    }()
+    private let kinds: [ConnectionKind] = [.trino, .postgres, .mysql]
 
     private func dialect(_ kind: ConnectionKind) -> EditorDialect {
         switch kind {
@@ -29,34 +39,38 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
         }
     }
 
-    /// Reads one quoted identifier off the front of `text` the way every server does: a doubled
-    /// quote is a quote in the name, a single one ends it. Returns the name and what is left.
-    private func readIdentifier(_ text: Substring, quote: Character) -> (name: String, rest: Substring)? {
+    /// Reads one quoted identifier off the front of `text` the way every server does, byte for byte:
+    /// a doubled quote is a quote in the name, a single one ends it. It walks `unicodeScalars`, not
+    /// `Character`s, because a quote followed by a combining mark is one Character in Swift and two
+    /// scalars to a server. Returns the name and what is left.
+    private func readIdentifier(_ text: ArraySlice<Unicode.Scalar>, quote: Unicode.Scalar)
+        -> (name: String, rest: ArraySlice<Unicode.Scalar>)? {
         guard text.first == quote else { return nil }
-        var name = ""
-        var index = text.index(after: text.startIndex)
+        var name = String.UnicodeScalarView()
+        var index = text.startIndex + 1
         while index < text.endIndex {
-            let character = text[index]
-            let next = text.index(after: index)
-            if character == quote {
-                if next < text.endIndex, text[next] == quote {
+            let scalar = text[index]
+            if scalar == quote {
+                if index + 1 < text.endIndex, text[index + 1] == quote {
                     name.append(quote)
-                    index = text.index(after: next)
+                    index += 2
                     continue
                 }
-                return (name, text[next...])
+                return (String(name), text[(index + 1)...])
             }
-            name.append(character)
-            index = next
+            name.append(scalar)
+            index += 1
         }
         return nil
     }
 
+    private func scalars(_ text: String) -> ArraySlice<Unicode.Scalar> { ArraySlice(Array(text.unicodeScalars)) }
+
     /// Splits `a.b.c` where every part is a quoted identifier into its names, or `nil` when anything
     /// but a dot sits between two of them (that is, when a name broke out of its quotes).
-    private func readQualified(_ text: String, quote: Character) -> [String]? {
+    private func readQualified(_ text: String, quote: Unicode.Scalar) -> [String]? {
         var parts: [String] = []
-        var rest = Substring(text)
+        var rest = scalars(text)
         while true {
             guard let (name, remainder) = readIdentifier(rest, quote: quote) else { return nil }
             parts.append(name)
@@ -64,6 +78,33 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
             guard remainder.first == "." else { return nil }
             rest = remainder.dropFirst()
         }
+    }
+
+    private func quote(_ kind: ConnectionKind) -> Unicode.Scalar { kind == .mysql ? "`" : "\"" }
+
+    /// The expected spelling of an identifier, built scalar by scalar without the implementation.
+    private func ident(_ name: String, _ kind: ConnectionKind) -> String {
+        let q = quote(kind)
+        var out = String.UnicodeScalarView()
+        out.append(q)
+        for scalar in name.unicodeScalars {
+            out.append(scalar)
+            if scalar == q { out.append(q) }
+        }
+        out.append(q)
+        return String(out)
+    }
+
+    /// How many times `needle` occurs in `text`, compared scalar by scalar.
+    private func occurrences(of needle: String, in text: String) -> Int {
+        let hay = Array(text.unicodeScalars)
+        let pin = Array(needle.unicodeScalars)
+        guard !pin.isEmpty, hay.count >= pin.count else { return 0 }
+        return (0...(hay.count - pin.count)).filter { Array(hay[$0..<($0 + pin.count)]) == pin }.count
+    }
+
+    private func count(of scalar: Unicode.Scalar, in text: String) -> Int {
+        text.unicodeScalars.filter { $0 == scalar }.count
     }
 
     private func assertOneStatement(_ sql: String, _ kind: ConnectionKind, _ label: String,
@@ -87,7 +128,7 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
 
     func testOrdinaryNamesKeepTheirExactBytes() {
         for kind in kinds {
-            let m = String(mark(kind))
+            let m = String(Character(quote(kind)))
             XCTAssertEqual(quotedIdent("nama", for: kind), m + "nama" + m)
             XCTAssertEqual(quotedIdent("Nama Lengkap", for: kind), m + "Nama Lengkap" + m)
         }
@@ -102,9 +143,17 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
     func testEveryNameStaysOneIdentifierInEveryPartOfAQualifiedName() throws {
         for kind in kinds {
             for name in hostile {
-                let quote = mark(kind)
-                let single = try XCTUnwrap(readIdentifier(Substring(quotedIdent(name, for: kind)), quote: quote))
-                XCTAssertEqual(single.name, name, "\(kind)")
+                let q = quote(kind)
+                let written = quotedIdent(name, for: kind)
+                // Built from the scalars, not from the implementation: each quote scalar in the name
+                // appears twice, and the two wrapping quotes are the only others.
+                var independent = [q]
+                for scalar in name.unicodeScalars { independent += scalar == q ? [q, q] : [scalar] }
+                independent.append(q)
+                XCTAssertEqual(Array(written.unicodeScalars), independent, "\(kind) \(name.unicodeScalars.map(\.value))")
+                XCTAssertEqual(count(of: q, in: written), 2 + 2 * count(of: q, in: name), "\(kind)")
+                let single = try XCTUnwrap(readIdentifier(scalars(written), quote: q))
+                XCTAssertEqual(Array(single.name.unicodeScalars), Array(name.unicodeScalars), "\(kind)")
                 XCTAssertTrue(single.rest.isEmpty, "\(kind) \(name)")
 
                 // The hostile name in each slot the driver has, the others ordinary.
@@ -117,7 +166,7 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
                     case .postgres: [schema!, table]
                     case .mysql: [database!, table]
                     }
-                    XCTAssertEqual(readQualified(text, quote: quote), expected, "\(kind): \(text)")
+                    XCTAssertEqual(readQualified(text, quote: q), expected, "\(kind): \(text)")
                     assertOneStatement("SELECT * FROM \(text)", kind, "\(kind) \(name)")
                 }
             }
@@ -145,7 +194,7 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
             for name in hostile {
                 let node = tableNode(kind, catalog: name, schema: name, table: name)
                 let text = try XCTUnwrap(node.insertableText)
-                let parts = try XCTUnwrap(readQualified(text, quote: mark(kind)), "\(kind): \(text)")
+                let parts = try XCTUnwrap(readQualified(text, quote: quote(kind)), "\(kind): \(text)")
                 XCTAssertEqual(parts, Array(repeating: name, count: kind == .trino ? 3 : 2), "\(kind)")
 
                 // `openTable` writes `SELECT *` first and a column list after; both hold the table.
@@ -164,7 +213,7 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
                 assertOneStatement(sql, kind, "inspector \(kind) \(name)")
                 XCTAssertTrue(sql.hasPrefix("SELECT * FROM "))
                 let target = String(sql.dropFirst("SELECT * FROM ".count))
-                let parts = try XCTUnwrap(readQualified(target, quote: mark(kind)), "\(kind): \(sql)")
+                let parts = try XCTUnwrap(readQualified(target, quote: quote(kind)), "\(kind): \(sql)")
                 XCTAssertEqual(parts.last, name)
             }
         }
@@ -190,13 +239,24 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
                 let sorted = try ServerSort.order(sql: "SELECT * FROM t", column: name, direction: .ascending, kind: kind)
                 assertOneStatement(sorted, kind, "sort \(kind) \(name)")
                 let tail = try XCTUnwrap(sorted.components(separatedBy: " ORDER BY ").last)
-                let ident = try XCTUnwrap(readIdentifier(Substring(tail), quote: mark(kind)), "\(kind): \(sorted)")
-                XCTAssertEqual(ident.name, name, "\(kind)")
+                let read = try XCTUnwrap(readIdentifier(scalars(tail), quote: quote(kind)), "\(kind): \(sorted)")
+                XCTAssertEqual(Array(read.name.unicodeScalars), Array(name.unicodeScalars), "\(kind)")
+                let nulls = kind == .mysql ? "" : " NULLS LAST"
+                XCTAssertEqual(sorted, "SELECT * FROM (\nSELECT * FROM t\n) AS queryhive_sort ORDER BY \(self.ident(name, kind)) ASC\(nulls)")
 
                 let search = try SearchStatement.crossColumn(sql: "SELECT * FROM t", term: "abc",
                                                              columns: columns(name), kind: kind)
                 assertOneStatement(search, kind, "search \(kind) \(name)")
-                XCTAssertTrue(search.contains(quotedIdent(name, for: kind)), "\(kind): \(search)")
+                let clauses = ["id", name].map { column -> String in
+                    let q = self.ident(column, kind)
+                    switch kind {
+                    case .mysql: return "LOCATE(LOWER('abc'), LOWER(CONCAT(\(q)))) > 0"
+                    case .postgres: return "STRPOS(LOWER(\(q)::text), LOWER('abc')) > 0"
+                    case .trino: return "STRPOS(LOWER(CAST(\(q) AS varchar)), LOWER('abc')) > 0"
+                    }
+                }
+                XCTAssertEqual(search, "SELECT * FROM (\nSELECT * FROM t\n) AS queryhive_search WHERE "
+                               + clauses.joined(separator: " OR "))
             }
         }
     }
@@ -219,18 +279,22 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
                 let table = try XCTUnwrap(node.insertableText)
                 let built = plan(kind, column: name, table: table)
                 XCTAssertEqual(built.statements.map(\.kind), [.delete, .update, .insert], "\(kind) \(name)")
-                let quoted = quotedIdent(name, for: kind)
+                let named = ident(name, kind)
+                let id = ident("id", kind)
                 for statement in built.statements {
                     assertOneStatement(statement.sql, kind, "\(statement.kind) \(kind) \(name)")
                     assertOneStatement(statement.boundSQL, kind, "bound \(statement.kind) \(kind) \(name)")
-                    XCTAssertTrue(statement.sql.contains(quoted), "\(kind): \(statement.sql)")
                 }
-                let update = try XCTUnwrap(built.statements.first { $0.kind == .update })
-                XCTAssertTrue(update.sql.hasPrefix("UPDATE \(table) SET \(quoted) = 'changed' WHERE "),
-                              "\(kind): \(update.sql)")
-                let insert = try XCTUnwrap(built.statements.first { $0.kind == .insert })
-                XCTAssertTrue(insert.sql.hasPrefix("INSERT INTO \(table) (\(quotedIdent("id", for: kind)), \(quoted)) VALUES "),
-                              "\(kind): \(insert.sql)")
+                let byKind = Dictionary(uniqueKeysWithValues: built.statements.map { ($0.kind, $0.sql) })
+                XCTAssertEqual(byKind[.update],
+                               "UPDATE \(table) SET \(named) = 'changed' WHERE \(id) = 1 AND \(named) = 'old'",
+                               "\(kind) \(name.unicodeScalars.map(\.value))")
+                XCTAssertEqual(byKind[.delete],
+                               "DELETE FROM \(table) WHERE \(id) = 2 AND \(named) = 'other'",
+                               "\(kind) \(name.unicodeScalars.map(\.value))")
+                XCTAssertEqual(byKind[.insert],
+                               "INSERT INTO \(table) (\(id), \(named)) VALUES (7, 'new')",
+                               "\(kind) \(name.unicodeScalars.map(\.value))")
             }
         }
     }
@@ -238,7 +302,8 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
     func testTheNoteNamingAnUnmatchedColumnCannotCloseItsComment() throws {
         // A column the predicate cannot compare (binary here) is named in a `/* … */` note that is part
         // of the statement. A name holding `*/` would end the comment and run what follows.
-        let evil = ["x */; DROP TABLE t; /*", "*/ DELETE FROM t; --", "/*", "*/", "a*/*b"]
+        var evil = ["x */; DROP TABLE t; /*", "*/ DELETE FROM t; --", "/*", "*/", "a*/*b"]
+        for mark in Self.marks { evil += ["x */\(mark); DROP TABLE t; --", "x /*\(mark) y", "*\(mark)/", "/\(mark)*", "*/\(mark)", "\(mark)*/"] }
         for kind in kinds {
             for name in evil {
                 let cols = [Event.Column(name: "id", type: "bigint"), Event.Column(name: "nama", type: "varchar"),
@@ -253,10 +318,11 @@ final class IdentifierQuotingHardeningTests: XCTestCase {
                     for text in [statement.sql, statement.boundSQL] {
                         let label = "\(statement.kind) \(kind) \(name)"
                         XCTAssertTrue(text.contains("not matched"), "\(label): \(text)")
-                        XCTAssertEqual(text.components(separatedBy: "*/").count - 1, 1,
-                                       "\(label): the comment closes once, at its end: \(text)")
-                        XCTAssertEqual(text.components(separatedBy: "/*").count - 1, 1,
-                                       "\(label): no comment opens inside the note: \(text)")
+                        let bytes = name.unicodeScalars.map(\.value)
+                        XCTAssertEqual(occurrences(of: "*/", in: text), 1,
+                                       "\(label) \(bytes): the comment closes once, at its end: \(text)")
+                        XCTAssertEqual(occurrences(of: "/*", in: text), 1,
+                                       "\(label) \(bytes): no comment opens inside the note: \(text)")
                         XCTAssertTrue(text.hasSuffix("*/"), "\(label): \(text)")
                         assertOneStatement(text, kind, label)
                     }

@@ -121,23 +121,13 @@ enum ParameterRender {
             return "TIMESTAMP '\(trimmed)'"
 
         case .text:
-            guard !entry.text.contains("\0") else { return nil }
-            guard entry.text.contains("\\") else { return quoted(entry.text) }
-            switch driver {
-            case .postgres:
-                // `E'...'` with the backslash doubled reads the same whether or not
-                // `standard_conforming_strings` is on, which is the one form that is right in both.
-                return "E'" + entry.text
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "'", with: "''") + "'"
-            case .mysql:
-                // A backslash means whatever `sql_mode` says it means, and this app cannot see that
-                // setting. Refused rather than guessed.
-                return nil
-            case .trino:
-                // Trino has no backslash escapes at all, so the text is written as it is.
-                return quoted(entry.text)
-            }
+            guard !SQLStringLiteral.contains("\0", in: entry.text) else { return nil }
+            // A backslash means whatever `sql_mode` says it means in MySQL, and this app cannot see
+            // that setting. Refused rather than guessed. PostgreSQL gets `E'...'` with the backslash
+            // doubled, which reads the same whether or not `standard_conforming_strings` is on, and
+            // Trino has no backslash escapes at all (`SQLStringLiteral`).
+            if driver == .mysql, SQLStringLiteral.contains("\\", in: entry.text) { return nil }
+            return SQLStringLiteral.quoted(entry.text, for: driver)
         }
     }
 
@@ -267,10 +257,10 @@ enum ParameterRender {
         case .timestamp:
             return ParameterError(message:
                 "\(name) is not a timestamp. Write it as YYYY-MM-DD HH:MM[:SS], or change its type.")
-        case .text where entry.text.contains("\0"):
+        case .text where SQLStringLiteral.contains("\0", in: entry.text):
             return ParameterError(message:
                 "\(name) contains a null character, which no dialect here can carry.")
-        case .text where entry.text.contains("\\") && driver == .mysql:
+        case .text where SQLStringLiteral.contains("\\", in: entry.text) && driver == .mysql:
             return ParameterError(message:
                 "\(name) contains a backslash, and MySQL's meaning for one depends on its sql_mode, "
                 + "which this app cannot see. Remove it, or use PostgreSQL or Trino.")
@@ -281,10 +271,6 @@ enum ParameterRender {
         case .list:
             return ParameterError(message: "\(name) is a list, which is written element by element.")
         }
-    }
-
-    private static func quoted(_ text: String) -> String {
-        "'" + text.replacingOccurrences(of: "'", with: "''") + "'"
     }
 
     /// `YYYY-MM-DD`. The shape only: whether the day exists is the server's to say, and a date that

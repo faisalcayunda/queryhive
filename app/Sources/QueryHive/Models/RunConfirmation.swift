@@ -143,7 +143,10 @@ enum StatementScan {
     static func significantWords(in sql: String) -> [String] {
         var words: [String] = []
         var current = ""
-        let characters = Array(sql)
+        // One element per scalar, not per grapheme: a quote with a combining mark on it is a quote to
+        // the engine, and a scanner that took the pair for one other character would read a closing
+        // quote as part of the literal and miss the statement after it.
+        let characters = sql.unicodeScalars.map(Character.init)
         var index = 0
 
         func flush() {

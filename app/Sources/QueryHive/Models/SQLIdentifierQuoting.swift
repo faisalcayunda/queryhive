@@ -43,7 +43,7 @@ enum SQLIdentifierQuoting {
     /// the dialect's own quote doubles; the other dialect's is an ordinary character.
     static func alwaysQuoted(_ name: String, for kind: ConnectionKind) -> String {
         let mark = kind == .mysql ? "`" : "\""
-        return mark + name.replacingOccurrences(of: mark, with: mark + mark) + mark
+        return mark + name.replacingOccurrences(of: mark, with: mark + mark, options: .literal) + mark
     }
 
     /// Lower-case ASCII letters, digits and underscores, starting with a letter or an underscore.

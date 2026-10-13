@@ -64,9 +64,10 @@ enum SearchStatement {
         }
         guard !usable.isEmpty else { throw Failure.noColumns }
 
-        // A quote is the only thing that needs escaping: the term is a literal, not a pattern, so
-        // there are no wildcards to escape — the position function does the containing.
-        let literal = "'" + needle.replacingOccurrences(of: "'", with: "''") + "'"
+        // The term is a literal, not a pattern, so there are no wildcards to escape — the position
+        // function does the containing. What closes the literal is the dialect's (`SQLStringLiteral`):
+        // the quote everywhere, and a backslash in MySQL, which the person types freely.
+        let literal = SQLStringLiteral.quoted(needle, for: kind)
         let clauses = usable.map { column -> String in
             let text = UpdateStatements.serverText(quotedIdent(column.name, for: kind), for: kind)
             switch kind {

@@ -94,7 +94,7 @@ enum InsertStatements {
                 if UpdateStatements.isDefaultKeyword(text) { return .keyword("DEFAULT") }
                 let type = columns[index].type
                 return .value(BindValue.from(text: text, type: type),
-                              display: UpdateStatements.literal(text, type: type))
+                              display: UpdateStatements.literal(text, type: type, kind: kind))
             }
             let allDefault = cells.allSatisfy { cell in
                 if case .keyword = cell { return true }

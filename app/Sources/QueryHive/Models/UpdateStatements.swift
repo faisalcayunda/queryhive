@@ -57,7 +57,7 @@ enum UpdateStatements {
                     let name = quotedIdent(columns[key.column].name, for: kind)
                     if isDefaultKeyword(text) { return (name, nil, "DEFAULT") }
                     let type = columns[key.column].type
-                    return (name, BindValue.from(text: text, type: type), literal(text, type: type))
+                    return (name, BindValue.from(text: text, type: type), literal(text, type: type, kind: kind))
                 }
             guard !assignments.isEmpty else { return nil }
 
@@ -118,11 +118,11 @@ enum UpdateStatements {
                 // text does not always answer `col = '<that text>'`.
                 bound.text("\(serverText(name, for: kind)) = ")
                 bound.value(BindValue.from(text: value, type: "varchar"),
-                            display: literal(value, type: "varchar"))
+                            display: literal(value, type: "varchar", kind: kind))
             } else {
                 bound.text("\(name) = ")
                 bound.value(BindValue.from(text: value, type: column.type),
-                            display: literal(value, type: column.type))
+                            display: literal(value, type: column.type, kind: kind))
             }
         }
         return MatchOutcome(clauses: clauses, excluded: excluded)
@@ -166,16 +166,16 @@ enum UpdateStatements {
     ///
     /// This is the **review** form. The executable form for a driver that binds is a placeholder,
     /// and the value is the typed `BindValue` beside it; the two are produced together.
-    static func literal(_ text: String, type: String) -> String {
+    static func literal(_ text: String, type: String, kind: ConnectionKind) -> String {
         // A number goes in bare, which is what makes `SET n = 3` a number rather than the string
         // '3'. It goes in bare only when it *is* a number: the inline path writes this straight
         // into the statement, so a value that does not parse would reach the server as a word —
         // `SET n = abc` is either a syntax error or, worse, a reference to a column called `abc`.
         // A value that does not parse is quoted instead, so the server reports a type error against
         // a statement that is at least well formed.
-        if isNumeric(type) { return isNumber(text) ? text : quoted(text) }
-        if isBoolean(type) { return isBooleanValue(text) ? text : quoted(text) }
-        return quoted(text)
+        if isNumeric(type) { return isNumber(text) ? text : quoted(text, kind) }
+        if isBoolean(type) { return isBooleanValue(text) ? text : quoted(text, kind) }
+        return quoted(text, kind)
     }
 
     /// A number a server will read as one.
@@ -224,9 +224,9 @@ enum UpdateStatements {
         ["true", "false"].contains(text.trimmingCharacters(in: .whitespaces).lowercased())
     }
 
-    /// Text as a quoted literal, with the one escape every dialect here agrees on.
-    private static func quoted(_ text: String) -> String {
-        "'" + text.replacingOccurrences(of: "'", with: "''") + "'"
+    /// Text as a quoted literal that the dialect reads back as exactly the text (`SQLStringLiteral`).
+    private static func quoted(_ text: String, _ kind: ConnectionKind) -> String {
+        SQLStringLiteral.quoted(text, for: kind)
     }
 
     /// Whether a type name is one whose literals are written without quotes.
@@ -269,7 +269,10 @@ struct MatchOutcome: Equatable {
     static func note(naming excluded: [String]) -> String? {
         guard !excluded.isEmpty else { return nil }
         let safe = excluded.map {
-            $0.replacingOccurrences(of: "*/", with: "* /").replacingOccurrences(of: "/*", with: "/ *")
+            // `.literal`: a `*` or `/` with a combining mark on it is one Character to Swift and the
+            // bytes `*/` to a server, so a Character-level match would let it through.
+            $0.replacingOccurrences(of: "*/", with: "* /", options: .literal)
+                .replacingOccurrences(of: "/*", with: "/ *", options: .literal)
         }
         return "/* not matched: \(safe.joined(separator: "; ")) */"
     }

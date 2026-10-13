@@ -180,15 +180,15 @@ final class CellEditsTests: XCTestCase {
     func testABooleanIsUnquoted() {
         // Trino is strict about comparing a boolean to a varchar, so a boolean literal has to be
         // written as one.
-        XCTAssertEqual(UpdateStatements.literal("true", type: "boolean"), "true")
-        XCTAssertEqual(UpdateStatements.literal("false", type: "bool"), "false")
+        XCTAssertEqual(UpdateStatements.literal("true", type: "boolean", kind: .trino), "true")
+        XCTAssertEqual(UpdateStatements.literal("false", type: "bool", kind: .trino), "false")
     }
 
     func testAnIntervalIsNotReadAsAnInteger() {
         // `interval` starts with `int`. A prefix match would write an interval literal unquoted,
         // which is the kind of bug that only shows up on the one table that has an interval column.
         XCTAssertFalse(UpdateStatements.isNumeric("interval day to second"))
-        XCTAssertEqual(UpdateStatements.literal("1 day", type: "interval day to second"), "'1 day'")
+        XCTAssertEqual(UpdateStatements.literal("1 day", type: "interval day to second", kind: .trino), "'1 day'")
     }
 
     func testATypeIsReadWithoutItsWidth() {
