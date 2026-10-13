@@ -1153,6 +1153,20 @@ pub async fn to_table(
     engine: &dyn Engine,
     cancel: &CancelFlag,
 ) -> Result<(), CliError> {
+    // First of all, before the guard writes a log row or anything is read from the source:
+    // a `DEST_` key of any kind, blank included, asks for a second connection, and a set
+    // that is partial or empty must never fall through to the `CREATE TABLE AS` below,
+    // which would run on the SOURCE connection under the `TARGET_*` name (W13-T20, §3.2).
+    // The transfer itself is not built yet, so a complete set is refused too; it replaces
+    // this refusal.
+    let destination = settings
+        .destination()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    if destination.is_some() {
+        return Err(CliError::Usage(
+            "saving a table to another connection is not available in this build".to_owned(),
+        ));
+    }
     let sql = source_sql(settings)?;
     let safe = safe_mode(settings, engine)?;
     let timeout = statement_timeout(settings)?;
