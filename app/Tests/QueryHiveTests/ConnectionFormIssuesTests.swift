@@ -76,6 +76,68 @@ final class ConnectionFormIssuesTests: XCTestCase {
         }
     }
 
+    // MARK: Panes
+
+    func testEveryFieldBelongsToExactlyOnePane() {
+        for field in ConnectionField.allCases {
+            let owners = ConnectionFormSection.allCases.filter { section in field.section == section }
+            XCTAssertEqual(owners.count, 1, field.rawValue)
+        }
+        XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .general }.map(\.rawValue),
+                       ["name", "host", "port", "user", "database", "caFile"])
+        XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .sshTunnel }.map(\.rawValue),
+                       ["sshHost", "sshPort", "sshUser", "sshKeyFile"])
+        XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .limits }.map(\.rawValue), ["timeout"])
+        XCTAssertTrue(ConnectionField.allCases.allSatisfy { $0.section != .appearance },
+                      "nothing in Appearance can be wrong")
+    }
+
+    func testThePanesHaveNamesAndSymbolsInSidebarOrder() {
+        XCTAssertEqual(ConnectionFormSection.allCases.map(\.title), ["General", "SSH Tunnel", "Limits", "Appearance"])
+        XCTAssertEqual(Set(ConnectionFormSection.allCases.map(\.symbol)).count, 4)
+        XCTAssertEqual(ConnectionFormSection.allCases.map(\.rawValue), ["general", "sshTunnel", "limits", "appearance"])
+    }
+
+    func testIssuesGroupByThePaneThatEditsThem() {
+        let fields = ConnectionFormIssues.fields(for: state {
+            $0.host = ""; $0.timeoutText = "x"; $0.sshEnabled = true; $0.sshHost = ""
+        }, resolved: nil)
+        let grouped = ConnectionFormIssues.bySection(fields)
+        XCTAssertEqual(grouped[.general], [.host])
+        XCTAssertEqual(grouped[.sshTunnel], [.sshHost, .sshUser])
+        XCTAssertEqual(grouped[.limits], [.timeout])
+        XCTAssertNil(grouped[.appearance])
+        XCTAssertEqual(ConnectionFormIssues.bySection([]), [:])
+    }
+
+    func testTheSummaryTellsThePaneInViewFirstAndPointsToTheOthers() {
+        let all: [ConnectionField] = [.host, .sshHost, .timeout]
+        XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .general),
+                       "Host is required. Also see SSH Tunnel and Limits.")
+        XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .sshTunnel),
+                       "SSH host is required. Also see General and Limits.")
+        XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .limits),
+                       "Check Statement timeout (0-600 seconds). Also see General and SSH Tunnel.")
+    }
+
+    func testAnotherPanesProblemsLeadWithItsName() {
+        XCTAssertEqual(ConnectionFormIssues.summary([.sshHost, .sshUser], visible: .general),
+                       "SSH Tunnel: SSH host and SSH user are required.")
+        XCTAssertEqual(ConnectionFormIssues.summary([.timeout], visible: .appearance),
+                       "Limits: Check Statement timeout (0-600 seconds).")
+        XCTAssertEqual(ConnectionFormIssues.summary([.sshHost, .timeout], visible: .appearance),
+                       "SSH Tunnel: SSH host is required. Also see Limits.")
+    }
+
+    func testTheSummaryIsEmptyWhenNothingIsWrong() {
+        XCTAssertEqual(ConnectionFormIssues.summary([], visible: .general), "")
+    }
+
+    func testSeveralIssuesInOnePaneShareOneSentence() {
+        XCTAssertEqual(ConnectionFormIssues.summary([.name, .host, .caFile], visible: .general),
+                       "Name and Host are required. Check CA file (not found).")
+    }
+
     // MARK: PF-5, "an empty field means keep"
 
     private func connection(_ tweak: (inout Connection) -> Void = { _ in }) -> Connection {

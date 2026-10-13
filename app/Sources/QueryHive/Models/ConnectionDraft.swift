@@ -159,6 +159,11 @@ struct ConnectionDraft: Equatable {
         // What only applied to the other driver goes with it: a JWT is Trino's, and MySQL has no CA.
         if option != .trino { dbAuth = .password; secrets.jwt = "" }
         if option == .mysql { caFile = "" }
+        // `verify` is not Trino's alone: the engine turns `verify == false` into "encrypt without
+        // checking" for any mode but `disable`. A flag carried over from an unverified Trino
+        // transport would silently unverify a PostgreSQL mode, so the new driver starts verified.
+        if option != .trino { verifyTLS = true }
+        enforceCAConstraint()
     }
 
     /// What a pasted URL meant. It fills the fields the URL speaks about and leaves the rest as
@@ -177,19 +182,15 @@ struct ConnectionDraft: Equatable {
         if name.isEmpty {
             name = parsed.host + (parsed.database.isEmpty ? "" : "/\(parsed.database)")
         }
+        enforceCAConstraint()
     }
 
     /// Writes the scheme and lets the port follow it.
     mutating func setScheme(_ new: String) {
         let old = scheme
         scheme = new
-        followPort(from: old, to: new)
-    }
-
-    /// Follow the standard port for the scheme, but only while the user is still on the other
-    /// scheme's standard one. The sheet calls this from its change handler on `scheme`, so every
-    /// way the scheme can change takes the port with it.
-    mutating func followPort(from old: String, to new: String) {
+        // Follow the standard port for the scheme, but only while the user is still on the other
+        // scheme's standard one.
         if old == "http", new == "https", port == 8080 { port = 8443 }
         if old == "https", new == "http", port == 8443 { port = 8080 }
         // `prefer` moves nothing. It tries HTTPS and falls back to clear on whatever
@@ -201,14 +202,25 @@ struct ConnectionDraft: Equatable {
     /// Writes the CA file path and applies what a CA means.
     mutating func setCAFile(_ path: String) {
         caFile = path
-        enforceCA()
+        enforceCAConstraint()
     }
 
-    /// A CA only means something to a mode that checks the certificate (blueprint 9.1), so choosing
-    /// one moves the mode to one that does. A blank path asks for nothing.
-    mutating func enforceCA() {
+    /// A CA only means something to a mode that checks the certificate (blueprint 9.1), so a CA in
+    /// the draft moves the mode to one that does, and turns verification on. It runs wherever the
+    /// draft can change under a CA: choosing the CA, choosing a driver, applying a URL. It does
+    /// not run on load, so a saved connection that already breaks the rule is shown as saved.
+    /// A blank path asks for nothing, and MySQL has no CA setting.
+    private mutating func enforceCAConstraint() {
         guard !caFile.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        if kind == .postgres, sslmode != "verify-ca", sslmode != "verify-full" { sslmode = "verify-full" }
-        if kind == .trino { setScheme(TrinoTransport.https.rawValue); verifyTLS = true }
+        switch kind {
+        case .postgres:
+            if sslmode != "verify-ca", sslmode != "verify-full" { sslmode = "verify-full" }
+            verifyTLS = true
+        case .trino:
+            setScheme(TrinoTransport.https.rawValue)
+            verifyTLS = true
+        case .mysql:
+            break
+        }
     }
 }

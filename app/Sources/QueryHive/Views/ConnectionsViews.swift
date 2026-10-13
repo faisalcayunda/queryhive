@@ -422,9 +422,6 @@ struct ConnectionEditorSheet: View {
                     requiredHint("port")
                 }
             }
-            .onChange(of: draft.scheme) { old, new in
-                draft.followPort(from: old, to: new)
-            }
             LabeledField("User · Required") {
                 TextField("faisal", text: $draft.user).field(invalid: attemptedSave && missingRequired.contains("user"))
                 requiredHint("user")
@@ -493,7 +490,7 @@ struct ConnectionEditorSheet: View {
             if draft.kind.hasSSLModes {
                 LabeledField("SSL mode") {
                     // With a CA file chosen only the modes that check the certificate make sense.
-                    Segmented(selection: $draft.sslmode,
+                    Segmented(selection: Binding(get: { draft.sslmode }, set: { draft.setTLS(.sslmode($0)) }),
                               options: draft.kind == .postgres && !draft.caFile.isEmpty ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
                 }
             } else {
@@ -594,19 +591,16 @@ struct ConnectionEditorSheet: View {
         LabeledField("CA certificate") {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    TextField("Use the system trust store", text: $draft.caFile)
+                    TextField("Use the system trust store", text: caFileBinding)
                         .field(invalid: attemptedSave && missingRequired.contains("caFile"))
-                    PillButton(title: "Choose…", compact: true) { chooseFile(into: $draft.caFile, title: "Choose the CA certificate") }
-                    PillButton(title: "Clear", role: .quiet, compact: true) { draft.caFile = "" }
+                    PillButton(title: "Choose…", compact: true) { chooseFile(into: caFileBinding, title: "Choose the CA certificate") }
+                    PillButton(title: "Clear", role: .quiet, compact: true) { draft.setCAFile("") }
                         .disabled(draft.caFile.isEmpty)
                 }
                 requiredHint("caFile", "File not found")
                 tlsNote("The server certificate is checked against this file only, and its name must match. "
                         + "For an IP address the certificate needs an IP SAN.")
             }
-        }
-        .onChange(of: draft.caFile) { _, _ in
-            draft.enforceCA()
         }
     }
 
@@ -729,9 +723,15 @@ struct ConnectionEditorSheet: View {
 
     /// The picker's own binding over the string the connection stores, so the third option
     /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
+    /// The CA field binds through the draft, so the rule that a CA needs a verifying mode holds
+    /// however the path changes (typing, Choose…, Clear).
+    private var caFileBinding: Binding<String> {
+        Binding(get: { draft.caFile }, set: { draft.setCAFile($0) })
+    }
+
     private var trinoTransport: Binding<TrinoTransport> {
         Binding(get: { TrinoTransport(stored: draft.scheme) },
-                set: { draft.scheme = $0.rawValue })
+                set: { draft.setScheme($0.rawValue) })
     }
 
     /// One spoken line where a control would be, for a transport with no verification to answer.

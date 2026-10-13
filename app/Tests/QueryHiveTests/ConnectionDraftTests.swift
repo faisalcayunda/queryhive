@@ -256,12 +256,90 @@ final class ConnectionDraftTests: XCTestCase {
         XCTAssertEqual(draft.port, 8443)
     }
 
-    func testFollowPortReadsTheTransitionTheSheetObserved() {
+    // MARK: The CA constraint holds wherever the draft can change
+
+    func testAPostgreSQLModeThatDoesNotVerifyGetsVerificationBackWithACA() {
         var draft = ConnectionDraft.new()
-        draft.scheme = "https"
-        draft.port = 8080
-        draft.followPort(from: "http", to: "https")
-        XCTAssertEqual(draft.port, 8443)
+        draft.choose(.postgres)
+        draft.verifyTLS = false
+        draft.setCAFile("/ca.pem")
+        XCTAssertEqual(draft.sslmode, "verify-full")
+        XCTAssertTrue(draft.verifyTLS)
+        draft = .new()
+        draft.choose(.postgres)
+        draft.sslmode = "verify-ca"
+        draft.verifyTLS = false
+        draft.setCAFile("/ca.pem")
+        XCTAssertEqual(draft.sslmode, "verify-ca", "a verifying word stays")
+        XCTAssertTrue(draft.verifyTLS, "but the flag that switches the check off does not")
+    }
+
+    func testChangingTheDriverFromAnUnverifiedTrinoStartsTheNewOneVerified() {
+        var draft = ConnectionDraft.new()
+        draft.verifyTLS = false
+        draft.choose(.postgres)
+        XCTAssertTrue(draft.verifyTLS)
+        draft.verifyTLS = false
+        draft.choose(.mysql)
+        XCTAssertTrue(draft.verifyTLS)
+        draft.verifyTLS = false
+        draft.choose(.trino)
+        XCTAssertFalse(draft.verifyTLS, "Trino keeps its own answer")
+    }
+
+    func testATrinoDraftWithACAThenChangeTypeToPostgreSQLIsNotPostgreSQLWithACAAndDisable() {
+        var draft = ConnectionDraft(Connection(id: id, name: "t", color: .blue, kind: .trino, host: "h", port: 8443,
+                                               scheme: "https", sslmode: "", user: "u", database: "", schema: "",
+                                               verify: true, caFile: "/ca.pem"))
+        XCTAssertEqual(draft.sslmode, "disable", "Trino's default, as the sheet has always loaded it")
+        draft.choose(.postgres)
+        XCTAssertEqual(draft.caFile, "/ca.pem")
+        XCTAssertEqual(draft.sslmode, "verify-full")
+        XCTAssertTrue(draft.verifyTLS)
+    }
+
+    func testAPostgreSQLDraftWithACAThenChangeTypeToTrinoIsHTTPSAndVerified() {
+        var draft = ConnectionDraft(Connection(id: id, name: "p", color: .blue, kind: .postgres, host: "h", port: 5432,
+                                               scheme: "", sslmode: "verify-full", user: "u", database: "d", schema: "",
+                                               verify: true, caFile: "/ca.pem"))
+        XCTAssertEqual(draft.scheme, "")
+        draft.choose(.trino)
+        XCTAssertEqual(draft.scheme, "https", "a blank scheme would read as plain HTTP")
+        XCTAssertTrue(draft.verifyTLS)
+        XCTAssertEqual(draft.caFile, "/ca.pem")
+    }
+
+    func testAURLAppliedOverADraftThatHoldsACAKeepsTheCARule() throws {
+        var draft = ConnectionDraft.new()
+        draft.setCAFile("/ca.pem")
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("postgresql://u@h/db?sslmode=disable")))
+        XCTAssertEqual(draft.kind, .postgres)
+        XCTAssertEqual(draft.sslmode, "verify-full")
+        XCTAssertTrue(draft.verifyTLS)
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("http://h:8080/hive")))
+        XCTAssertEqual(draft.kind, .trino)
+        XCTAssertEqual(draft.scheme, "https")
+        XCTAssertEqual(draft.port, 8443, "the standard port follows the scheme the CA forced")
+    }
+
+    func testALoadedConnectionThatAlreadyBreaksTheRuleIsShownAsSaved() {
+        let broken = Connection(id: id, name: "p", color: .blue, kind: .postgres, host: "h", port: 5432,
+                                sslmode: "disable", user: "u", database: "d", schema: "", verify: false,
+                                caFile: "/ca.pem")
+        let draft = ConnectionDraft(broken)
+        XCTAssertEqual(draft.sslmode, "disable")
+        XCTAssertFalse(draft.verifyTLS)
+        XCTAssertFalse(draft.isDirty(against: broken), "and opening it does not make it dirty")
+    }
+
+    func testTypingAMySQLCAChangesNothing() {
+        var draft = ConnectionDraft.new()
+        draft.choose(.mysql)
+        draft.verifyTLS = false
+        draft.setCAFile("/ca.pem")
+        XCTAssertEqual(draft.sslmode, "prefer")
+        XCTAssertFalse(draft.verifyTLS)
+        XCTAssertEqual(draft.connection(id: id, group: nil).caFile, "", "and it is not saved")
     }
 
     // MARK: Dirty

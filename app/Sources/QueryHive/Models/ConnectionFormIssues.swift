@@ -66,6 +66,42 @@ enum ConnectionField: String, CaseIterable {
         case .timeout: "Statement timeout (0-600 seconds)"
         }
     }
+
+    /// The pane the field is edited in.
+    var section: ConnectionFormSection {
+        switch self {
+        case .name, .host, .port, .user, .database, .caFile: .general
+        case .sshHost, .sshPort, .sshUser, .sshKeyFile: .sshTunnel
+        case .timeout: .limits
+        }
+    }
+}
+
+/// The panes of the connection form, in the order the sidebar lists them. `appearance` holds no
+/// field that can be wrong, so no issue ever maps to it.
+enum ConnectionFormSection: String, CaseIterable, Identifiable {
+    case general, sshTunnel, limits, appearance
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "General"
+        case .sshTunnel: "SSH Tunnel"
+        case .limits: "Limits"
+        case .appearance: "Appearance"
+        }
+    }
+
+    /// An SF Symbol from the macOS 14 SDK's set.
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .sshTunnel: "lock.shield"
+        case .limits: "speedometer"
+        case .appearance: "paintbrush"
+        }
+    }
 }
 
 /// What the form holds, reduced to what validation reads. A plain value so the rules are tested
@@ -142,6 +178,26 @@ enum ConnectionFormIssues {
         }
         if !wrong.isEmpty { sentences.append("Check \(list(wrong)).") }
         return sentences.joined(separator: " ")
+    }
+
+    /// The fields to fix, grouped by the pane that edits them. Panes with nothing to fix are absent.
+    static func bySection(_ fields: [ConnectionField]) -> [ConnectionFormSection: [ConnectionField]] {
+        Dictionary(grouping: fields, by: \.section)
+    }
+
+    /// One line for the footer. The pane in view is told first and in `message`'s words; another
+    /// pane's problems lead with its name ("SSH Tunnel: SSH host is required."), and every further
+    /// pane is pointed to ("Also see Limits."). Empty when nothing is wrong.
+    static func summary(_ fields: [ConnectionField], visible: ConnectionFormSection) -> String {
+        let grouped = bySection(fields)
+        let panes = [visible] + ConnectionFormSection.allCases.filter { $0 != visible }
+        let withIssues = panes.filter { grouped[$0] != nil }
+        guard let first = withIssues.first else { return "" }
+        var text = message(grouped[first, default: []].map(\.label))
+        if first != visible { text = "\(first.title): \(text)" }
+        let rest = withIssues.dropFirst().map(\.title)
+        if !rest.isEmpty { text += " Also see \(list(rest))." }
+        return text
     }
 
     private static func list(_ items: [String]) -> String {
