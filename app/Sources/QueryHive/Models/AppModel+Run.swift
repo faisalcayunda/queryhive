@@ -63,10 +63,11 @@ extension AppModel {
     static let footerCountInterval: TimeInterval = 0.2
 
     /// `source` decides what is sent: the selection, the statement under the caret, or everything.
-    /// `onColumns`, when given, is called with the run's own `columns` event (the names of what it
-    /// returns) while the run is still going: opening a table uses it to write the column list.
+    /// `onSuccess`, when given, is called with the columns the run itself returned, once, when it has
+    /// finished successfully and was not stopped; a failed or stopped run never calls it. Opening a
+    /// table uses it to write the column list.
     func preview(_ tab: QueryTab, from source: QuerySource = .selection,
-                 onColumns: (([Event.Column]) -> Void)? = nil) {
+                 onSuccess: (([Event.Column]) -> Void)? = nil) {
         Self.flushEditorsNow()
         guard !tab.previewing, tab.stage != .running else { return }
         guard let connection = connection(for: tab) else { return }
@@ -93,12 +94,12 @@ extension AppModel {
             awaitConfirmation(request) { [weak self] in
                 self?.runPreview(tab, sql: sql, connection: connection,
                                  env: env.merging(RunConfirmation.approvalSettings(true)) { _, new in new },
-                                 baseRun: true, origin: origin, onColumns: onColumns)
+                                 baseRun: true, origin: origin, onSuccess: onSuccess)
             }
             return
         }
         runPreview(tab, sql: sql, connection: connection, env: env, baseRun: true, origin: origin,
-                   onColumns: onColumns)
+                   onSuccess: onSuccess)
     }
 
     /// The statements a script holds, split the way the engine splits them, so the confirmation
@@ -341,7 +342,7 @@ extension AppModel {
                             baseSQL: String? = nil, activeSort: ActiveSort? = nil,
                             serverSearch: String? = nil, baseRun: Bool = false,
                             origin: (sent: SentSQL, snapshot: String)? = nil,
-                            onColumns: (([Event.Column]) -> Void)? = nil) {
+                            onSuccess: (([Event.Column]) -> Void)? = nil) {
         let store: StoreRows
         do { store = try engine.makeResultStore() } catch {
             tab.previewError = "Could not open a result store: \(error.localizedDescription)"
@@ -407,7 +408,6 @@ extension AppModel {
                 PerfSignposts.stamp(.columns, onlyFirst: true)
                 columns = event.columns ?? []
                 store.setColumns(columns)
-                onColumns?(columns)
                 // Paint the header as soon as it is known rather than after the first batch.
                 tab.preview = PreviewResult(columns: columns, rowCount: 0, truncated: false,
                                             queryID: nil, elapsedMS: 0)
@@ -473,6 +473,7 @@ extension AppModel {
                 }
                 return
             }
+            if !stopped { onSuccess?(columns) }
             Self.recordHistory(connection: connection, sql: sql, startedAt: startedAt,
                                outcome: stopped ? "cancelled" : "ok", elapsedMS: tab.preview?.elapsedMS,
                                rowCount: tab.preview?.rowCount ?? fetched, error: nil,

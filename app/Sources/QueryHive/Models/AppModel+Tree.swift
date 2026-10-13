@@ -13,16 +13,18 @@ extension AppModel {
     /// context-menu action; opening it is what the double-click is for.
     ///
     /// The query lists the table's columns (`OpenTableStatement`), not `*`, so it is one clause the
-    /// person can edit, and it costs no second query on the server:
+    /// person can edit, and it costs no second query on the server: the tab runs
+    /// `SELECT * FROM <table>` once, exactly as before, and when that run has finished successfully
+    /// the tab's text is rewritten to the columns that run itself returned. The rows on screen are
+    /// that run's and the list is what it returned, so the text and the grid agree. A run that fails
+    /// or is stopped leaves the `SELECT *` (and the server's error mark on it), and so do a table that
+    /// reports no columns and one with more than `OpenTableStatement.maxColumns`.
     ///
-    /// - When the object screen's inspector has already described the table (`inspectedColumns`),
-    ///   or the caller passes the columns, the statement is written with them and run once.
-    /// - Otherwise the tab opens and runs `SELECT * FROM <table>` once, exactly as before, and when
-    ///   that run's own `columns` event names the columns the tab's text is rewritten to the list.
-    ///   The rows on screen are that run's, and the list is what that run returned, so the text and
-    ///   the grid agree; a failed run, a table that reports no columns and one with more than
-    ///   `OpenTableStatement.maxColumns` all leave the `SELECT *` as it was.
-    func openTable(_ node: TreeNode, columns known: [String]? = nil) {
+    /// No cache is consulted. The object screen's inspector also learns columns, but what it holds is
+    /// whatever was true when it asked, and a column dropped or added since would break the opened
+    /// table or silently leave a column out; reusing it would save no query anyway, because this
+    /// one run is the query.
+    func openTable(_ node: TreeNode) {
         guard let name = node.insertableText else { return }
         newTab(connectionID: node.connectionID)
         guard let tab = selectedTab else { return }
@@ -33,16 +35,11 @@ extension AppModel {
         tab.sourceTable = name
         let kind = node.connectionKind
         let star = OpenTableStatement.sql(table: name, columns: [], kind: kind)
-        if let columns = known ?? inspectedColumns(for: node), !columns.isEmpty {
-            tab.sql = OpenTableStatement.sql(table: name, columns: columns, kind: kind)
-            preview(tab)
-        } else {
-            tab.sql = star
-            preview(tab, onColumns: { [weak self, weak tab] reported in
-                guard let self, let tab, self.tabs.contains(where: { $0 === tab }) else { return }
-                self.writeColumnList(reported.map(\.name), table: name, kind: kind, over: star, in: tab)
-            })
-        }
+        tab.sql = star
+        preview(tab, onSuccess: { [weak self, weak tab] reported in
+            guard let self, let tab, self.tabs.contains(where: { $0 === tab }) else { return }
+            self.writeColumnList(reported.map(\.name), table: name, kind: kind, over: star, in: tab)
+        })
         // Rows take the window. Opening a table is asking to *see* it, and the editor is still
         // there one click away; the previous behaviour showed the rows in a panel under a query the
         // user had not written.
@@ -50,14 +47,22 @@ extension AppModel {
         panelExpanded = true
     }
 
-    /// Replaces the `SELECT *` a table opened with by its column list, from the run's own answer.
+    /// Replaces the `SELECT *` a table opened with by its column list, from the finished run's answer.
     ///
     /// Only while the text is still exactly that `SELECT *`: anything the person has typed since is
     /// theirs, and the editor's own rule (typing not yet written back wins over an outside write) is
     /// honoured by flushing first, as everything that reads a tab's SQL does. The write goes through
-    /// `tab.sql` like loading a statement from the history, which is how the editor takes text from
-    /// outside: it is not an edit, so the tab is not marked as one. The run's recorded text follows,
-    /// when it is still that run's, so a later search, sort or row count wraps what the editor shows.
+    /// `tab.sql`, which is how the editor takes text from outside (like loading a statement from the
+    /// history): the editor sets its string, so it is not an edit and the tab is not marked as one.
+    /// The run's recorded text follows, when it is still that run's, so a later search, sort or row
+    /// count wraps what the editor shows.
+    ///
+    /// That string write registers no undo step and does not clear the undo stack (the history
+    /// loader's comment says otherwise, wrongly). One rare hazard follows: a person who types into the
+    /// fresh tab and undoes back to exactly the `SELECT *` before the run finishes has a redo stack
+    /// that no longer matches the text, and redoing then applies at the wrong place. The tab keeps no
+    /// edit count to tell that from an untouched one, so it is not guarded; the run that has to finish
+    /// first is the one that returned a one-screen result, and the window is that long.
     private func writeColumnList(_ names: [String], table: String, kind: ConnectionKind,
                                  over star: String, in tab: QueryTab) {
         Self.flushEditorsNow()
@@ -67,20 +72,6 @@ extension AppModel {
         tab.sql = list
         if tab.previewedSQL == star { tab.previewedSQL = list }
         if tab.previewBaseSQL == star { tab.previewBaseSQL = list }
-    }
-
-    /// The columns of a table that an open object screen's inspector has already fetched, in the
-    /// table's order, or `nil` when none has. The tree holds no columns, and this is the one place the
-    /// app keeps any: a second metadata path would be a second answer that could disagree.
-    func inspectedColumns(for node: TreeNode) -> [String]? {
-        for tab in tabs {
-            guard let scope = tab.objectScope, scope.connectionID == node.connectionID,
-                  scope.catalog == (node.database ?? ""), scope.schema == (node.schema ?? ""),
-                  tab.objectDetailTable == node.title, !tab.objectDetailLoading,
-                  tab.objectDetailError == nil, !tab.objectDetailColumns.isEmpty else { continue }
-            return tab.objectDetailColumns.map(\.name)
-        }
-        return nil
     }
 
     /// Opens a schema's (or a MySQL database's) objects in a tab of their own.
@@ -268,12 +259,9 @@ extension AppModel {
     /// already-selected row would look broken exactly when the user is moving fastest. Selecting
     /// first is also what makes the inspector agree with the tab that just opened.
     func openObject(_ tab: QueryTab, row: Int) {
-        // Read before `selectObject`, which clears what the inspector holds for a new selection and
-        // asks again: a table the inspector had already described is opened with those columns.
-        let known = objectNode(tab, row: row).flatMap { inspectedColumns(for: $0) }
         selectObject(tab, row: row)
         guard let node = objectNode(tab, row: row) else { return }
-        openTable(node, columns: known)
+        openTable(node)
     }
 
     /// Inserts one row's table into the active query, the tree's own context-menu action.

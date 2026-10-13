@@ -78,56 +78,20 @@ final class OpenTableModelTests: XCTestCase {
                                                 Event(event: "done", rows: 0)]))
     }
 
-    // MARK: Columns already known
-
-    func testAKnownColumnListIsWrittenAndRunAtOnceWithoutAskingTheServer() throws {
-        let (model, engine, node, _) = makeModel()
-        scriptColumns(engine, columns)
-        model.openTable(node, columns: ["id", "Nama", "order"])
-        let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertEqual(tab.sql, explicit)
-        XCTAssertEqual(tab.sourceTable, qualified)
-        XCTAssertTrue(wait { self.previews(engine).count == 1 })
-        XCTAssertEqual(previews(engine).first?.env["SQL"], explicit, "the statement that is run is the statement that is shown")
-        XCTAssertNotEqual(previews(engine).first?.env["LIMIT"], "1", "this is the real run, not the probe")
+    private func done(cancelled: Bool = false) -> Event {
+        var event = Event(event: "done", rows: 0)
+        if cancelled { event.cancelled = true }
+        return event
     }
 
-    func testAnInspectorThatHasDescribedTheTableSuppliesItsColumns() throws {
-        let (model, engine, node, connection) = makeModel()
-        scriptColumns(engine, columns)
-        let objects = QueryTab(title: "public")
-        objects.connectionID = connection.id
-        objects.objectScope = ObjectScope(connectionID: connection.id, catalog: "", schema: "public")
-        objects.objectDetailTable = "penerima_manfaat"
-        objects.objectDetailColumns = columns
-        model.tabs.append(objects)
-        XCTAssertEqual(model.inspectedColumns(for: node), ["id", "Nama", "order"])
-        model.openTable(node)
-        XCTAssertEqual(model.selectedTab?.sql, explicit)
-        XCTAssertTrue(wait { self.previews(engine).count == 1 }, "no probe: the inspector already knew")
-        XCTAssertEqual(previews(engine).count, 1)
+    private func waitForTheRunToEnd(_ tab: QueryTab) {
+        XCTAssertTrue(wait { !tab.previewing && tab.stage != .running })
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
 
-    func testAnInspectorStillLoadingOrFailedOrAboutAnotherTableSuppliesNothing() {
-        let (model, _, node, connection) = makeModel()
-        let objects = QueryTab(title: "public")
-        objects.objectScope = ObjectScope(connectionID: connection.id, catalog: "", schema: "public")
-        objects.objectDetailTable = "penerima_manfaat"
-        objects.objectDetailColumns = columns
-        model.tabs.append(objects)
-        objects.objectDetailLoading = true
-        XCTAssertNil(model.inspectedColumns(for: node))
-        objects.objectDetailLoading = false
-        objects.objectDetailError = "boom"
-        XCTAssertNil(model.inspectedColumns(for: node))
-        objects.objectDetailError = nil
-        objects.objectDetailTable = "another"
-        XCTAssertNil(model.inspectedColumns(for: node))
-    }
+    // MARK: One run, then the text follows it
 
-    // MARK: Columns not known: one run, then the text follows it
-
-    func testUnknownColumnsRunSelectStarOnceAndThenTheTextBecomesTheRunsOwnColumnList() throws {
+    func testTheTabRunsSelectStarOnceAndThenTheTextBecomesTheRunsOwnColumnList() throws {
         let (model, engine, node, _) = makeModel()
         scriptColumns(engine, columns)
         model.openTable(node)
@@ -135,7 +99,7 @@ final class OpenTableModelTests: XCTestCase {
         // At once, as before: the tab is there holding the query it runs.
         XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
         XCTAssertTrue(wait { tab.sql == self.explicit }, "the text did not become the column list: \(tab.sql)")
-        XCTAssertTrue(wait { !tab.previewing })
+        waitForTheRunToEnd(tab)
         // One query on the server, and it is the `SELECT *` as it always was, not a one-row probe.
         XCTAssertEqual(previews(engine).count, 1, "a second query was run: \(engine.calls.map(\.command))")
         XCTAssertEqual(previews(engine)[0].env["SQL"], "SELECT * FROM \(qualified)")
@@ -147,15 +111,41 @@ final class OpenTableModelTests: XCTestCase {
         XCTAssertNil(tab.previewError)
     }
 
-    func testAFailedRunLeavesSelectStarAndSaysNothingAboutColumns() throws {
+    func testARunThatFailsBeforeAnyColumnsLeavesSelectStarAndSaysNothingAboutColumns() throws {
         let (model, engine, node, _) = makeModel()
         engine.answer("preview", with: .failure(reason: "connection refused"))
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertTrue(wait { !tab.previewing })
+        waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "exactly as today")
         XCTAssertEqual(previews(engine).count, 1)
         XCTAssertEqual(tab.previewError, "connection refused", "the run's own error, and nothing else")
+    }
+
+    func testARunThatFailsAfterTheColumnsLeavesSelectStarAndTheServersErrorMark() throws {
+        let (model, engine, node, _) = makeModel()
+        var error = Event(event: "error")
+        error.message = "division by zero"
+        error.position = 8
+        engine.answer("preview", with: .failure(events: [Event(event: "columns", columns: columns), error],
+                                                reason: "division by zero"))
+        model.openTable(node)
+        let tab = try XCTUnwrap(model.selectedTab)
+        waitForTheRunToEnd(tab)
+        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "the header arrived and the run still failed")
+        XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)")
+        let mark = try XCTUnwrap(tab.errorMark, "the server's error position was dropped")
+        XCTAssertEqual(mark.sqlSnapshot, "SELECT * FROM \(qualified)")
+    }
+
+    func testAStoppedRunLeavesSelectStar() throws {
+        let (model, engine, node, _) = makeModel()
+        engine.answer("preview", with: .events([Event(event: "columns", columns: columns), done(cancelled: true)]))
+        model.openTable(node)
+        let tab = try XCTUnwrap(model.selectedTab)
+        waitForTheRunToEnd(tab)
+        XCTAssertEqual(tab.preview?.stopped, true)
+        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
     }
 
     func testARunThatCannotStartLeavesSelectStar() throws {
@@ -163,7 +153,7 @@ final class OpenTableModelTests: XCTestCase {
         engine.answer("preview", with: .cannotStart(reason: "no engine"))
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertTrue(wait { !tab.previewing })
+        waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
     }
 
@@ -172,35 +162,57 @@ final class OpenTableModelTests: XCTestCase {
         scriptColumns(engine, [])
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertTrue(wait { !tab.previewing })
-        spinLoop()
+        waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
         XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)")
     }
 
-    func testAVeryWideTableKeepsSelectStarWhateverTheRunReported() throws {
-        let (model, engine, node, _) = makeModel()
-        scriptColumns(engine, (1...(OpenTableStatement.maxColumns + 1)).map { Event.Column(name: "c\($0)", type: "int") })
-        model.openTable(node)
-        let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertTrue(wait { !tab.previewing })
-        spinLoop()
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
+    func testTheLimitIsTwoHundredColumnsAsTheModelSeesIt() throws {
+        for count in [OpenTableStatement.maxColumns, OpenTableStatement.maxColumns + 1] {
+            let (model, engine, node, _) = makeModel()
+            scriptColumns(engine, (1...count).map { Event.Column(name: "c\($0)", type: "int") })
+            model.openTable(node)
+            let tab = try XCTUnwrap(model.selectedTab)
+            waitForTheRunToEnd(tab)
+            if count == OpenTableStatement.maxColumns {
+                XCTAssertTrue(tab.sql.hasPrefix("SELECT c1, c2, "), "\(count) columns are listed: \(tab.sql.prefix(40))")
+                XCTAssertTrue(tab.sql.hasSuffix(", c200 FROM \(qualified)"))
+            } else {
+                XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "\(count) columns keep the star")
+            }
+        }
     }
 
-    func testTextTypedBeforeTheColumnsArriveIsNeitherOverwrittenNorTouched() throws {
+    func testTextTypedBeforeTheRunFinishesIsNeitherOverwrittenNorTouched() throws {
         let (model, engine, node, _) = makeModel()
         scriptColumns(engine, columns)
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         tab.sql = "SELECT 1"   // before the run's answer, which arrives on the main queue
-        XCTAssertTrue(wait { !tab.previewing })
-        spinLoop()
+        waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.sql, "SELECT 1", "the person's text was written over")
         XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)", "and the run's record is still what ran")
     }
 
-    func testATabClosedBeforeTheColumnsArriveIsLeftAlone() throws {
+    /// Typing the editor has not written back yet is handed to the model by `flushEditors`, and the
+    /// rewrite has to ask for it first: without the flush it would see the untouched `SELECT *` and
+    /// write over the person's text.
+    func testTheRewriteFlushesTheEditorBeforeItLooksAtTheText() throws {
+        let (model, engine, node, _) = makeModel()
+        scriptColumns(engine, columns)
+        let saved = AppModel.flushEditors
+        defer { AppModel.flushEditors = saved }
+        model.openTable(node)
+        let tab = try XCTUnwrap(model.selectedTab)
+        // An editor with typing in it that it has not published: the flush is what publishes it.
+        var pending: String? = "SELECT 1 -- typed, not yet written back"
+        AppModel.flushEditors = { if let text = pending { tab.sql = text; pending = nil } }
+        waitForTheRunToEnd(tab)
+        XCTAssertNil(pending, "the rewrite never asked the editor for its text")
+        XCTAssertEqual(tab.sql, "SELECT 1 -- typed, not yet written back")
+    }
+
+    func testATabClosedBeforeTheRunFinishesIsLeftAlone() throws {
         let (model, engine, node, _) = makeModel()
         scriptColumns(engine, columns)
         model.openTable(node)
@@ -221,38 +233,47 @@ final class OpenTableModelTests: XCTestCase {
         XCTAssertEqual(previews(engine)[1].env["SQL"], explicit)
     }
 
-    private func spinLoop() { RunLoop.current.run(until: Date().addingTimeInterval(0.3)) }
-
     // MARK: What the column list must not change
 
-    func testCellEditsStillWriteBackToTheOpenedTable() throws {
+    func testACellEditStillWritesBackToTheOpenedTableAfterTheRewrite() throws {
         let (model, engine, node, connection) = makeModel()
         scriptColumns(engine, columns)
-        model.openTable(node, columns: ["id", "Nama", "order"])
+        model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
-        XCTAssertEqual(tab.sql, explicit)
-        // The table the grid writes to is `sourceTable`, which is the table's name, never a reading
-        // of the statement.
+        XCTAssertTrue(wait { tab.sql == self.explicit })
+        waitForTheRunToEnd(tab)
+        // Everything the plan reads comes from the tab as it is after the rewrite: the table the
+        // grid writes to, and the columns the run reported.
+        let result = try XCTUnwrap(tab.preview?.columns)
+        XCTAssertEqual(result.map(\.name), ["id", "Nama", "order"])
         var edits = CellEdits()
         edits.edit("Baru", at: CellKey(row: 0, column: 1), original: "Lama")
-        let plan = WritePlan.build(edits: edits, rows: [["1", "Lama", "2"]], columns: columns,
+        let plan = WritePlan.build(edits: edits, rows: [["1", "Lama", "2"]], columns: result,
                                    table: tab.sourceTable, kind: connection.kind)
         XCTAssertEqual(plan.table, qualified)
         XCTAssertEqual(plan.statements.count, 1)
         XCTAssertTrue(plan.sql.first?.contains("UPDATE \(qualified)") == true, "\(plan.sql)")
         XCTAssertTrue(plan.sql.first?.contains("\"Nama\"") == true)
-        // And what makes the grid editable at all is the table's name being there.
+        // The grid offers to commit because the table's name is there, not because of the statement.
         XCTAssertNotNil(tab.sourceTable)
     }
 
-    func testTheSortAndSearchWrappersStillWrapTheColumnListStatement() throws {
+    func testServerSortAndSearchWrapTheRewrittenStatement() throws {
         let (model, engine, node, connection) = makeModel()
         scriptColumns(engine, columns)
-        model.openTable(node, columns: ["id", "Nama", "order"])
+        model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
-        let sorted = try ServerSort.order(sql: tab.sql, column: "Nama", direction: .ascending, kind: connection.kind)
-        XCTAssertEqual(sorted, "SELECT * FROM (\n\(explicit)\n) AS queryhive_sort ORDER BY \"Nama\" ASC NULLS LAST")
-        let searched = try SearchStatement.crossColumn(sql: tab.sql, term: "x", columns: columns, kind: connection.kind)
+        XCTAssertTrue(wait { tab.previewBaseSQL == self.explicit })
+        waitForTheRunToEnd(tab)
+        // The model's own server sort, which wraps `previewBaseSQL`.
+        model.sortOnServer(tab, column: Event.Column(name: "Nama", type: "varchar"), source: 1, direction: .ascending)
+        XCTAssertTrue(wait { self.previews(engine).count == 2 }, "the sort was not sent")
+        XCTAssertEqual(previews(engine)[1].env["SQL"],
+                       "SELECT * FROM (\n\(explicit)\n) AS queryhive_sort ORDER BY \"Nama\" ASC NULLS LAST")
+        let searched = try SearchStatement.crossColumn(sql: try XCTUnwrap(tab.previewBaseSQL), term: "x",
+                                                       columns: columns, kind: connection.kind)
         XCTAssertTrue(searched.hasPrefix("SELECT * FROM (\n\(explicit)\n) AS queryhive_search WHERE "), searched)
     }
+
+    private func spinLoop() { RunLoop.current.run(until: Date().addingTimeInterval(0.3)) }
 }
