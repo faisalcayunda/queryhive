@@ -77,7 +77,7 @@ final class ChromeParityTests: XCTestCase {
             switch self {
             case .shell: CGSize(width: Shell.minWidth, height: 800)
             case .settings: CGSize(width: 560, height: 640)
-            case .connectionSheet: CGSize(width: 620, height: 660)
+            case .connectionSheet: CGSize(width: 820, height: 620)
             case .hostKeySheet: CGSize(width: 520, height: 440)
             }
         }
@@ -109,6 +109,12 @@ final class ChromeParityTests: XCTestCase {
         Scene(name: "connection", seed: "connection", surface: .connectionSheet),
         // V-11 (W11-T3): the tunnelled connection form and the host-key sheet, first use and refusal.
         Scene(name: "connection-ssh", seed: "connection-ssh", surface: .connectionSheet),
+        // V-15 (W13-T19): the sectioned connection form, one scene per thing it draws that the two above do not.
+        Scene(name: "connection-trino", seed: "connection-trino", surface: .connectionSheet),
+        Scene(name: "connection-mysql", seed: "connection-mysql", surface: .connectionSheet),
+        Scene(name: "connection-new", seed: "connection-new", surface: .connectionSheet),
+        Scene(name: "connection-limits", seed: "connection-limits", surface: .connectionSheet),
+        Scene(name: "connection-appearance", seed: "connection-appearance", surface: .connectionSheet),
         Scene(name: "host-key-unknown", seed: "host-key-unknown", surface: .hostKeySheet),
         Scene(name: "host-key-changed", seed: "host-key-changed", surface: .hostKeySheet),
     ]
@@ -161,7 +167,8 @@ final class ChromeParityTests: XCTestCase {
     }
 
     override func tearDown() {
-        ConnectionEditorSheet.revealTunnelForSnapshot = false
+        ConnectionEditorSheet.initialSectionForSnapshot = nil
+        ConnectionEditorSheet.newKindForSnapshot = nil
         HostKeyCenter.shared.dismiss()
         closeWindows()
         ThemeStore.shared.unpinSurface()

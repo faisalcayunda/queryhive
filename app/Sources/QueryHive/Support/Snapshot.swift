@@ -1006,8 +1006,17 @@ enum Snapshot {
                                        statementTimeoutMS: 30_000)
             model.connections.append(tunnelled)
             model.rebuildTree()
-            ConnectionEditorSheet.revealTunnelForSnapshot = true
+            ConnectionEditorSheet.initialSectionForSnapshot = .sshTunnel
             model.presentConnectionEditor(tunnelled.id)
+        case "connection-new":
+            // W13-T19 (V-15): a new PostgreSQL connection's form, with nothing filled in, so the
+            // sidebar's badges and the footer's summary of what is missing are in the picture.
+            ConnectionEditorSheet.newKindForSnapshot = .postgres
+            model.presentConnectionEditor(nil)
+        case "connection-limits", "connection-appearance":
+            // W13-T19 (V-15): the sections the saved Trino connection's General pane does not show.
+            ConnectionEditorSheet.initialSectionForSnapshot = scene == "connection-limits" ? .limits : .appearance
+            model.presentConnectionEditor(primary.id)
         case "host-key-unknown", "host-key-changed":
             // V-11: the host-key sheet, first use and refusal. Fixed text, so the picture does not
             // depend on any machine's known_hosts.

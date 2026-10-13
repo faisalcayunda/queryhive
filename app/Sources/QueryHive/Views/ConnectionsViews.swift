@@ -105,7 +105,7 @@ struct ColorSwatchPicker: View {
 }
 
 /// Runs `test` with unsaved draft values, independent of anything a query tab is doing.
-private enum TestState {
+enum TestState {
     case idle, running
     case success(Int)
     case failure(String)
@@ -115,44 +115,53 @@ private enum TestState {
 /// Test, Save and Delete. Nothing behind it changes until Save.
 struct ConnectionEditorSheet: View {
     let target: ConnectionEditorTarget
-    @Environment(AppModel.self) private var model
+    @Environment(AppModel.self) var model
 
     private var connectionID: UUID? { target.connectionID }
     @Environment(\.dismiss) private var dismiss
 
     /// Which of the sheet's three states is showing. A saved connection starts at `.form`.
-    private enum Step { case typePicker, url, form }
+    enum Step { case typePicker, url, form }
 
-    @State private var step = Step.typePicker
+    @State var step = Step.typePicker
     @State private var urlText = ""
     @State private var urlError: String?
-    @State private var editingID: UUID?
+    @State var editingID: UUID?
     /// Every field of the connection and the secrets typed beside it (`ConnectionDraft`).
-    @State private var draft = ConnectionDraft.new()
-    @State private var aliasPreview: Result<SSHAliasInfo, SSHAliasError>?
+    @State var draft = ConnectionDraft.new()
+    @State var aliasPreview: Result<SSHAliasInfo, SSHAliasError>?
     /// What the URL step read and left out, for one line on the form.
-    @State private var urlNote: String?
+    @State var urlNote: String?
     /// Whether the last Test failed on the host key, so trusting the key can run it again.
-    @State private var lastTestWasHostKey = false
+    @State var lastTestWasHostKey = false
     @State private var confirmDelete = false
-    @State private var testState = TestState.idle
+    @State var testState = TestState.idle
     @State private var testProcess: (any EngineRun)?
     @State private var testRun = UUID()
-    @State private var attemptedSave = false
+    @State var attemptedSave = false
     /// The id a brand-new connection will save under, reused across retries so a Save that fails
     /// (a JSON write error) doesn't mint a fresh UUID next try and orphan the Keychain item the
     /// first attempt already wrote.
     @State private var draftID = UUID()
+    /// The section the sidebar has selected.
+    @State var section = ConnectionFormSection.general
+    @FocusState var focus: ConnectionField?
+    /// A field to focus once the section that holds it is on screen: `FocusState` ignores a field
+    /// that is not mounted, so the jump to another section hands it over to that section.
+    @State private var pendingFocus: ConnectionField?
 
-    /// Set by the `connection-ssh` snapshot scene (see `formStep`). Never set by the app itself.
-    nonisolated(unsafe) static var revealTunnelForSnapshot = false
+    /// Set by the snapshot scenes that show a section other than General. Never set by the app itself.
+    nonisolated(unsafe) static var initialSectionForSnapshot: ConnectionFormSection?
+    /// Set by the snapshot scene that shows a new connection's form, not the type grid. Never set
+    /// by the app itself.
+    nonisolated(unsafe) static var newKindForSnapshot: ConnectionKind?
 
     private var original: Connection? { model.connections.first { $0.id == editingID } }
 
     private var isDirty: Bool { draft.isDirty(against: original) }
 
 
-    private var resolvedAlias: SSHAliasInfo? {
+    var resolvedAlias: SSHAliasInfo? {
         if case .success(let info)? = aliasPreview { return info }
         return nil
     }
@@ -161,21 +170,25 @@ struct ConnectionEditorSheet: View {
     /// and Postgres cannot open a connection without a database at all; the tunnel's host, user and
     /// key file count when it is on (an alias may supply the user and the key). Port and encryption
     /// always carry a value; a blank password simply means "connect without one".
-    private var issues: [ConnectionField] {
+    var issues: [ConnectionField] {
         ConnectionFormIssues.fields(for: draft.formState, resolved: resolvedAlias)
     }
 
-    private var missingRequired: Set<String> { Set(issues.map(\.rawValue)) }
+    var missingRequired: Set<String> { Set(issues.map(\.rawValue)) }
 
     var body: some View {
         VStack(spacing: 0) {
             switch step {
-            case .typePicker: typePicker
-            case .url: urlStep
+            // The type grid and the URL step keep the 620 pt column they have always had, centred
+            // in the wider frame the form needs.
+            case .typePicker: typePicker.frame(maxWidth: 620)
+            case .url: urlStep.frame(maxWidth: 620)
             case .form: formStep
             }
         }
-        .frame(width: 620, height: 660)
+        // The size of the form with its sidebar. Every pane inside is allowed to be shorter than
+        // it asks for (`minHeight: 0`), so this frame is never the thing hiding a taller minimum.
+        .frame(width: 820, height: 620)
         .background(Tone.canvas)
         // No `.preferredColorScheme(.dark)` here. It used to pin the sheet dark, and that is what
         // made the editor unreadable in light mode: `Tone.canvas` follows the *stored mode* (light
@@ -189,7 +202,7 @@ struct ConnectionEditorSheet: View {
         } message: {
             Text("This removes the saved connection and its Keychain password. This can't be undone.")
         }
-        .onAppear { load() }
+        .onAppear { load(); applySnapshotHooks() }
         .onDisappear { testProcess?.terminate() }
         // A host key refused during Test is asked about here, over this sheet: a sheet cannot be
         // presented over a sheet from the view that presented the first one.
@@ -315,22 +328,71 @@ struct ConnectionEditorSheet: View {
     }
 
     private var formStep: some View {
-        VStack(spacing: 0) {
-            header
-            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
-            ScrollViewReader { proxy in
+        HStack(spacing: 0) {
+            ConnectionFormSidebar(kind: draft.kind, isSaved: editingID != nil, selection: $section,
+                                  issueCounts: [:]) { confirmDelete = true }
+                .frame(width: 200)
+                .frame(minHeight: 0, maxHeight: .infinity)
+            Rectangle().fill(Tone.ink.opacity(0.08)).frame(width: 1)
+            VStack(spacing: 0) {
+                ConnectionFormHeader(title: editingID == nil ? "New Connection" : (draft.name.isEmpty ? "Connection" : draft.name),
+                                     isDirty: isDirty)
+                Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
                 ScrollView {
-                    form.padding(20)
+                    pane
+                        .background(FrameMarker(name: "connection-pane-\(section.rawValue)"))
+                        .padding(20)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .onAppear {
-                    // Snapshot scaffolding, like `previewTestCount`: the W11 sections sit below the
-                    // fold, and a picture of the form that never shows them would not be a picture of
-                    // them. Never true in the running app.
-                    if Self.revealTunnelForSnapshot { proxy.scrollTo("tunnel", anchor: .top) }
+                .id(section)
+                .frame(minHeight: 0, maxHeight: .infinity)
+                .task(id: section) {
+                    guard let field = pendingFocus else { return }
+                    pendingFocus = nil
+                    await Task.yield()
+                    focus = field
                 }
+                Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
+                ConnectionFormFooter(isTesting: isTesting, status: footerStatus, canSave: isDirty,
+                                     onTest: runTest, onCancel: { dismiss() }, onSave: save)
             }
-            Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
-            footer
+            .frame(minWidth: 0, maxWidth: .infinity)
+        }
+    }
+
+    private var isTesting: Bool {
+        if case .running = testState { return true }
+        return false
+    }
+
+    private var footerStatus: ConnectionFormFooter.Status {
+        switch testState {
+        case .idle, .running: .none
+        case .success(let level):
+            .success("Connected · \(pluralized(level, draft.kind == .postgres ? "schema" : "catalog"))")
+        case .failure(let message): .failure(message)
+        }
+    }
+
+    /// Save and Test with something missing: the first section that has a problem comes up (the one
+    /// in view first), and the first field in it takes the focus. A field in a section that is not
+    /// on screen yet cannot be focused, so it waits for its section.
+    private func reveal(_ problems: [ConnectionField]) {
+        attemptedSave = true
+        let grouped = ConnectionFormIssues.bySection(problems)
+        let order = [section] + ConnectionFormSection.allCases.filter { $0 != section }
+        if let target = order.first(where: { grouped[$0] != nil }), let field = grouped[target]?.first {
+            if target == section { focus = field } else { pendingFocus = field; section = target }
+        }
+        Announcer.post(ConnectionFormIssues.summary(problems, visible: section))
+    }
+
+    /// The snapshot scenes that open on another section, or on a new connection's form.
+    private func applySnapshotHooks() {
+        section = Self.initialSectionForSnapshot ?? .general
+        if editingID == nil, let kind = Self.newKindForSnapshot {
+            draft.choose(kind)
+            step = .form
         }
     }
 
@@ -339,6 +401,7 @@ struct ConnectionEditorSheet: View {
     private func choose(_ option: ConnectionKind) {
         draft.choose(option)
         step = .form
+        if Self.newKindForSnapshot == nil { pendingFocus = .name }
     }
 
 
@@ -360,481 +423,7 @@ struct ConnectionEditorSheet: View {
         urlNote = parsed.ignored.isEmpty ? nil : "Ignored from the URL: " + parsed.ignored.joined(separator: ", ") + "."
         draft.apply(parsed)
         step = .form
-    }
-
-    private var header: some View {
-        HStack(spacing: 14) {
-            ConnectionBrandTile(kind: draft.kind, size: 56)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(editingID == nil ? "New Connection" : (draft.name.isEmpty ? "Connection" : draft.name))
-                    .font(.ui(18, weight: .bold, rounded: true))
-                    .lineLimit(1)
-                Text(editingID == nil ? "Not saved yet." : "Saved \(draft.kind.label) connection.")
-                    .font(.ui(12))
-                    .foregroundStyle(Tone.secondary)
-            }
-            Spacer(minLength: 12)
-            if isDirty {
-                Label("Unsaved changes", systemImage: "exclamationmark.circle")
-                    .font(.ui(11, weight: .medium))
-                    .foregroundStyle(Tone.amber)
-                    .labelStyle(.titleAndIcon)
-            }
-            PillButton(title: "Change Type…", symbol: "arrow.triangle.2.circlepath", compact: true) { step = .typePicker }
-                .help("Pick a different driver — this clears the fields that only applied to \(draft.kind.label)")
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 84)
-    }
-
-    private var form: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            LabeledField("Name · Required") {
-                TextField("\(draft.kind.label) production", text: $draft.name)
-                    .field(invalid: attemptedSave && missingRequired.contains("name"))
-                requiredHint("name")
-            }
-            LabeledField("Color") { ColorSwatchPicker(selection: $draft.color) }
-            LabeledField("Host · Required") {
-                TextField("db.internal", text: $draft.host).field(invalid: attemptedSave && missingRequired.contains("host"))
-                requiredHint("host")
-            }
-            HStack(alignment: .top, spacing: 12) {
-                if draft.kind == .trino {
-                    // Three options, not two, because Trino's encryption decision has four
-                    // outcomes and the two scheme words can only spell three of them. The
-                    // fourth — "https when the coordinator offers it, http otherwise" — is
-                    // `prefer`, and it is the shared vocabulary's own word rather than a new
-                    // one: the other two drivers' SSL mode pickers already show it for this
-                    // exact outcome. See `TrinoTransport` for how it reaches the engine.
-                    LabeledField("Transport") {
-                        Segmented(selection: trinoTransport,
-                                  options: draft.caFile.isEmpty ? TrinoTransport.allCases : [.https]) { $0.label }
-                    }
-                    .frame(width: 235)
-                    .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
-                          + "first and keeps plain HTTP only for a coordinator that has no TLS at all — "
-                          + "the certificate is not checked either way.")
-                }
-                LabeledField("Port · Required") {
-                    TextField(String(draft.kind.defaultPort), value: $draft.port, format: .number.grouping(.never))
-                        .field(invalid: attemptedSave && missingRequired.contains("port"))
-                    requiredHint("port")
-                }
-            }
-            LabeledField("User · Required") {
-                TextField("faisal", text: $draft.user).field(invalid: attemptedSave && missingRequired.contains("user"))
-                requiredHint("user")
-            }
-            LabeledField(editingID == nil ? "Password" : "Password · leave blank to keep") {
-                if draft.kind == .trino, draft.dbAuth == .jwt {
-                    tlsNote("Not used: this connection logs in with a JWT, set under Authentication below.")
-                } else {
-                    SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.password)
-                        .field()
-                    Text(passwordHint)
-                        .font(.ui(11))
-                        .foregroundStyle(Tone.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    removeSavedRow(.database)
-                }
-            }
-            HStack(alignment: .bottom, spacing: 12) {
-                LabeledField(draft.kind.databaseLabel + (draft.kind.requiresDatabase ? " · Required" : "")) {
-                    TextField(draft.kind == .trino ? "hive" : "mydb", text: $draft.database)
-                        .field(invalid: attemptedSave && missingRequired.contains("database"))
-                    requiredHint("database")
-                }
-                // Postgres only, and beside the field it modifies: the database named above is where
-                // the tree starts, and this puts a level holding every database this user may open
-                // in front of it.
-                //
-                // "All Databases" rather than the menu's "Show All Databases": this row carries two
-                // checkboxes and the longer label pushed the field beside it narrow enough to wrap
-                // "DATABASE · REQUIRED" onto two lines, which reads as a layout that broke rather
-                // than as two switches.
-                //
-                // `fixedSize`, because this is the only row with two checkboxes on it and the
-                // flexible fields would otherwise squeeze both labels.
-                if draft.kind == .postgres {
-                    InlineCheckbox(label: "All Databases", isOn: $draft.showAllDatabases)
-                        .fixedSize()
-                        .padding(.bottom, 5)
-                        .help("List every database on the server in the object tree, not just the one above.")
-                }
-                if draft.kind.hasSchemaLevel {
-                    LabeledField("Schema") { TextField("public", text: $draft.schema).field() }
-                }
-                // Beside the schema it modifies, not in a section of its own: it is a property of
-                // that field, and reading it as anything else was the previous layout's mistake.
-                // Postgres only — it is the one driver that hides anything.
-                if draft.kind == .postgres {
-                    InlineCheckbox(label: "Show System Schemas", isOn: $draft.showAllSchemas)
-                        .fixedSize()
-                        .padding(.bottom, 5)
-                        .help("List pg_catalog, information_schema and pg_* schemas in the object tree too.")
-                } else if draft.kind == .mysql {
-                    // Same switch, opposite default story: MySQL's system databases are always
-                    // returned by the server, so this one starts hidden and the box reveals them.
-                    //
-                    // `fixedSize` and a layout priority, because MySQL has no schema field and a
-                    // lone Database field expands to the full row width -- which pushed the
-                    // checkbox off the edge entirely rather than sharing the row with it.
-                    InlineCheckbox(label: "Show All", isOn: $draft.showAllSchemas)
-                        .fixedSize()
-                        .layoutPriority(1)
-                        .padding(.bottom, 5)
-                        .help("List information_schema, mysql, performance_schema and sys in the object tree too.")
-                }
-            }
-            if draft.kind.hasSSLModes {
-                LabeledField("SSL mode") {
-                    // With a CA file chosen only the modes that check the certificate make sense.
-                    Segmented(selection: Binding(get: { draft.sslmode }, set: { draft.setTLS(.sslmode($0)) }),
-                              options: draft.kind == .postgres && !draft.caFile.isEmpty ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
-                }
-            } else {
-                // HTTPS is the only Trino transport with a verification answer to give, so it is
-                // the only one that shows the box. `prefer` never checks the certificate — the
-                // mode means "encrypt if you can", both on the attempt and on the fallback —
-                // and in clear there is nothing to check, so neither is offered a control that
-                // could not change the connection.
-                //
-                // The absence is *said* rather than left blank: a control that simply vanishes
-                // reads as a mistake, and an unchecked box reads as an answer. The stored value
-                // stays stored either way, so going back to HTTPS offers the user's last choice
-                // again.
-                switch TrinoTransport(stored: draft.scheme) {
-                case .https:
-                    ChipToggle(label: "Verify the TLS certificate", isOn: $draft.verifyTLS)
-                        .disabled(!draft.caFile.isEmpty)
-                case .prefer:
-                    tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
-                            + "The certificate is not checked.")
-                        .help("`prefer` never verifies: it encrypts when it can and falls back to clear "
-                              + "only when the coordinator answers the handshake with something that is not "
-                              + "TLS. HTTPS with this box off is the transport that says so outright.")
-                case .http:
-                    tlsNote("Plain HTTP: nothing to verify. A password still forces HTTPS — "
-                            + "pick HTTPS to choose how that is verified.")
-                        .help("In clear there is no certificate to check. The engine raises this connection "
-                              + "to HTTPS anyway when a password is stored, which is why the verification "
-                              + "answer lives on the HTTPS transport rather than here.")
-                }
-            }
-
-            // Last, because it is about what may run rather than how to reach the server. The
-            // engine enforces it and this picker only records the choice: the command line and
-            // the MCP server go through the same guard, and neither has this control.
-            LabeledField("Safe Mode") {
-                VStack(alignment: .leading, spacing: 5) {
-                    Segmented(selection: $draft.safeMode, options: ConnectionSafeMode.allCases) { $0.title }
-                    Text(draft.safeMode.detail)
-                        .font(.ui(11))
-                        .foregroundStyle(Tone.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .help("Refused by the engine, not by this window: a `read_only` connection refuses a write "
-                  + "even when the statement comes from the command line or an MCP client.")
-
-            LabeledField("Environment") {
-                VStack(alignment: .leading, spacing: 5) {
-                    Segmented(selection: $draft.environment,
-                              options: [ConnectionEnvironment?.none] + ConnectionEnvironment.allCases.map { Optional($0) }) {
-                        $0?.title ?? "None"
-                    }
-                    Text("A label only. It does not change what Safe Mode allows.")
-                        .font(.ui(11))
-                        .foregroundStyle(Tone.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            // The W11 sections come last, after everything an existing connection already showed.
-            if let urlNote { tlsNote(urlNote) }
-            LabeledField("Statement timeout (seconds)") {
-                VStack(alignment: .leading, spacing: 5) {
-                    TextField("Follow the app setting (\(model.statementTimeoutMS / 1000) s)", text: $draft.timeoutText)
-                        .field(invalid: attemptedSave && missingRequired.contains("timeout"))
-                    tlsNote("Blank follows Settings. 0 means no bound. A statement that overruns is cancelled "
-                            + "on the server. The MCP server never runs unbounded: it uses this, or 60 s.")
-                }
-            }
-            if draft.kind == .trino { authenticationSection }
-            if draft.kind != .mysql { caSection } else {
-                tlsNote("MySQL can't check a certificate against a CA file of your own in this build, "
-                        + "so there is no CA setting for it.")
-            }
-            tunnelSection
-        }
-    }
-
-    // MARK: W11 sections
-
-    /// Trino only: a password, or a bearer token sent over HTTPS.
-    @ViewBuilder private var authenticationSection: some View {
-        LabeledField("Authentication") {
-            VStack(alignment: .leading, spacing: 8) {
-                Segmented(selection: $draft.dbAuth, options: DatabaseAuth.allCases) { $0.title }
-                if draft.dbAuth == .jwt {
-                    SecureField(editingID == nil ? "Paste the token" : "Unchanged", text: $draft.secrets.jwt).field()
-                    removeSavedRow(.jwt)
-                    tlsNote("JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved.")
-                }
-            }
-        }
-    }
-
-    /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store.
-    @ViewBuilder private var caSection: some View {
-        LabeledField("CA certificate") {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    TextField("Use the system trust store", text: caFileBinding)
-                        .field(invalid: attemptedSave && missingRequired.contains("caFile"))
-                    PillButton(title: "Choose…", compact: true) { chooseFile(into: caFileBinding, title: "Choose the CA certificate") }
-                    PillButton(title: "Clear", role: .quiet, compact: true) { draft.setCAFile("") }
-                        .disabled(draft.caFile.isEmpty)
-                }
-                requiredHint("caFile", "File not found")
-                tlsNote("The server certificate is checked against this file only, and its name must match. "
-                        + "For an IP address the certificate needs an IP SAN.")
-            }
-        }
-    }
-
-    @ViewBuilder private var tunnelSection: some View {
-        ChipToggle(label: "Connect through an SSH tunnel", isOn: $draft.sshEnabled)
-            .id("tunnel")
-        if draft.sshEnabled {
-            VStack(alignment: .leading, spacing: 14) {
-                tlsNote("The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it.")
-                LabeledField("SSH host · Required") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            TextField("bastion.corp, or an alias from ~/.ssh/config",
-                                      text: Binding(get: { draft.sshHost },
-                                                    // Typing a host of your own is not picking an alias.
-                                                    set: { draft.sshHost = $0; draft.sshUseConfig = false; refreshAliasPreview() }))
-                                .field(invalid: attemptedSave && missingRequired.contains("sshHost"))
-                            aliasMenu
-                        }
-                        requiredHint("sshHost")
-                        if draft.sshUseConfig, let aliasPreview {
-                            switch aliasPreview {
-                            case .success(let info): tlsNote(info.summary)
-                            case .failure(let failure):
-                                Text(failure.message).font(.ui(11)).foregroundStyle(Tone.coral)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                }
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledField("SSH user · Required") {
-                        TextField(resolvedAlias?.user ?? "deploy", text: $draft.sshUser)
-                            .field(invalid: attemptedSave && missingRequired.contains("sshUser"))
-                        requiredHint("sshUser")
-                    }
-                    LabeledField("SSH port") {
-                        TextField("22", value: Binding(get: { draft.sshPort == 0 ? nil : draft.sshPort }, set: { draft.sshPort = $0 ?? 0 }),
-                                  format: .number.grouping(.never))
-                            .field(invalid: attemptedSave && missingRequired.contains("sshPort"))
-                    }
-                    .frame(width: 120)
-                }
-                LabeledField("SSH authentication") {
-                    Segmented(selection: $draft.sshAuth, options: SSHAuthMethod.allCases) { $0.title }
-                }
-                switch draft.sshAuth {
-                case .agent:
-                    tlsNote("Uses the keys your ssh-agent offers. Nothing is stored.")
-                case .key:
-                    LabeledField("SSH key file · Required") {
-                        HStack(spacing: 8) {
-                            TextField(resolvedAlias?.identityFiles.first ?? "~/.ssh/id_ed25519", text: $draft.sshKeyPath)
-                                .field(invalid: attemptedSave && missingRequired.contains("sshKeyFile"))
-                            PillButton(title: "Choose…", compact: true) { chooseFile(into: $draft.sshKeyPath, title: "Choose the SSH private key") }
-                        }
-                        requiredHint("sshKeyFile")
-                    }
-                    LabeledField(editingID == nil ? "Key passphrase" : "Key passphrase · leave blank to keep") {
-                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.sshPassphrase).field()
-                        removeSavedRow(.sshPassphrase)
-                    }
-                case .password:
-                    LabeledField(editingID == nil ? "SSH password" : "SSH password · leave blank to keep") {
-                        SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.sshPassword).field()
-                        removeSavedRow(.sshPassword)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The `~/.ssh/config` aliases, when there are any. Choosing one fills the host and turns on
-    /// alias mode; the engine then reads the host name, user, port and key from the file.
-    @ViewBuilder private var aliasMenu: some View {
-        let aliases = SSHConfigAliases.current.hosts()
-        if !aliases.isEmpty {
-            Menu {
-                ForEach(aliases, id: \.self) { alias in
-                    Button(alias) { draft.sshHost = alias; draft.sshUseConfig = true; refreshAliasPreview() }
-                }
-            } label: {
-                Text("Aliases")
-            }
-            .menuStyle(.button)
-            .fixedSize()
-        }
-    }
-
-    private func refreshAliasPreview() {
-        aliasPreview = draft.sshUseConfig && !draft.sshHost.isEmpty ? SSHConfigAliases.current.resolve(draft.sshHost) : nil
-    }
-
-    /// "Remove saved…" for one secret, shown only when the Keychain has one and the person has not
-    /// already staged its removal. Nothing is deleted until Save, and an empty field alone never
-    /// deletes anything: the form cannot show a saved secret, so blank can only mean "keep".
-    @ViewBuilder private func removeSavedRow(_ slot: ConnectionKeychain.Slot) -> some View {
-        if let id = editingID, AppModel.secretStore.contains(slot: slot, for: id) {
-            if draft.secrets.removals.contains(slot) {
-                HStack(spacing: 8) {
-                    Text("The saved \(AppModel.secretName(slot)) is removed when you save.")
-                        .font(.ui(11)).foregroundStyle(Tone.amber)
-                    PillButton(title: "Undo", role: .quiet, compact: true) { draft.secrets.removals.remove(slot) }
-                }
-            } else {
-                PillButton(title: "Remove saved…", role: .destructive, compact: true) { draft.secrets.removals.insert(slot) }
-                    .help("Takes the saved \(AppModel.secretName(slot)) out of the Keychain when you save")
-            }
-        }
-    }
-
-    private func chooseFile(into binding: Binding<String>, title: String) {
-        let panel = NSOpenPanel()
-        panel.title = title
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        if panel.runModal() == .OK, let url = panel.url { binding.wrappedValue = url.path }
-    }
-
-    /// The picker's own binding over the string the connection stores, so the third option
-    /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
-    /// The CA field binds through the draft, so the rule that a CA needs a verifying mode holds
-    /// however the path changes (typing, Choose…, Clear).
-    private var caFileBinding: Binding<String> {
-        Binding(get: { draft.caFile }, set: { draft.setCAFile($0) })
-    }
-
-    private var trinoTransport: Binding<TrinoTransport> {
-        Binding(get: { TrinoTransport(stored: draft.scheme) },
-                set: { draft.setScheme($0.rawValue) })
-    }
-
-    /// One spoken line where a control would be, for a transport with no verification to answer.
-    private func tlsNote(_ text: String) -> some View {
-        Text(text)
-            .font(.ui(11))
-            .foregroundStyle(Tone.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var passwordHint: String {
-        switch draft.kind {
-        case .trino: "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https. Prefer is the exception: it starts on HTTPS and falls back to clear only when the coordinator has no TLS."
-        case .postgres: "Postgres accepts a password over any SSL mode, including \"prefer\"."
-        case .mysql: "MySQL accepts a password over either SSL mode."
-        }
-    }
-
-    @ViewBuilder private func requiredHint(_ key: String, _ word: String = "Required") -> some View {
-        if attemptedSave && missingRequired.contains(key) {
-            Text(word).font(.ui(11)).foregroundStyle(Tone.coral)
-        }
-    }
-
-    /// The last test's outcome, on one line next to the button. A failure's message can be long
-    /// — the engine prefixes it with the exception class and Trino's connection errors run to a
-    /// paragraph — so the class prefix is dropped for reading and the whole thing stays in the
-    /// tooltip.
-    @ViewBuilder private var testStatus: some View {
-        switch testState {
-        case .idle, .running:
-            // Nothing to add: the button beside this says "Testing…" while it works.
-            EmptyView()
-        case .success(let level):
-            statusLine("Connected · \(pluralized(level, draft.kind == .postgres ? "schema" : "catalog"))",
-                       tint: Tone.mint, truncation: .tail)
-        case .failure(let message):
-            // Middle, not tail: a connection error's cause is at the end of the sentence
-            // ("… Connection refused"), and its class prefix is at the start.
-            statusLine(Self.shortDiagnosis(message), tint: Tone.coral, truncation: .middle)
-                .help(message)
-        }
-    }
-
-    private func statusLine(_ text: String, tint: Color,
-                            truncation: Text.TruncationMode) -> some View {
-        HStack(spacing: 7) {
-            Circle().fill(tint).frame(width: 7, height: 7).layoutPriority(1)
-            Text(text)
-                .font(.ui(12))
-                .foregroundStyle(tint == Tone.coral ? Tone.coral : Tone.ink.opacity(0.85))
-                .lineLimit(1)
-                .truncationMode(truncation)
-        }
-        // Negative priority: the status yields its width before the button beside it does. A
-        // greedy frame here squeezed "Test Connection" down to "Test Conn…".
-        .layoutPriority(-1)
-    }
-
-    /// Drops the engine's `TypeName: ` prefix. It is useful in a log and noise beside a button.
-    private static func shortDiagnosis(_ message: String) -> String {
-        guard let separator = message.range(of: ": ") else { return message }
-        return String(message[separator.upperBound...])
-    }
-
-    /// Left has the action and its outcome; right has the terminal choices, in the order a
-    /// dialog's footer always puts them.
-    private var footer: some View {
-        HStack(spacing: 10) {
-            // The running state keeps the capsule's shape so the footer does not reflow the
-            // moment a test starts — it is the same button, mid-press.
-            if case .running = testState {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.small)
-                    Text("Testing…").font(.ui(12.5, weight: .medium))
-                }
-                .foregroundStyle(Tone.ink)
-                .padding(.horizontal, 13)
-                .frame(height: 28)
-                .background(Tone.ink.opacity(0.10), in: Capsule())
-                .overlay(Capsule().strokeBorder(Tone.ink.opacity(0.14)))
-            } else {
-                PillButton(title: "Test Connection", symbol: "bolt") { runTest() }
-                    // ⌘↩, not ⌘T: ⌘T is New Query in the QueryHive scheme, and ⌘↩ belongs to the sheet
-                    // alone because the sheet is modal (it is the key window, so its key wins).
-                    .keyboardShortcut(SheetShortcut.testConnection.keyboard)
-                    .help("Test Connection (\(SheetShortcut.testConnection.display))")
-            }
-            testStatus
-
-            Spacer()
-
-            if editingID != nil {
-                PillButton(title: "Delete", symbol: "trash", role: .destructive) { confirmDelete = true }
-            }
-            PillButton(title: "Cancel", role: .quiet) { dismiss() }
-                .keyboardShortcut(.cancelAction)
-            HubButton(title: "Save", symbol: "checkmark", hue: .connection) { save() }
-                .disabled(!isDirty)
-                .keyboardShortcut(.defaultAction)
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 62)
+        if Self.newKindForSnapshot == nil { pendingFocus = .name }
     }
 
     private func load() {
@@ -864,6 +453,7 @@ struct ConnectionEditorSheet: View {
         attemptedSave = true
         let problems = issues
         guard problems.isEmpty else {
+            reveal(problems)
             testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
             return
         }
@@ -927,7 +517,7 @@ struct ConnectionEditorSheet: View {
         // The same named check Save uses, in the same words, before anything is run.
         let problems = issues
         guard problems.isEmpty else {
-            attemptedSave = true
+            reveal(problems)
             testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
             return
         }
