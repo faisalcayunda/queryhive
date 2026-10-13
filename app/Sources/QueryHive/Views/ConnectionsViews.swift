@@ -109,6 +109,14 @@ enum TestState {
     case idle, running
     case success(Int)
     case failure(String)
+
+    /// Whether this is an answer, as opposed to nothing yet or still asking.
+    var isResult: Bool {
+        switch self {
+        case .success, .failure: true
+        case .idle, .running: false
+        }
+    }
 }
 
 /// The connection editor, as Navicat presents it: a modal connection-properties dialog with
@@ -149,6 +157,10 @@ struct ConnectionEditorSheet: View {
     /// A field to focus once the section that holds it is on screen: `FocusState` ignores a field
     /// that is not mounted, so the jump to another section hands it over to that section.
     @State private var pendingFocus: ConnectionField?
+    /// The draft the Test result on screen belongs to. The result goes when the draft stops being it:
+    /// that is the person's edit, and not `load()` setting the draft the first time, which would
+    /// otherwise wipe the result a snapshot scene hands in.
+    @State private var resultDraft: ConnectionDraft?
 
     /// Set by the snapshot scenes that show a section other than General. Never set by the app itself.
     nonisolated(unsafe) static var initialSectionForSnapshot: ConnectionFormSection?
@@ -202,6 +214,15 @@ struct ConnectionEditorSheet: View {
             Text("This removes the saved connection and its Keychain password. This can't be undone.")
         }
         .onAppear { load(); applySnapshotHooks() }
+        // What the person changes takes the Test result with it: it described another form.
+        .onChange(of: draft) { _, new in
+            guard let shown = resultDraft, new != shown else { return }
+            resultDraft = nil
+            switch testState {
+            case .success, .failure: testState = .idle
+            case .idle, .running: break
+            }
+        }
         .onDisappear { testProcess?.terminate() }
         // A host key refused during Test is asked about here, over this sheet: a sheet cannot be
         // presented over a sheet from the view that presented the first one.
@@ -329,7 +350,7 @@ struct ConnectionEditorSheet: View {
     private var formStep: some View {
         HStack(spacing: 0) {
             ConnectionFormSidebar(kind: draft.kind, isSaved: editingID != nil, selection: $section,
-                                  issueCounts: [:]) { confirmDelete = true }
+                                  issueCounts: ConnectionFormIssues.bySection(issues).mapValues(\.count)) { confirmDelete = true }
                 .frame(width: 200)
                 .frame(minHeight: 0, maxHeight: .infinity)
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(width: 1)
@@ -365,11 +386,16 @@ struct ConnectionEditorSheet: View {
     }
 
     private var footerStatus: ConnectionFormFooter.Status {
+        // A Test result since the last edit first; otherwise what is missing, which is not a Test
+        // result and never shares its slot's meaning (it is amber, and a Test never ran).
         switch testState {
-        case .idle, .running: .none
         case .success(let level):
-            .success("Connected · \(pluralized(level, draft.kind == .postgres ? "schema" : "catalog"))")
-        case .failure(let message): .failure(message)
+            return .success("Connected · \(pluralized(level, draft.kind.contextNoun))")
+        case .failure(let message):
+            return .failure(message)
+        case .idle, .running:
+            let summary = ConnectionFormIssues.summary(issues, visible: section)
+            return summary.isEmpty ? .none : .problem(summary)
         }
     }
 
@@ -435,6 +461,7 @@ struct ConnectionEditorSheet: View {
         testState = .idle
         // After the reset, not before: this line used to sit above it and was silently wiped.
         if let count = target.previewTestCount { testState = .success(count) }
+        resultDraft = nil
         // Nothing typed and nothing staged for removal carries over: the form never holds a saved
         // secret, so there is nothing else it could start with.
         aliasPreview = nil; urlNote = nil; lastTestWasHostKey = false
@@ -445,6 +472,7 @@ struct ConnectionEditorSheet: View {
         }
         draft = ConnectionDraft(connection)
         refreshAliasPreview()
+        if testState.isResult { resultDraft = draft }
     }
 
     private func save() {
@@ -452,7 +480,6 @@ struct ConnectionEditorSheet: View {
         let problems = issues
         guard problems.isEmpty else {
             reveal(problems)
-            testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
             return
         }
         let id = editingID ?? draftID
@@ -516,12 +543,13 @@ struct ConnectionEditorSheet: View {
         let problems = issues
         guard problems.isEmpty else {
             reveal(problems)
-            testState = .failure(ConnectionFormIssues.message(problems.map(\.label)))
             return
         }
         testProcess?.terminate()
         testState = .running
+        resultDraft = nil
         lastTestWasHostKey = false
+        let tested = draft
         let run = UUID()
         testRun = run
         let candidate = draft.connection(id: editingID ?? draftID, group: original?.group)
@@ -554,6 +582,9 @@ struct ConnectionEditorSheet: View {
         }, onExit: { status, log in
             guard testRun == run else { return }
             testProcess = nil
+            // Edited while it ran: the answer is about a form that is gone.
+            guard draft == tested else { testState = .idle; return }
+            resultDraft = tested
             if status == 0 {
                 testState = .success(catalogs)
             } else {

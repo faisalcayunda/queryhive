@@ -74,6 +74,56 @@ extension View {
     }
 }
 
+/// The one control for how the connection is encrypted, beside the host it is about. It reads and
+/// writes through the draft (`onSelect` is `ConnectionDraft.setTLS`), shows the stored choice even
+/// when it is not one the menu offers, and is never empty. The glyph is decoration: the title and
+/// the spoken value carry the meaning.
+struct ConnectionEncryptionMenu: View {
+    let current: ConnectionTLSChoice
+    let options: [ConnectionTLSChoice]
+    let onSelect: (ConnectionTLSChoice) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(options) { option in
+                Button { onSelect(option) } label: {
+                    if option == current { Label(option.title, systemImage: "checkmark") } else { Text(option.title) }
+                }
+                .help(option.help)
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: current.glyph)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Tone.secondary)
+                    .accessibilityHidden(true)
+                Text(current.title)
+                    .font(.ui(12))
+                    .foregroundStyle(Tone.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Tone.secondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 10)
+            .frame(minWidth: 168, minHeight: 30)
+            .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Tone.ink.opacity(0.1)))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(current.help)
+        .accessibilityLabel("Encryption")
+        .accessibilityValue(current.spokenDescription)
+        .background(FrameMarker(name: "connection-encryption"))
+    }
+}
+
 /// The list of sections, with the driver's mark above and, for a saved connection, Delete below.
 struct ConnectionFormSidebar: View {
     let kind: ConnectionKind
@@ -110,6 +160,11 @@ struct ConnectionFormSidebar: View {
         .background(Tone.ink.opacity(0.03))
     }
 
+    /// What VoiceOver adds to a section's name: how many of its fields need attention, or nothing.
+    static func attentionValue(_ count: Int) -> String {
+        count > 0 ? "\(count) \(count == 1 ? "field needs" : "fields need") attention" : ""
+    }
+
     private func item(_ section: ConnectionFormSection) -> some View {
         let active = selection == section
         let count = issueCounts[section] ?? 0
@@ -126,6 +181,7 @@ struct ConnectionFormSidebar: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Tone.amber)
+                        .background(FrameMarker(name: "connection-badge-\(section.rawValue)"))
                         .accessibilityHidden(true)
                 }
             }
@@ -138,7 +194,7 @@ struct ConnectionFormSidebar: View {
         .buttonStyle(.plain)
         .background(FrameMarker(name: "connection-section-\(section.rawValue)"))
         .accessibilityLabel(section.title)
-        .accessibilityValue(count > 0 ? "\(count) \(count == 1 ? "field needs" : "fields need") attention" : "")
+        .accessibilityValue(Self.attentionValue(count))
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
 }
@@ -248,6 +304,7 @@ struct ConnectionFormFooter: View {
                     .truncationMode(.tail)
             }
             .layoutPriority(-1)
+            .background(FrameMarker(name: "connection-footer-problem"))
             .help(text)
         }
     }
@@ -264,6 +321,7 @@ struct ConnectionFormFooter: View {
         // Negative priority: the status yields its width before the button beside it does. A
         // greedy frame here squeezed "Test Connection" down to "Test Conn…".
         .layoutPriority(-1)
+        .background(FrameMarker(name: "connection-footer-result"))
     }
 
     /// Drops the engine's `TypeName: ` prefix. It is useful in a log and noise beside a button.
@@ -318,30 +376,23 @@ extension ConnectionEditorSheet {
     }
 
     @ViewBuilder private var serverRows: some View {
+        // The encryption control sits beside the host it is about. Trino's four outcomes are four
+        // explicit choices (HTTPS verified or not, Prefer, HTTP); PostgreSQL and MySQL keep their
+        // own mode words (`ConnectionTLSChoice`).
         ConnectionFormRow(label: "Host") {
-            TextField("db.internal", text: $draft.host)
-                .field(invalid: attemptedSave && missingRequired.contains("host"))
-                .focused($focus, equals: .host)
-                .background(FrameMarker(name: "connection-host-field"))
-                .formControl("Host", required: true)
-            requiredHint("host")
-        }
-        if draft.kind == .trino {
-            ConnectionRowDivider()
-            // Three options, not two, because Trino's encryption decision has four
-            // outcomes and the two scheme words can only spell three of them. The
-            // fourth — "https when the coordinator offers it, http otherwise" — is
-            // `prefer`, and it is the shared vocabulary's own word rather than a new
-            // one: the other two drivers' SSL mode pickers already show it for this
-            // exact outcome. See `TrinoTransport` for how it reaches the engine.
-            ConnectionFormRow(label: "Transport") {
-                Segmented(selection: trinoTransport,
-                          options: draft.hasCA ? [.https] : TrinoTransport.allCases) { $0.label }
-                    .formControl("Transport")
-                    .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
-                          + "first and keeps plain HTTP only for a coordinator that has no TLS at all — "
-                          + "the certificate is not checked either way.")
+            HStack(spacing: 8) {
+                TextField("db.internal", text: $draft.host)
+                    .field(invalid: attemptedSave && missingRequired.contains("host"))
+                    .focused($focus, equals: .host)
+                    .background(FrameMarker(name: "connection-host-field"))
+                    .formControl("Host", required: true)
+                ConnectionEncryptionMenu(current: draft.tls,
+                                         options: ConnectionTLSChoice.options(kind: draft.kind, caFile: draft.caFile,
+                                                                              dbAuth: draft.dbAuth),
+                                         onSelect: { draft.setTLS($0) })
             }
+            requiredHint("host")
+            ForEach(encryptionNotes, id: \.self) { tlsNote($0) }
         }
         ConnectionRowDivider()
         ConnectionFormRow(label: "Port") {
@@ -352,6 +403,8 @@ extension ConnectionEditorSheet {
                 .formControl("Port", required: true)
             requiredHint("port")
         }
+        ConnectionRowDivider()
+        caRow
         ConnectionRowDivider()
         // Postgres only, and beside the field it modifies: the database named here is where
         // the tree starts, and "All Databases" puts a level holding every database this user may
@@ -403,53 +456,20 @@ extension ConnectionEditorSheet {
                 }
             }
         }
-        ConnectionRowDivider()
-        oldEncryptionRow
-        ConnectionRowDivider()
-        caRow
     }
 
-    /// The step-3 encryption rows, as the form had them: the SSL mode for Postgres and MySQL, and
-    /// for Trino a verify box that exists only on HTTPS.
-    @ViewBuilder private var oldEncryptionRow: some View {
-        if draft.kind.hasSSLModes {
-            ConnectionFormRow(label: "SSL mode") {
-                // With a CA file chosen only the modes that check the certificate make sense.
-                Segmented(selection: Binding(get: { draft.sslmode }, set: { draft.setTLS(.sslmode($0)) }),
-                          options: draft.kind == .postgres && draft.hasCA ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
-                    .formControl("SSL mode")
-            }
-        } else {
-            // HTTPS is the only Trino transport with a verification answer to give, so it is
-            // the only one that shows the box. `prefer` never checks the certificate — the
-            // mode means "encrypt if you can", both on the attempt and on the fallback —
-            // and in clear there is nothing to check, so neither is offered a control that
-            // could not change the connection.
-            //
-            // The absence is *said* rather than left blank: a control that simply vanishes
-            // reads as a mistake, and an unchecked box reads as an answer. The stored value
-            // stays stored either way, so going back to HTTPS offers the user's last choice
-            // again.
-            ConnectionFormRow(label: "Certificate") {
-                switch TrinoTransport(stored: draft.scheme) {
-                case .https:
-                    ChipToggle(label: "Verify the TLS certificate", isOn: $draft.verifyTLS)
-                        .disabled(draft.hasCA)
-                case .prefer:
-                    tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
-                            + "The certificate is not checked.")
-                        .help("`prefer` never verifies: it encrypts when it can and falls back to clear "
-                              + "only when the coordinator answers the handshake with something that is not "
-                              + "TLS. HTTPS with this box off is the transport that says so outright.")
-                case .http:
-                    tlsNote("Plain HTTP: nothing to verify. A password still forces HTTPS — "
-                            + "pick HTTPS to choose how that is verified.")
-                        .help("In clear there is no certificate to check. The engine raises this connection "
-                              + "to HTTPS anyway when a password is stored, which is why the verification "
-                              + "answer lives on the HTTPS transport rather than here.")
-                }
-            }
+    /// What the encryption control cannot say in its own label: how the choice behaves where that is
+    /// not obvious, and why the menu is short while a CA file is set.
+    private var encryptionNotes: [String] {
+        var notes: [String] = []
+        switch draft.tls {
+        case .trinoPrefer, .trinoHTTP, .sslmodeUnverified: notes.append(draft.tls.help)
+        default: break
         }
+        if draft.kind != .mysql, draft.hasCA {
+            notes.append("Only modes that check the certificate are offered while a CA file is set.")
+        }
+        return notes
     }
 
     /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store.
@@ -717,13 +737,6 @@ extension ConnectionEditorSheet {
         Binding(get: { draft.caFile }, set: { draft.setCAFile($0) })
     }
 
-    /// The picker's own binding over the string the connection stores, so the third option
-    /// needs no second field: `TrinoTransport` already reads and writes the scheme slot.
-    private var trinoTransport: Binding<TrinoTransport> {
-        Binding(get: { TrinoTransport(stored: draft.scheme) },
-                set: { draft.setScheme($0.rawValue) })
-    }
-
     /// One spoken line where a control would be, for a transport with no verification to answer.
     func tlsNote(_ text: String) -> some View {
         Text(text)
@@ -743,6 +756,18 @@ extension ConnectionEditorSheet {
     @ViewBuilder private func requiredHint(_ key: String, _ word: String = "Required") -> some View {
         if attemptedSave && missingRequired.contains(key) {
             Text(word).font(.ui(11)).foregroundStyle(Tone.coral)
+        }
+    }
+}
+
+extension ConnectionKind {
+    /// What a Test counts when it succeeds, named as this driver's top level is: Trino lists
+    /// catalogs, PostgreSQL the schemas of its database, MySQL databases.
+    var contextNoun: String {
+        switch self {
+        case .trino: "catalog"
+        case .postgres: "schema"
+        case .mysql: "database"
         }
     }
 }

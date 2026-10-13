@@ -160,13 +160,16 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
 
     /// What the menu offers, in the order it shows them. A CA file only means something to a mode
     /// that checks the certificate, so while one is set the others are not offered (blueprint
-    /// 9.1). MySQL has no CA setting and no verifying mode, so a path there changes nothing.
-    static func options(kind: ConnectionKind, caFile: String) -> [ConnectionTLSChoice] {
+    /// 9.1). MySQL has no CA setting and no verifying mode, so a path there changes nothing. A
+    /// Trino JWT is sent only over HTTPS (the engine refuses it over Prefer or HTTP), so with one
+    /// only the two HTTPS choices are offered.
+    static func options(kind: ConnectionKind, caFile: String, dbAuth: DatabaseAuth = .password) -> [ConnectionTLSChoice] {
         let hasCA = !caFile.trimmingCharacters(in: .whitespaces).isEmpty  // as `ConnectionDraft.hasCA`
         switch kind {
         case .trino:
-            return hasCA ? [.trinoHTTPSVerified]
-                         : [.trinoHTTPSVerified, .trinoHTTPSUnverified, .trinoPrefer, .trinoHTTP]
+            if hasCA { return [.trinoHTTPSVerified] }
+            if dbAuth == .jwt { return [.trinoHTTPSVerified, .trinoHTTPSUnverified] }
+            return [.trinoHTTPSVerified, .trinoHTTPSUnverified, .trinoPrefer, .trinoHTTP]
         case .postgres:
             let modes = hasCA ? ["verify-ca", "verify-full"] : kind.sslModes
             return modes.map { .sslmode($0) }

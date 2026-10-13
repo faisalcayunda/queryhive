@@ -198,6 +198,80 @@ final class ConnectionSheetTests: XCTestCase {
         }
     }
 
+    // MARK: Encryption beside the host
+
+    func testTheEncryptionControlSitsOnTheHostRow() throws {
+        let mysql = Connection(id: UUID(), name: "Reporting", color: .amber, kind: .mysql, host: "mysql.internal",
+                               port: 3306, sslmode: "disable", user: "u", database: "r", schema: "", verify: true)
+        for (index, connection) in [nil, postgres(), mysql].enumerated() {
+            let rig = rig()
+            let kind = connection?.kind ?? .trino
+            let sheet = try openEditor(connection ?? rig.model.connections.first, in: rig)
+            XCTAssertTrue(wait { self.frame("connection-encryption", in: sheet) != nil && self.frame("connection-host-field", in: sheet) != nil },
+                          "\(kind): no encryption control or no host field")
+            let control = try XCTUnwrap(frame("connection-encryption", in: sheet))
+            let field = try XCTUnwrap(frame("connection-host-field", in: sheet))
+            XCTAssertLessThanOrEqual(abs(control.midY - field.midY), 2, "\(kind) (\(index)): not on the host row")
+            XCTAssertGreaterThan(control.minX, field.maxX, "\(kind): not to the right of the host")
+            let content = try XCTUnwrap(sheet.contentView).bounds
+            XCTAssertTrue(content.contains(control) && content.contains(field), "\(kind): outside the sheet")
+            for window in windows { if let attached = window.attachedSheet { window.endSheet(attached) } }
+            spin(0.3)
+        }
+    }
+
+    // MARK: Badges and the footer
+
+    func testTheGeneralBadgeFollowsTheMissingFields() throws {
+        let rig = rig()
+        let sheet = try openEditor(nil, in: rig, newKind: .postgres)
+        // A new PostgreSQL connection lacks a name, a host, a user and a database, all in General.
+        XCTAssertTrue(wait { self.marker("connection-badge-general", in: sheet) != nil }, "General has no badge")
+        XCTAssertNil(marker("connection-badge-sshTunnel", in: sheet), "a section with nothing missing has none")
+        XCTAssertNil(marker("connection-badge-limits", in: sheet))
+        XCTAssertNotNil(marker("connection-footer-problem", in: sheet), "the footer does not say what is missing")
+        // What the badge says aloud, and what the footer says: pure, so they are held directly.
+        XCTAssertEqual(ConnectionFormSidebar.attentionValue(4), "4 fields need attention")
+        XCTAssertEqual(ConnectionFormSidebar.attentionValue(1), "1 field needs attention")
+        XCTAssertEqual(ConnectionFormSidebar.attentionValue(0), "")
+        var postgres = ConnectionDraft.new()
+        postgres.choose(.postgres)
+        let missing = ConnectionFormIssues.fields(for: postgres.formState, resolved: nil)
+        XCTAssertEqual(ConnectionFormIssues.summary(missing, visible: .general), "Name, Host, User and Database are required.")
+    }
+
+    func testASavedCompleteConnectionHasNoBadgeAndNoSummary() throws {
+        let rig = rig()
+        let sheet = try openEditor(postgres(), in: rig)
+        XCTAssertTrue(wait { self.frame("connection-footer", in: sheet) != nil })
+        for section in ConnectionFormSection.allCases {
+            XCTAssertNil(marker("connection-badge-\(section.rawValue)", in: sheet), section.title)
+        }
+        XCTAssertNil(marker("connection-footer-problem", in: sheet))
+    }
+
+    // MARK: The Test result
+
+    func testATestResultHandedInSurvivesTheLoadAndGoesWithTheFirstEdit() throws {
+        let rig = rig()
+        let connection = try XCTUnwrap(rig.model.connections.first)
+        ConnectionEditorSheet.initialSectionForSnapshot = nil
+        rig.model.presentConnectionEditor(connection.id, previewTestCount: 56)
+        XCTAssertTrue(wait { rig.window.attachedSheet != nil })
+        let sheet = try XCTUnwrap(rig.window.attachedSheet)
+        // `load()` runs as the sheet appears and must not take the result with it.
+        XCTAssertTrue(wait { self.marker("connection-footer-result", in: sheet) != nil },
+                      "the result the scene hands in was lost when the sheet loaded")
+        spin(0.6)
+        XCTAssertNotNil(marker("connection-footer-result", in: sheet), "and it must still be there a moment later")
+        // An edit by the person ends it: it described the form as it was.
+        XCTAssertTrue(wait { self.textField(at: "connection-host-field", in: sheet) != nil })
+        let host = try XCTUnwrap(textField(at: "connection-host-field", in: sheet))
+        XCTAssertTrue(sheet.makeFirstResponder(host))
+        host.currentEditor()?.insertText("x")
+        XCTAssertTrue(wait { self.marker("connection-footer-result", in: sheet) == nil }, "the result outlived an edit")
+    }
+
     // MARK: Over the shell
 
     func testTheSheetFitsAWindowAtTheShellMinimum() throws {

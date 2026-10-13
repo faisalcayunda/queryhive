@@ -50,8 +50,9 @@ struct ConnectionDraft: Equatable {
     /// The blank form of a connection that does not exist yet.
     static func new() -> ConnectionDraft { ConnectionDraft() }
 
-    /// The form of a saved connection. `sslmode` blank is shown as the driver's default, which is
-    /// what the sheet has always done on load (and why it can read as changed; blueprint T-1).
+    /// The form of a saved connection, as it is saved. Nothing is normalised: a blank `sslmode` stays
+    /// blank (the encryption control reads it as the driver's default), so opening a connection
+    /// never makes it look changed (blueprint T-1).
     init(_ connection: Connection) {
         name = connection.name
         color = connection.color
@@ -59,7 +60,7 @@ struct ConnectionDraft: Equatable {
         host = connection.host
         port = connection.port
         scheme = connection.scheme
-        sslmode = connection.sslmode.isEmpty ? connection.kind.defaultSSLMode : connection.sslmode
+        sslmode = connection.sslmode
         user = connection.user
         database = connection.database
         schema = connection.schema
@@ -135,7 +136,9 @@ struct ConnectionDraft: Equatable {
 
     /// Whether Save has anything to save. A new connection counts once any field holds something;
     /// a saved one when a secret was typed or staged for removal, or the connection it describes
-    /// differs from the stored one.
+    /// differs from the stored one. The stored one is read through the draft too, so what Save
+    /// would tidy (a trailing space an import left, a timeout that is not whole seconds, a CA on a
+    /// MySQL connection) is not a change the person made.
     func isDirty(against original: Connection?) -> Bool {
         guard let original else {
             return !(name.isEmpty && host.isEmpty && user.isEmpty && secrets.password.isEmpty
@@ -145,7 +148,8 @@ struct ConnectionDraft: Equatable {
         }
         return !secrets.password.isEmpty || !secrets.sshPassword.isEmpty || !secrets.sshPassphrase.isEmpty
             || !secrets.jwt.isEmpty || !secrets.removals.isEmpty
-            || connection(id: original.id, group: original.group) != original
+            || connection(id: original.id, group: original.group)
+                != ConnectionDraft(original).connection(id: original.id, group: original.group)
     }
 
     // MARK: Rules that tie fields together
@@ -153,6 +157,9 @@ struct ConnectionDraft: Equatable {
     /// Picking a tile is the only place the driver is chosen; the form then has no type control,
     /// because changing it would invalidate half of what is already filled in.
     mutating func choose(_ option: ConnectionKind) {
+        // Picking the driver the draft already has is not a change: nothing is reset, filled in or
+        // enforced, so Change Type and the same tile leave the form as it was.
+        guard option != kind else { return }
         if port == kind.defaultPort { port = option.defaultPort }
         if option.hasSSLModes, sslmode.isEmpty { sslmode = option.defaultSSLMode }
         // What only applied to the other driver goes with it: a JWT is Trino's, and MySQL has no CA.
@@ -162,10 +169,9 @@ struct ConnectionDraft: Equatable {
         // into "encrypt, never check" for any mode but `disable`, which for `prefer` is also the
         // difference between "may fall back to clear" and "must encrypt". So a flag that meant
         // "unverified HTTPS" on Trino must not ride into another driver and silently decide that,
-        // and it is reset when the driver is left. Picking the driver the draft already has, or
-        // moving between PostgreSQL and MySQL, leaves `verify` alone: it is the connection's
-        // existing answer there, and changing it would change what the connection does without
-        // anything on the form changing.
+        // and it is reset when the driver is left. Moving between PostgreSQL and MySQL leaves
+        // `verify` alone: it is the connection's existing answer there, and changing it would
+        // change what the connection does without anything on the form changing.
         if kind == .trino, option != .trino { verifyTLS = true }
         kind = option
         enforceCAConstraint()

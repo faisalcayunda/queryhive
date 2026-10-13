@@ -42,6 +42,32 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                        ConnectionTLSChoice.options(kind: .trino, caFile: ""), "a blank path is no CA")
     }
 
+    func testATrinoJWTIsOnlyOfferedOverHTTPS() {
+        XCTAssertEqual(ConnectionTLSChoice.options(kind: .trino, caFile: "", dbAuth: .jwt),
+                       [.trinoHTTPSVerified, .trinoHTTPSUnverified])
+        XCTAssertEqual(ConnectionTLSChoice.options(kind: .trino, caFile: "/ca.pem", dbAuth: .jwt), [.trinoHTTPSVerified])
+        XCTAssertEqual(ConnectionTLSChoice.options(kind: .trino, caFile: "", dbAuth: .password).count, 4)
+        // The other drivers have no JWT, so it changes nothing there.
+        XCTAssertEqual(ConnectionTLSChoice.options(kind: .postgres, caFile: "", dbAuth: .jwt),
+                       ConnectionTLSChoice.options(kind: .postgres, caFile: ""))
+    }
+
+    func testTrinoHTTPKeepsItsVerifyFlagAndSaysAPasswordOrAHTTPSPortRaisesIt() {
+        var d = draft(.trino)
+        d.setTLS(.trinoHTTPSUnverified)
+        d.setTLS(.trinoHTTP)
+        XCTAssertFalse(d.verifyTLS, "choosing HTTP leaves the flag for when HTTPS comes back")
+        // With a password the engine runs it over HTTPS, and the stored flag then decides the check.
+        let withPassword = AppModel.connectionEnvironment(d.connection(id: UUID(), group: nil),
+                                                         secrets: ConnectionSecrets(password: "pw"))
+        XCTAssertEqual(withPassword["DB_SCHEME"], "http", "the app sends what is stored; the engine raises it")
+        XCTAssertEqual(withPassword["DB_INSECURE"], "1")
+        for text in [d.tls.help, d.tls.spokenDescription] {
+            XCTAssertTrue(text.contains("HTTPS"), text)
+            XCTAssertTrue(text.contains("443"), text)
+        }
+    }
+
     func testMySQLHasNoCASoAPathChangesNothing() {
         XCTAssertEqual(ConnectionTLSChoice.options(kind: .mysql, caFile: "/ca.pem"),
                        ConnectionTLSChoice.options(kind: .mysql, caFile: ""))

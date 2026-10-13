@@ -103,13 +103,46 @@ final class ConnectionDraftTests: XCTestCase {
         }
     }
 
-    func testASavedBlankSSLModeShowsAsTheDriversDefault() {
-        // How the sheet has always loaded it. It reads as a change (blueprint T-1), which the
-        // later step that fixes it will turn around; until then this pins the behaviour.
+    func testASavedBlankSSLModeStaysBlankAndOpeningItIsNotAChange() {
+        // T-1: the sheet used to load a blank mode as the driver's default, which Save would then
+        // write, so a connection nobody touched opened as "Unsaved changes".
+        for kind in ConnectionKind.allCases {
+            var c = saved(kind)
+            c.sslmode = ""
+            let draft = ConnectionDraft(c)
+            XCTAssertEqual(draft.sslmode, "", "\(kind)")
+            XCTAssertFalse(draft.isDirty(against: c), "\(kind)")
+            XCTAssertEqual(draft.connection(id: c.id, group: c.group), c, "and what Save would write is what is saved")
+        }
+    }
+
+    func testOpeningAConnectionAnOlderBuildOrAnImportSavedIsNotAChange() {
+        // What Save tidies is not an edit: each of these opened as "Unsaved changes" before.
+        func opens(_ name: String, _ kind: ConnectionKind = .postgres, _ tweak: (inout Connection) -> Void) {
+            var c = saved(kind)
+            tweak(&c)
+            XCTAssertFalse(ConnectionDraft(c).isDirty(against: c), name)
+        }
+        opens("a timeout that is not whole seconds") { $0.statementTimeoutMS = 1500 }
+        opens("spaces an import left in the name") { $0.name = "  Warehouse " }
+        opens("spaces an import left in the host") { $0.host = " pg.internal  " }
+        opens("a MySQL connection with a CA file", .mysql) { $0.caFile = "/ca.pem" }
+        opens("a PostgreSQL connection with a JWT login") { $0.dbAuth = .jwt }
+        opens("an upper-case Trino scheme", .trino) { $0.scheme = "HTTPS" }
+        opens("a Trino connection with no scheme", .trino) { $0.scheme = "" }
+    }
+
+    func testARealEditToASavedConnectionIsStillAChange() {
         var c = saved(.postgres)
         c.sslmode = ""
-        let draft = ConnectionDraft(c)
-        XCTAssertEqual(draft.sslmode, "prefer")
+        var draft = ConnectionDraft(c)
+        draft.sslmode = "require"
+        XCTAssertTrue(draft.isDirty(against: c))
+        draft = ConnectionDraft(c)
+        draft.timeoutText = "30"
+        XCTAssertTrue(draft.isDirty(against: c))
+        draft = ConnectionDraft(c)
+        draft.host += "x"
         XCTAssertTrue(draft.isDirty(against: c))
     }
 
@@ -376,7 +409,7 @@ final class ConnectionDraftTests: XCTestCase {
         var draft = ConnectionDraft(Connection(id: id, name: "t", color: .blue, kind: .trino, host: "h", port: 8443,
                                                scheme: "https", sslmode: "", user: "u", database: "", schema: "",
                                                verify: true, caFile: "/ca.pem"))
-        XCTAssertEqual(draft.sslmode, "disable", "Trino's default, as the sheet has always loaded it")
+        XCTAssertEqual(draft.sslmode, "", "a Trino connection stores no SSL mode, and the form shows it as stored")
         draft.choose(.postgres)
         XCTAssertEqual(draft.caFile, "/ca.pem")
         XCTAssertEqual(draft.sslmode, "verify-full")
