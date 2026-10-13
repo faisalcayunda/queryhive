@@ -123,6 +123,22 @@ fn is_single_statement(sql: &str) -> bool {
         .all(|lexer| statements_dialect(sql, *lexer).len() <= 1)
 }
 
+/// The refusal both ways of sending text to the server share: the driver's own statements
+/// (`text_rows`) and the caller's (`run_statement`). `mysql_async` negotiates multi-statement
+/// support, so the server, not this driver, would split a text that holds a second statement.
+fn refuse_unless_single_statement(sql: &str) -> Result<(), EngineError> {
+    if is_single_statement(sql) {
+        return Ok(());
+    }
+    Err(EngineError::Usage {
+        message: "this connection runs one statement per request; the text given holds \
+                  more than one, or MySQL string escaping and comments could read it as \
+                  more than one depending on the server's sql_mode (write a quote \
+                  inside a string as '' instead of \\')"
+            .to_owned(),
+    })
+}
+
 /// Rows the producer may run ahead by, in batches.
 ///
 /// Four, not four hundred: the point of the bound is that a slow consumer stops
@@ -561,6 +577,9 @@ impl MysqlSession {
     /// Used by browse and objects, which are our statements with a known shape —
     /// unlike a user's query, they do not need the streaming path.
     async fn text_rows(&mut self, sql: &str) -> Result<Vec<Vec<Option<String>>>, EngineError> {
+        // The same refusal `run_statement` applies: `mysql_async` sends this over the text protocol
+        // with multi-statement support on, and these statements hold names the server supplied.
+        refuse_unless_single_statement(sql)?;
         let mut conn = self.connection(false).await?;
         if let Err(error) = self.use_wanted_database(&mut conn).await {
             self.idle = Some(conn);
@@ -629,15 +648,7 @@ impl MysqlSession {
         // here, before it is sent, so no unapproved second statement ever reaches the
         // server. The bound path (`exec_iter`, COM_STMT_PREPARE) rejects multiples
         // server-side too; this closes the text path.
-        if !is_single_statement(sql) {
-            return Err(EngineError::Usage {
-                message: "this connection runs one statement per request; the text given holds \
-                          more than one, or MySQL string escaping and comments could read it as \
-                          more than one depending on the server's sql_mode (write a quote \
-                          inside a string as '' instead of \\')"
-                    .to_owned(),
-            });
-        }
+        refuse_unless_single_statement(sql)?;
 
         let effect = txn_effect(sql);
         if self.transaction_lost && effect != TxnEffect::Rollback {
@@ -1541,12 +1552,18 @@ fn objects_sql(database: &str) -> String {
     )
 }
 
-/// A string literal with its quotes doubled.
+/// A string literal with its quotes and its backslashes doubled.
 ///
 /// A literal and an identifier are different problems: the schema in a comparison
 /// is a literal, so `quote_ident` would be wrong here.
+///
+/// MySQL reads a backslash as an escape unless `NO_BACKSLASH_ESCAPES` is on, and this crate cannot
+/// know the mode before it connects (see `metadata.rs`). A name such as `x\';DROP TABLE y.t;#`
+/// would otherwise have its `\'` swallow the closing quote. Doubled, the backslash is a backslash
+/// in the default mode and, under `NO_BACKSLASH_ESCAPES`, two characters that match nothing: the
+/// name then lists no objects, and still cannot leave its literal.
 fn quote_literal(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 /// The error a failed `connect` reports, with what it means for a caller.
@@ -2171,6 +2188,51 @@ mod tests {
             warning.as_deref(),
             Some("MySQL plans are returned as text.")
         );
+    }
+
+    /// A database named to look like the end of its own literal (`x\';DROP TABLE y.t;#`): the
+    /// tree's name goes into `TABLE_SCHEMA = '…'`, and MySQL reads a backslash as an escape unless
+    /// `NO_BACKSLASH_ESCAPES` is on, so `\'` must not be allowed to swallow the closing quote.
+    #[test]
+    fn a_database_name_with_a_backslash_cannot_end_its_literal() {
+        let hostile = "x\\';DROP TABLE y.t;#";
+        assert_eq!(quote_literal(hostile), "'x\\\\'';DROP TABLE y.t;#'");
+        assert_eq!(quote_literal("a\\b"), "'a\\\\b'");
+        assert_eq!(quote_literal("a'b"), "'a''b'");
+        assert_eq!(quote_literal("sips"), "'sips'");
+        // Under every lexer the server might use the whole statement is still one statement.
+        for name in [
+            hostile,
+            "x\\",
+            "\\",
+            "\\\\'",
+            "a\\'; SELECT 1; --",
+            "x'; DROP TABLE t; --",
+        ] {
+            let sql = objects_sql(name);
+            assert!(is_single_statement(&sql), "{name:?} broke out: {sql}");
+            assert!(
+                refuse_unless_single_statement(&sql).is_ok(),
+                "{name:?}: {sql}"
+            );
+        }
+    }
+
+    /// The driver's own statements go through the same single-statement refusal as the caller's.
+    #[test]
+    fn the_drivers_own_text_is_refused_when_it_holds_a_second_statement() {
+        let error =
+            refuse_unless_single_statement("SELECT 1; DROP TABLE y.t").expect_err("two statements");
+        assert!(
+            error.message().contains("one statement per request"),
+            "{}",
+            error.message()
+        );
+        assert!(refuse_unless_single_statement(&objects_sql("sips")).is_ok());
+        // The statement the unfixed literal produced for the hostile name is exactly such a text.
+        let old_literal = format!("'{}'", "x\\';DROP TABLE y.t;#".replace('\'', "''"));
+        let old = format!("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = {old_literal} ORDER BY 1");
+        assert!(refuse_unless_single_statement(&old).is_err(), "{old}");
     }
 
     #[test]
