@@ -1374,6 +1374,9 @@ impl Session for TrinoSession {
         sql: &str,
         options: &ExecuteOptions,
     ) -> Result<Box<dyn Cursor>, EngineError> {
+        // Every statement this session sends goes through here (`execute_bound` with no
+        // values and `collect` both land on it), so this is where the terminator goes.
+        let sql = &wire_sql(sql);
         // Returns as soon as the POST answers, which is normally while the query
         // is still QUEUED. See the module note: waiting here for the columns would
         // mean waiting for the whole query.
@@ -1916,6 +1919,33 @@ fn objects_sql(catalog: &str, schema: &str) -> Result<String, EngineError> {
         quote(catalog),
         literal(schema)
     ))
+}
+
+/// The statement as Trino is sent it: one trailing terminator dropped, nothing else moved.
+///
+/// Trino 483 answers a trailing `;` with `SYNTAX_ERROR: mismatched input ';'`, while the editor
+/// (a statement range holds no `;`), PostgreSQL and MySQL all take it as the end of the
+/// statement. `strip_terminator` drops one trailing terminator that has nothing but whitespace
+/// or comments after it. With no separator at all, the shared scanner (`ends_with_terminator`)
+/// also drops a final `;` that sits inside a trailing line comment, an unclosed string or an
+/// unclosed comment, which is harmless: the meaning, or the syntax error, does not change.
+/// Multi-statement text such as `SELECT 1; SELECT 2` and a `;` inside a literal pass through
+/// unchanged, and so do `;;;` and a routine body ending `END;`, which keep their `;` and are
+/// still rejected by Trino as before.
+///
+/// It also trims, and the leading blanks are put back: the server's error position counts into
+/// what it was sent, and the caller reads it against what they wrote. Text that is only a
+/// terminator and blanks (`;`, `;;`, `  ;  `) is sent as written: stripping would leave an empty
+/// body, which Trino answers with a different error (HTTP 400 "SQL statement is empty") than
+/// the one it gave before. The Safe Mode classifier reads the same statements either way,
+/// because a terminator with only trivia after it changes no keyword.
+fn wire_sql(sql: &str) -> String {
+    let stripped = strip_terminator_dialect(sql, Dialect::Trino);
+    if stripped.trim().is_empty() {
+        return sql.to_owned();
+    }
+    let lead = sql.len() - sql.trim_start().len();
+    format!("{}{stripped}", &sql[..lead])
 }
 
 /// `EXPLAIN` in front of the statement, with the caller's terminator dropped.

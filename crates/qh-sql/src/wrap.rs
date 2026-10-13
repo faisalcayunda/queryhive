@@ -144,6 +144,7 @@ pub fn count_statement_dialect(sql: &str, dialect: impl Into<Lexer>) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{decisions_readings, Decision, SafeMode, StatementKind};
 
     /// The expectations from `check_explain_strips_one_trailing_semicolon`,
     /// `check_explain_keeps_a_semicolon_inside_a_literal` and
@@ -190,6 +191,96 @@ mod tests {
     #[test]
     fn a_block_comment_is_part_of_the_statement() {
         assert_eq!(strip_terminator("SELECT 1 /* x; */;"), "SELECT 1 /* x; */");
+    }
+
+    /// The text the Trino driver sends for `sql`: the terminator stripped and the leading blanks
+    /// put back (the driver's `wire_sql`, which this crate must not depend on).
+    fn sent_to_trino(sql: &str) -> String {
+        let lead = sql.len() - sql.trim_start().len();
+        format!(
+            "{}{}",
+            &sql[..lead],
+            strip_terminator_dialect(sql, Dialect::Trino)
+        )
+    }
+
+    const SAFE_MODES: [SafeMode; 4] = [
+        SafeMode::Full,
+        SafeMode::NoDdl,
+        SafeMode::Confirm,
+        SafeMode::ReadOnly,
+    ];
+
+    /// What the Safe Mode gate decides, statement by statement, as the engine host asks it
+    /// (`decisions_readings` over the connection's readings). The statement text is left out:
+    /// it differs by the terminator by design.
+    fn gate(
+        mode: SafeMode,
+        sql: &str,
+    ) -> Vec<(usize, StatementKind, Decision, Option<&'static str>)> {
+        decisions_readings(mode, sql, Dialect::Trino.readings())
+            .into_iter()
+            .map(|d| (d.index, d.kind, d.decision, d.reason))
+            .collect()
+    }
+
+    fn refusal_rank(decision: Decision) -> u8 {
+        match decision {
+            Decision::Allow => 0,
+            Decision::Confirm => 1,
+            Decision::Refuse => 2,
+        }
+    }
+
+    /// Safe Mode decides on the text the caller wrote and the server runs the stripped text, so
+    /// the two must get the same decision for every statement in every mode.
+    #[test]
+    fn stripping_the_terminator_never_changes_the_safe_mode_decisions() {
+        for sql in [
+            "SELECT 1;",
+            "SELECT 1; -- note",
+            "DELETE FROM t;",
+            "DELETE FROM t; -- SELECT 1",
+            "DROP TABLE t;;",
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1; DELETE FROM t;",
+            "SELECT 'a;b;'; ",
+            "INSERT INTO t VALUES (';');",
+            "SELECT 1; -- ; DROP TABLE x",
+            "SELECT 1 --x\r; DELETE FROM t",
+            "SELECT 1 /* a /* b */ ; DELETE FROM t",
+            "  \n SELECT 1 ; ",
+        ] {
+            let sent = sent_to_trino(sql);
+            for mode in SAFE_MODES {
+                assert_eq!(gate(mode, sql), gate(mode, &sent), "{mode:?} {sql:?}");
+            }
+        }
+    }
+
+    /// A non-breaking space is not a blank to the statement splitter but is one to `trim`, so the
+    /// original text reads one statement more than what is sent. Equality does not hold here;
+    /// what must hold is that the gate, which reads the original, is never less strict than the
+    /// statements the server runs: it may refuse more, never let through more.
+    #[test]
+    fn stripping_the_terminator_never_lets_through_more_than_the_gate_read() {
+        for sql in ["SELECT 1;\u{a0}", "\u{a0}DELETE FROM t;\u{a0}"] {
+            let sent = sent_to_trino(sql);
+            for mode in SAFE_MODES {
+                let strictest = |text: &str| {
+                    gate(mode, text)
+                        .into_iter()
+                        .map(|(_, _, decision, _)| refusal_rank(decision))
+                        .max()
+                };
+                assert!(
+                    strictest(sql) >= strictest(&sent),
+                    "{mode:?} {sql:?}: gate read {:?}, but {sent:?} reads {:?}",
+                    gate(mode, sql),
+                    gate(mode, &sent)
+                );
+            }
+        }
     }
 
     #[test]
