@@ -27,10 +27,15 @@ struct DestinationPopover: View {
 
     var body: some View {
         // A zero-size anchor: the popover has to hang off something, and the Run group is what it
-        // describes.
+        // describes (the footer's corner while the rows fill the window; see `Workspace`).
         Color.clear
             .frame(width: 1, height: 1)
             .popover(isPresented: showing, arrowEdge: .bottom) { panel }
+            // Here rather than on the Run group: this view is mounted in both layouts, the Run
+            // group only while the editor shows.
+            .onChange(of: tab.destination) { _, destination in
+                if destination == .table { model.prepareTableDestination(tab) }
+            }
             .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?",
                                 isPresented: $confirmReplace) {
                 Button("Drop and Recreate", role: .destructive) { commit() }

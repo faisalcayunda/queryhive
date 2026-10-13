@@ -35,6 +35,12 @@ struct Workspace: View {
                     // it centred the remainder, which showed up as a band of nothing above the tab
                     // strip.
                     BottomPanel(tab: tab, ceiling: workspaceHeight, fills: true)
+                        // The query row and its wizard anchor went with the editor, and the
+                        // footer's Export still opens the wizard: it hangs off the footer's corner
+                        // instead. Exactly one anchor is mounted in either layout.
+                        .overlay(alignment: .bottomTrailing) {
+                            DestinationPopover(tab: tab).padding(Metrics.gutter)
+                        }
                 } else {
                     QueryToolbar(tab: tab)
                     // Keyed by tab: sharing one editor across tabs would carry the previous
@@ -385,9 +391,6 @@ struct QueryActions: View {
         }
         // At its ideal size, never squeezed: left to compress, Run's label becomes "R…".
         .fixedSize()
-        .onChange(of: tab.destination) { _, destination in
-            if destination == .table { model.prepareTableDestination(tab) }
-        }
     }
 
     /// Run with its variants on a chevron, and Stop beside it. Navicat's shape, in this app's

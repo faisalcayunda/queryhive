@@ -315,6 +315,28 @@ final class ShellTests: XCTestCase {
         XCTAssertNil(frame("query-toolbar", in: objects))
     }
 
+    /// Whether a popover window is on screen.
+    private var popoverShown: Bool {
+        NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+    }
+
+    // The footer's Export opens the same wizard as the Run menu, and it has to open it with the rows
+    // filling the window too: the wizard's anchor used to live only in the query row, which is not
+    // there then, so the click set a flag nothing presented.
+    func testTheExportWizardOpensWithTheEditorShownAndWithTheRowsFillingTheWindow() throws {
+        for expanded in [false, true] {
+            let rig = rig(scene: "done")
+            rig.model.panelExpanded = expanded
+            spin()
+            XCTAssertFalse(popoverShown, "a popover before the click")
+            rig.model.exportSettingsOpen = true
+            XCTAssertTrue(wait { self.popoverShown }, "no wizard with panelExpanded=\(expanded)")
+            rig.model.exportSettingsOpen = false
+            XCTAssertTrue(wait { !self.popoverShown }, "the wizard did not close")
+        }
+    }
+
+
     func testTheWindowTitleFollowsTheSelectedTab() {
         let rig = rig(scene: "done")
         XCTAssertTrue(wait { rig.window.title == "penerima_manfaat" })
