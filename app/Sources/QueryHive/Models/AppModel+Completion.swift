@@ -105,10 +105,27 @@ extension AppModel {
                 }
                 walk(root.children ?? [])
             }
+        } else if path.count == 1, let references, let connection,
+                  case let named = Self.relations(named: path[0], in: references), !named.isEmpty {
+            // `o.` where `o` is an alias or a table of the statement: that relation's columns. An
+            // alias the statement gives twice, a subquery and a CTE with no column list name no
+            // columns we can vouch for, so they offer none.
+            if named.count == 1 {
+                for name in columnNames(of: named[0], in: references, tab: tab, connection: connection) {
+                    add(name, .column)
+                }
+            }
         } else if let scope = node(atPath: path, connectionID: tab.connectionID) {
+            if scope.kind == .table {
+                // `schema.table.`: the table's own columns, read once if the tree has not got them.
+                if let columns = scope.columns {
+                    for column in columns { add(column.name, .column) }
+                } else {
+                    loadColumns(of: scope)
+                }
             // A node whose children are not loaded yet is asked for them, so `FROM hive.` fills in
             // without the user having to expand that catalog in the sidebar first.
-            if let children = scope.children {
+            } else if let children = scope.children {
                 for child in children {
                     switch child.kind {
                     case .catalog, .database: add(child.title, .catalog)
@@ -129,6 +146,21 @@ extension AppModel {
         // next word is an object and a column name would be noise, and never where a table is
         // being named.
         if path.isEmpty {
+            // The statement's own CTEs are tables where a table is named.
+            if clause == .queryTable, let references {
+                for cte in references.ctes { addTable([cte.name], away: 0) }
+            }
+            // Where a column is written, the columns of the relations the statement names come
+            // first; the last run's columns, which may be from another query, after them.
+            var relationColumns = false
+            if columnClause, let references, let connection {
+                for relation in references.relations.prefix(Self.relationLimit) {
+                    for name in columnNames(of: relation, in: references, tab: tab, connection: connection) {
+                        add(name, .column)
+                        relationColumns = true
+                    }
+                }
+            }
             if !tableClause {
                 // The select list's own names, where this clause and driver accept them. Where they
                 // are refused, a column of the last run that is one of them is not offered either:
@@ -140,7 +172,7 @@ extension AppModel {
                 }
                 let refused = accepted ? [] : Set(aliases.map { SQLSuggestions.unquoted($0).lowercased() })
                 for column in tab.columns where !refused.contains(column.name.lowercased()) {
-                    add(column.name, .column)
+                    add(column.name, .column, away: relationColumns ? 1 : 0)
                 }
             }
             for keyword in SQLSuggestions.keywords { add(keyword, .keyword) }
@@ -235,11 +267,19 @@ extension AppModel {
         case .mysql: [database(for: tab)]
         }
         if let blank = wanted.firstIndex(where: \.isEmpty) { wanted.removeSubrange(blank...) }
+        if let scope = descend(wanted, from: root, connection: connection) { requestLoad(of: scope) }
+    }
+
+    /// The node `path` names below a connection's node, asking for the first level that is not
+    /// loaded on the way (so the answer is nil until that arrives and the caller asks again). A
+    /// path that names nothing is nil too, and asks for nothing more.
+    private func descend(_ path: [String], from root: TreeNode, connection: Connection) -> TreeNode? {
         var current = root
-        while true {
+        var rest = path[...]
+        while let name = rest.first {
             guard let children = current.children else {
                 requestLoad(of: current)
-                return
+                return nil
             }
             // "Show all databases" puts the database level back under a Postgres connection.
             if connection.kind == .postgres, current.kind == .connection,
@@ -247,17 +287,124 @@ extension AppModel {
                 guard let own = children.first(where: {
                     $0.kind == .database
                         && $0.title.compare(connection.database, options: .caseInsensitive) == .orderedSame
-                }) else { return }
+                }) else { return nil }
                 current = own
                 continue
             }
-            guard let name = wanted.first else { return }
             guard let next = children.first(where: {
                 $0.title.compare(name, options: .caseInsensitive) == .orderedSame
-            }) else { return }
-            wanted.removeFirst()
+            }) else { return nil }
+            rest = rest.dropFirst()
             current = next
         }
+        return current
+    }
+
+    /// How many of a statement's relations are asked about for a bare column.
+    static let relationLimit = 8
+
+    /// The relations an `o.` can mean: those aliased `o`, or else the ones with no alias called
+    /// `o`. More than one is an ambiguity, and the caller offers nothing for it.
+    static func relations(named qualifier: String, in references: EditorReferences) -> [EditorRelation] {
+        func same(_ a: String?, _ b: String) -> Bool {
+            a?.compare(b, options: .caseInsensitive) == .orderedSame
+        }
+        let aliased = references.relations.filter { same($0.alias, qualifier) }
+        if !aliased.isEmpty { return aliased }
+        return references.relations.filter { $0.alias == nil && same($0.name, qualifier) }
+    }
+
+    /// The tree path a relation of a statement names, with the tab's database and schema filling
+    /// in the leading parts the statement left out, the way the server would read it. Nil when a
+    /// part is missing and the tab has no default for it.
+    func treePath(of relation: EditorRelation, tab: QueryTab, kind: ConnectionKind) -> [String]? {
+        guard let name = relation.name else { return nil }
+        let depth = kind.levels.count
+        let written = [relation.catalog, relation.schema].compactMap { $0 } + [name]
+        let parts = Array(written.suffix(depth))
+        let defaults: [String] = switch kind {
+        case .trino: [database(for: tab), schema(for: tab)]
+        case .postgres: [schema(for: tab)]
+        case .mysql: [database(for: tab)]
+        }
+        let leading = Array(defaults.prefix(depth - parts.count))
+        guard leading.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return leading + parts
+    }
+
+    /// The columns of one relation of the statement, when they can be vouched for. A table's come
+    /// from its node in the tree and are read once if the node has none yet (the answer lands
+    /// through `completion.catalogLoaded()`); a CTE's from the column list it declares. A subquery
+    /// and a CTE with no list have none, which is better than a guess.
+    func columnNames(of relation: EditorRelation, in references: EditorReferences, tab: QueryTab,
+                     connection: Connection) -> [String] {
+        func cte(_ name: String) -> EditorCte? {
+            references.ctes.first { $0.name.compare(name, options: .caseInsensitive) == .orderedSame }
+        }
+        switch relation.kind {
+        case .subquery:
+            return []
+        case .cte:
+            return relation.name.flatMap(cte)?.columns ?? []
+        case .table:
+            guard let name = relation.name else { return [] }
+            if relation.catalog == nil, relation.schema == nil, let own = cte(name) { return own.columns }
+            guard let root = connectionNode(for: connection.id),
+                  let path = treePath(of: relation, tab: tab, kind: connection.kind),
+                  let table = descend(path, from: root, connection: connection),
+                  table.kind == .table else { return [] }
+            if let columns = table.columns { return columns.map(\.name) }
+            loadColumns(of: table)
+            return []
+        }
+    }
+
+    /// Reads one table's columns for completion, once: nothing while it is loading or failed
+    /// before, and at most `completionColumnReadLimit` at a time.
+    ///
+    /// The engine has no columns command, so this asks the way the object inspector does: a
+    /// `preview` of `SELECT *` under a one-row cap, which the server describes before it sends a
+    /// row (`objectColumnsSQL`). It is a real query, which is why it is only sent for a table the
+    /// statement names, and never twice for the same one.
+    func loadColumns(of table: TreeNode) {
+        guard table.kind == .table, table.columns == nil, !table.columnsLoading,
+              table.columnsError == nil,
+              completionColumnReads < Self.completionColumnReadLimit,
+              let connection = connections.first(where: { $0.id == table.connectionID }) else { return }
+        var env: [String: String]
+        do {
+            env = try Self.connectionEnvironment(connection, password: Self.storedPassword(for: connection.id))
+        } catch {
+            table.columnsError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            return
+        }
+        if let database = table.database { env["DB_DATABASE"] = database }
+        if let schema = table.schema { env["DB_SCHEMA"] = schema }
+        env["SQL"] = objectColumnsSQL(database: table.database, schema: table.schema,
+                                      table: table.title, for: connection.kind)
+        env["LIMIT"] = "1"
+        env["RETRIES"] = "2"
+        table.columnsLoading = true
+        let token = UUID()
+        table.loadToken = token
+        completionColumnReads += 1
+        engine.run("preview", env: env, onEvent: { event in
+            guard table.loadToken == token else { return }
+            switch event.event {
+            case "columns": table.columns = event.columns ?? []
+            case "error": table.columnsError = event.message ?? "Reading the table's columns failed."
+            default: break
+            }
+        }, onExit: { [weak self] status, log in
+            self?.completionColumnReads -= 1
+            guard table.loadToken == token else { return }
+            table.columnsLoading = false
+            if table.columns == nil, table.columnsError == nil {
+                table.columnsError = status == 0 ? "The server reported no columns."
+                    : log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)"
+            }
+            self?.completion.catalogLoaded()
+        })
     }
 
     /// The node a typed path names, or nil when the tree cannot answer for it.
@@ -331,6 +478,10 @@ extension AppModel {
     ///
     /// A name with more parts than its level has, a level the driver does not have, or a name
     /// that cannot be completed because the tab has no default for a missing part drops nothing.
+    ///
+    /// A reply still on its way for a dropped node is ignored: the node's load token changes, so
+    /// what was asked before the DDL cannot repopulate it after.
+    @MainActor
     func invalidateCompletionCatalog(for tab: QueryTab, object parts: [String],
                                      kind: TreeNode.Kind = .table) {
         guard let connection = connection(for: tab),
@@ -358,6 +509,10 @@ extension AppModel {
             node.children = nil
             node.error = nil
             node.loading = false
+            node.loadToken = nil
+            node.columns = nil
+            node.columnsError = nil
+            node.columnsLoading = false
         }
     }
 }

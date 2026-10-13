@@ -207,6 +207,44 @@ final class EditorAnalysis: @unchecked Sendable {
         return try Self.convert(packet, length: length)
     }
 
+    /// The tables, aliases and CTEs of the statement at `offset`, for the revision this object holds
+    /// now. Background thread. A packet that reaches outside the document is `malformed`, never
+    /// used; one for a revision that has moved on is `stale`.
+    func references(at offset: Int) throws -> EditorReferences {
+        try references(at: offset, revision: revision)
+    }
+
+    private func references(at offset: Int, revision asked: UInt64) throws -> EditorReferences {
+        let found: EditorReferences = try get {
+            try document.references(revision: asked, offsetUtf16: UInt32(clamping: offset))
+        }
+        let end = length
+        guard found.revision == asked,
+              Int(found.statementStartUtf16) + Int(found.statementLenUtf16) <= end,
+              found.relations.allSatisfy({ Int($0.nameStartUtf16) + Int($0.nameLenUtf16) <= end })
+        else { throw EditorAnalysisError.malformed }
+        return found
+    }
+
+    /// `references(at:)` off the main thread, answered on it. The revision is the one at the time
+    /// of asking, so an edit that lands before the answer makes the answer `stale`.
+    func requestReferences(at offset: Int,
+                           completion: @escaping (Result<EditorReferences, EditorAnalysisError>) -> Void) {
+        let asked = revision
+        paintQueue.async { [weak self] in
+            let result: Result<EditorReferences, EditorAnalysisError>
+            do {
+                guard let self else { return }
+                result = .success(try self.references(at: offset, revision: asked))
+            } catch let error as EditorAnalysisError {
+                result = .failure(error)
+            } catch {
+                result = .failure(.malformed)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     /// The delimiters touching `offset`, opener first, for the revision this object holds now: two
     /// ranges, or none. Background thread. A result that disagrees with the invariants (an odd
     /// count, a range past the text) is `malformed`, never drawn.

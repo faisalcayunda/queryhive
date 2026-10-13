@@ -65,8 +65,31 @@ enum CompletionTrigger {
         return text.substring(with: NSRange(location: start, length: end - start)).lowercased()
     }
 
-    private static func isBlank(_ unit: unichar) -> Bool {
+    static func isBlank(_ unit: unichar) -> Bool {
         unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D
+    }
+
+    /// Words that can follow a table's name without being its alias.
+    private static let afterTable: Set<String> = [
+        "where", "join", "inner", "left", "right", "full", "cross", "natural", "outer", "on", "using",
+        "group", "order", "having", "limit", "offset", "fetch", "union", "intersect", "except", "select",
+        "set", "values", "returning", "window", "qualify", "lateral", "tablesample", "for", "with",
+        "and", "or", "when", "then", "else", "end",
+    ]
+
+    /// Whether what follows `offset` is already an alias for the table being written: a name that is
+    /// not one of the words that follow a table, an `AS`, or a quoted name. A comma, a bracket, the
+    /// end of the statement or the end of the text is not.
+    static func aliasFollows(in text: NSString, from offset: Int) -> Bool {
+        var index = min(offset, text.length)
+        while index < text.length, isBlank(text.character(at: index)) { index += 1 }
+        guard index < text.length else { return false }
+        let first = text.character(at: index)
+        if first == 0x22 || first == 0x60 { return true }
+        var end = index
+        while end < text.length, WordScope.isWordCharacter(text.character(at: end)) { end += 1 }
+        guard end > index else { return false }
+        return !afterTable.contains(text.substring(with: NSRange(location: index, length: end - index)).lowercased())
     }
 
     /// Clauses where a single typed letter is already worth a list.

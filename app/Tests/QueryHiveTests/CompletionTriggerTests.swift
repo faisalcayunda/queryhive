@@ -113,6 +113,24 @@ final class CompletionTriggerTests: XCTestCase {
         XCTAssertTrue(opens("select ", manual: true))
     }
 
+    // MARK: A table that already has an alias
+
+    func testAnAliasThatFollowsTheWordIsRecognised() {
+        func follows(_ text: String) -> Bool {
+            CompletionTrigger.aliasFollows(in: text as NSString, from: 0)
+        }
+        XCTAssertTrue(follows(" u where x"))
+        XCTAssertTrue(follows(" AS u"))
+        XCTAssertTrue(follows("\n  \"my alias\""))
+        XCTAssertFalse(follows(""))
+        XCTAssertFalse(follows(" where x = 1"))
+        XCTAssertFalse(follows(" JOIN b ON true"))
+        XCTAssertFalse(follows(", b"))
+        XCTAssertFalse(follows(") x"))
+        XCTAssertFalse(follows(";"))
+        XCTAssertFalse(follows("\ngroup by a"))
+    }
+
     // MARK: Esc
 
     func testEscSilencesTheWordItClosedUntilTheNextWord() {

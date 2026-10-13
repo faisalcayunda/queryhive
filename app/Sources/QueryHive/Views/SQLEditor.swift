@@ -867,7 +867,7 @@ struct SQLEditor: NSViewRepresentable {
                 // The change we just made was accepting a suggestion; re-opening the list over
                 // the word it just inserted would be maddening.
                 suppressAutoTrigger = false
-                parent.completion.dismiss()
+                closeList()
                 return
             }
             debounce?.cancel()
@@ -1382,7 +1382,7 @@ struct SQLEditor: NSViewRepresentable {
 
         func textDidEndEditing(_ notification: Notification) {
             parent.focused = false
-            parent.completion.dismiss()
+            closeList()
             flushToModel()
         }
 
@@ -1414,7 +1414,7 @@ struct SQLEditor: NSViewRepresentable {
             // way the caret moves is handled where it happens — a click closes the list through
             // `SQLTextView.onClick`, and a keystroke rebuilds it against the new caret in `refresh`.
             guard parent.completion.active else { return }
-            if nsText.length == 0 { parent.completion.dismiss() }
+            if nsText.length == 0 { closeList() }
         }
 
         /// Tell SwiftUI how many lines there are, when that changed. Deferred a turn: this is also
@@ -1739,7 +1739,7 @@ struct SQLEditor: NSViewRepresentable {
 
         /// A click moved the caret: close the list rather than leave it pinned to the old one.
         func dismissCompletionOnClick() {
-            parent.completion.dismiss()
+            closeList()
         }
 
         // MARK: Candidates
@@ -1777,29 +1777,71 @@ struct SQLEditor: NSViewRepresentable {
                 return
             }
             // ⌃Space and a quote just opened are explicit; the rest follows the trigger rules.
-            var waiting = false
-            for site in sites {
+            let plan: [(site: CompletionSite, scope: EditorCaretScope?)] = sites.compactMap { site in
                 let scope = caretScope(for: site, in: text)
-                guard CompletionTrigger.shouldOpen(site, clause: scope?.clause, manual: manual) else {
-                    continue
-                }
-                waiting = true
+                return CompletionTrigger.shouldOpen(site, clause: scope?.clause, manual: manual)
+                    ? (site, scope) : nil
+            }
+            guard !plan.isEmpty else {
+                closeList()
+                return
+            }
+            // A question worth asking may be answered late (a level of the tree still loading),
+            // and then it is asked again.
+            lastManual = manual
+            awaitCatalog(caret: caret, length: text.length, manual: manual)
+            generation &+= 1
+            let mine = generation
+            // The statement's tables and aliases come from the analysis, off the main thread: a
+            // key never waits for it. The list for the previous key stays up until it answers, and
+            // an answer for text that has moved on (another key, a moved caret, an older revision
+            // of the document) is dropped.
+            guard let analysis, plan.contains(where: { Self.needsReferences($0.site, $0.scope) }) else {
+                show(plan, references: nil, caret: caret)
+                return
+            }
+            let length = text.length
+            analysis.requestReferences(at: caret) { [weak self] result in
+                guard let self, let textView = self.textView, mine == self.generation,
+                      textView.selectedRange().location == caret, self.nsText.length == length else { return }
+                let current = (try? result.get()).flatMap { $0.revision == self.analysis?.revision ? $0 : nil }
+                self.show(plan, references: current, caret: caret)
+            }
+        }
+
+        private var generation = 0
+        private var lastManual = false
+
+        /// Whether the statement's analysis changes the answer: after a qualifier (`o.` may be an
+        /// alias) and wherever the clause is known (aliases to avoid, columns of the relations).
+        private static func needsReferences(_ site: CompletionSite, _ scope: EditorCaretScope?) -> Bool {
+            site.path.count == 1 || (scope.map { $0.clause != .other } ?? false)
+        }
+
+        private func show(_ plan: [(site: CompletionSite, scope: EditorCaretScope?)],
+                          references: EditorReferences?, caret: Int) {
+            guard let textView else { return }
+            let text = nsText
+            for (site, scope) in plan {
+                // A table named here that is already followed by an alias (`FROM us| u`) gets none
+                // written, or it would be there twice.
+                let aliasable = !CompletionTrigger.aliasFollows(in: text, from: wordEnd(of: site, caret: caret))
                 let items = parent.candidates(CompletionRequest(prefix: site.prefix, path: site.path,
-                                                                scope: scope))
+                                                                scope: scope, references: references,
+                                                                aliasable: aliasable))
                 guard !items.isEmpty else { continue }
                 activeSite = site
                 activeCaret = caret
                 parent.completion.present(items, anchor: caretRect(in: textView),
-                                          passive: CompletionTrigger.isPassive(site, manual: manual))
-                awaitCatalog(caret: caret, length: text.length, manual: manual)
+                                          passive: CompletionTrigger.isPassive(site, manual: lastManual))
                 return
             }
-            closeList()
-            // An empty answer to a question worth asking may be an answer still on its way.
-            if waiting { awaitCatalog(caret: caret, length: text.length, manual: manual) }
+            activeSite = nil
+            parent.completion.dismiss()
         }
 
         private func closeList() {
+            generation &+= 1
             activeSite = nil
             parent.completion.dismiss()
             parent.completion.onCatalogLoaded = nil
@@ -1836,17 +1878,25 @@ struct SQLEditor: NSViewRepresentable {
                 while start > 0, WordScope.isWordCharacter(text.character(at: start - 1)) { start -= 1 }
                 return NSRange(location: start, length: caret - start)
             }
+            return NSRange(location: site.replaceStart, length: wordEnd(of: site, caret: caret) - site.replaceStart)
+        }
+
+        /// Where the word the caret is in ends: after the rest of its name characters, or, for a
+        /// word typed inside a quote, after a closing quote that follows the caret without a blank
+        /// in between (so `"prod-o|ps"` is one word, and `"prod-o| from "x"` is not).
+        private func wordEnd(of site: CompletionSite, caret: Int) -> Int {
+            let text = nsText
             var end = caret
             if site.quoted {
                 let quote = text.character(at: site.replaceStart)
                 var probe = caret
                 while probe < text.length, text.character(at: probe) != quote,
-                      text.character(at: probe) != 0x0A { probe += 1 }
+                      !CompletionTrigger.isBlank(text.character(at: probe)) { probe += 1 }
                 if probe < text.length, text.character(at: probe) == quote { end = probe + 1 }
             } else {
                 while end < text.length, WordScope.isWordCharacter(text.character(at: end)) { end += 1 }
             }
-            return NSRange(location: site.replaceStart, length: end - site.replaceStart)
+            return end
         }
 
         /// Whether the caret is inside text that is not code: a string, a comment, a `$$` body.

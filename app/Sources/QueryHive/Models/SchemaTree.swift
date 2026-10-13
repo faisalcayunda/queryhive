@@ -69,6 +69,16 @@ final class TreeNode: Identifiable {
     var expanded = false
     var loading = false
     var error: String?
+    /// Which load is allowed to write this node. A reply that comes back after `invalidate`
+    /// (or after a refresh started another load) carries an old token and is dropped.
+    @ObservationIgnored var loadToken: UUID?
+
+    /// A table's columns as completion last read them: nil is "never asked", `[]` is "asked and
+    /// empty". They live on the table node, and are dropped with it, rather than in a cache of
+    /// their own. Read through `AppModel.loadColumns`.
+    var columns: [Event.Column]?
+    var columnsLoading = false
+    var columnsError: String?
 
     var isExpandable: Bool { kind.isExpandable }
 

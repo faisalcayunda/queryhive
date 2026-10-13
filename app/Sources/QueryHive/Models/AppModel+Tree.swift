@@ -425,6 +425,9 @@ extension AppModel {
         node.children = nil
         node.error = nil
         node.loading = false
+        node.loadToken = nil
+        node.columns = nil
+        node.columnsError = nil
         if node.expanded { loadChildren(of: node) }
     }
 
@@ -434,6 +437,9 @@ extension AppModel {
             node.children = nil
             node.error = nil
             node.loading = false
+            node.loadToken = nil
+            node.columns = nil
+            node.columnsError = nil
             node.expanded = false
         }
         selectedNodeID = nil
@@ -500,6 +506,10 @@ extension AppModel {
         env["RETRIES"] = "2"
         node.loading = true
         node.error = nil
+        // A reply that finds another token on the node was asked for before the node was
+        // invalidated or refreshed, and describes a server state that may be gone.
+        let token = UUID()
+        node.loadToken = token
         var message: String?
         // `catalogs` means a catalog for Trino and a database for the other two; the command is
         // shared because it is the same question ("what is directly under the connection?"). A
@@ -507,6 +517,7 @@ extension AppModel {
         // databases, so it belongs on the database side of this the same way MySQL does.
         let catalogNode = connection.kind == .trino ? TreeNode.catalog : TreeNode.database
         engine.run(command, env: env, onEvent: { event in
+            guard node.loadToken == token else { return }
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
             case "schemas": node.children = (event.names ?? []).map { TreeNode.schema($0, parent: node) }
@@ -515,6 +526,7 @@ extension AppModel {
             default: break
             }
         }, onExit: { [weak self] status, log in
+            guard node.loadToken == token else { return }
             node.loading = false
             // Whatever the editor was waiting on, it can ask again now.
             defer { self?.completion.catalogLoaded() }

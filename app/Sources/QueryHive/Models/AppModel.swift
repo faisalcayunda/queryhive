@@ -309,6 +309,12 @@ final class AppModel {
     /// this is app-level rather than per-tab state.
     var completion = EditorCompletion()
 
+    /// How many column reads completion has in flight. Each is a `SELECT *` under a one-row cap, so
+    /// a statement of eight relations must not send eight at once to a warehouse; the rest wait
+    /// for the next ask, which comes when one of these lands.
+    @ObservationIgnored var completionColumnReads = 0
+    static let completionColumnReadLimit = 3
+
     // MARK: Importing data
 
 
