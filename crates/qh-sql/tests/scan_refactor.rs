@@ -883,7 +883,13 @@ fn add_surface(digest: &mut Digest, sql: &str) {
 /// or the classifier does moved with either: the payloads, the seeds and the random inputs are the
 /// same, `payloads_and_repository_sql_scan_identically` reads the new text of that file under
 /// every lexer and finds the frozen scanner agreeing, and `qh-sql`'s sources are untouched.
-const SURFACE_DIGEST: u64 = 0x6e16_c1bd_0d82_fdfb;
+///
+/// It was retaken on 14 Oct 2026 for one reason: `count_statement_dialect` now puts a line break
+/// before the closing parenthesis (`FROM (<sql>\n) AS queryhive_count`), so a trailing `--` or
+/// `#` comment cannot swallow it. Checked: with that one suffix mapped back to `) AS
+/// queryhive_count` inside `add_surface`, the digest is still the previous constant
+/// (`0x6e16_c1bd_0d82_fdfb`), so no decision, split, classification or strip moved.
+const SURFACE_DIGEST: u64 = 0x2b8a_cad1_87f1_be0d;
 
 #[test]
 fn the_safe_mode_surface_is_unchanged() {

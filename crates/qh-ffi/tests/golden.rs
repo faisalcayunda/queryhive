@@ -1173,7 +1173,7 @@ async fn every_exact_case_matches_the_python_snapshot() {
 }
 
 #[tokio::test]
-async fn the_count_command_runs_the_wrapper_the_snapshot_was_recorded_with() {
+async fn the_count_command_runs_the_wrapper_with_a_line_break_before_the_closing_parenthesis() {
     let case = cases()
         .into_iter()
         .find(|case| case.id == "count")
@@ -1182,7 +1182,7 @@ async fn the_count_command_runs_the_wrapper_the_snapshot_was_recorded_with() {
     recorded(&case, None).await.expect("count runs");
     assert_eq!(
         session.executed(),
-        vec!["SELECT COUNT(*) FROM (SELECT * FROM t) AS queryhive_count".to_owned()],
+        vec!["SELECT COUNT(*) FROM (SELECT * FROM t\n) AS queryhive_count".to_owned()],
         "the caller's SQL is wrapped, and only the wrapper, is what runs"
     );
 }
