@@ -1,0 +1,601 @@
+# Blueprint W13-T19: form koneksi bersidebar
+
+- **Status:** blueprint tingkat berkas, 13 Okt 2026. Belum ada kode yang ditulis. Menunggu verdict `architect-reviewer` (bagian terakhir).
+- **Untuk:** W13-T19 (ID usulan, CONN-FORM). Permintaan pemilik 2026-10-13 (`target/run/keep/ledger.md:649-652`): centang "Verify the TLS certificate" yang sekarang berdiri sendiri di satu baris selebar form dipindah ke samping kolom host, dan seluruh form koneksi ditata seperti jendela koneksi TablePro: sidebar bagian, baris berlabel kiri dan nilai kanan, dan footer.
+- **Sumber:** `AGENTS.md`; `development-plan.md` §0.5, §1, §5 (W13), §7; PRD §6.5; `blueprints/w11-metadata-and-connections.md` §9.1–§9.3; `blueprints/w13-plan-activity.md` §8.2; `tablepro-adoption-plan.md` §8; enam tangkapan layar TablePro dari pemilik.
+- **Bukti:** kode dibaca dari pohon kerja `main` (`3a5957b`), 13 Okt 2026. Setiap `path:baris` di bawah benar-benar dibaca hari ini. Kutipan `ConnectionsViews.swift:471-486` di `tablepro-feature-map.md:40` sudah basi; jangan dipakai.
+- **TablePro (AGPL-3.0):** yang dipelajari hanya tata letak dan angka. Konten jendela 820×620, minimum 720×560 (`TablePro/Views/ConnectionForm/ConnectionFormWindowController.swift:69-70`); sidebar 200–260 pt, detail ≥ 480 pt (`ConnectionFormSplitViewController.swift:18-20`). Tidak ada kode, aset, string, atau identifier yang disalin. Semua label di sini adalah label QueryHive yang sudah ada atau tulisan baru milik QueryHive.
+- **Bahasa:** dokumen Indonesia. Identifier, string app, nama tes, dan pesan commit Inggris.
+
+## Ringkasan
+
+1. **Tetap sheet, bukan jendela.** Editor dipresentasikan dengan `.sheet(item: $model.editingConnection)` (`RootView.swift:80-83`). Ukurannya tetap 820×620; hari ini 620×660 (`ConnectionsViews.swift:272`). Sidebar adalah `HStack` biasa, bukan `NavigationSplitView`. Jendela sungguhan adalah pertanyaan terbuka OQ-2.
+2. **Empat bagian.** Bagiannya General, SSH Tunnel, Limits, dan Appearance. "General" dan "Appearance" adalah nama pane Settings QueryHive sendiri (`SettingsView.swift:61`, `:64`).
+3. **TLS, rekomendasi opsi A.** Satu kontrol enkripsi ringkas (Menu) duduk di samping kolom Host, sama untuk ketiga driver. Trino mendapat empat pilihan, sesuai empat hasil di `Connections.swift:218-225`. PostgreSQL dan MySQL memakai kata sslmode mereka. Baris CA pindah tepat di bawah Host, sehingga keterikatan "CA membatasi pilihan" terlihat di pane yang sama. Opsi B (bagian jaringan dengan baris mode SSL) dan varian checkbox harfiah dibandingkan di §4. Keputusan akhir ada di pemilik (OQ-1).
+4. **Tanpa Rust, FFI, atau migrasi.** `Connection` dan kunci Codable-nya tidak berubah (`Connections.swift:304-472`), begitu pula akun Keychain (`:877-899`). Pilihan enkripsi hanya cara lain menampilkan dan mengubah `scheme`, `verify`, dan `sslmode` yang sudah tersimpan.
+5. **Satu draft.** Dua puluh enam `@State` di sheet (`ConnectionsViews.swift:126-184`) diganti satu nilai `ConnectionDraft`. Invarian yang sekarang menempel di `.onChange` sebuah view pindah ke draft: CA memaksa verifikasi (`:725-730`), dan port mengikuti scheme Trino (`:535-544`). Bila tidak dipindah, invarian itu berhenti berlaku saat bagiannya tidak sedang dipasang.
+6. **Gate visual sheet ini adalah `ChromeParityTests`, bukan `VisualParityTests`.** Scene-nya `connection` dan `connection-ssh` dengan ukuran tertanam 620×660 (`ChromeParityTests.swift:80`, `:109-111`). Gate ini hanya jalan lokal, karena tes render di-skip di CI (`ledger.md:588`). Perubahan visual dideklarasikan sebagai **V-15**, karena V-14 sudah dipakai (`development-plan.md:738`, `ledger.md:273`).
+7. **Posisi rantai: sebelum W13-T15.** T15 butuh G-LIVE TLS dan kontainer yang sudah dihapus, dan T15 menambah isi ke footer yang sama (§2).
+
+## 1. Keadaan sekarang
+
+### 1.1 Pintu masuk dan alur
+
+- **Pintu masuk.** Semua jalur memanggil `presentConnectionEditor(_:startAtURL:previewTestCount:inGroup:)` (`AppModel+Connections.swift:170-179`), yang mengisi `editingConnection` (`AppModel.swift:133`) dengan `ConnectionEditorTarget` (`SchemaTree.swift:194-210`). Pemanggilnya: menu picker koneksi (`ConnectionsViews.swift:56-57`), sidebar (`SidebarTree.swift:79-80`, `:130-131`), dan menu pohon (`TreeMenu.swift:46`, `:50`, `:72`).
+- **Tiga langkah dalam satu sheet** (`ConnectionsViews.swift:124`):
+  - pemilih jenis berupa tile (`:303-360`);
+  - URI (`:373-409`);
+  - form (`:411-429`).
+  - Koneksi tersimpan langsung masuk ke form (`:967`).
+- **Header form** (`:475-498`) memuat:
+  - tile merek 56 pt;
+  - nama, atau "New Connection";
+  - tanda "Unsaved changes";
+  - "Change Type…", yang kembali ke pemilih jenis.
+- **Footer** (`:922-958`) memuat:
+  - Test Connection dan statusnya di kiri;
+  - Delete (hanya saat edit), Cancel, dan Save di kanan.
+
+### 1.2 Isi form per jenis
+
+| Field | Trino | PostgreSQL | MySQL | Bukti |
+|---|---|---|---|---|
+| Name (wajib) | ya | ya | ya | `ConnectionsViews.swift:502-506` |
+| Color (6 warna) | ya | ya | ya | `:507`; `Connections.swift:7-8` |
+| Host (wajib) | ya | ya | ya | `:508-511` |
+| Transport HTTPS/HTTP/Prefer | ya; hanya HTTPS bila ada CA | – | – | `:513-528` |
+| Port (wajib, 1–65535) | ya | ya | ya | `:529-533`; `ConnectionFormIssues.swift:110` |
+| User (wajib) | ya | ya | ya | `:545-548` |
+| Password (kosong = pertahankan) | ya, kecuali auth JWT | ya | ya | `:549-561` |
+| Catalog / Database | Catalog | Database (wajib) + "All Databases" | Database + "Show All" | `:562-584`, `:596-608`; `Connections.swift:88`, `:93` |
+| Schema | ya | ya + "Show System Schemas" | – | `:585-595`; `Connections.swift:90` |
+| SSL mode | – | 5 kata libpq; hanya verify-ca/verify-full bila ada CA | disable/prefer/require | `:610-615`; `Connections.swift:98-122` |
+| "Verify the TLS certificate" | hanya transport HTTPS; nonaktif bila ada CA; untuk HTTP/Prefer diganti kalimat | – | – | `:616-644` (ChipToggle `:629-630`) |
+| Safe Mode | ya | ya | ya | `:649-659` |
+| Environment | ya | ya | ya | `:661-672` |
+| Statement timeout (detik) | ya | ya | ya | `:676-683` |
+| Authentication Password/JWT | ya | – | – | `:684`, `:696-707` |
+| CA certificate | ya | ya | kalimat "no CA setting" | `:685-688`, `:710-731` |
+| SSH tunnel (host atau alias, user, port, metode, kunci, passphrase/password) | ya | ya | ya | `:689`, `:733-800` |
+
+Grup tidak ada di form, dan itu disengaja. Koneksi baru yang dibuat dari menu grup diberi `model.newConnectionGroup` saat Save (`ConnectionsViews.swift:1040-1047`; alasannya di `AppModel+Connections.swift:174-178`).
+
+### 1.3 Validasi
+
+`ConnectionFormIssues.fields` (`ConnectionFormIssues.swift:103-127`) memeriksa hal berikut:
+
+- name, host, port 1–65535, dan user;
+- database untuk PostgreSQL;
+- saat tunnel menyala: SSH host, SSH port, SSH user (atau user dari alias), dan berkas kunci untuk metode `key` (atau berkas dari alias);
+- berkas CA harus ada;
+- timeout 0–600.
+
+Kalimatnya dirakit `message` (`:136-145`). Kolom merah dan tulisan "Required" baru muncul setelah percobaan Save atau Test (`ConnectionsViews.swift:873-877`). Pesan validasi dititipkan ke `testState.failure`, jadi bercampur dengan hasil Test (`:1025`, `:1091`).
+
+### 1.4 Penyimpanan
+
+- **Keychain**, service `id.data-ecosystem.queryhive` (`Connections.swift:873`). Ada empat slot: password database (akun = UUID), `ssh-password:`, `ssh-passphrase:`, dan `jwt:` (`:877-888`, `:899`).
+  - Form tidak pernah menampilkan rahasia tersimpan.
+  - Field kosong berarti "pertahankan".
+  - Rahasia dihapus hanya lewat "Remove saved…", atau bila koneksi berhenti memakai slot itu (`ConnectionFormIssues.swift:156-214`; `ConnectionsViews.swift:826-839`).
+- **`connections.json`** di Application Support/QueryHive (`Connections.swift:782-800`). Berkas ini berisi semua field `Connection` (`:417-422`) di dalam `ConnectionsDocument` bersama grup (`:673-697`), ditambah satu salinan `.bak` (`:841-845`).
+- **Urutan Save:** Keychain dulu, baru JSON (`ConnectionsViews.swift:1033-1050`). Item lama yang masih memunculkan prompt diperbarui sesudahnya (`:1059-1070`). `draftID` dipakai ulang antar-percobaan supaya item Keychain tidak yatim (`:181-184`).
+
+### 1.5 Test, Save, Delete
+
+- **Test** (`:1086-1136`):
+  1. menjalankan validasi yang sama dengan Save;
+  2. bila ada masalah, berhenti dengan pesan;
+  3. bila tidak, menyusun koneksi draft; rahasia yang diketik menang atas yang tersimpan, kecuali penghapusannya sudah dijadwalkan (`:1099-1112`);
+  4. menjalankan `Engine.current.run("test")` (`:1120`).
+  - Hasilnya satu baris status (`:883-912`).
+  - Kegagalan karena host key dibuka lewat `HostKeyCenter`, dan Test diulang setelah kunci dipercaya (`:290`, `:293-295`).
+  - Pintasannya ⌘↩ (`:940`; `Shortcuts.swift:267-271`).
+- **Save** (`:1021-1078`). Tidak ada "Save & Connect". Yang paling dekat: koneksi **baru** menjadi tujuan tab terpilih bila tab itu belum punya koneksi (`:1074-1076`).
+- **Delete** memakai dialog konfirmasi (`:281-285`), lalu `model.deleteConnection` (`:1080-1084`).
+
+### 1.6 Impor
+
+- **URI.** `ConnectionURL.parse` (`Connections.swift:552-583`) mengisi field form (`ConnectionsViews.swift:443-473`). Parameter yang diabaikan disebut dalam satu catatan (`:458`, `:675`).
+- **Navicat, DBeaver, DataGrip, dan daftar QueryHive** tidak melewati form. Menu impor menutup sheet dulu (`:328-338`, `:362-368`).
+
+### 1.7 Tes dan baseline yang menutupnya
+
+- **Tes unit:**
+  - `ConnectionFormIssuesTests` (validasi dan rencana rahasia, `:14-152`);
+  - `ConnectionURLTests`, `ConnectionKeychainTests`, `ConnectionEnvironmentTests`, `ConnectionMappingTests`, `ConnectionGroupTests`, `ConnectionListTransferTests`.
+- **Tidak ada tes unit untuk pemetaan state sheet** (`load`, `draftConnection`). Keduanya `private` dan hanya terlihat lewat gambar.
+- **Render.**
+  - `ShellTests.testASheetStillAttachesToTheWindow` (`ShellTests.swift:539-545`).
+  - `ChromeParityTests` memakai scene `connection` (Trino tersimpan) dan `connection-ssh` (PostgreSQL bertunnel), dengan permukaan 620×660 (`ChromeParityTests.swift:76-83`, `:109-111`). Baselinenya `chrome-connection-{dark,light}` dan `chrome-connection-ssh-{dark,light}`.
+  - Rekam dengan `QH_RECORD_CHROME` (`:19-27`). Menu dan popover tidak tertangkap (`:48-50`).
+- **Scene snapshot tanpa baseline:** `new-connection`, `connection-uri`, `connection-trino`, `connection-postgres`, `connection-mysql`, `connection-tested` (`Snapshot.swift:552-556`, `:966-997`).
+
+### 1.8 Temuan sampingan
+
+- **T-1. Koneksi tersimpan terbuka dengan tanda "Unsaved changes".**
+  - Sebab: `load()` menormalkan `sslmode` kosong ke bawaan driver (`ConnectionsViews.swift:989`), `draftConnection` menulisnya (`:211`), dan `isDirty` membandingkannya (`:198`).
+  - Buktinya ada di baseline yang ter-commit: `__Baselines__/chrome-connection-dark.png` menampilkan "Unsaved changes" untuk "Trino production". Koneksi itu dibuat dengan `sslmode` bawaan `""` (`Snapshot.swift:297-299`; `Connections.swift:382`).
+  - Diperbaiki di langkah 4 (§10).
+- **T-2.** Pesan sukses Test untuk MySQL berbunyi "N catalogs" (`ConnectionsViews.swift:889`), padahal level MySQL adalah database (`Connections.swift:68`). Diperbaiki di langkah 4.
+
+## 2. Tugas, kepemilikan, dan tabrakan
+
+### 2.1 ID dan posisi
+
+- **ID.** W13-T19 belum dipakai (grep atas seluruh `*.md`).
+- **Tingkat.** Sedang (fitur UI). Langkah 1 Tinggi, karena memindah jalur Save dan Keychain.
+- **FR.** Tidak ada FR baru. FR-CON-09 tetap berlaku.
+- **Rantai `ConnectionsViews.swift` dan `Connections.swift`** (`development-plan.md:1082`): W11-T3s → W13-T4b → W13-T15 → W13-T16 → bersyarat. Status hari ini:
+  - **W11-T3s mendarat.** `ConnectionURLTests.swift` ada, dan `statementTimeoutMS` ada di `Connections.swift:376`.
+  - **W13-T16 mendarat di luar urutan.** `DBeaverImport.swift`, `DataGripImport.swift`, dan `ConnectionListTransfer` (`Connections.swift:707-751`) sudah ada; lihat juga `handoff.md:27`.
+  - **W13-T4b belum.** Migrasi berhenti di `0008`.
+  - **W13-T15 belum.** `securityLabel` hanya ada definisinya (`Connections.swift:489`); lihat juga `handoff.md:31`.
+- **Usulan rantai:** W11-T3s → **W13-T19** → W13-T4b → W13-T15 → (W13-T16 sudah) → W13-T11 → W13-T17 → W13-T10 → W13-T18. Alasannya:
+  - T19 tidak butuh kontainer.
+  - T15 butuh G-LIVE TLS dan G-GOLDEN (`development-plan.md:954`), sementara kontainernya sudah dihapus (`AGENTS.md`).
+  - T15 menambah isi ke footer yang dirancang ulang di sini, jadi lebih murah menulisnya sekali di atas footer baru.
+  - Satu-satunya baris Swift milik T4b ada di `connectionEnvironment` (`w13-plan-activity.md:667`, berkas `AppModel+Connections.swift`), yang tidak disentuh T19.
+
+### 2.2 Berkas
+
+**Dimiliki T19:**
+
+- `app/Sources/QueryHive/Views/ConnectionsViews.swift`
+- `Views/ConnectionForm.swift` (baru: sidebar, kartu, baris, kontrol enkripsi, empat bagian)
+- `Models/ConnectionDraft.swift` (baru)
+- `Models/ConnectionTLSChoice.swift` (baru)
+- `Models/ConnectionFormIssues.swift` (tidak punya pemilik §7 setelah W11-T3)
+- `Support/Snapshot.swift` (hanya menambah `case`)
+- Tes baru: `ConnectionDraftTests.swift`, `ConnectionTLSChoiceTests.swift`, `ConnectionSheetTests.swift`
+- Tes yang diubah: `ConnectionFormIssuesTests.swift`, `ChromeParityTests.swift`
+- `app/DESIGN.md` (langkah terakhir)
+- `__Baselines__/chrome-connection*` (hanya orkestrator)
+
+**Tidak disentuh:**
+
+| Berkas | Alasan |
+|---|---|
+| `Models/Connections.swift` | tidak ada field baru |
+| `AppModel+Connections.swift` | rantai W11-T3s → W13-T4b → W13-T16 |
+| `SchemaTree.swift` (`ConnectionEditorTarget`) | rantai W9-T3 → W11-T4 → W12-T12 |
+| `Support/Theme.swift` | W9-T9 → W10-T2 |
+| `SettingsView.swift` | W9-T9 → W13-T8c → W13-T7 |
+| `Models/Shortcuts.swift` | … → W12-T2 |
+| `RootView.swift`, `App.swift` | – |
+| `ShellTests.swift` | sedang disunting agen lain hari ini |
+| `crates/**`, `app/Generated/` | – |
+
+### 2.3 Tabrakan
+
+- **`Support/Snapshot.swift`** (`development-plan.md:1083`; `w13-plan-activity.md:827`). W11-T4, W12-T4, W13-T5, W13-T6, dan W13-T8c belum mendarat. T19 hanya menambah lengan `case` dan dua kait statis.
+  - Usul: lengan `case` boleh digabung tangan, seperti baris `mod` (`development-plan.md:1050`).
+  - Bila orkestrator menolak, T19 menunggu W13-T6.
+- **`ChromeParityTests.swift`** tidak punya baris §7. W13-T8c kemungkinan menambah scene di berkas yang sama, jadi aturan gabung tangannya sama.
+- **`__Baselines__/`** hanya lewat langkah orkestrator (`development-plan.md:1110`, §0.5 `:89-95`).
+- **W13-T7 (lokalisasi).** T19 harus mendarat sebelum T7, supaya string barunya ikut dikatalogkan.
+
+### 2.4 Perubahan untuk orkestrator (dokumen yang tidak boleh disunting blueprint ini)
+
+1. Tambah baris §5 W13:
+
+   | W13-T19 | Form koneksi bersidebar (CONN-FORM, permintaan pemilik 2026-10-13): empat bagian dengan sidebar, baris berlabel, kontrol enkripsi di samping Host, ringkasan masalah di footer, lencana per bagian. Tanpa Rust, FFI, atau migrasi. Tingkat Sedang; langkah 1 Tinggi. bp: `blueprints/w13-connection-form.md`. | FR-CON-09; V-15 | (berkas §2.2) | GP-s | satu reviewer opus per putaran (O-20) dengan daftar periksa UX dan AX | G-SWIFT, ChromeParity, G-APP | M | `feat(connections): the connection form is four sections beside a sidebar` |
+
+2. Ubah §7 `:1082` sesuai §2.1, dan tambahkan T19 ke rantai `Snapshot.swift` (`:1083`).
+3. PRD §6.5 (`prd-performance-and-parity.md:288-302`): daftarkan V-14, yang sudah dipakai di `development-plan.md:738` dan `ledger.md:273,289` tetapi belum ada di tabel. Tambahkan juga **V-15**: "Form koneksi bersidebar: empat bagian, kontrol enkripsi di samping Host, footer" (W13-T19).
+4. `development-plan.md:92` masih menyebut "V-1…V-12"; samakan dengan tabel PRD.
+5. Catat jawaban OQ-1 sampai OQ-6 di ledger sebelum langkah 3.
+
+## 3. Arsitektur informasi
+
+### 3.1 Bagian
+
+| Bagian | Simbol SF | Isi |
+|---|---|---|
+| General | `gearshape` (sama dengan pane General, `SettingsView.swift:76`) | identitas, server, autentikasi |
+| SSH Tunnel | `lock.shield` | tunnel SSH |
+| Limits | `speedometer` | Safe Mode, statement timeout |
+| Appearance | `paintbrush` (`SettingsView.swift:78`) | warna, label lingkungan |
+
+Simbol dipilih dari SF Symbols 1–2, karena binary dibangun dengan SDK 14 (`ledger.md:640`).
+
+### 3.2 Isi per bagian per jenis (opsi A)
+
+| Bagian / kartu | Baris | Trino | PostgreSQL | MySQL |
+|---|---|---|---|---|
+| General / tanpa judul | catatan URL (bila ada, `:675`) | ✓ | ✓ | ✓ |
+| | Name | ✓ | ✓ | ✓ |
+| | Type: tile 18 pt + `kind.label` + "Change Type…" | ✓ | ✓ | ✓ |
+| General / "Server" | Host [kolom][kontrol enkripsi] + keterangan bersyarat | ✓ (4 pilihan) | ✓ (5 kata) | ✓ (3 kata) |
+| | Port | ✓ | ✓ | ✓ |
+| | CA certificate [kolom][Choose…][Clear] + keterangan `:721-722` | ✓ | ✓ | kalimat `:686-687` |
+| | Catalog / Database + sakelar di belakangnya | Catalog | Database + "All Databases" | Database + "Show All" |
+| | Schema + sakelar di belakangnya | ✓ | ✓ + "Show System Schemas" | – |
+| General / "Authentication" (`:697`) | User | ✓ | ✓ | ✓ |
+| | Method: Password \| JWT (`Connections.swift:299`) | ✓ | – | – |
+| | Password atau JWT + petunjuk `:865-871` + "Remove saved…" | ✓ | ✓ | ✓ |
+| SSH Tunnel / "SSH tunnel" | InlineCheckbox "Connect through an SSH tunnel" (`:734`) | ✓ | ✓ | ✓ |
+| | kalimat fingerprint (`:738`, terikat w11 §9.2) | ✓ | ✓ | ✓ |
+| | Host [kolom][Aliases] + pratinjau alias (`:739-759`) | bila menyala | | |
+| | User, Port, Authentication (Agent/Key file/Password) | bila menyala | | |
+| | Key file [Choose…] / Passphrase / Password + "Remove saved…" | bila menyala | | |
+| Limits / "Safe Mode" | Segmented + detail (`:649-659`) | ✓ | ✓ | ✓ |
+| Limits / "Statement timeout" | Seconds + keterangan `:680-681` | ✓ | ✓ | ✓ |
+| Appearance | Color (`ColorSwatchPicker`, `:87-105`) | ✓ | ✓ | ✓ |
+| | Environment + "A label only. It does not change what Safe Mode allows." (`:667`) | ✓ | ✓ | ✓ |
+
+### 3.3 Keputusan lama yang dipertahankan
+
+- **Sakelar pohon tetap di belakang field yang dimodifikasinya.** Komentar `:568-608` menyebut tata letak yang memisahkannya "the previous layout's mistake".
+- **Grup tetap bukan field form** (`:1040-1043`; `AppModel+Connections.swift:174-178`). Membalik keputusan ini adalah OQ-4.
+- **Kalimat yang diikat w11 §9.2 dipakai apa adanya** (`w11-metadata-and-connections.md:712-714`): kalimat fingerprint, "JWT is sent only over HTTPS.", dan teks bantuan CA.
+- **Keterikatan CA dengan mode TLS** (w11 §9.1, `:706`) dan **validasi bernama dengan ⌘↩** (w11 §9.3, `:718-719`) tetap berlaku.
+
+### 3.4 Yang tidak dibawa dari tangkapan layar TablePro
+
+| Fitur di tangkapan layar | Status di QueryHive | Bukti | Keputusan |
+|---|---|---|---|
+| Sumber kredensial dan pengelola profil kredensial | tidak ada; "profile" QueryHive adalah item milik akun, bukan kredensial | `SettingsView.swift:337-339`; `crates/qh-storage/src/identity.rs:1-19` | tidak dibawa |
+| Minta password setiap kali connect | tidak ada; password kosong berarti connect tanpa password | `ConnectionsViews.swift:254-257` | tidak dibawa |
+| Zona waktu, perintah SQL awal, skrip shell sebelum connect | tidak ada setelan engine-nya (grep `TIME_ZONE`, `STARTUP`, `INIT_SQL` di `crates/` kosong); skrip shell adalah permukaan eksekusi baru | – | tidak dibawa; kandidat PRD §10 bila pemilik mau |
+| Batas waktu connect per koneksi | konstanta engine 15 s | `crates/qh-core/src/error.rs:29`; `crates/qh-tunnel/src/tunnel.rs:77` | tidak dibawa |
+| Batas waktu query | ada, sebagai statement timeout per koneksi | `Connections.swift:376` | dibawa ke Limits |
+| Kebijakan AI dan aturan AI | tidak ada AI di app; ditunda menunggu keputusan on-prem | `tablepro-adoption-plan.md:719-727` | tidak dibawa |
+| Akses klien eksternal per koneksi | akses MCP diatur per token (allowlist koneksi), dikelola lewat CLI | `crates/qh-ffi/src/mcp.rs:33-40`; `SettingsView.swift:17-20` | tidak dibawa |
+| Tag bebas | satu label lingkungan (None/Dev/Staging/Prod) | `Connections.swift:182-203` | dibawa sebagai Environment |
+| Jalur selain langsung dan SSH | hanya tunnel SSH | `Connections.swift:360-379` | tidak dibawa |
+| Warna "tanpa warna" | enam warna, tanpa "none" | `Connections.swift:7-8` | tidak dibawa |
+| Safe Mode | ada, empat tingkat | `Connections.swift:145-175` | dibawa ke Limits |
+| Grup | ada di data, sengaja tidak di form | §3.3 | OQ-4 |
+| Simpan lalu connect | tidak ada padanan | §1.5 | OQ-3 |
+
+## 4. Pertanyaan TLS
+
+### 4.1 Batasan yang menentukan
+
+- **Flag `verify` hanya untuk Trino** (`Connections.swift:324-325`) dan hanya berarti di transport HTTPS. Untuk `prefer`, engine tidak pernah memeriksa sertifikat (`AppModel+Connections.swift:948-952`).
+- **PostgreSQL dan MySQL menyatakan verifikasi di dalam `sslmode`.** MySQL tidak punya mode verify (`Connections.swift:98-120`).
+- **Berkas CA mengikat mode.** PostgreSQL dibatasi ke verify-ca/verify-full, dan Trino dipaksa ke HTTPS dengan verifikasi menyala (`ConnectionsViews.swift:522`, `:614`, `:630`, `:725-730`).
+- **Port Trino mengikuti scheme** (`:535-544`).
+- **Trino punya tepat empat hasil** (`Connections.swift:218-225`). Pengimpor URL sudah memetakan kata libpq ke keempatnya (`:631-642`).
+- **Nilai `verify` yang tersimpan dipertahankan** selama transport bukan HTTPS (`ConnectionsViews.swift:623-626`).
+- **Menu yang terbuka tidak tertangkap ChromeParity** (`ChromeParityTests.swift:48`).
+
+### 4.2 Opsi A (direkomendasikan): kontrol enkripsi ringkas di samping Host
+
+- **Bentuk.** Satu `Menu` dengan `.menuStyle(.button)`, `.buttonStyle(.plain)`, dan indikator bawaan disembunyikan, digambar seperti `ConnectionPickerButton` (`ConnectionsViews.swift:44-84`). Lebarnya tetap 168 pt dan duduk di sebelah kanan kolom host, untuk ketiga driver. Isinya glyph, teks pendek, dan chevron.
+- **Pilihan** (`ConnectionTLSChoice.options(kind:caFile:)`):
+  - **Trino:** "HTTPS · verified", "HTTPS · unverified", "Prefer · unverified", "HTTP". Kosakatanya kosakata QueryHive sendiri (`Connections.swift:493-499`). Bila ada CA, hanya "HTTPS · verified".
+  - **PostgreSQL:** prefer, disable, require, verify-ca, verify-full. Bila ada CA, hanya verify-ca dan verify-full.
+  - **MySQL:** disable, prefer, require.
+- **Glyph:**
+  - `lock.fill` untuk mode yang memverifikasi;
+  - `lock` untuk mode terenkripsi tanpa verifikasi;
+  - `lock.open` untuk mode yang bisa berjalan tanpa enkripsi.
+
+  Glyph bersifat dekoratif dan disembunyikan dari VoiceOver; maknanya dibawa teks.
+- **Bantuan.** Teks `.help` di tiap pilihan memakai kalimat yang sudah ada (`:525-527`, `:632-642`). Keterangan di bawah baris Host hanya muncul bila perlu:
+  - kalimat Prefer atau HTTP untuk Trino (`:632-633`, `:638-639`);
+  - "Only modes that check the certificate are offered while a CA file is set." bila ada CA.
+- **Yang hilang dari form:** picker Transport (`:513-528`), baris SSL mode (`:610-615`), dan baris ChipToggle "Verify the TLS certificate" (`:616-644`).
+- **Kenapa A.** Keputusan verifikasi duduk di samping Host, seperti permintaan pemilik, dan kontrolnya sama untuk tiga driver. Empat hasil Trino menjadi empat pilihan eksplisit. Baris CA, satu-satunya yang membatasi pilihan, ada di kartu yang sama, dua baris di bawahnya.
+
+### 4.3 Opsi B: bagian "SSH & TLS" dengan baris mode
+
+- **Bentuk.** General menampilkan Host tanpa kontrol. Bagian kedua menjadi "SSH & TLS", dengan kartu "Encryption" berisi Mode (pilihan yang sama dengan §4.2), CA certificate, nanti sertifikat klien W13-T17, dan hasil TLS dari W13-T15. Di bawahnya kartu SSH tunnel.
+- **Untung.** Seluruh keamanan transport ada di satu pane, ada ruang untuk kalimat penjelasan, dan menjadi rumah alami T15 dan T17. Bentuknya juga lebih dekat ke referensi.
+- **Rugi.** Permintaan eksplisit pemilik tidak terpenuhi: di samping Host tidak ada apa pun. Status TLS juga tidak terlihat di tempat host diketik, dan butuh satu perpindahan pane untuk memeriksanya.
+
+### 4.4 Varian A1 (checkbox harfiah), ditolak
+
+- **Bentuk.** `InlineCheckbox` "Verify" di samping Host. Komponen ini memang dibuat untuk duduk di samping field (`Theme.swift:713-717`).
+- **Alasan ditolak.** Checkbox itu hanya ada untuk Trino di transport HTTPS. Untuk dua dari tiga driver dan dua dari tiga transport, slotnya kosong atau berganti teks, sehingga tata letak melompat. Picker transport dan baris SSL mode juga tetap ada.
+- **Kelebihannya** hanya biaya bangun yang paling murah.
+
+### 4.5 Rekomendasi
+
+**Opsi A.** Yang hilang bagi pemilik dengan A:
+
+- toggle satu klik menjadi menu dua klik;
+- semua pilihan tidak lagi terlihat sekaligus seperti di segmented;
+- mode SSL tidak berada di pane jaringan seperti di referensi.
+
+Yang hilang dengan B: permintaannya sendiri, dan status TLS tidak terlihat di samping host. Ini **OQ-1**. Bila B yang dipilih:
+
+- `ConnectionField.caFile` dipetakan ke bagian kedua;
+- bagian kedua berganti nama menjadi "SSH & TLS";
+- tes §8.2 butir 1 diganti dengan "baris enkripsi ada di SSH & TLS dan General tidak punya kontrol enkripsi".
+
+## 5. Aturan tata letak
+
+### 5.1 Sheet dan ukuran
+
+- **Ukuran tetap** `.frame(width: 820, height: 620)`. Lebarnya mengikuti angka studi; tingginya ≤ 620 supaya muat di bawah title bar jendela utama yang minimum 700 pt (`RootView.swift:19`).
+- **Langkah pemilih jenis dan URI** memakai bingkai yang sama, dengan kolom isi paling lebar 620 di tengah supaya tampilannya tidak berubah.
+- **Struktur:** `HStack(spacing: 0) { sidebar.frame(width: 200); hairline; content }`, tanpa `NavigationSplitView`.
+- **Batas tinggi minimum.** Setiap pane yang menggulir atau meregang diberi `.frame(minHeight: 0, maxHeight: .infinity)`. Ini pelajaran dari `RootView.swift:55-59` dan `ledger.md:640`.
+- **Latar** tetap `.background(Tone.canvas)` (`:273`). Tidak ada `NSWindow.backgroundColor`.
+
+### 5.2 Sidebar
+
+- **Lebar 200.** Latarnya `Tone.ink.opacity(0.03)` dengan hairline di kanan (`panelEdge(.trailing)`, `Theme.swift:421-425`).
+- **Blok atas 64 pt:** `ConnectionBrandTile` 36 pt (`:1210-1241`), `kind.label` `.ui(12, weight: .semibold)`, dan subjudul "Not saved yet." atau "Saved \(kind) connection." (`:482`).
+- **Item:**
+  - tinggi 30, radius 8;
+  - simbol 13 pt dan label `.ui(13)`;
+  - item terpilih diisi `Tone.ink.opacity(0.14)`, sama dengan `paneItem` (`SettingsView.swift:185`);
+  - lencana `exclamationmark.triangle.fill` 11 pt `Tone.amber` di kanan bila bagian itu punya masalah.
+- **Dasar** (hanya saat edit): PillButton destructive compact "Delete Connection…", pindahan dari footer (`:947-949`). Dialog konfirmasinya tetap di root.
+
+### 5.3 Kepala konten
+
+- Tinggi 52.
+- Judul `.ui(17, weight: .bold, rounded: true)`: "New Connection" atau nama koneksi (`:479`).
+- Di kanan: "Unsaved changes" (`:487-492`).
+- Hairline di bawahnya.
+
+### 5.4 Kartu dan anatomi baris
+
+- **Kartu** seperti `SettingsCard` (`SettingsView.swift:209-226`): `.glass(12)`, padding 14, judul `SectionLabel`. Jarak antar-kartu 18. Antar-baris ada `RowDivider` (`:260-264`).
+- **Baris:**
+  - tinggi minimum 36;
+  - kolom label 128 pt, `.ui(13)` `Tone.ink`, satu baris; bila terpotong, label lengkap tampil di `.help`;
+  - kolom nilai fleksibel:
+    - kolom teks mengisi lebar dengan `.field(invalid:)` (`Theme.swift:392-400`);
+    - kolom angka (Port, SSH port) 96 pt;
+    - segmented mengisi lebar;
+    - menu dan checkbox rata kanan;
+    - sakelar di belakang Database/Schema tetap `.fixedSize()` dan `.layoutPriority(1)`, seperti `:580-607`.
+- **Keterangan** `.ui(11)` `Tone.secondary` di bawah baris, sejajar kolom nilai, dan membungkus.
+- **Tanda wajib.** Label kehilangan akhiran "· Required" dan huruf besar (`LabeledField` tidak lagi dipakai di form). Status wajib disampaikan lewat:
+  - ringkasan di footer;
+  - lencana sidebar;
+  - garis merah dan "Required" setelah percobaan Save atau Test (`:873-877`);
+  - hint aksesibilitas "Required".
+- **Label yang diperpendek** supaya muat 128 pt: "Statement timeout (seconds)" menjadi judul kartu "Statement timeout" plus baris "Seconds"; "SSH authentication" menjadi "Authentication" di dalam kartu SSH tunnel; "Key passphrase · leave blank to keep" menjadi "Passphrase" dengan placeholder "Unchanged" (`:789`).
+
+### 5.5 Footer
+
+- Tinggi 56, hairline di atas, padding 20.
+- **Kiri:** Test Connection (`:937-941`), atau kapsul "Testing…" saat berjalan (`:926-936`), lalu slot status (fleksibel, `layoutPriority(-1)`, `:911`).
+- **Kanan:** Cancel (Esc), lalu Save (HubButton, Return, nonaktif bila tidak ada perubahan, `:953`).
+- **Prioritas slot status:**
+  1. Test sedang berjalan: kosong.
+  2. Hasil Test sejak perubahan terakhir: baris mint atau coral (`:883-912`).
+  3. Ada masalah: baris amber dengan `exclamationmark.triangle` dan ringkasan (§5.6).
+  4. Selain itu: kosong.
+- **Hasil Test kembali ke idle** setiap kali draft berubah (perilaku baru).
+
+### 5.6 Validasi dan lencana
+
+- **Sumber masalah:** `ConnectionFormIssues.fields(for: draft.formState, …)`, dihitung terus-menerus.
+- **Lencana dan ringkasan selalu tampil** (rekomendasi; OQ-5). Warnanya amber, bukan coral. Garis merah di field tetap hanya setelah percobaan.
+- **Ringkasan.** Bagian yang sedang terlihat didahulukan, memakai `message` (`ConnectionFormIssues.swift:136-145`). Untuk bagian lain, ringkasan diawali judul bagiannya, misalnya "SSH Tunnel: SSH host is required.". Bila lebih dari satu bagian bermasalah, tambahkan "Also see \(section)."
+- **Save atau Test dengan masalah:**
+  1. `attemptedSave = true`;
+  2. pindah ke bagian bermasalah pertama (bagian yang terlihat lebih dulu, lalu urutan General, SSH Tunnel, Limits, Appearance);
+  3. fokus ke field bermasalah pertama di putaran run loop berikutnya, setelah bagiannya terpasang;
+  4. `Announcer.post(summary)` (`Accessibility.swift:6`).
+
+  `testState` tidak disentuh. Ini memisahkan pesan validasi dari hasil Test (`:1025`, `:1091`).
+
+### 5.7 Keyboard dan fokus
+
+- **Pintasan tidak berubah:** Return = Save, Esc = Cancel, ⌘↩ = Test (`SheetShortcut`, `Shortcuts.swift:267-271`). Tidak ada pintasan baru, supaya `Shortcuts.swift` dan `ShortcutConflictTests` tidak tersentuh.
+- **Urutan Tab:** item sidebar (Button, masuk key-view loop), lalu isi dari atas ke bawah, lalu footer dari kiri ke kanan. Menu enkripsi dan Aliases dibuka dengan Space.
+- **Fokus awal:** Name untuk koneksi baru; tidak ada untuk edit.
+- **Pindah bagian dari sidebar:** fokus tetap di sidebar, dan VoiceOver mengumumkan nama bagian.
+
+### 5.8 Aksesibilitas
+
+- **Item sidebar:** label = judul; value = "\(n) fields need attention" bila ada masalah; trait `.isSelected` untuk item aktif (pola `SettingsView.swift:191-192`). Glyph lencana `accessibilityHidden(true)`.
+- **Kontrol di setiap baris** diberi `.accessibilityLabel(<label baris>)`. Field wajib diberi `.accessibilityHint("Required")`. Keterangan pendek menjadi hint kontrolnya.
+- **Kontrol enkripsi:** label "Encryption", value deskripsi panjang (mis. "HTTPS, certificate verified").
+- **Lantai font 11 pt**, kecuali `SectionLabel` (`FontFloorTests.swift:50`). Tombol ikon wajib punya nama (`ChromeAccessibilityTests.swift:12`). Token amber, coral, dan mint sudah diuji kontrasnya (`ChromeAccessibilityTests.swift:166-211`).
+
+### 5.9 Teks
+
+- **Dipertahankan:**
+  - "New Connection", "Change Type…", "Unsaved changes";
+  - label field yang ada, "All Databases", "Show System Schemas", "Show All";
+  - kalimat `tlsNote`, petunjuk password, kalimat Safe Mode dan Environment, kalimat SSH dan CA;
+  - "Remove saved…", "Test Connection", "Testing…", "Cancel", "Save".
+- **Baru**, Inggris, milik QueryHive: "Server", "SSH Tunnel", "Limits", "Encryption", "HTTPS · verified", "Prefer · unverified", "Seconds", "Delete Connection…", "\(n) fields need attention", "Also see \(section).", "Only modes that check the certificate are offered while a CA file is set."
+- **Perbaikan T-2:** "Connected · N databases" untuk MySQL.
+
+## 6. State dan aliran data
+
+### 6.1 `ConnectionDraft` (baru, `Models/ConnectionDraft.swift`)
+
+Struct `Equatable`. Isinya field yang sekarang menjadi `@State` (`ConnectionsViews.swift:130-168`): name … timeoutText, ditambah `secrets: ConnectionSecretPlan.Draft`, yang dipakai ulang beserta `removals` (`ConnectionFormIssues.swift:171-186`).
+
+| Anggota | Asal hari ini |
+|---|---|
+| `init(_ connection:)` | `load()` `:983-1009` |
+| `static func new()` | `:973-981` |
+| `connection(id:group:)` | `draftConnection` `:203-232` |
+| `formState`, `timeoutMS` | `:242-247`, `:236-240` |
+| `choose(_ kind:)` | `:433-441` |
+| `apply(_ parsed: ConnectionURL.Parsed)` | `:459-471` |
+| `setScheme(_:)` (port mengikuti) | `:535-544` |
+| `setCAFile(_:)` (memaksa mode yang memverifikasi) | `:725-730` |
+| `setTLS(_ choice:)` | baru |
+
+Alasannya: view bagian yang ada di berkas lain tidak bisa membaca `@State` privat milik sheet. Satu binding juga menggantikan 26, dan invarian tinggal di tipe, bukan di `.onChange` view yang bisa saja tidak terpasang.
+
+### 6.2 `ConnectionTLSChoice` (baru)
+
+- **Kasus:** `trinoHTTPSVerified`, `trinoHTTPSUnverified`, `trinoPrefer`, `trinoHTTP`, `sslmode(String)`.
+- **Membaca draft:**
+  - Trino lewat `TrinoTransport(stored:)` (`Connections.swift:237-243`) ditambah `verify`;
+  - driver lain: `sslmode.isEmpty ? kind.defaultSSLMode : sslmode`.
+- **Menulis:**
+  - HTTPS verified → `scheme = "https"`, `verify = true`;
+  - HTTPS unverified → `"https"`, `false`;
+  - Prefer → `"prefer"`, `verify` tidak disentuh;
+  - HTTP → `"http"`, `verify` tidak disentuh;
+  - driver lain → `sslmode = kata`.
+- **Properti tampilan:** `title`, `spokenDescription`, `glyph`, `help`, dan `static func options(kind:caFile:)`.
+- **Tidak memakai `securityLabel`** (`Connections.swift:489-503`). Memakai atau menghapusnya adalah keputusan W13-T15 (`development-plan.md:954`); T15 bisa menghapusnya demi tipe ini.
+
+### 6.3 Bagian dan pemetaan masalah (`ConnectionFormIssues.swift`)
+
+- Enum `ConnectionFormSection`: `general`, `sshTunnel`, `limits`, `appearance`, masing-masing dengan `title` dan `symbol`.
+- `ConnectionField.section` (fungsi murni):
+  - name, host, port, user, database, caFile → `general` (opsi A);
+  - sshHost, sshPort, sshUser, sshKeyFile → `sshTunnel`;
+  - timeout → `limits`.
+- Ditambah `ConnectionFormIssues.bySection(_:)` dan `summary(_:visible:)`.
+
+### 6.4 Sheet
+
+- **State UI yang tetap di sheet:** `step`, `section`, `testState`, `testProcess`, `testRun`, `attemptedSave`, `draftID`, `editingID`, `confirmDelete`, `lastTestWasHostKey`, `aliasPreview`, `urlText`, `urlError`, `urlNote`.
+- **`isDirty`** sama dengan `:191-199`, hanya dibaca dari draft.
+- **Logika Save, Test, dan Delete tidak berubah**, kecuali sumber datanya draft dan validasi tidak lagi masuk `testState`.
+- **Pengubah yang wajib tetap di root**, bukan di view bagian: `confirmationDialog` (`:281-285`), `onAppear` dan `onDisappear` (`:286-287`), `.hostKeySheet(active: true)` (`:290`), dan `onChange` atas `trustedCount` (`:293-295`). Test bisa ditekan dari bagian mana pun, sedangkan prompt host key datang dari engine.
+- **Kait snapshot:** `revealTunnelForSnapshot` (`:187`) menjadi `initialSectionForSnapshot: ConnectionFormSection?`, ditambah `newKindForSnapshot: ConnectionKind?` untuk membuka koneksi baru langsung di form. Keduanya statis dan direset di `tearDown` ChromeParity (`:164`). `ConnectionEditorTarget` tidak diubah. Trik `ScrollViewReader` (`:415-425`) dihapus.
+
+### 6.5 Tanpa Rust dan FFI
+
+- Env dibangun oleh `AppModel.connectionEnvironment`, yang tidak berubah (`AppModel+Connections.swift:914-1035`).
+- Test memakai perintah `test` yang sudah ada.
+- `SSHConfigAliases` tidak berubah (`ConnectionFormIssues.swift:34-44`).
+- Bila implementer merasa butuh Rust: berhenti, catat penyimpangan, rencanakan ulang. Rantai FFI serial.
+
+## 7. Migrasi data tersimpan
+
+**Tidak ada.**
+
+- Field `Connection`, kunci Codable, dan dekodenya tidak berubah (`Connections.swift:304-472`). Begitu juga `ConnectionsDocument` (`:673-697`) dan akun Keychain (`:877-899`).
+- **Kasus tepi:**
+  - Scheme Trino kosong atau tak dikenal dibaca sebagai HTTP (`Connections.swift:237-243`), dan baru ditulis bila pengguna memilih.
+  - `sslmode` kosong ditampilkan sebagai bawaan driver, dan sejak perbaikan T-1 disimpan tetap kosong. Env-nya identik, karena kosong dikirim sebagai bawaan (`AppModel+Connections.swift:945-947`).
+  - `verify` dipertahankan untuk HTTP dan Prefer.
+- **Rollback:** revert commit. Berkas data tetap cocok ke dua arah.
+
+## 8. Rencana tes
+
+### 8.1 Unit (G-SWIFT)
+
+**`ConnectionDraftTests`:**
+
+- bolak-balik `Connection` → draft → `Connection` identik untuk tiap jenis, dengan dan tanpa tunnel, JWT, CA, dan timeout;
+- trim;
+- tunnel mati mengosongkan field SSH saat Save, tetapi nilai tetap ada di draft;
+- `choose` mereset JWT dan CA seperti `:438-439`;
+- `apply(URL)`;
+- `setCAFile` memaksa verify-full atau HTTPS+verify;
+- `setScheme` menggeser port 8080↔8443;
+- T-1: membuka koneksi ber-`sslmode` kosong tidak membuatnya "dirty" (langkah 4).
+
+**`ConnectionTLSChoiceTests`:**
+
+- opsi per jenis, dengan dan tanpa CA;
+- membaca nilai lama (scheme kosong, sslmode kosong);
+- HTTP dan Prefer mempertahankan `verify`;
+- untuk setiap pilihan, `AppModel.connectionEnvironment(_:secrets:)` menghasilkan `DB_SCHEME`, `DB_SSLMODE`, dan `DB_INSECURE` sesuai tabel `Connections.swift:220-225`.
+
+**Tambahan di `ConnectionFormIssuesTests`:**
+
+- setiap `ConnectionField` punya tepat satu bagian;
+- `bySection` dan `summary` (dengan awalan bagian, dan bagian terlihat lebih dulu).
+
+### 8.2 Rig render `ConnectionSheetTests` (berkas baru, gaya `ShellTests`)
+
+Pola rig: `NSHostingView` di `NSWindow` nyata, `wait`, `descendants`, dan penanda `FrameMarker` (`RootView.swift:250`) dengan id `connection-host-field`, `connection-encryption`, `connection-footer`, `connection-section-<raw>` (`ShellTests.swift:58-136`).
+
+1. `testTheEncryptionControlSitsOnTheHostRow`: selisih `midY` ≤ 2 pt, `minX` kontrol > `maxX` field, dan keduanya di dalam sheet. Diuji untuk tiga jenis.
+2. `testTheSheetNeverAsksForMoreThanItsFrame`: untuk setiap jenis × bagian, `fittingSize` ≤ 820×620.
+3. `testTheSheetFitsAWindowAtTheShellMinimum`: `RootView` di jendela 1400×700, `presentConnectionEditor(nil)`, sheet menempel, dan `connection-footer` utuh di dalam jendela sheet.
+4. `testTypedValuesSurviveASectionSwitch`: Host dan password yang diketik masih ada setelah General → SSH Tunnel → General.
+5. `testTheGeneralBadgeFollowsTheMissingFields`, termasuk value aksesibilitasnya.
+6. `testAHostKeyPromptAttachesFromAnySection`: `HostKeyCenter.shared.report(…)` saat berada di Limits membuat sheet bertingkat menempel.
+7. `testSavingWithProblemsOpensTheirSection`: SSH host kosong saat berada di General; Save memindah ke SSH Tunnel.
+
+### 8.3 ChromeParity dan V-15
+
+- **Permukaan** `connectionSheet` menjadi 820×620 (`ChromeParityTests.swift:80`).
+- **Scene** (7 × 2 tampilan):
+  - `connection` (General, Trino tersimpan);
+  - `connection-ssh` (bagian SSH Tunnel lewat kait statis);
+  - `connection-trino` (Prefer, dengan keterangan);
+  - `connection-mysql`;
+  - `connection-new`: scene baru, PostgreSQL baru dengan lencana dan ringkasan;
+  - `connection-limits`: scene baru;
+  - `connection-appearance`: scene baru.
+- **Rekam:** `QH_RECORD_CHROME=connection,connection-ssh,connection-trino,connection-mysql,connection-new,connection-limits,connection-appearance swift test --filter ChromeParityTests` (`:19-27`). Dua gambar identik sudah dijamin oleh rig.
+- **Commit sendiri:** `test(visual): re-record chrome-connection scenes for V-15` (`handoff.md:44`). Verdict ui-ux-designer dan a11y harus approved (§0.5 `:92-94`).
+- **Hanya lokal**, karena di-skip di CI (`ledger.md:588`). Harness 2x tetap, dan tampilan utama tetap jadi syarat (`ledger.md:289`).
+
+### 8.4 Pemeriksaan manual pemilik
+
+- Keadaan menu terbuka.
+- Satu lintasan VoiceOver.
+- Keychain nyata (`QH_TEST_KEYCHAIN=1` belum pernah jalan, `handoff.md:80`).
+
+## 9. Risiko
+
+- **R-1. Ukuran minimum sheet diambil dari tata letak** (mode kompatibilitas macOS 27; `RootView.swift:55-59`, `ledger.md:640`). Mitigasi: `.frame(minHeight: 0, maxHeight: .infinity)` pada ScrollView dan sidebar; tes §8.2 butir 2 dan 3.
+- **R-2. `NSWindow.backgroundColor` kustom menyembunyikan traffic light** (`ledger.md:640`). Hanya relevan bila OQ-2 memilih jendela. Jangan pernah menyetelnya; pakai latar SwiftUI.
+- **R-3. Pengubah, popover, dan invarian di bagian yang tidak terpasang.**
+  - Lihat §6.4 untuk pengubah root.
+  - Popover `HelpHint` memakai state lokal (`Theme.swift:864-889`) dan aman. State `isPresented` untuk jangkar di bagian lain tidak boleh disimpan di sheet.
+  - Invarian `:535-544` dan `:725-730` pindah ke draft (§6.1).
+- **R-4. Rahasia yang sudah diketik hilang saat pindah bagian.** Mitigasi: state di draft; tes §8.2 butir 4.
+- **R-5. Regresi jalur Save** (Keychain dulu `:1033-1050`, renew `:1059-1070`, `draftID` `:181-184`). Mitigasi: langkah 1 netral piksel, tes unit, review Tinggi.
+- **R-6. Gate visual hanya lokal dan bergantung pada layar** (`ledger.md:289`, `:588`).
+- **R-7. Perbaikan T-1 mengubah perilaku**: Save nonaktif saat koneksi lama dibuka. Ini disengaja dan dikunci tes.
+- **R-8. Lisensi.** Reviewer mencocokkan setiap string baru dengan tangkapan layar TablePro; hanya angka yang dipelajari.
+- **R-9. Kepemilikan.** `Snapshot.swift` dan `ChromeParityTests.swift` digabung tangan (§2.3). `ShellTests.swift` sedang kotor, jadi tes baru masuk berkas baru.
+- **R-10. Lebar kolom.** Host 236 pt di 820 lebar hanya estimasi; nama host panjang menggulir di dalam field, dan label terpotong punya `.help`.
+- **R-11. Menu tidak terlihat di baseline** (`ChromeParityTests.swift:48`). Logika pilihannya ditutup tes unit.
+
+## 10. Urutan build
+
+Satu commit per langkah. Anggaran bukti setiap langkah: satu tes terarah ditambah satu G-SWIFT penuh di mesin yang menganggur. G-RUST tidak diperlukan, karena tidak ada perubahan Rust. G-APP butuh SSD terpasang dan `CARGO_TARGET_DIR` di sana (`AGENTS.md`).
+
+| Langkah | Isi dan berkas | Gate | Tingkat review | Commit |
+|---|---|---|---|---|
+| 0 | Orkestrator: §2.4 (plan §5 dan §7, PRD §6.5, plan §0.5, ledger), plus jawaban OQ | review ringan dokumen | Rendah | `docs(plan): schedule the sectioned connection form as W13-T19` |
+| 1 | Ekstraksi `ConnectionDraft`. Perilaku dan piksel tidak berubah: normalisasi `sslmode` lama dibiarkan dulu, dan `.onChange` lama memanggil metode draft. Berkas: `Models/ConnectionDraft.swift`, `Views/ConnectionsViews.swift`, `ConnectionDraftTests.swift` | G-SWIFT; `swift test --filter ChromeParityTests` hijau **tanpa** rekam ulang sebagai bukti netral; `--filter ConnectionDraftTests` | **Tinggi**: satu reviewer opus; ditambah reviewer keamanan hanya bila pemanggilan `ConnectionSecretPlan` atau `AppModel.apply` berubah makna | `refactor(connections): the connection form edits one draft value` |
+| 2 | `ConnectionTLSChoice` dan `ConnectionField.section`, tanpa UI. Berkas: `Models/ConnectionTLSChoice.swift`, `Models/ConnectionFormIssues.swift`, dan kedua tesnya | G-SWIFT | Rendah; review digabung dengan langkah 3 | `feat(connections): name each driver's encryption choices once, over the stored fields` |
+| 3 | Kerangka: sidebar, kartu, baris, footer, Delete pindah ke sidebar, kait snapshot, scene baru, ukuran ChromeParity. Isi pindah apa adanya; baris TLS lama masih ada. Berkas: `Views/ConnectionForm.swift`, `Views/ConnectionsViews.swift`, `Support/Snapshot.swift`, `ChromeParityTests.swift`, `ConnectionSheetTests.swift` (butir 2, 3, 4, 6, 7) | G-SWIFT; ChromeParity merah **hanya** untuk scene V-15 yang terdaftar di §8.3; `FontFloorTests` dan `ChromeAccessibilityTests` hijau; G-APP: `./app/build.sh` lalu `app/dist/QueryHive.app/Contents/MacOS/QueryHive --snapshot target/run/<scene>.png --scene <scene>` untuk tujuh scene | Sedang: satu reviewer opus dengan daftar periksa UX dan AX | `feat(connections): the connection form is four sections beside a sidebar` |
+| 4 | Kontrol enkripsi di samping Host, CA di bawah Port, baris Transport/SSL/Verify dihapus, lencana dan ringkasan, validasi terpisah dari hasil Test, hasil Test reset saat ada perubahan, T-1, T-2. Berkas: sama dengan langkah 3, ditambah `ConnectionDraft.swift` dan tes (butir 1 dan 5) | sama dengan langkah 3 | Sedang; boleh satu putaran review bersama langkah 3 | `feat(connections): encryption sits beside the host, and the footer names what is missing` |
+| 5 | Rekam ulang 14 pasang baseline `chrome-connection*` (orkestrator) | rekam lalu bandingkan, hijau; verdict UX dan AX approved | (§0.5) | `test(visual): re-record chrome-connection scenes for V-15` |
+| 6 | `app/DESIGN.md`, bagian editor koneksi (`:793`), dan status ledger | review ringan | Rendah | `docs(connections): describe the sectioned connection form` |
+
+- **Bila OQ-3 atau OQ-4 dijawab "ya"**, kerjakan sebelum langkah 5 sebagai langkah 4b (perilaku dan piksel baru, gate sama), supaya baseline direkam sekali saja.
+- **Jendela sungguhan (OQ-2)** adalah tugas lain di rantai `App.swift`, bukan bagian T19.
+- **Batas review:** maksimal dua putaran. Temuan yang tidak memblokir masuk backlog.
+
+## 11. Titik temu dengan tugas lain
+
+- **W13-T15:** menambah TLS hasil negosiasi dan versi server ke baris sukses di slot status footer (§5.5), lalu memutuskan nasib `securityLabel` (§6.2).
+- **W13-T17 (bersyarat):** baris sertifikat dan kunci klien. Di opsi A masuk kartu Server di bawah CA; di opsi B masuk kartu Encryption.
+- **W13-T10 (bersyarat):** tanda produksi per database masuk Limits.
+- **W13-T18 (bersyarat):** pemilih tunnel bersama masuk SSH Tunnel.
+- **W13-T11 (bersyarat):** hanya teks Safe Mode di `Connections.swift`; tidak memengaruhi tata letak.
+- **W13-T4b:** tidak ada sentuhan bersama (§2.1).
+- **W13-T7:** mengatalogkan string T19 (§2.3).
+
+## 12. Yang tidak bisa diverifikasi
+
+- Tidak ada build atau tes yang dijalankan di sesi blueprint ini.
+- Tinggi sheet nyata di mode kompatibilitas macOS 27 belum diukur.
+- Lebar teks dan kolom (168 pt kontrol, 236 pt host) hanya estimasi.
+- Tampilan label `Menu` dengan `.menuStyle(.button)` di sheet belum dicoba.
+- Apakah koneksi milik pemilik menyimpan `sslmode` kosong tidak diperiksa: data pemilik sengaja tidak dibaca.
+- TablePro hanya dibaca untuk angka ukuran.
+
+## Pertanyaan terbuka untuk pemilik
+
+1. **OQ-1, penempatan TLS:** A (kontrol enkripsi di samping Host, direkomendasikan), B (bagian "SSH & TLS" dengan baris mode), atau A1 (checkbox harfiah, Trino saja)?
+2. **OQ-2:** tetap sheet, atau jendela sendiri dengan traffic light, bisa diubah ukurannya, dan tidak modal? Jendela sendiri adalah tugas terpisah.
+3. **OQ-3:** tambahkan "Save and Open" (simpan, buka tab query baru di koneksi itu, dan bentangkan node pohonnya), atau tidak ada padanan "simpan lalu connect"?
+4. **OQ-4:** baris Group di Appearance? Ini membalik keputusan bahwa grup adalah urusan pohon (`ConnectionsViews.swift:1040-1043`).
+5. **OQ-5:** lencana dan ringkasan tampil sejak awal (rekomendasi), atau baru setelah Save atau Test pertama, seperti perilaku sekarang?
+6. **OQ-6:** nama bagian General / SSH Tunnel / Limits / Appearance, setuju?
+
+## Verdict architect-reviewer
+
+Belum direview.
