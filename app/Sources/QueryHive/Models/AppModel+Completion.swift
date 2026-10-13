@@ -1,4 +1,5 @@
 import AppKit
+import QueryHiveFFI
 import SwiftUI
 
 extension AppModel {
@@ -13,10 +14,32 @@ extension AppModel {
     /// `hive.analytics.` offered `penerima_manfaat` (correct), `raw_kpm` from the *bronze* schema,
     /// and tables from other connections — a list that looked plausible and was mostly wrong. The
     /// fix is to resolve the path first and list one node's children.
-    func suggestions(for tab: QueryTab, prefix: String, path: [String]) -> [SQLSuggestion] {
+    ///
+    /// `scope` is what the text before the word says about the caret (`sqlCaretScope`, asked of
+    /// the text up to where the word starts), and `references` is the statement's last analysis
+    /// (`EditorDocument.references`, which runs in the background). Both are optional and the
+    /// list without them is the one above. With them:
+    ///
+    /// - A table offered in a `FROM` or `JOIN` of a query carries a free alias
+    ///   (`SQLSuggestions.tableText`); one named by `UPDATE`, `DELETE FROM` or `INSERT INTO`
+    ///   never does. Without `references` the statement's aliases are unknown, so none is made.
+    /// - The select list's `AS` names are offered where the driver accepts them
+    ///   (`SQLSuggestions.offersSelectAliases`), and where it does not, an output column of the
+    ///   last run that is only an alias is not offered either.
+    ///
+    /// The editor is flushed (`AppModel.flushEditors`) by whoever reads the tab's SQL to make
+    /// the `head` this is given; nothing here reads `tab.sql`.
+    func suggestions(for tab: QueryTab, prefix: String, path: [String],
+                     scope: EditorCaretScope? = nil,
+                     references: EditorReferences? = nil) -> [SQLSuggestion] {
         let needle = prefix.lowercased()
         func matches(_ name: String) -> Bool {
             needle.isEmpty || name.lowercased().hasPrefix(needle)
+        }
+
+        let driver = connection(for: tab)?.kind
+        func tableText(_ name: String) -> String {
+            SQLSuggestions.tableText(name, in: scope?.clause, references: references)
         }
 
         var found: [SQLSuggestion] = []
@@ -40,7 +63,7 @@ extension AppModel {
                 switch child.kind {
                 case .catalog, .database: add(child.title, .catalog)
                 case .schema: add(child.title, .schema)
-                case .table: add(child.title, .table)
+                case .table: add(tableText(child.title), .table)
                 case .group, .connection: break
                 }
             }
@@ -51,7 +74,7 @@ extension AppModel {
                 switch node.kind {
                 case .catalog, .database: add(node.title, .catalog)
                 case .schema: add(node.title, .schema)
-                case .table: add(node.title, .table)
+                case .table: add(tableText(node.title), .table)
                 // A group is how the side bar files connections; it is not a name a statement can
                 // use, so it is never a suggestion.
                 case .group, .connection: break
@@ -67,7 +90,18 @@ extension AppModel {
         // A column is only in scope where a bare name could be one — never after a path, where the
         // next word is an object and a column name would be noise.
         if path.isEmpty {
-            for column in tab.columns where matches(column.name) {
+            // The select list's own names, where this clause and driver accept them. Where they
+            // are refused, a column of the last run that is one of them is not offered either:
+            // `HAVING total > 1` fails on PostgreSQL even though `total` was a column last time.
+            let aliases = scope?.selectAliases ?? []
+            let accepted = scope.map { SQLSuggestions.offersSelectAliases(in: $0.clause, for: driver) } ?? false
+            if accepted {
+                for alias in aliases where matches(SQLSuggestions.unquoted(alias)) {
+                    add(alias, .column)
+                }
+            }
+            let refused = accepted ? [] : Set(aliases.map { SQLSuggestions.unquoted($0).lowercased() })
+            for column in tab.columns where matches(column.name) && !refused.contains(column.name.lowercased()) {
                 add(column.name, .column)
             }
             for keyword in SQLSuggestions.keywords where matches(keyword) {
@@ -139,5 +173,50 @@ extension AppModel {
             if matched { return current }
         }
         return nil
+    }
+
+    /// Forgets what completion loaded about one object, so the next keystroke asks the engine
+    /// again. Called after DDL (W12-T4), with the name as the statement wrote it: one to three
+    /// parts, a missing leading part taken from the tab's own database and schema, the way the
+    /// server would read it. `kind` is the level the name is at, a table or view by default;
+    /// `CREATE SCHEMA hive.silver` names a `.schema`, and MySQL's `CREATE DATABASE` a `.database`.
+    ///
+    /// Two nodes are dropped: the object's own (a table's columns, once the tree holds them, or
+    /// a schema's tables) and the one that lists it, because `CREATE` and `DROP` change that
+    /// list. There is no second cache to clear: completion reads the object tree, so this
+    /// resets `children` to "never loaded". A node the side bar shows open is left to the
+    /// tree's own refresh, which reloads it and keeps its rows until the reply; clearing it here
+    /// would blank rows the user is looking at.
+    ///
+    /// A name with more parts than its level has, a level the driver does not have, or a name
+    /// that cannot be completed because the tab has no default for a missing part drops nothing.
+    func invalidateCompletionCatalog(for tab: QueryTab, object parts: [String],
+                                     kind: TreeNode.Kind = .table) {
+        guard let connection = connection(for: tab),
+              let depth = connection.kind.levels.firstIndex(of: kind).map({ $0 + 1 }),
+              (1...depth).contains(parts.count) else { return }
+        let defaults: [String] = switch connection.kind {
+        case .trino: [database(for: tab), schema(for: tab)]
+        case .postgres: [schema(for: tab)]
+        case .mysql: [database(for: tab)]
+        }
+        let leading = Array(defaults.prefix(depth - parts.count))
+        guard leading.allSatisfy({ !$0.isEmpty }) else { return }
+        let path = leading + parts
+
+        var dropped: [TreeNode] = []
+        if let own = node(atPath: path, connectionID: tab.connectionID) { dropped.append(own) }
+        if path.count > 1 {
+            if let parent = node(atPath: Array(path.dropLast()), connectionID: tab.connectionID) {
+                dropped.append(parent)
+            }
+        } else if let root = connectionNode(for: connection.id) {
+            dropped.append(root)
+        }
+        for node in dropped where !node.expanded {
+            node.children = nil
+            node.error = nil
+            node.loading = false
+        }
     }
 }

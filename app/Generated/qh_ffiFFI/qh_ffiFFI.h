@@ -314,6 +314,11 @@ RustBuffer uniffi_qh_ffi_fn_method_editordocument_outline(uint64_t ptr, uint64_t
 RustBuffer uniffi_qh_ffi_fn_method_editordocument_paint(uint64_t ptr, uint64_t revision, uint32_t window_start, uint32_t window_len, uint32_t budget_utf16, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REFERENCES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REFERENCES
+RustBuffer uniffi_qh_ffi_fn_method_editordocument_references(uint64_t ptr, uint64_t revision, uint32_t offset_utf16, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REPLACE
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_METHOD_EDITORDOCUMENT_REPLACE
 uint64_t uniffi_qh_ffi_fn_method_editordocument_replace(uint64_t ptr, uint32_t start_utf16, uint32_t len_utf16, RustBuffer text, RustCallStatus *_Nonnull out_status
@@ -487,9 +492,19 @@ uint32_t uniffi_qh_ffi_fn_func_editor_ceiling_utf16(RustCallStatus *_Nonnull out
 RustBuffer uniffi_qh_ffi_fn_func_format_sql(RustBuffer sql, RustBuffer dialect, RustBuffer options, uint32_t selection_start, uint32_t selection_len, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_CARET_SCOPE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_CARET_SCOPE
+RustBuffer uniffi_qh_ffi_fn_func_sql_caret_scope(RustBuffer head, RustBuffer dialect, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_STATEMENT_RANGES
 RustBuffer uniffi_qh_ffi_fn_func_sql_statement_ranges(RustBuffer sql, RustBuffer dialect, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_TABLE_ALIAS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_SQL_TABLE_ALIAS
+RustBuffer uniffi_qh_ffi_fn_func_sql_table_alias(RustBuffer table, RustBuffer taken, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_FN_FUNC_TOGGLE_LINE_COMMENT
@@ -792,9 +807,21 @@ uint16_t uniffi_qh_ffi_checksum_func_format_sql(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_CARET_SCOPE
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_CARET_SCOPE
+uint16_t uniffi_qh_ffi_checksum_func_sql_caret_scope(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_STATEMENT_RANGES
 uint16_t uniffi_qh_ffi_checksum_func_sql_statement_ranges(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_TABLE_ALIAS
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_FUNC_SQL_TABLE_ALIAS
+uint16_t uniffi_qh_ffi_checksum_func_sql_table_alias(void
     
 );
 #endif
@@ -873,6 +900,12 @@ uint16_t uniffi_qh_ffi_checksum_method_editordocument_outline(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_PAINT
 #define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_PAINT
 uint16_t uniffi_qh_ffi_checksum_method_editordocument_paint(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REFERENCES
+#define UNIFFI_FFIDEF_UNIFFI_QH_FFI_CHECKSUM_METHOD_EDITORDOCUMENT_REFERENCES
+uint16_t uniffi_qh_ffi_checksum_method_editordocument_references(void
     
 );
 #endif

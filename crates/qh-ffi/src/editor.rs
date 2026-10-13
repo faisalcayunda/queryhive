@@ -16,6 +16,9 @@
 use std::sync::{Arc, Mutex};
 
 use qh_editor::keywords::is_keyword;
+use qh_editor::refs::{
+    scope_at_end, table_alias, Clause, RefSource, References, Relation, RelationKind, Scope,
+};
 use qh_editor::{
     Analyzer, Dialect, EditError, Fold, FoldKind, Issue, IssueKind, Outline, Paint, TextBuffer,
     CEILING_UTF16,
@@ -226,6 +229,166 @@ impl From<IssueKind> for EditorIssueKind {
     }
 }
 
+/// What a relation of a statement is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum EditorRelationKind {
+    Table,
+    /// `(select …) alias`.
+    Subquery,
+    /// A table reference whose name is a CTE of the same statement.
+    Cte,
+}
+
+impl From<RelationKind> for EditorRelationKind {
+    fn from(kind: RelationKind) -> Self {
+        match kind {
+            RelationKind::Table => EditorRelationKind::Table,
+            RelationKind::Subquery => EditorRelationKind::Subquery,
+            RelationKind::Cte => EditorRelationKind::Cte,
+        }
+    }
+}
+
+/// How the relations were read: from the statement's tree, or from its tokens when the tree
+/// has errors or the statement is too big to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum EditorRefSource {
+    Tree,
+    Lexical,
+}
+
+impl From<RefSource> for EditorRefSource {
+    fn from(source: RefSource) -> Self {
+        match source {
+            RefSource::Tree => EditorRefSource::Tree,
+            RefSource::Lexical => EditorRefSource::Lexical,
+        }
+    }
+}
+
+/// One table, subquery or CTE reference of a statement. The name parts have their quotes
+/// removed; `name` is `None` for a subquery. Offsets are UTF-16 units of the document: the
+/// name's last part, or the whole subquery.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EditorRelation {
+    pub kind: EditorRelationKind,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub name: Option<String>,
+    /// The last part of the name was written in quotes, so it matches exactly, not by case.
+    pub quoted: bool,
+    pub alias: Option<String>,
+    pub name_start_utf16: u32,
+    pub name_len_utf16: u32,
+}
+
+impl From<&Relation> for EditorRelation {
+    fn from(relation: &Relation) -> Self {
+        EditorRelation {
+            kind: relation.kind.into(),
+            catalog: relation.catalog.clone(),
+            schema: relation.schema.clone(),
+            name: relation.name.clone(),
+            quoted: relation.quoted,
+            alias: relation.alias.clone(),
+            name_start_utf16: relation.name_start_utf16,
+            name_len_utf16: relation.name_len_utf16,
+        }
+    }
+}
+
+/// A CTE of a statement and its declared column list (empty when there is none).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EditorCte {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+/// The tables and aliases of one statement.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EditorReferences {
+    pub revision: u64,
+    /// The statement that was read, in UTF-16 units of the document. Length 0 with no
+    /// relations when the offset is in no statement.
+    pub statement_start_utf16: u32,
+    pub statement_len_utf16: u32,
+    pub relations: Vec<EditorRelation>,
+    pub ctes: Vec<EditorCte>,
+    pub source: EditorRefSource,
+}
+
+impl From<References> for EditorReferences {
+    fn from(refs: References) -> Self {
+        EditorReferences {
+            revision: refs.revision,
+            statement_start_utf16: refs.statement_start_utf16,
+            statement_len_utf16: refs.statement_len_utf16,
+            relations: refs.relations.iter().map(EditorRelation::from).collect(),
+            ctes: refs
+                .ctes
+                .into_iter()
+                .map(|c| EditorCte {
+                    name: c.name,
+                    columns: c.columns,
+                })
+                .collect(),
+            source: refs.source.into(),
+        }
+    }
+}
+
+/// What the caret is for in its statement; see [`sql_caret_scope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum EditorClause {
+    Other,
+    SelectList,
+    /// A table is named here in a query (`FROM`, `JOIN`): it may take an alias.
+    QueryTable,
+    /// A table is named here by a statement that writes it (`UPDATE`, `DELETE FROM`,
+    /// `INSERT INTO`, `TRUNCATE`, `CREATE|ALTER|DROP TABLE`): no alias.
+    WriteTable,
+    JoinCondition,
+    Where,
+    GroupBy,
+    Having,
+    OrderBy,
+    SetList,
+}
+
+impl From<Clause> for EditorClause {
+    fn from(clause: Clause) -> Self {
+        match clause {
+            Clause::Other => EditorClause::Other,
+            Clause::SelectList => EditorClause::SelectList,
+            Clause::QueryTable => EditorClause::QueryTable,
+            Clause::WriteTable => EditorClause::WriteTable,
+            Clause::JoinCondition => EditorClause::JoinCondition,
+            Clause::Where => EditorClause::Where,
+            Clause::GroupBy => EditorClause::GroupBy,
+            Clause::Having => EditorClause::Having,
+            Clause::OrderBy => EditorClause::OrderBy,
+            Clause::SetList => EditorClause::SetList,
+        }
+    }
+}
+
+/// What the caret sees in its statement: its clause, and the output names the select list
+/// gave with `AS`, as spelled.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EditorCaretScope {
+    pub clause: EditorClause,
+    pub select_aliases: Vec<String>,
+}
+
+impl From<Scope> for EditorCaretScope {
+    fn from(scope: Scope) -> Self {
+        EditorCaretScope {
+            clause: scope.clause.into(),
+            select_aliases: scope.select_aliases,
+        }
+    }
+}
+
 /// One document's text and its analysis, behind two locks so the main thread never
 /// waits for analysis: `replace`, `mark_applied` and `mark_dirty` touch only the text
 /// lock, while `paint`, `outline` and `converge` replay the log onto the analyzer.
@@ -350,6 +513,27 @@ impl EditorDocument {
         Ok(EditorOutline::from(analysis.outline()))
     }
 
+    /// The tables, subqueries and CTEs of the statement holding `offset_utf16`, with their
+    /// aliases (blueprint w11 section 12). Background thread, never per keystroke: replays the
+    /// log first, like `outline`, and answers from the statement's cached tree when it has
+    /// one. `Stale` when `revision` is older than the text's.
+    pub fn references(
+        &self,
+        revision: u64,
+        offset_utf16: u32,
+    ) -> Result<EditorReferences, EditorError> {
+        let mut analysis = self.analysis.lock().map_err(|_| EditorError::Malformed)?;
+        let log = {
+            let mut text = self.text.lock().map_err(|_| EditorError::Malformed)?;
+            if revision < text.revision() {
+                return Err(EditorError::Stale);
+            }
+            text.drain_log()
+        };
+        analysis.sync(log)?;
+        Ok(EditorReferences::from(analysis.references(offset_utf16)?))
+    }
+
     /// The delimiter pair touching `offset_utf16`, as `[start, len, start, len]` in UTF-16
     /// units of the document, opener first; empty when there is none (blueprint w10 §9.1).
     /// Background thread: replays the log first, like `outline`. `Stale` unless `revision`
@@ -394,6 +578,23 @@ pub fn editor_ceiling_utf16() -> Result<u32, EditorError> {
 #[uniffi::export]
 pub fn sql_statement_ranges(sql: String, dialect: EditorDialect) -> Result<Vec<u32>, EditorError> {
     qh_editor::statement_ranges(&sql, dialect.dialect()).map_err(EditorError::from)
+}
+
+/// What a caret sees: `head` is the text before it, or before the word being completed (so a
+/// half-typed `fro` does not decide its own context). The statement is the last one in `head`.
+/// A function of the text alone, with no document and no lock, cheap enough for every
+/// keystroke when `head` is a few KB of text before the caret. See `qh_editor::refs::Scope`.
+#[uniffi::export]
+pub fn sql_caret_scope(head: String, dialect: EditorDialect) -> EditorCaretScope {
+    scope_at_end(&head, dialect.dialect()).into()
+}
+
+/// An alias for a table name that is free among `taken` (aliases and table names already in
+/// the statement, compared without regard to case) and never a keyword: `order_items` is `oi`,
+/// `users` is `u`, and a taken `u` makes `us`.
+#[uniffi::export]
+pub fn sql_table_alias(table: String, taken: Vec<String>) -> String {
+    table_alias(&table, &taken)
 }
 
 impl EditorDialect {
@@ -895,6 +1096,109 @@ mod tests {
                 .all(|fold| fold.last_line > fold.header_line),
             "every fold hides a line: {:?}",
             outline.folds
+        );
+    }
+
+    // ---- references, clause and alias ----
+
+    #[test]
+    fn references_name_the_tables_and_aliases_at_the_caret() {
+        let doc = EditorDocument::new(
+            "with c(x) as (select 1) select * from c, s.t as a join (select 1) q on true;
+select 1"
+                .to_owned(),
+            EditorDialect::Postgres,
+        )
+        .expect("a small document opens");
+        let refs = doc.references(1, 3).expect("a fresh revision answers");
+        assert_eq!(refs.revision, 1);
+        assert_eq!(refs.source, EditorRefSource::Tree);
+        assert_eq!(
+            (refs.statement_start_utf16, refs.statement_len_utf16),
+            (0, 76)
+        );
+        assert_eq!(
+            refs.ctes,
+            vec![EditorCte {
+                name: "c".to_owned(),
+                columns: vec!["x".to_owned()],
+            }]
+        );
+        let shown: Vec<_> = refs
+            .relations
+            .iter()
+            .map(|r| (r.kind, r.schema.clone(), r.name.clone(), r.alias.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (EditorRelationKind::Cte, None, Some("c".to_owned()), None),
+                (
+                    EditorRelationKind::Table,
+                    Some("s".to_owned()),
+                    Some("t".to_owned()),
+                    Some("a".to_owned())
+                ),
+                (
+                    EditorRelationKind::Subquery,
+                    None,
+                    None,
+                    Some("q".to_owned())
+                ),
+            ]
+        );
+        // The name's span is in UTF-16 units of the document.
+        let t = &refs.relations[1];
+        assert_eq!((t.name_start_utf16, t.name_len_utf16), (43, 1));
+        // The second statement is asked for by an offset in it.
+        let second = doc.references(1, 80).expect("the other statement answers");
+        assert!(second.relations.is_empty());
+        assert_eq!(second.statement_start_utf16, 76);
+    }
+
+    #[test]
+    fn references_refuse_a_stale_revision_and_a_bad_offset() {
+        let doc = EditorDocument::new("select * from t".to_owned(), EditorDialect::Generic)
+            .expect("a small document opens");
+        doc.replace(0, 0, " ".to_owned()).expect("an edit applies");
+        assert_eq!(doc.references(1, 0).unwrap_err(), EditorError::Stale);
+        assert_eq!(
+            doc.references(2, 999).unwrap_err(),
+            EditorError::OutOfBounds
+        );
+        let ok = doc.references(2, 16).expect("the new revision answers");
+        assert_eq!(ok.revision, 2);
+        assert_eq!(ok.relations.len(), 1);
+    }
+
+    #[test]
+    fn the_scope_is_read_from_the_text_before_the_caret() {
+        for (head, clause) in [
+            ("select * from ", EditorClause::QueryTable),
+            ("delete from ", EditorClause::WriteTable),
+            ("select * from t group by a having ", EditorClause::Having),
+            ("select 1;\n", EditorClause::Other),
+        ] {
+            assert_eq!(
+                sql_caret_scope(head.to_owned(), EditorDialect::Postgres).clause,
+                clause,
+                "{head}"
+            );
+        }
+        let scope = sql_caret_scope(
+            "select count(*) as n, a from t group by a order by ".to_owned(),
+            EditorDialect::Postgres,
+        );
+        assert_eq!(scope.clause, EditorClause::OrderBy);
+        assert_eq!(scope.select_aliases, vec!["n".to_owned()]);
+    }
+
+    #[test]
+    fn an_alias_avoids_keywords_and_what_is_taken() {
+        assert_eq!(sql_table_alias("order_items".to_owned(), vec![]), "oi");
+        assert_eq!(
+            sql_table_alias("orders".to_owned(), vec!["O".to_owned()]),
+            "ord"
         );
     }
 

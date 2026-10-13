@@ -1,3 +1,4 @@
+import QueryHiveFFI
 import XCTest
 
 @testable import QueryHive
@@ -218,6 +219,328 @@ final class SuggestionScopeTests: XCTestCase {
         // `hive.` would never fill in.
         XCTAssertTrue(model.suggestions(for: tab, prefix: "", path: ["hive"]).isEmpty)
         XCTAssertTrue(hive.loading, "an unloaded node was not asked for its children")
+    }
+}
+
+// MARK: Position-dependent suggestions (W11-T6b)
+
+extension SuggestionScopeTests {
+    private func scope(_ clause: EditorClause, _ aliases: [String] = []) -> EditorCaretScope {
+        EditorCaretScope(clause: clause, selectAliases: aliases)
+    }
+
+    private func relation(_ name: String, alias: String? = nil) -> EditorRelation {
+        EditorRelation(kind: .table, catalog: nil, schema: nil, name: name, quoted: false,
+                       alias: alias, nameStartUtf16: 0, nameLenUtf16: 0)
+    }
+
+    private func references(_ relations: [EditorRelation] = [],
+                            ctes: [EditorCte] = []) -> EditorReferences {
+        EditorReferences(revision: 1, statementStartUtf16: 0, statementLenUtf16: 0,
+                         relations: relations, ctes: ctes, source: .tree)
+    }
+
+    /// A tab on a connection of `kind`, with no tree: enough for what only the driver decides.
+    private func driverTab(_ model: AppModel, kind: ConnectionKind) -> QueryTab {
+        let connection = Connection(id: UUID(), name: "c", color: .violet, kind: kind,
+                                    host: "h.internal", port: 1, sslmode: "prefer",
+                                    user: "u", database: "d", schema: "s", verify: true)
+        model.connections = [connection]
+        model.rebuildTree()
+        return tab(model, connection: connection)
+    }
+
+    // MARK: Aliases on tables
+
+    func testATableInAFromListCarriesAFreeAlias() {
+        let model = model()
+        let (connection, _, _, _) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        let offered = texts(model.suggestions(for: tab, prefix: "", path: ["hive", "analytics"],
+                                              scope: scope(.queryTable), references: references()))
+        XCTAssertEqual(offered.sorted(), ["penerima_manfaat pm", "wilayah w"])
+        // A bare word reaches every table in the tree, and gets the same treatment.
+        let bare = texts(model.suggestions(for: tab, prefix: "wil", path: [],
+                                           scope: scope(.queryTable), references: references()))
+        XCTAssertEqual(bare, ["wilayah w"])
+    }
+
+    func testAnAliasThatTheStatementAlreadyUsesIsNotMadeAgain() {
+        let model = model()
+        let (connection, _, _, _) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        // `w` is taken by an alias, and `wi` is a table name of the statement.
+        let taken = references([relation("orders", alias: "w"), relation("wi")])
+        let offered = texts(model.suggestions(for: tab, prefix: "wil", path: ["hive", "analytics"],
+                                              scope: scope(.queryTable), references: taken))
+        XCTAssertEqual(offered, ["wilayah wil"])
+        // A CTE name is taken, too.
+        let cte = references(ctes: [EditorCte(name: "w", columns: [])])
+        XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: ["hive", "analytics"],
+                                               scope: scope(.queryTable), references: cte)),
+                       ["wilayah wi"])
+    }
+
+    func testNoAliasWhereTheStatementWritesOrIsNotKnown() {
+        let model = model()
+        let (connection, _, _, _) = seed(model)
+        let tab = tab(model, connection: connection)
+        let path = ["hive", "analytics"]
+
+        // A table named by UPDATE, DELETE FROM, INSERT INTO or DDL is written bare.
+        for clause in [EditorClause.writeTable, .other, .where, .joinCondition, .selectList] {
+            XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: path,
+                                                   scope: scope(clause), references: references())),
+                           ["wilayah"], "\(clause)")
+        }
+        // No scope, or no analysis to know what is taken: bare, as before this existed.
+        XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: path)), ["wilayah"])
+        XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: path,
+                                               scope: scope(.queryTable))), ["wilayah"])
+        XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: path,
+                                               references: references())), ["wilayah"])
+    }
+
+    func testSchemasAndCatalogsNeverGetAnAlias() {
+        let model = model()
+        let (connection, _, _, _) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        let suggestions = model.suggestions(for: tab, prefix: "", path: ["hive"],
+                                            scope: scope(.queryTable), references: references())
+        XCTAssertEqual(texts(suggestions).sorted(), ["analytics", "bronze"])
+    }
+
+    // MARK: Select aliases per dialect
+
+    func testSelectAliasesAreOfferedWhereTheDriverAcceptsThem() {
+        let model = model()
+        let cases: [(ConnectionKind, EditorClause, Bool)] = [
+            (.postgres, .orderBy, true), (.mysql, .orderBy, true), (.trino, .orderBy, true),
+            (.postgres, .groupBy, true), (.mysql, .groupBy, true), (.trino, .groupBy, false),
+            (.postgres, .having, false), (.trino, .having, false), (.mysql, .having, true),
+            (.postgres, .where, false), (.mysql, .selectList, false), (.mysql, .queryTable, false),
+        ]
+        for (kind, clause, expected) in cases {
+            let tab = driverTab(model, kind: kind)
+            let offered = texts(model.suggestions(for: tab, prefix: "tot", path: [],
+                                                  scope: scope(clause, ["total", "region"])))
+            XCTAssertEqual(offered.contains("total"), expected, "\(kind) \(clause)")
+        }
+    }
+
+    func testAnAliasIsNotOfferedAsAColumnWhereTheDriverRefusesIt() {
+        let model = model()
+        let tab = driverTab(model, kind: .postgres)
+        tab.columns = [Event.Column(name: "total", type: "bigint"),
+                       Event.Column(name: "region", type: "varchar")]
+
+        // `total` is an output name of this statement, so HAVING on PostgreSQL does not take it;
+        // `region` is only a column and stays.
+        let having = texts(model.suggestions(for: tab, prefix: "", path: [],
+                                             scope: scope(.having, ["total"])))
+        XCTAssertFalse(having.contains("total"))
+        XCTAssertTrue(having.contains("region"))
+        // Where the driver accepts it, it is offered once.
+        let order = texts(model.suggestions(for: tab, prefix: "", path: [],
+                                            scope: scope(.orderBy, ["total"])))
+        XCTAssertEqual(order.filter { $0 == "total" }.count, 1)
+        // Without a scope nothing changes.
+        XCTAssertTrue(texts(model.suggestions(for: tab, prefix: "", path: [])).contains("total"))
+    }
+
+    func testAQuotedAliasIsMatchedByItsNameAndWrittenAsSpelled() {
+        let model = model()
+        let tab = driverTab(model, kind: .postgres)
+        let offered = model.suggestions(for: tab, prefix: "n", path: [],
+                                        scope: scope(.orderBy, ["\"Net\"", "`odd`"]))
+        XCTAssertTrue(offered.contains { $0.text == "\"Net\"" && $0.kind == .column })
+        XCTAssertFalse(offered.contains { $0.text == "`odd`" })
+    }
+
+    func testNoAliasesUnderAPath() {
+        let model = model()
+        let tab = driverTab(model, kind: .postgres)
+        XCTAssertTrue(model.suggestions(for: tab, prefix: "", path: ["s"],
+                                        scope: scope(.orderBy, ["total"])).isEmpty)
+    }
+
+    // MARK: Invalidation
+
+    func testInvalidatingATableDropsItsListingSchemaButNotItsNeighbours() {
+        let model = model()
+        let (connection, hive, analytics, bronze) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        model.invalidateCompletionCatalog(for: tab, object: ["hive", "analytics", "wilayah"])
+        XCTAssertNil(analytics.children, "the list holding the table was kept")
+        XCTAssertNotNil(bronze.children, "a neighbouring schema was dropped")
+        XCTAssertNotNil(hive.children, "the catalog above was dropped")
+    }
+
+    func testAnUnqualifiedNameTakesTheTabsDefaults() {
+        let model = model()
+        let (connection, _, analytics, bronze) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        // The connection's default is hive.analytics.
+        model.invalidateCompletionCatalog(for: tab, object: ["wilayah"])
+        XCTAssertNil(analytics.children)
+        XCTAssertNotNil(bronze.children)
+        // The tab's own context wins over the connection's.
+        analytics.children = [TreeNode.table("wilayah", parent: analytics)]
+        tab.contextSchema = "bronze"
+        model.invalidateCompletionCatalog(for: tab, object: ["raw_kpm"])
+        XCTAssertNil(bronze.children)
+        XCTAssertNotNil(analytics.children)
+    }
+
+    func testANewObjectInvalidatesTheListThatWillHoldIt() {
+        let model = model()
+        let (connection, hive, analytics, _) = seed(model)
+        let tab = tab(model, connection: connection)
+
+        // `CREATE TABLE hive.analytics.fresh`: no node yet, but the schema's list is stale.
+        model.invalidateCompletionCatalog(for: tab, object: ["hive", "analytics", "fresh"])
+        XCTAssertNil(analytics.children)
+        // `CREATE SCHEMA hive.silver`: the catalog's list of schemas.
+        analytics.children = [TreeNode.table("wilayah", parent: analytics)]
+        model.invalidateCompletionCatalog(for: tab, object: ["hive", "silver"], kind: .schema)
+        XCTAssertNil(hive.children)
+        XCTAssertNotNil(analytics.children)
+        // A schema's own tables are dropped with it: `DROP SCHEMA hive.analytics`.
+        hive.children = [analytics]
+        model.invalidateCompletionCatalog(for: tab, object: ["analytics"], kind: .schema)
+        XCTAssertNil(analytics.children)
+        XCTAssertNil(hive.children)
+        // A level the driver does not have names nothing: Trino has no database level.
+        analytics.children = [TreeNode.table("wilayah", parent: analytics)]
+        model.invalidateCompletionCatalog(for: tab, object: ["hive"], kind: .database)
+        XCTAssertNotNil(analytics.children)
+    }
+
+    func testANodeTheSideBarShowsOpenIsLeftToTheTreeRefresh() {
+        let model = model()
+        let (connection, _, analytics, _) = seed(model)
+        let tab = tab(model, connection: connection)
+        analytics.expanded = true
+
+        model.invalidateCompletionCatalog(for: tab, object: ["hive", "analytics", "wilayah"])
+        XCTAssertNotNil(analytics.children, "blanked rows the user is looking at")
+    }
+
+    func testANameThatCannotBeResolvedDropsNothing() {
+        let model = model()
+        let (connection, hive, analytics, bronze) = seed(model)
+        let tab = tab(model, connection: connection)
+        func everythingKept() -> Bool {
+            hive.children != nil && analytics.children != nil && bronze.children != nil
+        }
+
+        model.invalidateCompletionCatalog(for: tab, object: [])
+        model.invalidateCompletionCatalog(for: tab, object: ["a", "b", "c", "d"])
+        model.invalidateCompletionCatalog(for: tab, object: ["nosuch", "nosuch", "t"])
+        XCTAssertTrue(everythingKept())
+        // No tab connection at all.
+        model.invalidateCompletionCatalog(for: QueryTab(title: "none"), object: ["hive", "analytics", "t"])
+        XCTAssertTrue(everythingKept())
+    }
+
+    func testPostgresAndMySQLNamesAreQualifiedByTheirOwnLevels() {
+        let model = model()
+        let pg = Connection(id: UUID(), name: "pg", color: .violet, kind: .postgres,
+                            host: "pg.internal", port: 5432, sslmode: "prefer",
+                            user: "u", database: "warehouse", schema: "public", verify: true)
+        let my = Connection(id: UUID(), name: "my", color: .amber, kind: .mysql,
+                            host: "my.internal", port: 3306, sslmode: "disable",
+                            user: "u", database: "reporting", schema: "", verify: true)
+        model.connections = [pg, my]
+        model.rebuildTree()
+        let pgRoot = model.tree.first { $0.connectionID == pg.id }!
+        let publicSchema = TreeNode.schema("public", parent: pgRoot)
+        publicSchema.children = [TreeNode.table("orders", parent: publicSchema)]
+        pgRoot.children = [publicSchema]
+        let myRoot = model.tree.first { $0.connectionID == my.id }!
+        let reporting = TreeNode.database("reporting", parent: myRoot)
+        reporting.children = [TreeNode.table("kpm", parent: reporting)]
+        myRoot.children = [reporting]
+
+        model.invalidateCompletionCatalog(for: tab(model, connection: pg), object: ["orders"])
+        XCTAssertNil(publicSchema.children)
+        model.invalidateCompletionCatalog(for: tab(model, connection: my), object: ["kpm"])
+        XCTAssertNil(reporting.children)
+    }
+
+    func testAfterInvalidationTheNextSuggestionAsksTheEngineAgain() {
+        let model = model()
+        let (connection, _, analytics, _) = seed(model)
+        let tab = tab(model, connection: connection)
+        XCTAssertEqual(texts(model.suggestions(for: tab, prefix: "wil", path: ["hive", "analytics"])),
+                       ["wilayah"])
+
+        model.invalidateCompletionCatalog(for: tab, object: ["hive", "analytics", "wilayah"])
+        XCTAssertTrue(model.suggestions(for: tab, prefix: "wil", path: ["hive", "analytics"]).isEmpty)
+        XCTAssertTrue(analytics.loading, "the schema was not asked for its tables again")
+    }
+}
+
+/// The policy behind the suggestions, and the Rust functions it stands on.
+final class SuggestionPolicyTests: XCTestCase {
+    func testTheBindingsReadTheStatementAtTheCaret() throws {
+        let sql = "select * from public.t as a join (select 1) q on true"
+        let document = try EditorDocument(text: sql, dialect: .postgres)
+        let references = try document.references(revision: try document.revision(), offsetUtf16: 3)
+        XCTAssertEqual(references.source, .tree)
+        XCTAssertEqual(references.relations.map(\.alias), ["a", "q"])
+        XCTAssertEqual(references.relations.map(\.kind), [.table, .subquery])
+        XCTAssertEqual(references.relations[0].schema, "public")
+        XCTAssertEqual(references.relations[0].name, "t")
+        XCTAssertEqual(SQLSuggestions.takenNames(references), ["a", "t", "q"])
+    }
+
+    func testTheBindingsRefuseAStaleRevision() throws {
+        let document = try EditorDocument(text: "select 1", dialect: .generic)
+        let old = try document.revision()
+        _ = try document.replace(startUtf16: 0, lenUtf16: 0, text: " ")
+        XCTAssertThrowsError(try document.references(revision: old, offsetUtf16: 0)) {
+            XCTAssertEqual($0 as? EditorError, EditorError.Stale)
+        }
+    }
+
+    func testTheCaretScopeIsReadFromTheTextBeforeIt() {
+        XCTAssertEqual(sqlCaretScope(head: "select * from ", dialect: .postgres).clause, .queryTable)
+        XCTAssertEqual(sqlCaretScope(head: "update ", dialect: .mysql).clause, .writeTable)
+        XCTAssertEqual(sqlCaretScope(head: "delete from ", dialect: .trino).clause, .writeTable)
+        let scope = sqlCaretScope(head: "select count(*) as n from t group by a having ",
+                                  dialect: .postgres)
+        XCTAssertEqual(scope.clause, .having)
+        XCTAssertEqual(scope.selectAliases, ["n"])
+    }
+
+    func testAnAliasIsFreeAndNeverAKeyword() {
+        XCTAssertEqual(sqlTableAlias(table: "order_items", taken: []), "oi")
+        XCTAssertEqual(sqlTableAlias(table: "users", taken: ["u"]), "us")
+        // `or` is a keyword, `o` is taken: the next form is used.
+        XCTAssertEqual(sqlTableAlias(table: "orders", taken: ["o"]), "ord")
+    }
+
+    func testTableTextIsTheBareNameUnlessAFromListOfAKnownStatement() {
+        let known = EditorReferences(revision: 1, statementStartUtf16: 0, statementLenUtf16: 0,
+                                     relations: [], ctes: [], source: .tree)
+        XCTAssertEqual(SQLSuggestions.tableText("users", in: .queryTable, references: known), "users u")
+        XCTAssertEqual(SQLSuggestions.tableText("users", in: .writeTable, references: known), "users")
+        XCTAssertEqual(SQLSuggestions.tableText("users", in: nil, references: known), "users")
+        XCTAssertEqual(SQLSuggestions.tableText("users", in: .queryTable, references: nil), "users")
+    }
+
+    func testUnquotingStripsOnePairOfMatchingQuotes() {
+        XCTAssertEqual(SQLSuggestions.unquoted("\"Net\""), "Net")
+        XCTAssertEqual(SQLSuggestions.unquoted("`odd`"), "odd")
+        XCTAssertEqual(SQLSuggestions.unquoted("plain"), "plain")
+        XCTAssertEqual(SQLSuggestions.unquoted("\"half"), "\"half")
+        XCTAssertEqual(SQLSuggestions.unquoted("\""), "\"")
     }
 }
 

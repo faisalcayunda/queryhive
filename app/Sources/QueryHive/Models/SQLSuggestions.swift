@@ -1,3 +1,4 @@
+import QueryHiveFFI
 import SwiftUI
 
 /// One row of the editor's suggestion popup.
@@ -88,4 +89,51 @@ enum SQLSuggestions {
         "ANALYZE", "VARCHAR", "BIGINT", "INTEGER", "DOUBLE", "DECIMAL", "BOOLEAN",
         "DATE", "TIMESTAMP", "ARRAY", "MAP", "ROW", "JSON", "INTERVAL", "FILTER",
     ]
+
+    // MARK: Position-dependent policy (blueprint w11 section 12, T6b)
+
+    /// Whether the output names a select list gave (`count(*) AS total`) are valid where the
+    /// caret is, for this driver. `ORDER BY` takes them on all three. `GROUP BY` takes them on
+    /// PostgreSQL and MySQL but not Trino, and `HAVING` only on MySQL, whose extension it is.
+    /// Offering a name a server then refuses is worse than leaving it out, so everywhere else,
+    /// and for an unknown driver, the answer is no.
+    static func offersSelectAliases(in clause: EditorClause, for kind: ConnectionKind?) -> Bool {
+        guard let kind else { return false }
+        switch clause {
+        case .orderBy: return true
+        case .groupBy: return kind != .trino
+        case .having: return kind == .mysql
+        default: return false
+        }
+    }
+
+    /// The names a new alias must avoid: every alias and every table name the statement already
+    /// uses, and its CTEs. Compared without regard to case by the Rust side.
+    static func takenNames(_ references: EditorReferences) -> [String] {
+        references.relations.flatMap { [$0.alias, $0.name].compactMap { $0 } }
+            + references.ctes.map(\.name)
+    }
+
+    /// What picking `table` writes at the caret. In a `FROM` or `JOIN` of a query it is the name
+    /// and a short alias that is free in the statement (`order_items oi`); anywhere else, and
+    /// wherever the statement is not known, the bare name. A table named by `UPDATE`, `DELETE
+    /// FROM` or `INSERT INTO` never gets one: an alias there is not portable (MySQL refuses it in
+    /// some forms) and the statement did not ask for it. The alias is made by the Rust side, so a
+    /// keyword is never one and what is written reads back as an alias.
+    ///
+    /// A caller whose caret word is already followed by an alias (`FROM us| u`) passes no scope,
+    /// or the alias would be written twice.
+    static func tableText(_ table: String, in clause: EditorClause?,
+                          references: EditorReferences?) -> String {
+        guard clause == .queryTable, let references else { return table }
+        return "\(table) \(sqlTableAlias(table: table, taken: takenNames(references)))"
+    }
+
+    /// An alias as the select list spelled it, without its quotes: what a column of the same
+    /// name would be called.
+    static func unquoted(_ alias: String) -> String {
+        guard alias.count >= 2, let first = alias.first, first == "\"" || first == "`",
+              alias.last == first else { return alias }
+        return String(alias.dropFirst().dropLast())
+    }
 }

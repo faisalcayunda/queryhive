@@ -679,6 +679,14 @@ public protocol EditorDocumentProtocol: AnyObject, Sendable {
     func paint(revision: UInt64, windowStart: UInt32, windowLen: UInt32, budgetUtf16: UInt32) throws  -> EditorPaint
     
     /**
+     * The tables, subqueries and CTEs of the statement holding `offset_utf16`, with their
+     * aliases (blueprint w11 section 12). Background thread, never per keystroke: replays the
+     * log first, like `outline`, and answers from the statement's cached tree when it has
+     * one. `Stale` when `revision` is older than the text's.
+     */
+    func references(revision: UInt64, offsetUtf16: UInt32) throws  -> EditorReferences
+    
+    /**
      * Replace `[start_utf16, start_utf16 + len_utf16)` with `text`; returns the new
      * revision. Main thread: shifts the indexes, logs the edit, never parses.
      */
@@ -869,6 +877,23 @@ open func paint(revision: UInt64, windowStart: UInt32, windowLen: UInt32, budget
         FfiConverterUInt32.lower(windowStart),
         FfiConverterUInt32.lower(windowLen),
         FfiConverterUInt32.lower(budgetUtf16),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The tables, subqueries and CTEs of the statement holding `offset_utf16`, with their
+     * aliases (blueprint w11 section 12). Background thread, never per keystroke: replays the
+     * log first, like `outline`, and answers from the statement's cached tree when it has
+     * one. `Stale` when `revision` is older than the text's.
+     */
+open func references(revision: UInt64, offsetUtf16: UInt32)throws  -> EditorReferences  {
+    return try  FfiConverterTypeEditorReferences_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_method_editordocument_references(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(revision),
+        FfiConverterUInt32.lower(offsetUtf16),uniffiCallStatus
     )
 })
 }
@@ -2066,6 +2091,121 @@ public func FfiConverterTypeDistinctValues_lower(_ value: DistinctValues) -> Rus
 
 
 /**
+ * What the caret sees in its statement: its clause, and the output names the select list
+ * gave with `AS`, as spelled.
+ */
+public struct EditorCaretScope: Equatable, Hashable {
+    public var clause: EditorClause
+    public var selectAliases: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(clause: EditorClause, selectAliases: [String]) {
+        self.clause = clause
+        self.selectAliases = selectAliases
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorCaretScope: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorCaretScope: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorCaretScope {
+        return
+            try EditorCaretScope(
+                clause: FfiConverterTypeEditorClause.read(from: &buf), 
+                selectAliases: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorCaretScope, into buf: inout [UInt8]) {
+        FfiConverterTypeEditorClause.write(value.clause, into: &buf)
+        FfiConverterSequenceString.write(value.selectAliases, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorCaretScope_lift(_ buf: RustBuffer) throws -> EditorCaretScope {
+    return try FfiConverterTypeEditorCaretScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorCaretScope_lower(_ value: EditorCaretScope) -> RustBuffer {
+    return FfiConverterTypeEditorCaretScope.lower(value)
+}
+
+
+/**
+ * A CTE of a statement and its declared column list (empty when there is none).
+ */
+public struct EditorCte: Equatable, Hashable {
+    public var name: String
+    public var columns: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, columns: [String]) {
+        self.name = name
+        self.columns = columns
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorCte: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorCte: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorCte {
+        return
+            try EditorCte(
+                name: FfiConverterString.read(from: &buf), 
+                columns: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorCte, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceString.write(value.columns, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorCte_lift(_ buf: RustBuffer) throws -> EditorCte {
+    return try FfiConverterTypeEditorCte.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorCte_lower(_ value: EditorCte) -> RustBuffer {
+    return FfiConverterTypeEditorCte.lower(value)
+}
+
+
+/**
  * One collapsible region. Lines are 0-based; offsets are UTF-16 units.
  */
 public struct EditorFold: Equatable, Hashable {
@@ -2405,6 +2545,176 @@ public func FfiConverterTypeEditorPaint_lift(_ buf: RustBuffer) throws -> Editor
 #endif
 public func FfiConverterTypeEditorPaint_lower(_ value: EditorPaint) -> RustBuffer {
     return FfiConverterTypeEditorPaint.lower(value)
+}
+
+
+/**
+ * The tables and aliases of one statement.
+ */
+public struct EditorReferences: Equatable, Hashable {
+    public var revision: UInt64
+    /**
+     * The statement that was read, in UTF-16 units of the document. Length 0 with no
+     * relations when the offset is in no statement.
+     */
+    public var statementStartUtf16: UInt32
+    public var statementLenUtf16: UInt32
+    public var relations: [EditorRelation]
+    public var ctes: [EditorCte]
+    public var source: EditorRefSource
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(revision: UInt64, 
+        /**
+         * The statement that was read, in UTF-16 units of the document. Length 0 with no
+         * relations when the offset is in no statement.
+         */statementStartUtf16: UInt32, statementLenUtf16: UInt32, relations: [EditorRelation], ctes: [EditorCte], source: EditorRefSource) {
+        self.revision = revision
+        self.statementStartUtf16 = statementStartUtf16
+        self.statementLenUtf16 = statementLenUtf16
+        self.relations = relations
+        self.ctes = ctes
+        self.source = source
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorReferences: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorReferences: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorReferences {
+        return
+            try EditorReferences(
+                revision: FfiConverterUInt64.read(from: &buf), 
+                statementStartUtf16: FfiConverterUInt32.read(from: &buf), 
+                statementLenUtf16: FfiConverterUInt32.read(from: &buf), 
+                relations: FfiConverterSequenceTypeEditorRelation.read(from: &buf), 
+                ctes: FfiConverterSequenceTypeEditorCte.read(from: &buf), 
+                source: FfiConverterTypeEditorRefSource.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorReferences, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterUInt32.write(value.statementStartUtf16, into: &buf)
+        FfiConverterUInt32.write(value.statementLenUtf16, into: &buf)
+        FfiConverterSequenceTypeEditorRelation.write(value.relations, into: &buf)
+        FfiConverterSequenceTypeEditorCte.write(value.ctes, into: &buf)
+        FfiConverterTypeEditorRefSource.write(value.source, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorReferences_lift(_ buf: RustBuffer) throws -> EditorReferences {
+    return try FfiConverterTypeEditorReferences.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorReferences_lower(_ value: EditorReferences) -> RustBuffer {
+    return FfiConverterTypeEditorReferences.lower(value)
+}
+
+
+/**
+ * One table, subquery or CTE reference of a statement. The name parts have their quotes
+ * removed; `name` is `None` for a subquery. Offsets are UTF-16 units of the document: the
+ * name's last part, or the whole subquery.
+ */
+public struct EditorRelation: Equatable, Hashable {
+    public var kind: EditorRelationKind
+    public var catalog: String?
+    public var schema: String?
+    public var name: String?
+    /**
+     * The last part of the name was written in quotes, so it matches exactly, not by case.
+     */
+    public var quoted: Bool
+    public var alias: String?
+    public var nameStartUtf16: UInt32
+    public var nameLenUtf16: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: EditorRelationKind, catalog: String?, schema: String?, name: String?, 
+        /**
+         * The last part of the name was written in quotes, so it matches exactly, not by case.
+         */quoted: Bool, alias: String?, nameStartUtf16: UInt32, nameLenUtf16: UInt32) {
+        self.kind = kind
+        self.catalog = catalog
+        self.schema = schema
+        self.name = name
+        self.quoted = quoted
+        self.alias = alias
+        self.nameStartUtf16 = nameStartUtf16
+        self.nameLenUtf16 = nameLenUtf16
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EditorRelation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorRelation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorRelation {
+        return
+            try EditorRelation(
+                kind: FfiConverterTypeEditorRelationKind.read(from: &buf), 
+                catalog: FfiConverterOptionString.read(from: &buf), 
+                schema: FfiConverterOptionString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                quoted: FfiConverterBool.read(from: &buf), 
+                alias: FfiConverterOptionString.read(from: &buf), 
+                nameStartUtf16: FfiConverterUInt32.read(from: &buf), 
+                nameLenUtf16: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EditorRelation, into buf: inout [UInt8]) {
+        FfiConverterTypeEditorRelationKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.catalog, into: &buf)
+        FfiConverterOptionString.write(value.schema, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.quoted, into: &buf)
+        FfiConverterOptionString.write(value.alias, into: &buf)
+        FfiConverterUInt32.write(value.nameStartUtf16, into: &buf)
+        FfiConverterUInt32.write(value.nameLenUtf16, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRelation_lift(_ buf: RustBuffer) throws -> EditorRelation {
+    return try FfiConverterTypeEditorRelation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRelation_lower(_ value: EditorRelation) -> RustBuffer {
+    return FfiConverterTypeEditorRelation.lower(value)
 }
 
 
@@ -3283,6 +3593,138 @@ public func FfiConverterTypeCommentFfiError_lower(_ value: CommentFfiError) -> R
 
 
 /**
+ * What the caret is for in its statement; see [`sql_caret_scope`].
+ */
+
+public enum EditorClause: Equatable, Hashable {
+    
+    case other
+    case selectList
+    /**
+     * A table is named here in a query (`FROM`, `JOIN`): it may take an alias.
+     */
+    case queryTable
+    /**
+     * A table is named here by a statement that writes it (`UPDATE`, `DELETE FROM`,
+     * `INSERT INTO`, `TRUNCATE`, `CREATE|ALTER|DROP TABLE`): no alias.
+     */
+    case writeTable
+    case joinCondition
+    case `where`
+    case groupBy
+    case having
+    case orderBy
+    case setList
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorClause: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorClause: FfiConverterRustBuffer {
+    typealias SwiftType = EditorClause
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorClause {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .other
+        
+        case 2: return .selectList
+        
+        case 3: return .queryTable
+        
+        case 4: return .writeTable
+        
+        case 5: return .joinCondition
+        
+        case 6: return .`where`
+        
+        case 7: return .groupBy
+        
+        case 8: return .having
+        
+        case 9: return .orderBy
+        
+        case 10: return .setList
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorClause, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .other:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .selectList:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .queryTable:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .writeTable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .joinCondition:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .`where`:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .groupBy:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .having:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .orderBy:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .setList:
+            writeInt(&buf, Int32(10))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorClause_lift(_ buf: RustBuffer) throws -> EditorClause {
+    return try FfiConverterTypeEditorClause.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorClause_lower(_ value: EditorClause) -> RustBuffer {
+    return FfiConverterTypeEditorClause.lower(value)
+}
+
+
+
+/**
  * The lexical family a document's SQL is read under. Only the `"` rule differs between
  * them today; the app sends `.generic` until W10-T6 connects one document per tab.
  */
@@ -3656,6 +4098,158 @@ public func FfiConverterTypeEditorIssueKind_lift(_ buf: RustBuffer) throws -> Ed
 #endif
 public func FfiConverterTypeEditorIssueKind_lower(_ value: EditorIssueKind) -> RustBuffer {
     return FfiConverterTypeEditorIssueKind.lower(value)
+}
+
+
+
+/**
+ * How the relations were read: from the statement's tree, or from its tokens when the tree
+ * has errors or the statement is too big to parse.
+ */
+
+public enum EditorRefSource: Equatable, Hashable {
+    
+    case tree
+    case lexical
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorRefSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorRefSource: FfiConverterRustBuffer {
+    typealias SwiftType = EditorRefSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorRefSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .tree
+        
+        case 2: return .lexical
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorRefSource, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .tree:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .lexical:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRefSource_lift(_ buf: RustBuffer) throws -> EditorRefSource {
+    return try FfiConverterTypeEditorRefSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRefSource_lower(_ value: EditorRefSource) -> RustBuffer {
+    return FfiConverterTypeEditorRefSource.lower(value)
+}
+
+
+
+/**
+ * What a relation of a statement is.
+ */
+
+public enum EditorRelationKind: Equatable, Hashable {
+    
+    case table
+    /**
+     * `(select …) alias`.
+     */
+    case subquery
+    /**
+     * A table reference whose name is a CTE of the same statement.
+     */
+    case cte
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension EditorRelationKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEditorRelationKind: FfiConverterRustBuffer {
+    typealias SwiftType = EditorRelationKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EditorRelationKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .table
+        
+        case 2: return .subquery
+        
+        case 3: return .cte
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EditorRelationKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .table:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .subquery:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .cte:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRelationKind_lift(_ buf: RustBuffer) throws -> EditorRelationKind {
+    return try FfiConverterTypeEditorRelationKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEditorRelationKind_lower(_ value: EditorRelationKind) -> RustBuffer {
+    return FfiConverterTypeEditorRelationKind.lower(value)
 }
 
 
@@ -4681,6 +5275,31 @@ fileprivate struct FfiConverterSequenceTypeColumnWire: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeEditorCte: FfiConverterRustBuffer {
+    typealias SwiftType = [EditorCte]
+
+    public static func write(_ value: [EditorCte], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEditorCte.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EditorCte] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EditorCte]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEditorCte.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeEditorFold: FfiConverterRustBuffer {
     typealias SwiftType = [EditorFold]
 
@@ -4723,6 +5342,31 @@ fileprivate struct FfiConverterSequenceTypeEditorIssue: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeEditorIssue.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeEditorRelation: FfiConverterRustBuffer {
+    typealias SwiftType = [EditorRelation]
+
+    public static func write(_ value: [EditorRelation], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEditorRelation.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EditorRelation] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EditorRelation]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEditorRelation.read(from: &buf))
         }
         return seq
     }
@@ -4882,6 +5526,21 @@ public func formatSql(sql: String, dialect: EditorDialect, options: FormatOption
 })
 }
 /**
+ * What a caret sees: `head` is the text before it, or before the word being completed (so a
+ * half-typed `fro` does not decide its own context). The statement is the last one in `head`.
+ * A function of the text alone, with no document and no lock, cheap enough for every
+ * keystroke when `head` is a few KB of text before the caret. See `qh_editor::refs::Scope`.
+ */
+public func sqlCaretScope(head: String, dialect: EditorDialect) -> EditorCaretScope  {
+    return try!  FfiConverterTypeEditorCaretScope_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_sql_caret_scope(
+        FfiConverterString.lower(head),
+        FfiConverterTypeEditorDialect_lower(dialect),uniffiCallStatus
+    )
+})
+}
+/**
  * The statements of `sql` for Run, as `(start, end)` pairs in UTF-16 units: the
  * pieces between separators that hold more than whitespace, comments and `;`.
  */
@@ -4891,6 +5550,20 @@ public func sqlStatementRanges(sql: String, dialect: EditorDialect)throws  -> [U
     uniffi_qh_ffi_fn_func_sql_statement_ranges(
         FfiConverterString.lower(sql),
         FfiConverterTypeEditorDialect_lower(dialect),uniffiCallStatus
+    )
+})
+}
+/**
+ * An alias for a table name that is free among `taken` (aliases and table names already in
+ * the statement, compared without regard to case) and never a keyword: `order_items` is `oi`,
+ * `users` is `u`, and a taken `u` makes `us`.
+ */
+public func sqlTableAlias(table: String, taken: [String]) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_qh_ffi_fn_func_sql_table_alias(
+        FfiConverterString.lower(table),
+        FfiConverterSequenceString.lower(taken),uniffiCallStatus
     )
 })
 }
@@ -4978,7 +5651,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_qh_ffi_checksum_func_format_sql() != 8323) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_qh_ffi_checksum_func_sql_caret_scope() != 5581) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_qh_ffi_checksum_func_sql_statement_ranges() != 45986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_func_sql_table_alias() != 38884) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_func_toggle_line_comment() != 1544) {
@@ -5018,6 +5697,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_editordocument_paint() != 64111) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_qh_ffi_checksum_method_editordocument_references() != 22462) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_qh_ffi_checksum_method_editordocument_replace() != 21135) {
