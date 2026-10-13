@@ -131,6 +131,71 @@ final class CompletionEditorTests: XCTestCase {
         XCTAssertEqual(aliased.textView.string, "SELECT * FROM wilayah w")
     }
 
+    // MARK: Names that need quotes
+
+    /// The seeded catalog `hive` with a hyphenated schema added to the ones it lists.
+    private func hyphenated(_ sql: String, caret: Int? = nil) throws -> EditorTestHost {
+        let made = try editor(sql)
+        let hive = try XCTUnwrap(made.model.tree[0].children?.first)
+        hive.children?.append(TreeNode.schema("prod-ops-aktivitas-produksi-harian-ro", parent: hive))
+        hive.children?.append(TreeNode.schema("prod_datalake_pii_ro", parent: hive))
+        if let caret { made.textView.setSelectedRange(NSRange(location: caret, length: 0)) }
+        return made
+    }
+
+    func testAHyphenatedNameTypedWithoutAQuoteIsWrittenQuoted() throws {
+        let host = try hyphenated("SELECT * FROM hive.")
+        type("prod-o", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }), "a hyphen stopped the list from opening")
+        XCTAssertEqual(host.model.completion.items.map(\.text), ["prod-ops-aktivitas-produksi-harian-ro"])
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM hive.\"prod-ops-aktivitas-produksi-harian-ro\"")
+    }
+
+    func testAnOpeningQuoteIsNotDoubled() throws {
+        let host = try hyphenated("SELECT * FROM hive.\"prod-o")
+        host.textView.insertText("p", replacementRange: NSRange(location: 26, length: 0))
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM hive.\"prod-ops-aktivitas-produksi-harian-ro\"")
+    }
+
+    func testAClosingQuoteThatIsAlreadyThereIsReplacedToo() throws {
+        // `hive."prod-o|"`: the caret sits before a closing quote.
+        let sql = "SELECT * FROM hive.\"prod-o\""
+        let host = try hyphenated(sql, caret: (sql as NSString).length - 1)
+        host.textView.insertText("p", replacementRange: NSRange(location: (sql as NSString).length - 1, length: 0))
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM hive.\"prod-ops-aktivitas-produksi-harian-ro\"")
+    }
+
+    func testASnakeCaseSchemaIsWrittenBare() throws {
+        let host = try hyphenated("SELECT * FROM hive.")
+        type("prod_d", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM hive.prod_datalake_pii_ro")
+    }
+
+    func testABareWordWithAHyphenFindsTheSchemaToo() throws {
+        let host = try hyphenated("SELECT * FROM ")
+        type("prod-o", into: host)
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT * FROM \"prod-ops-aktivitas-produksi-harian-ro\"")
+    }
+
+    func testAMinusBetweenTwoNamesStillCompletesTheSecond() throws {
+        let host = try editor("SELECT 1 FROM wilayah w WHERE kode_wilayah-")
+        type("wil", into: host)
+        // Nothing is called `kode_wilayah-wil`, so the word is `wil` after a minus, and the
+        // minus stays where it is.
+        XCTAssertTrue(host.pump(until: { host.model.completion.active }))
+        XCTAssertTrue(key(48, in: host))
+        XCTAssertEqual(host.textView.string, "SELECT 1 FROM wilayah w WHERE kode_wilayah-wilayah")
+    }
+
     func testPickingARowReplacesTheWholeWordTheCaretIsIn() throws {
         let host = try editor("SELECT * FROM wix tail")
         // The caret sits inside the word: "wi|x", and one more letter makes "wil|x".

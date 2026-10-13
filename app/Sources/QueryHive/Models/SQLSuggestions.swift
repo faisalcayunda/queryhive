@@ -67,6 +67,9 @@ struct CompletionRequest {
     /// Whether a table written here may get an alias. False when the word is already followed by
     /// one (`FROM us| u`), which would otherwise be written twice.
     var aliasable = true
+    /// The word was typed after an identifier quote the user opened. The name picked is then
+    /// written quoted even if it did not need to be.
+    var quoted = false
 }
 
 /// The suggestion list the editor is showing right now.

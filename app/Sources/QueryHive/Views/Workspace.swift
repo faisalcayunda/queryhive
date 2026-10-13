@@ -543,7 +543,7 @@ struct EditorPane: View {
                   candidates: { request in
                       model.suggestions(for: tab, prefix: request.prefix, path: request.path,
                                         scope: request.scope, references: request.references,
-                                        aliasable: request.aliasable)
+                                        aliasable: request.aliasable, typedQuote: request.quoted)
                   },
                   // Read here rather than inside the editor so this body depends on the switches:
                   // that is what makes flipping one in Settings re-apply the editor.

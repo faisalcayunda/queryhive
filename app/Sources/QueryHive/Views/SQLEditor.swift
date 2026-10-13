@@ -1828,7 +1828,7 @@ struct SQLEditor: NSViewRepresentable {
                 let aliasable = !CompletionTrigger.aliasFollows(in: text, from: wordEnd(of: site, caret: caret))
                 let items = parent.candidates(CompletionRequest(prefix: site.prefix, path: site.path,
                                                                 scope: scope, references: references,
-                                                                aliasable: aliasable))
+                                                                aliasable: aliasable, quoted: site.quoted))
                 guard !items.isEmpty else { continue }
                 activeSite = site
                 activeCaret = caret

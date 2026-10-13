@@ -43,7 +43,7 @@ extension AppModel {
     /// the `head` this is given; nothing here reads `tab.sql`.
     func suggestions(for tab: QueryTab, prefix: String, path: [String],
                      scope: EditorCaretScope? = nil, references: EditorReferences? = nil,
-                     aliasable: Bool = true) -> [SQLSuggestion] {
+                     aliasable: Bool = true, typedQuote: Bool = false) -> [SQLSuggestion] {
         let connection = connection(for: tab)
         let driver = connection?.kind
         let clause = scope?.clause
@@ -62,25 +62,46 @@ extension AppModel {
         }
         var hits: [Hit] = []
         var seen = Set<String>()
-        func add(_ text: String, _ kind: SQLSuggestion.Kind, name: String? = nil, away: Int = 0) {
+
+        /// An identifier as it is written in this connection's statements: bare when it can be,
+        /// quoted when the server would not read it back (`SQLIdentifierQuoting`). A quote the user
+        /// already typed is kept even for a name that does not need one.
+        func spell(_ name: String, typedQuote: Bool = false) -> String {
+            guard let driver else { return name }
+            guard typedQuote else { return SQLIdentifierQuoting.quoted(name, for: driver) }
+            let mark = driver == .mysql ? "`" : "\""
+            return mark + name.replacingOccurrences(of: mark, with: mark + mark) + mark
+        }
+
+        /// `identifier` is a name from the server or from a result, which gets quoted when it must
+        /// be; a keyword, and a select-list alias that is already spelled as written, do not.
+        func add(_ text: String, _ kind: SQLSuggestion.Kind, name: String? = nil, away: Int = 0,
+                 identifier: Bool = false, insert: String? = nil) {
             guard !text.isEmpty,
                   let quality = SQLSuggestions.match(name ?? text, typed: prefix, keyword: kind == .keyword),
                   seen.insert("\(kind.rawValue):\(text.lowercased())").inserted else { return }
-            hits.append(Hit(suggestion: SQLSuggestion(text: text, kind: kind), quality: quality, away: away))
+            let written = insert ?? (identifier ? spell(text, typedQuote: typedQuote) : text)
+            hits.append(Hit(suggestion: SQLSuggestion(text: text, kind: kind, insert: written),
+                            quality: quality, away: away))
         }
 
-        /// A table written bare under a path, or with the qualifier its place needs.
+        /// A table written bare under a path, or with the qualifier its place needs, each part
+        /// quoted for itself (`"prod-ops-x".public."My Table"`).
         func addTable(_ parts: [String], away: Int) {
             guard let last = parts.last else { return }
-            let name = parts.joined(separator: ".")
-            add(SQLSuggestions.tableText(name, base: last, in: clause, references: aliasing), .table,
-                name: last, away: away)
+            let shown = SQLSuggestions.tableText(parts.joined(separator: "."), base: last, in: clause,
+                                                 references: aliasing)
+            let spelled = parts.enumerated()
+                .map { spell($1, typedQuote: typedQuote && $0 == parts.count - 1) }
+                .joined(separator: ".")
+            let written = SQLSuggestions.tableText(spelled, base: last, in: clause, references: aliasing)
+            add(shown, .table, name: last, away: away, insert: written)
         }
 
         func offer(_ node: TreeNode) {
             switch node.kind {
-            case .catalog, .database: add(node.title, .catalog)
-            case .schema: add(node.title, .schema)
+            case .catalog, .database: add(node.title, .catalog, identifier: true)
+            case .schema: add(node.title, .schema, identifier: true)
             case .table:
                 if let connection {
                     let placed = qualifier(of: node, for: connection.kind, tab: tab)
@@ -112,14 +133,14 @@ extension AppModel {
             // columns we can vouch for, so they offer none.
             if named.count == 1 {
                 for name in columnNames(of: named[0], in: references, tab: tab, connection: connection) {
-                    add(name, .column)
+                    add(name, .column, identifier: true)
                 }
             }
         } else if let scope = node(atPath: path, connectionID: tab.connectionID) {
             if scope.kind == .table {
                 // `schema.table.`: the table's own columns, read once if the tree has not got them.
                 if let columns = scope.columns {
-                    for column in columns { add(column.name, .column) }
+                    for column in columns { add(column.name, .column, identifier: true) }
                 } else {
                     loadColumns(of: scope)
                 }
@@ -128,8 +149,8 @@ extension AppModel {
             } else if let children = scope.children {
                 for child in children {
                     switch child.kind {
-                    case .catalog, .database: add(child.title, .catalog)
-                    case .schema: add(child.title, .schema)
+                    case .catalog, .database: add(child.title, .catalog, identifier: true)
+                    case .schema: add(child.title, .schema, identifier: true)
                     case .table: addTable([child.title], away: 0)
                     case .group, .connection: break
                     }
@@ -156,7 +177,7 @@ extension AppModel {
             if columnClause, let references, let connection {
                 for relation in references.relations.prefix(Self.relationLimit) {
                     for name in columnNames(of: relation, in: references, tab: tab, connection: connection) {
-                        add(name, .column)
+                        add(name, .column, identifier: true)
                         relationColumns = true
                     }
                 }
@@ -172,7 +193,7 @@ extension AppModel {
                 }
                 let refused = accepted ? [] : Set(aliases.map { SQLSuggestions.unquoted($0).lowercased() })
                 for column in tab.columns where !refused.contains(column.name.lowercased()) {
-                    add(column.name, .column, away: relationColumns ? 1 : 0)
+                    add(column.name, .column, away: relationColumns ? 1 : 0, identifier: true)
                 }
             }
             for keyword in SQLSuggestions.keywords { add(keyword, .keyword) }
