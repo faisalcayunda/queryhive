@@ -54,7 +54,12 @@ extension AppModel {
         let aliasing = aliasable ? references : nil
 
         struct Hit {
-            let suggestion: SQLSuggestion
+            /// Built after the list is sorted and cut: a table's text carries an alias, which is an
+            /// FFI call, and a connection can hold thousands of tables.
+            let make: () -> SQLSuggestion
+            let kind: SQLSuggestion.Kind
+            /// What orders equal matches: the name without its alias or quoting.
+            let sortText: String
             let quality: Int
             /// 0 for a name that can be written bare where the caret is, 1 for one that needs its
             /// qualifier.
@@ -62,6 +67,8 @@ extension AppModel {
         }
         var hits: [Hit] = []
         var seen = Set<String>()
+        // The names a new alias must avoid, once for the whole list.
+        let taken = aliasing.map(SQLSuggestions.takenNames)
 
         /// An identifier as it is written in this connection's statements: bare when it can be,
         /// quoted when the server would not read it back (`SQLIdentifierQuoting`). A quote the user
@@ -76,26 +83,31 @@ extension AppModel {
         /// `identifier` is a name from the server or from a result, which gets quoted when it must
         /// be; a keyword, and a select-list alias that is already spelled as written, do not.
         func add(_ text: String, _ kind: SQLSuggestion.Kind, name: String? = nil, away: Int = 0,
-                 identifier: Bool = false, insert: String? = nil) {
+                 identifier: Bool = false) {
             guard !text.isEmpty,
                   let quality = SQLSuggestions.match(name ?? text, typed: prefix, keyword: kind == .keyword),
                   seen.insert("\(kind.rawValue):\(text.lowercased())").inserted else { return }
-            let written = insert ?? (identifier ? spell(text, typedQuote: typedQuote) : text)
-            hits.append(Hit(suggestion: SQLSuggestion(text: text, kind: kind, insert: written),
-                            quality: quality, away: away))
+            let written = identifier ? spell(text, typedQuote: typedQuote) : text
+            hits.append(Hit(make: { SQLSuggestion(text: text, kind: kind, insert: written) }, kind: kind,
+                            sortText: text, quality: quality, away: away))
         }
 
         /// A table written bare under a path, or with the qualifier its place needs, each part
-        /// quoted for itself (`"prod-ops-x".public."My Table"`).
+        /// quoted for itself (`"prod-ops-x".public."My Table"`). The match is made on the table's
+        /// own name before anything else is built.
         func addTable(_ parts: [String], away: Int) {
-            guard let last = parts.last else { return }
-            let shown = SQLSuggestions.tableText(parts.joined(separator: "."), base: last, in: clause,
-                                                 references: aliasing)
-            let spelled = parts.enumerated()
-                .map { spell($1, typedQuote: typedQuote && $0 == parts.count - 1) }
-                .joined(separator: ".")
-            let written = SQLSuggestions.tableText(spelled, base: last, in: clause, references: aliasing)
-            add(shown, .table, name: last, away: away, insert: written)
+            let bare = parts.joined(separator: ".")
+            guard let last = parts.last,
+                  let quality = SQLSuggestions.match(last, typed: prefix),
+                  seen.insert("\(SQLSuggestion.Kind.table.rawValue):\(bare.lowercased())").inserted else { return }
+            hits.append(Hit(make: {
+                let spelled = parts.enumerated()
+                    .map { spell($1, typedQuote: typedQuote && $0 == parts.count - 1) }
+                    .joined(separator: ".")
+                let alias = SQLSuggestions.alias(for: last, in: clause, references: aliasing, taken: taken)
+                return SQLSuggestion(text: alias.map { "\(bare) \($0)" } ?? bare, kind: .table,
+                                     insert: alias.map { "\(spelled) \($0)" } ?? spelled)
+            }, kind: .table, sortText: bare, quality: quality, away: away))
         }
 
         func offer(_ node: TreeNode) {
@@ -113,6 +125,16 @@ extension AppModel {
             // use, so it is never a suggestion.
             case .group, .connection: break
             }
+        }
+
+        // A word that is exactly one of the statement's own names (`o` in `ON o.id = i.o_id`, typed
+        // as far as `o`) is the qualifier about to be written. A list of columns that start with it
+        // would turn it into one when Return or Tab is pressed, so there is none.
+        if path.isEmpty, columnClause, !prefix.isEmpty, let references,
+           SQLSuggestions.takenNames(references).contains(where: {
+               $0.compare(prefix, options: .caseInsensitive) == .orderedSame
+           }) {
+            return []
         }
 
         if path.isEmpty {
@@ -227,17 +249,15 @@ extension AppModel {
                 // A name the typed text starts always beats one it only occurs in.
                 let lhsPrefix = lhs.quality == 0 ? 0 : 1, rhsPrefix = rhs.quality == 0 ? 0 : 1
                 if lhsPrefix != rhsPrefix { return lhsPrefix < rhsPrefix }
-                let lhsGroup = group(lhs.suggestion.kind), rhsGroup = group(rhs.suggestion.kind)
+                let lhsGroup = group(lhs.kind), rhsGroup = group(rhs.kind)
                 if lhsGroup != rhsGroup { return lhsGroup < rhsGroup }
                 if lhs.away != rhs.away { return lhs.away < rhs.away }
                 if lhs.quality != rhs.quality { return lhs.quality < rhs.quality }
-                if lhs.suggestion.text.count != rhs.suggestion.text.count {
-                    return lhs.suggestion.text.count < rhs.suggestion.text.count
-                }
-                return lhs.suggestion.text < rhs.suggestion.text
+                if lhs.sortText.count != rhs.sortText.count { return lhs.sortText.count < rhs.sortText.count }
+                return lhs.sortText < rhs.sortText
             }
             .prefix(Self.suggestionLimit)
-            .map(\.suggestion)
+            .map { $0.make() }
     }
 
     /// How many suggestions are kept. The popup shows `EditorCompletion.visibleRows` of them and
@@ -272,9 +292,16 @@ extension AppModel {
 
     /// Asks for a level of the tree unless it already failed once. `loadChildren` itself skips a
     /// node that is loaded or loading.
+    ///
+    /// This is completion asking, not a person: it reads the password without the Keychain dialog,
+    /// bounds the statement, raises no host key sheet, and says nothing in the UI when it fails. A
+    /// connection that goes through an SSH tunnel is not touched until it has connected in this
+    /// session by something the person did.
     func requestLoad(of node: TreeNode) {
-        guard node.error == nil else { return }
-        loadChildren(of: node)
+        guard node.error == nil, !node.completionFailed,
+              let connection = connections.first(where: { $0.id == node.connectionID }),
+              completionMayLoad(connection) else { return }
+        loadChildren(of: node, background: true)
     }
 
     /// Walks down the tab's default database and schema and asks for the first level that is not
@@ -383,46 +410,68 @@ extension AppModel {
     /// Reads one table's columns for completion, once: nothing while it is loading or failed
     /// before, and at most `completionColumnReadLimit` at a time.
     ///
-    /// The engine has no columns command, so this asks the way the object inspector does: a
-    /// `preview` of `SELECT *` under a one-row cap, which the server describes before it sends a
-    /// row (`objectColumnsSQL`). It is a real query, which is why it is only sent for a table the
-    /// statement names, and never twice for the same one.
+    /// It asks the engine's `columns` command, which reads the server's own catalog
+    /// (`information_schema` on Trino and MySQL, `pg_attribute` on PostgreSQL, so views and
+    /// foreign tables answer too) on the metadata lane and replies with a `table_columns` event of
+    /// `fields`, names and types in the table's order. It runs no statement of the user's table:
+    /// the earlier `preview` of `SELECT * FROM <table>` made the server plan, and for a view run,
+    /// the whole query.
+    ///
+    /// The read is background work: the password is read without the Keychain dialog, a refused
+    /// SSH host key raises no sheet, nothing is shown when it fails, the statement is bounded by
+    /// `completionStatementTimeoutMS`, and the run handle is kept on the node so a read that is
+    /// superseded (the node invalidated or refreshed) is stopped and not just ignored.
     func loadColumns(of table: TreeNode) {
         guard table.kind == .table, table.columns == nil, !table.columnsLoading,
-              table.columnsError == nil,
+              table.columnsError == nil, !table.completionFailed,
               completionColumnReads < Self.completionColumnReadLimit,
-              let connection = connections.first(where: { $0.id == table.connectionID }) else { return }
+              let connection = connections.first(where: { $0.id == table.connectionID }),
+              completionMayLoad(connection) else { return }
         var env: [String: String]
         do {
-            env = try Self.connectionEnvironment(connection, password: Self.storedPassword(for: connection.id))
+            env = Self.connectionEnvironment(connection, password: try Self.backgroundPassword(for: connection.id))
         } catch {
-            table.columnsError = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            table.completionFailed = true
             return
         }
+        // The connection is opened on the table's own catalog and schema, the way the tree does
+        // to list them, and the object is named the way the engine's other table commands name it.
         if let database = table.database { env["DB_DATABASE"] = database }
         if let schema = table.schema { env["DB_SCHEMA"] = schema }
-        env["SQL"] = objectColumnsSQL(database: table.database, schema: table.schema,
-                                      table: table.title, for: connection.kind)
-        env["LIMIT"] = "1"
+        env.merge(TableOperation.targetSettings(catalog: table.database, schema: table.schema,
+                                                table: table.title)) { _, new in new }
+        env["STATEMENT_TIMEOUT_MS"] = String(Self.completionStatementTimeoutMS)
         env["RETRIES"] = "2"
         table.columnsLoading = true
         let token = UUID()
         table.loadToken = token
         completionColumnReads += 1
-        engine.run("preview", env: env, onEvent: { event in
-            guard table.loadToken == token else { return }
-            switch event.event {
-            case "columns": table.columns = event.columns ?? []
-            case "error": table.columnsError = event.message ?? "Reading the table's columns failed."
-            default: break
-            }
-        }, onExit: { [weak self] status, log in
+        // Released once, whichever of the exit and the stop comes first.
+        var released = false
+        let release: () -> Void = { [weak self] in
+            guard !released else { return }
+            released = true
             self?.completionColumnReads -= 1
+        }
+        table.columnsRelease = release
+        table.columnsRun = engine.runInBackground("columns", env: env, onEvent: { event in
+            guard table.loadToken == token else { return }
+            if event.event == "table_columns" {
+                table.columns = (event.fields ?? []).map { Event.Column(name: $0.name, type: $0.type) }
+            }
+        }, onExit: { [weak self] status, _ in
+            release()
             guard table.loadToken == token else { return }
             table.columnsLoading = false
-            if table.columns == nil, table.columnsError == nil {
-                table.columnsError = status == 0 ? "The server reported no columns."
-                    : log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)"
+            table.columnsRun = nil
+            table.columnsRelease = nil
+            if table.columns == nil {
+                // Said nowhere: the person did not ask, and a tunnel or a Keychain that refuses
+                // must not be asked again with every key.
+                table.columnsError = status == 0 ? "The server reported no columns." : "exit status \(status)"
+                table.completionFailed = true
+            } else {
+                self?.noteConnected(connection.id)
             }
             self?.completion.catalogLoaded()
         })
@@ -500,6 +549,11 @@ extension AppModel {
     /// A name with more parts than its level has, a level the driver does not have, or a name
     /// that cannot be completed because the tab has no default for a missing part drops nothing.
     ///
+    /// Nothing calls this yet. The blueprint names its callers: W12-T4 after a DDL statement
+    /// succeeds, and a connection edit. A refresh from the side bar already does the same for the
+    /// node it refreshes (`forgetCompletionState`). Until then a table made by a statement in the
+    /// editor is found after "Refresh" on its schema.
+    ///
     /// A reply still on its way for a dropped node is ignored: the node's load token changes, so
     /// what was asked before the DDL cannot repopulate it after.
     @MainActor
@@ -530,10 +584,7 @@ extension AppModel {
             node.children = nil
             node.error = nil
             node.loading = false
-            node.loadToken = nil
-            node.columns = nil
-            node.columnsError = nil
-            node.columnsLoading = false
+            forgetCompletionState(of: node)
         }
     }
 }

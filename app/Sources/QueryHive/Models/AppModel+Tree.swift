@@ -425,10 +425,23 @@ extension AppModel {
         node.children = nil
         node.error = nil
         node.loading = false
+        forgetCompletionState(of: node)
+        if node.expanded { loadChildren(of: node) }
+    }
+
+    /// Everything completion learned or was learning about one node: its token (so a reply still on
+    /// its way is dropped), a column read in flight (stopped, not just ignored), what it read, and
+    /// the memory of a quiet failure.
+    func forgetCompletionState(of node: TreeNode) {
         node.loadToken = nil
+        node.columnsRun?.terminate()
+        node.columnsRun = nil
+        node.columnsRelease?()
+        node.columnsRelease = nil
         node.columns = nil
         node.columnsError = nil
-        if node.expanded { loadChildren(of: node) }
+        node.columnsLoading = false
+        node.completionFailed = false
     }
 
     /// Collapses the whole tree back to one row per connection and forgets every fetch.
@@ -437,9 +450,7 @@ extension AppModel {
             node.children = nil
             node.error = nil
             node.loading = false
-            node.loadToken = nil
-            node.columns = nil
-            node.columnsError = nil
+            forgetCompletionState(of: node)
             node.expanded = false
         }
         selectedNodeID = nil
@@ -447,17 +458,28 @@ extension AppModel {
 
     /// Runs one engine browse command for a node that has never been expanded. `RETRIES` is
     /// dropped to 2: a typo'd catalog name should come back quickly, not after five backoffs.
-    func loadChildren(of node: TreeNode) {
+    ///
+    /// `background` is completion asking, not a person: the password is read without the Keychain
+    /// dialog, the statement is bounded, a refused host key raises no sheet, and a failure is
+    /// remembered on the node (`completionFailed`) and said nowhere in the UI.
+    func loadChildren(of node: TreeNode, background: Bool = false) {
         guard node.children == nil, !node.loading else { return }
         guard let connection = connections.first(where: { $0.id == node.connectionID }) else { return }
         let command: String
         var env: [String: String]
         do {
-            env = try Self.connectionEnvironment(connection, password: Self.storedPassword(for: connection.id))
+            let password = background ? try Self.backgroundPassword(for: connection.id)
+                : try Self.storedPassword(for: connection.id)
+            env = Self.connectionEnvironment(connection, password: password)
         } catch {
-            node.error = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            if background {
+                node.completionFailed = true
+            } else {
+                node.error = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            }
             return
         }
+        if background { env["STATEMENT_TIMEOUT_MS"] = String(Self.completionStatementTimeoutMS) }
         // Which command lists a node's children depends on the driver as much as on the level:
         // Trino's level under the connection is a catalog, MySQL's is a database, and Postgres
         // has neither — its database is fixed by the connection, so its first level is a schema.
@@ -506,6 +528,8 @@ extension AppModel {
         env["RETRIES"] = "2"
         node.loading = true
         node.error = nil
+        // A person asking again is also the one way out of a quiet failure.
+        if !background { node.completionFailed = false }
         // A reply that finds another token on the node was asked for before the node was
         // invalidated or refreshed, and describes a server state that may be gone.
         let token = UUID()
@@ -516,7 +540,7 @@ extension AppModel {
         // Postgres connection only reaches it through "show all databases", and what it lists is
         // databases, so it belongs on the database side of this the same way MySQL does.
         let catalogNode = connection.kind == .trino ? TreeNode.catalog : TreeNode.database
-        engine.run(command, env: env, onEvent: { event in
+        let onEvent: (Event) -> Void = { event in
             guard node.loadToken == token else { return }
             switch event.event {
             case "catalogs": node.children = (event.names ?? []).map { catalogNode($0, node) }
@@ -525,17 +549,28 @@ extension AppModel {
             case "error": message = event.message
             default: break
             }
-        }, onExit: { [weak self] status, log in
+        }
+        let onExit: (Int32, String) -> Void = { [weak self] status, log in
             guard node.loadToken == token else { return }
             node.loading = false
             // Whatever the editor was waiting on, it can ask again now.
             defer { self?.completion.catalogLoaded() }
             guard status == 0 else {
-                node.error = message ?? log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)"
+                if background {
+                    node.completionFailed = true
+                } else {
+                    node.error = message ?? log.split(separator: "\n").last.map(String.init) ?? "exit status \(status)"
+                }
                 return
             }
+            self?.noteConnected(connection.id)
             if node.children == nil { node.children = [] }
-        })
+        }
+        if background {
+            engine.runInBackground(command, env: env, onEvent: onEvent, onExit: onExit)
+        } else {
+            engine.run(command, env: env, onEvent: onEvent, onExit: onExit)
+        }
     }
 
     /// Double-clicking a table drops its quoted name into the active query, the way Navicat

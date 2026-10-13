@@ -431,6 +431,8 @@ extension AppModel {
             case "done":
                 PerfSignposts.runDone()
                 finished = true
+                // A tunnel that carried a statement to its end is one completion may use.
+                if let id = tab.connectionID { self.noteConnected(id) }
                 stopped = Self.applyPreviewDone(event, columns: columns, rowCount: event.rows ?? store.fetched,
                                                 to: tab, store: store, storeBase: baseRun)
             default:

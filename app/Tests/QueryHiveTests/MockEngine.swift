@@ -40,6 +40,7 @@ final class MockEngine: DatabaseEngine, @unchecked Sendable {
     private let lock = NSLock()
     private var answers: [String: Answer] = [:]
     private var invocations: [Invocation] = []
+    private var handles: [MockRun] = []
 
     init(onMainQueue: Bool = true) {
         self.onMainQueue = onMainQueue
@@ -108,7 +109,18 @@ final class MockEngine: DatabaseEngine, @unchecked Sendable {
         case .failure(let events, let status, let reason):
             deliver(events, status: status, stderr: reason, onEvent: onEvent, onExit: onExit)
         }
-        return MockRun(command: command)
+        let handle = MockRun(command: command)
+        lock.lock()
+        handles.append(handle)
+        lock.unlock()
+        return handle
+    }
+
+    /// The handle of every run that started, in order, so a test can see which ones were stopped.
+    var runs: [MockRun] {
+        lock.lock()
+        defer { lock.unlock() }
+        return handles
     }
 
     func terminateAll() {}

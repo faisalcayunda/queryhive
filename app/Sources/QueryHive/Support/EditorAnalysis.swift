@@ -214,13 +214,15 @@ final class EditorAnalysis: @unchecked Sendable {
         try references(at: offset, revision: revision)
     }
 
-    private func references(at offset: Int, revision asked: UInt64) throws -> EditorReferences {
+    func references(at offset: Int, revision asked: UInt64) throws -> EditorReferences {
         let found: EditorReferences = try get {
             try document.references(revision: asked, offsetUtf16: UInt32(clamping: offset))
         }
+        // The Rust side refuses a revision that moved on; a packet that answers for another one
+        // anyway is the same thing as far as the caller is concerned.
+        guard found.revision == asked else { throw EditorAnalysisError.stale }
         let end = length
-        guard found.revision == asked,
-              Int(found.statementStartUtf16) + Int(found.statementLenUtf16) <= end,
+        guard Int(found.statementStartUtf16) + Int(found.statementLenUtf16) <= end,
               found.relations.allSatisfy({ Int($0.nameStartUtf16) + Int($0.nameLenUtf16) <= end })
         else { throw EditorAnalysisError.malformed }
         return found

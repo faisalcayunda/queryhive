@@ -149,6 +149,12 @@ extension AppModel {
         try benchPassword ?? secretStore.get(slot: .database, for: id)
     }
 
+    /// `storedPassword` for work nobody is waiting on: an item that would show the Keychain's
+    /// approval dialog throws instead, and the caller skips the work.
+    static func backgroundPassword(for id: UUID) throws -> String? {
+        try benchPassword ?? secretStore.getWithoutPrompt(slot: .database, for: id)
+    }
+
     /// One slot of a saved connection, with the same `--bench` stand-in: a benchmark's throwaway
     /// connection has a password and nothing else, and never touches a Keychain.
     static func storedSecret(_ slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? {

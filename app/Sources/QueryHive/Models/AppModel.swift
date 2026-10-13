@@ -315,6 +315,24 @@ final class AppModel {
     @ObservationIgnored var completionColumnReads = 0
     static let completionColumnReadLimit = 3
 
+    /// The bound on a statement completion sends on its own (a catalog listing or a column read).
+    /// Not the user's statement timeout, which may be none: nobody asked for these, so nothing may
+    /// run on the server for longer than this on their behalf.
+    static let completionStatementTimeoutMS = 15_000
+
+    /// Connections that have carried something to its end in this session. Completion does not
+    /// open a tunnel by itself until the person has, so a changed or unknown SSH host key is met
+    /// by an action they took and not by a letter they typed.
+    @ObservationIgnored var connectedThisSession = Set<UUID>()
+
+    func noteConnected(_ id: UUID) { connectedThisSession.insert(id) }
+
+    /// Whether completion may reach this connection on its own: any connection that needs no
+    /// tunnel, and a tunnelled one only after it has connected in this session.
+    func completionMayLoad(_ connection: Connection) -> Bool {
+        !connection.usesTunnel || connectedThisSession.contains(connection.id)
+    }
+
     // MARK: Importing data
 
 

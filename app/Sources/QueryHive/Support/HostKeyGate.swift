@@ -59,6 +59,17 @@ final class HostKeyGate: DatabaseEngine, @unchecked Sendable {
         wrapped.run(command, env: Self.detailed(env), onEvent: observing(env, onEvent), onExit: onExit)
     }
 
+    /// Work nobody asked for (completion reading the catalog): forwarded as it is, with no host key
+    /// detail asked for and nothing handed to the center, so a refused key cannot raise the sheet in
+    /// the middle of a word. The error event still reaches the caller, which marks the load failed
+    /// and does not retry it.
+    @discardableResult
+    func runInBackground(_ command: String, env: [String: String],
+                         onEvent: @escaping (Event) -> Void,
+                         onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? {
+        wrapped.runInBackground(command, env: env, onEvent: onEvent, onExit: onExit)
+    }
+
     /// Preview and explain run through here, and they are the operations that open a tunnel most
     /// often: a gate that observed only `run` would never prompt for them.
     @discardableResult

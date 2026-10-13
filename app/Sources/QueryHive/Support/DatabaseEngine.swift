@@ -34,6 +34,15 @@ protocol DatabaseEngine: Sendable {
              onEvent: @escaping (Event) -> Void,
              onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)?
 
+    /// `run` for work nobody asked for by name: completion reading the catalog while a person
+    /// types. It is the same operation with one promise more: nothing it learns reaches a person
+    /// as a prompt. A refused SSH host key is dropped, not offered on a sheet in the middle of a
+    /// word; the caller records the failure quietly and does not ask again.
+    @discardableResult
+    func runInBackground(_ command: String, env: [String: String],
+                         onEvent: @escaping (Event) -> Void,
+                         onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)?
+
     /// Stops everything this engine still has running, used when the app terminates: a run left
     /// in flight would keep working after the window is gone.
     func terminateAll()
@@ -72,6 +81,15 @@ protocol DatabaseEngine: Sendable {
 extension DatabaseEngine {
     /// Most engines have nothing to warm; `MockEngine` and any other conformer inherit this.
     func warmUp(env: [String: String]) {}
+
+    /// An engine with no prompt of its own to suppress runs a background command like any other.
+    /// `HostKeyGate` is the one that overrides it.
+    @discardableResult
+    func runInBackground(_ command: String, env: [String: String],
+                         onEvent: @escaping (Event) -> Void,
+                         onExit: @escaping (_ status: Int32, _ stderr: String) -> Void) -> (any EngineRun)? {
+        run(command, env: env, onEvent: onEvent, onExit: onExit)
+    }
 }
 
 /// A handle to one running operation. Callers only ever stop it, so stopping it is all this

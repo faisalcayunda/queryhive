@@ -1051,11 +1051,24 @@ enum ConnectionKeychain {
 protocol SecretStoring {
     func contains(slot: ConnectionKeychain.Slot, for id: UUID) -> Bool
     func get(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String?
+    /// `get` for work nobody is waiting on (completion reading the catalog): an item that would
+    /// need the user's approval throws instead of showing the dialog.
+    func getWithoutPrompt(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String?
     func set(_ secret: String, slot: ConnectionKeychain.Slot, for id: UUID) throws
     func delete(slot: ConnectionKeychain.Slot, for id: UUID) throws
 }
 
+extension SecretStoring {
+    /// A store that has no approval dialog (a dictionary in a test) reads the same either way.
+    func getWithoutPrompt(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? {
+        try get(slot: slot, for: id)
+    }
+}
+
 struct SystemKeychain: SecretStoring {
+    func getWithoutPrompt(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? {
+        try ConnectionKeychain.getWithoutPrompt(slot: slot, for: id)
+    }
     func contains(slot: ConnectionKeychain.Slot, for id: UUID) -> Bool {
         ConnectionKeychain.contains(slot: slot, for: id)
     }

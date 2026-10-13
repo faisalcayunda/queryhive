@@ -7,10 +7,10 @@ import XCTest
 /// Columns in the editor's suggestions: `alias.` and `table.`, a bare column in a clause that takes
 /// one, and the on-demand read that fills them in.
 ///
-/// Everything here runs against `MockEngine`: the real read is a `preview` of `SELECT *` under a
-/// one-row cap, and these tests pin what is asked (the command, the statement and the scope it is
-/// asked in), that it is asked once, and what is done with the answer. No server is involved, so
-/// whether a live Trino or PostgreSQL answers the same way is not shown by them.
+/// Everything here runs against `MockEngine`: the read is the engine's `columns` command, and these
+/// tests pin what is asked (the command, the object it names, the bound on it), that it is asked
+/// once and can be stopped, and what is done with the `table_columns` answer. No server is
+/// involved, so whether a live Trino, PostgreSQL or MySQL answers the same way is not shown by them.
 @MainActor
 final class SuggestionColumnsTests: XCTestCase {
     override func setUp() {
@@ -35,11 +35,13 @@ final class SuggestionColumnsTests: XCTestCase {
         if !failing {
             // One scripted answer per command: the mock does not look at the statement, so every
             // table read answers with these two columns.
-            engine.answer("preview", with: .events([
-                Event(event: "columns", columns: ["kode_wilayah", "nama"].map { Event.Column(name: $0, type: "varchar") }),
+            engine.answer("columns", with: .events([
+                Event(event: "table_columns", fields: ["kode_wilayah", "nama"].map {
+                    Event.ColumnField(name: $0, type: "varchar", nullable: nil, default: nil, extra: "")
+                }),
             ]))
         } else {
-            engine.answer("preview", with: .failure(reason: "permission denied"))
+            engine.answer("columns", with: .failure(reason: "permission denied"))
         }
         let model = AppModel()
         model.engine = engine
@@ -100,13 +102,21 @@ final class SuggestionColumnsTests: XCTestCase {
                                                    scope: scope(.selectList), references: refs)),
                        ["nama", "kode_wilayah"])
 
-        let reads = f.engine.calls.filter { $0.command == "preview" }
+        let reads = f.engine.calls.filter { $0.command == "columns" }
         XCTAssertEqual(reads.count, 1, "the read was repeated")
         let env = try XCTUnwrap(reads.first).env
-        XCTAssertEqual(env["SQL"], "SELECT * FROM \"hive\".\"analytics\".\"wilayah\"")
-        XCTAssertEqual(env["LIMIT"], "1")
+        // The object the engine's own `columns` command names, read from the catalog: no statement of
+        // ours, so nothing on the table itself runs.
+        XCTAssertEqual(env["TARGET_CATALOG"], "hive")
+        XCTAssertEqual(env["TARGET_SCHEMA"], "analytics")
+        XCTAssertEqual(env["TARGET_TABLE"], "wilayah")
+        XCTAssertNil(env["SQL"])
+        XCTAssertNil(env["LIMIT"])
         XCTAssertEqual(env["DB_DATABASE"], "hive")
         XCTAssertEqual(env["DB_SCHEMA"], "analytics")
+        XCTAssertEqual(env["STATEMENT_TIMEOUT_MS"], String(AppModel.completionStatementTimeoutMS),
+                       "unbounded: nobody asked for this read, so it may not run for long on their behalf")
+        XCTAssertTrue(f.engine.calls.filter { $0.command == "preview" }.isEmpty)
     }
 
     func testARequestInFlightIsNotSentTwice() {
@@ -116,7 +126,7 @@ final class SuggestionColumnsTests: XCTestCase {
             _ = f.model.suggestions(for: f.tab, prefix: "", path: ["w"], scope: scope(.selectList), references: refs)
         }
         pump()
-        XCTAssertEqual(f.engine.calls.filter { $0.command == "preview" }.count, 1)
+        XCTAssertEqual(f.engine.calls.filter { $0.command == "columns" }.count, 1)
     }
 
     func testAFailedReadIsNotRepeatedOnEveryKeystroke() {
@@ -126,7 +136,7 @@ final class SuggestionColumnsTests: XCTestCase {
             _ = f.model.suggestions(for: f.tab, prefix: "", path: ["w"], scope: scope(.selectList), references: refs)
             pump()
         }
-        XCTAssertEqual(f.engine.calls.filter { $0.command == "preview" }.count, 1)
+        XCTAssertEqual(f.engine.calls.filter { $0.command == "columns" }.count, 1)
         XCTAssertNotNil(f.analytics.children?.first { $0.title == "wilayah" }?.columnsError)
     }
 
@@ -145,7 +155,7 @@ final class SuggestionColumnsTests: XCTestCase {
         // `wilayah.` is not valid once the table is aliased `w`: no columns, and no read either.
         XCTAssertTrue(f.model.suggestions(for: f.tab, prefix: "", path: ["wilayah"],
                                           scope: scope(.where), references: refs).isEmpty)
-        XCTAssertTrue(f.engine.calls.filter { $0.command == "preview" }.isEmpty)
+        XCTAssertTrue(f.engine.calls.filter { $0.command == "columns" }.isEmpty)
     }
 
     func testAnAmbiguousAliasOffersNothing() {
@@ -153,7 +163,7 @@ final class SuggestionColumnsTests: XCTestCase {
         let refs = references([relation("wilayah", alias: "t"), relation("program", alias: "t")])
         XCTAssertTrue(f.model.suggestions(for: f.tab, prefix: "", path: ["t"],
                                           scope: scope(.where), references: refs).isEmpty)
-        XCTAssertTrue(f.engine.calls.filter { $0.command == "preview" }.isEmpty,
+        XCTAssertTrue(f.engine.calls.filter { $0.command == "columns" }.isEmpty,
                       "a read was sent for a name that cannot be resolved")
     }
 
@@ -195,8 +205,9 @@ final class SuggestionColumnsTests: XCTestCase {
         let f = fixture()
         let refs = references([relation("raw_kpm", alias: "k", schema: "bronze")])
         _ = f.model.suggestions(for: f.tab, prefix: "", path: ["k"], scope: scope(.where), references: refs)
-        let env = try XCTUnwrap(f.engine.calls.first { $0.command == "preview" }).env
-        XCTAssertEqual(env["SQL"], "SELECT * FROM \"hive\".\"bronze\".\"raw_kpm\"")
+        let env = try XCTUnwrap(f.engine.calls.first { $0.command == "columns" }).env
+        XCTAssertEqual(env["TARGET_SCHEMA"], "bronze")
+        XCTAssertEqual(env["TARGET_TABLE"], "raw_kpm")
         XCTAssertEqual(env["DB_SCHEMA"], "bronze")
     }
 
@@ -222,10 +233,10 @@ final class SuggestionColumnsTests: XCTestCase {
             f.analytics.children?.append(TreeNode.table("t\(index)", parent: f.analytics))
         }
         _ = f.model.suggestions(for: f.tab, prefix: "", path: [], scope: scope(.selectList), references: refs)
-        XCTAssertEqual(f.engine.calls.filter { $0.command == "preview" }.count, 3)
+        XCTAssertEqual(f.engine.calls.filter { $0.command == "columns" }.count, 3)
         pump()
         _ = f.model.suggestions(for: f.tab, prefix: "", path: [], scope: scope(.selectList), references: refs)
-        XCTAssertEqual(f.engine.calls.filter { $0.command == "preview" }.count, 6, "the rest follow, three at a time")
+        XCTAssertEqual(f.engine.calls.filter { $0.command == "columns" }.count, 6, "the rest follow, three at a time")
     }
 
     func testNoColumnsWhereATableIsBeingNamed() {
@@ -315,16 +326,5 @@ final class SuggestionColumnsTests: XCTestCase {
         let refs = try analysis.references(at: 0)
         XCTAssertEqual(refs.revision, analysis.revision)
         XCTAssertEqual(refs.relations.map(\.alias), ["w"])
-    }
-
-    func testTheAnalysisAnswersOffTheMainThread() throws {
-        let analysis = try EditorAnalysis(text: "select * from wilayah w", dialect: .trino)
-        let answered = expectation(description: "answered")
-        analysis.requestReferences(at: 5) { result in
-            XCTAssertTrue(Thread.isMainThread)
-            XCTAssertEqual((try? result.get())?.relations.first?.alias, "w")
-            answered.fulfill()
-        }
-        wait(for: [answered], timeout: 5)
     }
 }

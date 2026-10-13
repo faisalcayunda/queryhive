@@ -79,6 +79,14 @@ final class TreeNode: Identifiable {
     var columns: [Event.Column]?
     var columnsLoading = false
     var columnsError: String?
+    /// The read in flight, kept so a superseded one can be stopped.
+    @ObservationIgnored var columnsRun: (any EngineRun)?
+    /// Gives the read's place in the in-flight count back; safe to call twice.
+    @ObservationIgnored var columnsRelease: (() -> Void)?
+    /// A load that completion started failed (or could not start without a prompt). Said nowhere in
+    /// the UI, and the reason completion does not ask again until the node is invalidated or the
+    /// person expands it themselves.
+    @ObservationIgnored var completionFailed = false
 
     var isExpandable: Bool { kind.isExpandable }
 

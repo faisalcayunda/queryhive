@@ -101,12 +101,26 @@ final class EditorCompletion {
     /// The rows on screen.
     var visible: ArraySlice<SQLSuggestion> { items[top..<min(top + Self.visibleRows, items.count)] }
 
-    func present(_ items: [SQLSuggestion], anchor: CGRect, passive: Bool) {
+    /// Shows `items`. With `keepingSelection` (the same word asked again after the catalog
+    /// answered) the row the person is on stays under them when it is still in the list, the list
+    /// stays where it was scrolled, and a list they stepped into stays active; otherwise the first
+    /// row is selected.
+    func present(_ items: [SQLSuggestion], anchor: CGRect, passive: Bool, keepingSelection: Bool = false) {
+        let kept = keepingSelection && selected < self.items.count ? self.items[selected].id : nil
+        let wasPassive = self.passive
+        let oldTop = top
         self.items = items
-        self.selected = 0
-        self.top = 0
-        self.passive = passive
         self.anchor = anchor
+        if let kept, let row = items.firstIndex(where: { $0.id == kept }) {
+            selected = row
+            top = min(oldTop, max(0, items.count - Self.visibleRows))
+            if selected < top { top = selected }
+            if selected >= top + Self.visibleRows { top = selected - Self.visibleRows + 1 }
+        } else {
+            selected = 0
+            top = 0
+        }
+        self.passive = keepingSelection ? (wasPassive && passive) : passive
     }
 
     func dismiss() {
@@ -210,9 +224,24 @@ enum SQLSuggestions {
     /// `name` is what is written for the table, which may be qualified (`sales.orders`); the alias
     /// is made from `base`, the table's own name, when it differs.
     static func tableText(_ name: String, base: String? = nil, in clause: EditorClause?,
-                          references: EditorReferences?) -> String {
-        guard clause == .queryTable, let references else { return name }
-        return "\(name) \(sqlTableAlias(table: base ?? name, taken: takenNames(references)))"
+                          references: EditorReferences?, taken: [String]? = nil) -> String {
+        guard let alias = alias(for: base ?? name, in: clause, references: references, taken: taken) else {
+            return name
+        }
+        return "\(name) \(alias)"
+    }
+
+    /// Makes the alias a table written at the caret gets: one in a `FROM` or `JOIN` of a query whose
+    /// other names are known, none anywhere else. The maker is a property so a test can count
+    /// the calls: each is an FFI call, and a connection can offer thousands of tables.
+    static func alias(for table: String, in clause: EditorClause?, references: EditorReferences?,
+                      taken: [String]? = nil) -> String? {
+        guard clause == .queryTable, let references else { return nil }
+        return makeAlias(table, taken ?? takenNames(references))
+    }
+
+    nonisolated(unsafe) static var makeAlias: (_ table: String, _ taken: [String]) -> String = {
+        sqlTableAlias(table: $0, taken: $1)
     }
 
     /// An alias as the select list spelled it, without its quotes: what a column of the same
