@@ -90,7 +90,7 @@ final class ConnectionSheetTests: XCTestCase {
                             newKind: ConnectionKind? = nil) throws -> NSWindow {
         ConnectionEditorSheet.initialSectionForSnapshot = section
         ConnectionEditorSheet.newKindForSnapshot = newKind
-        if let connection {
+        if let connection, !rig.model.connections.contains(where: { $0.id == connection.id }) {
             rig.model.connections.append(connection)
             rig.model.rebuildTree()
         }
@@ -164,8 +164,15 @@ final class ConnectionSheetTests: XCTestCase {
 
     /// What a sheet that is framed to 820 x 620 asks for cannot be read from the sheet: the frame
     /// answers 820 x 620 whatever is inside (blueprint B-3). So the parts that do not scroll are
-    /// measured on their own, without the frame, and must leave room for a pane in what is left.
-    func testTheSheetNeverAsksForMoreThanItsFrame() {
+    /// measured on their own, without that frame. What this really holds: the sidebar's own natural
+    /// height (it has no fixed height, so this is a measurement) fits the sheet for every driver and
+    /// section, and the header and footer are the fixed 52 and 56 they are designed to be (they
+    /// carry their own height, so for them this pins a constant, not a layout) and leave a pane at
+    /// least 400 points. It cannot say whether the scrolling pane or the sidebar would still be
+    /// allowed to shrink without `.frame(minHeight: 0, maxHeight: .infinity)`: under xctest the
+    /// sheet's outer frame hides that, and no seam shows it. That is the gate of the SDK 14 build
+    /// and the UI probe (blueprint R-1), not this test.
+    func testTheSidebarFitsAndTheHeaderAndFooterAreTheFixedHeightsTheySayTheyAre() {
         func height<V: View>(_ view: V, width: CGFloat) -> CGFloat {
             NSHostingView(rootView: view.frame(width: width)).fittingSize.height
         }
@@ -222,13 +229,25 @@ final class ConnectionSheetTests: XCTestCase {
 
     // MARK: Badges and the footer
 
-    func testTheGeneralBadgeFollowsTheMissingFields() throws {
+    /// The count a section's badge carries in the picture (it is in the marker's name), or `nil`
+    /// when the section has no badge.
+    private func badgeCount(_ section: ConnectionFormSection, in window: NSWindow) -> Int? {
+        guard let root = window.contentView else { return nil }
+        let prefix = "connection-badge-\(section.rawValue)-"
+        return descendants(NSView.self, in: root)
+            .compactMap { $0.identifier?.rawValue }
+            .first { $0.hasPrefix(prefix) }
+            .flatMap { Int($0.dropFirst(prefix.count)) }
+    }
+
+    func testTheGeneralBadgeAndTheFooterFollowTheMissingFields() throws {
         let rig = rig()
         let sheet = try openEditor(nil, in: rig, newKind: .postgres)
         // A new PostgreSQL connection lacks a name, a host, a user and a database, all in General.
-        XCTAssertTrue(wait { self.marker("connection-badge-general", in: sheet) != nil }, "General has no badge")
-        XCTAssertNil(marker("connection-badge-sshTunnel", in: sheet), "a section with nothing missing has none")
-        XCTAssertNil(marker("connection-badge-limits", in: sheet))
+        XCTAssertTrue(wait { self.badgeCount(.general, in: sheet) != nil }, "General has no badge")
+        XCTAssertEqual(badgeCount(.general, in: sheet), 4, "the badge in the picture counts the four missing fields")
+        XCTAssertNil(badgeCount(.sshTunnel, in: sheet), "a section with nothing missing has none")
+        XCTAssertNil(badgeCount(.limits, in: sheet))
         XCTAssertNotNil(marker("connection-footer-problem", in: sheet), "the footer does not say what is missing")
         // What the badge says aloud, and what the footer says: pure, so they are held directly.
         XCTAssertEqual(ConnectionFormSidebar.attentionValue(4), "4 fields need attention")
@@ -245,9 +264,122 @@ final class ConnectionSheetTests: XCTestCase {
         let sheet = try openEditor(postgres(), in: rig)
         XCTAssertTrue(wait { self.frame("connection-footer", in: sheet) != nil })
         for section in ConnectionFormSection.allCases {
-            XCTAssertNil(marker("connection-badge-\(section.rawValue)", in: sheet), section.title)
+            XCTAssertNil(badgeCount(section, in: sheet), section.title)
         }
         XCTAssertNil(marker("connection-footer-problem", in: sheet))
+    }
+
+    func testChoosingASectionInTheSidebarAnnouncesItsName() throws {
+        let rig = rig()
+        let sheet = try openEditor(postgres(), in: rig)
+        XCTAssertTrue(wait { self.isShowing(.general, in: sheet) })
+        Announcer.reset()
+        try click("connection-section-limits", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.limits, in: sheet) })
+        XCTAssertEqual(Announcer.last, "Limits")
+        Announcer.reset()
+        try click("connection-section-limits", in: sheet)
+        XCTAssertNil(Announcer.last, "choosing the section already showing says nothing")
+    }
+
+    /// The required fields and the login are the first two cards of General, and they fit above the
+    /// footer without scrolling for every driver: the scroller hides itself, so nothing would say
+    /// that a required field was below the fold.
+    func testTheLoginIsReachableWithoutScrollingInGeneralForEveryDriver() throws {
+        let mysql = Connection(id: UUID(), name: "Reporting", color: .amber, kind: .mysql, host: "mysql.internal",
+                               port: 3306, sslmode: "disable", user: "u", database: "r", schema: "", verify: true)
+        for connection in [nil, postgres(), mysql] {
+            let rig = rig()
+            let kind = connection?.kind ?? .trino
+            let sheet = try openEditor(connection ?? rig.model.connections.first, in: rig)
+            XCTAssertTrue(wait { self.frame("connection-row-Password", in: sheet) != nil }, "\(kind): no Password row")
+            let password = try XCTUnwrap(frame("connection-row-Password", in: sheet))
+            let user = try XCTUnwrap(frame("connection-row-User", in: sheet))
+            let footer = try XCTUnwrap(frame("connection-footer", in: sheet))
+            // Window coordinates run upward: a row above the footer has its bottom above the footer's top.
+            XCTAssertGreaterThanOrEqual(password.minY, footer.maxY, "\(kind): Password is below the fold")
+            XCTAssertGreaterThanOrEqual(user.minY, footer.maxY, "\(kind): User is below the fold")
+            for window in windows { if let attached = window.attachedSheet { window.endSheet(attached) } }
+            spin(0.3)
+        }
+    }
+
+    // MARK: Focus
+
+    /// The text field whose field editor has the focus, if a field has it.
+    private func focusedField(in window: NSWindow) -> NSTextField? {
+        (window.firstResponder as? NSTextView)?.delegate as? NSTextField
+    }
+
+    func testOpeningASavedConnectionLeavesNoFieldFocusedOrSelected() throws {
+        let rig = rig()
+        let sheet = try openEditor(postgres(), in: rig)
+        XCTAssertTrue(wait { self.frame("connection-footer", in: sheet) != nil })
+        spin(1.0)
+        XCTAssertNil(focusedField(in: sheet), "a field has the focus, and its text is selected for the first keystroke to replace")
+        XCTAssertFalse(sheet.firstResponder is NSText)
+    }
+
+    func testANewConnectionOpensWithNameFocusedAndTheCaretAtTheEnd() throws {
+        let rig = rig()
+        let sheet = try openEditor(nil, in: rig)
+        XCTAssertTrue(wait { self.frame("connection-type-postgres", in: sheet) != nil }, "no type picker")
+        try click("connection-type-postgres", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.general, in: sheet) })
+        XCTAssertTrue(wait { self.focusedField(in: sheet) != nil }, "Name did not take the focus")
+        let field = try XCTUnwrap(focusedField(in: sheet))
+        XCTAssertTrue(field.isEditable)
+        let editor = try XCTUnwrap(sheet.firstResponder as? NSTextView)
+        XCTAssertEqual(editor.selectedRange, NSRange(location: (editor.string as NSString).length, length: 0),
+                       "the caret is not at the end")
+        editor.insertText("Warehouse")
+        XCTAssertTrue(wait { self.textFields(in: sheet).contains { $0.stringValue == "Warehouse" } },
+                      "what was typed went somewhere other than the first field")
+    }
+
+    private func textFields(in window: NSWindow) -> [NSTextField] {
+        guard let root = window.contentView else { return [] }
+        return descendants(NSTextField.self, in: root)
+    }
+
+    // MARK: Captions behind a "?"
+
+    private func popoverWindows() -> [NSWindow] {
+        var found: [NSWindow] = NSApp.windows
+        for window in windows {
+            found += window.childWindows ?? []
+            found += window.attachedSheet?.childWindows ?? []
+        }
+        return found.filter { String(describing: Swift.type(of: $0)).contains("Popover") }
+    }
+
+    /// The sentence under "Connect through an SSH tunnel" used to take two lines of the pane. It is
+    /// a "?" beside the row's label now, and opens on a click (a hover shows the tooltip `HelpHint`
+    /// carries, which a test cannot see).
+    func testALongCaptionIsBehindAQuestionMarkAndItsHintOpensOnClick() throws {
+        let rig = rig()
+        let sheet = try openEditor(postgres { $0.sshHost = "bastion.corp"; $0.sshUser = "deploy" }, in: rig, section: .sshTunnel)
+        XCTAssertTrue(wait { self.frame("connection-row-Tunnel", in: sheet) != nil }, "no Tunnel row")
+        let row = try XCTUnwrap(frame("connection-row-Tunnel", in: sheet))
+        // A checkbox and a two-line caption were about 75 points; the checkbox alone is about 42.
+        XCTAssertLessThan(row.height, 55, "the caption is still drawn under the checkbox")
+        let root = try XCTUnwrap(sheet.contentView)
+        let hints = descendants(NSView.self, in: root).filter { $0.identifier?.rawValue == "connection-hint" }
+        let beside = try XCTUnwrap(hints.first { row.contains($0.convert($0.bounds, to: nil)) }, "no \"?\" in the Tunnel row")
+        // Beside the label, which is the left column of the row.
+        XCTAssertLessThan(beside.convert(beside.bounds, to: nil).maxX, row.minX + 12 + 128 + 1)
+
+        let before = popoverWindows().count
+        let target = beside.convert(beside.bounds, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: target.midX, y: target.midY), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: sheet.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            sheet.sendEvent(event)
+            spin(0.1)
+        }
+        XCTAssertTrue(wait { self.popoverWindows().count > before }, "clicking the \"?\" did not open its hint")
     }
 
     // MARK: The Test result
@@ -272,6 +404,48 @@ final class ConnectionSheetTests: XCTestCase {
         XCTAssertTrue(wait { self.marker("connection-footer-result", in: sheet) == nil }, "the result outlived an edit")
     }
 
+    /// A Keychain that refuses every read, for the Test that cannot fetch a saved secret.
+    private struct UnreadableKeychain: SecretStoring {
+        struct Refused: LocalizedError { var errorDescription: String? { "denied" } }
+        func contains(slot: ConnectionKeychain.Slot, for id: UUID) -> Bool { true }
+        func get(slot: ConnectionKeychain.Slot, for id: UUID) throws -> String? { throw Refused() }
+        func set(_ secret: String, slot: ConnectionKeychain.Slot, for id: UUID) throws {}
+        func delete(slot: ConnectionKeychain.Slot, for id: UUID) throws {}
+    }
+
+    func testAKeychainReadThatFailsIsATestResultLikeAnyOtherAndAnEditEndsIt() throws {
+        let previous = AppModel.secretStore
+        AppModel.secretStore = UnreadableKeychain()
+        addTeardownBlock { AppModel.secretStore = previous }
+        let rig = rig()
+        let sheet = try openEditor(postgres(), in: rig)
+        XCTAssertTrue(wait { self.frame("connection-footer", in: sheet) != nil })
+        XCTAssertNil(marker("connection-footer-result", in: sheet))
+        // Test with the password field blank asks the Keychain for the saved one, and is refused.
+        try pressTest(in: sheet)
+        XCTAssertTrue(wait { self.marker("connection-footer-result", in: sheet) != nil },
+                      "the Keychain failure is not shown as a Test result")
+        // The person edits: the result described a form that is gone, and must not stick.
+        try type("x", intoFieldAt: "connection-host-field", in: sheet)
+        XCTAssertTrue(wait { self.marker("connection-footer-result", in: sheet) == nil },
+                      "a failed Keychain read stayed over a later edit")
+        // Clearing a required field now shows what is missing, which the stale result used to hide.
+        let host = try XCTUnwrap(textField(at: "connection-host-field", in: sheet))
+        host.currentEditor()?.selectAll(nil)
+        host.currentEditor()?.insertText("")
+        XCTAssertTrue(wait { self.marker("connection-footer-problem", in: sheet) != nil },
+                      "the summary of what is missing is hidden")
+    }
+
+    /// ⌘↩, the shortcut for Test Connection.
+    private func pressTest(in sheet: NSWindow, file: StaticString = #filePath, line: UInt = #line) throws {
+        let key = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: sheet.windowNumber, context: nil,
+            characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36), file: file, line: line)
+        XCTAssertTrue(sheet.performKeyEquivalent(with: key), "⌘↩ was not taken by the sheet", file: file, line: line)
+    }
+
     // MARK: Over the shell
 
     func testTheSheetFitsAWindowAtTheShellMinimum() throws {
@@ -288,24 +462,69 @@ final class ConnectionSheetTests: XCTestCase {
         XCTAssertGreaterThan(footer.height, 40)
     }
 
+    /// Types into a field through its field editor, as a person does: the field takes the focus and
+    /// the text goes in with the editor, not into the model. Nothing resigns the field; leaving it
+    /// is up to whatever the test does next (a click on the sidebar).
+    private func type(_ text: String, intoFieldAt name: String, in sheet: NSWindow,
+                      file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertTrue(wait { self.textField(at: name, in: sheet) != nil }, "no field at \(name)", file: file, line: line)
+        let field = try XCTUnwrap(textField(at: name, in: sheet), file: file, line: line)
+        XCTAssertTrue(sheet.makeFirstResponder(field), file: file, line: line)
+        field.currentEditor()?.selectAll(nil)
+        field.currentEditor()?.insertText(text)
+        spin(0.2)
+    }
+
+    /// Typed into Host, Port, the password, SSH port and the statement timeout, then a trip to
+    /// another section and back by clicking the sidebar. A numeric field commits when it is left
+    /// (`TextField(value:format:)`), and leaving a section removes it from the window, so this is
+    /// the case where a number could come back as it was.
     func testTypedValuesSurviveASectionSwitch() throws {
         let rig = rig()
-        let sheet = try openEditor(nil, in: rig, newKind: .postgres)
+        let tunnelled = postgres { $0.sshHost = "bastion.corp"; $0.sshUser = "deploy"; $0.sshPort = 22 }
+        let sheet = try openEditor(tunnelled, in: rig)
         XCTAssertTrue(wait { self.isShowing(.general, in: sheet) }, "the form does not open on General")
-        XCTAssertTrue(wait { self.textField(at: "connection-host-field", in: sheet) != nil })
-        let host = try XCTUnwrap(textField(at: "connection-host-field", in: sheet))
-        XCTAssertTrue(sheet.makeFirstResponder(host))
-        host.currentEditor()?.insertText("db.example.org")
-        spin()
-        XCTAssertEqual(host.stringValue, "db.example.org")
+
+        try type("db.example.org", intoFieldAt: "connection-host-field", in: sheet)
+        try type("5433", intoFieldAt: "connection-port-field", in: sheet)
+        let root = try XCTUnwrap(sheet.contentView)
+        let password = try XCTUnwrap(descendants(NSSecureTextField.self, in: root).first, "no password field")
+        XCTAssertTrue(sheet.makeFirstResponder(password))
+        password.currentEditor()?.insertText("s3cret")
+        spin(0.2)
 
         try click("connection-section-sshTunnel", in: sheet)
         XCTAssertTrue(wait { self.isShowing(.sshTunnel, in: sheet) }, "the sidebar did not switch to SSH Tunnel")
+        try type("2222", intoFieldAt: "connection-ssh-port-field", in: sheet)
+
+        try click("connection-section-limits", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.limits, in: sheet) })
+        let timeout = try XCTUnwrap(descendants(NSTextField.self, in: root).first { $0.isEditable },
+                                    "no statement timeout field")
+        XCTAssertTrue(sheet.makeFirstResponder(timeout))
+        timeout.currentEditor()?.insertText("45")
+        spin(0.2)
+
         try click("connection-section-general", in: sheet)
         XCTAssertTrue(wait { self.isShowing(.general, in: sheet) })
         XCTAssertTrue(wait { self.textField(at: "connection-host-field", in: sheet) != nil })
         XCTAssertEqual(textField(at: "connection-host-field", in: sheet)?.stringValue, "db.example.org",
                        "what was typed in Host did not survive a trip to another section")
+        XCTAssertEqual(textField(at: "connection-port-field", in: sheet)?.stringValue, "5433",
+                       "the port reverted: a number typed into a field that was then removed was not committed")
+        let passwordAgain = try XCTUnwrap(descendants(NSSecureTextField.self, in: root).first)
+        XCTAssertEqual(passwordAgain.stringValue, "s3cret", "the typed password did not survive")
+
+        try click("connection-section-sshTunnel", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.sshTunnel, in: sheet) })
+        XCTAssertTrue(wait { self.textField(at: "connection-ssh-port-field", in: sheet) != nil })
+        XCTAssertEqual(textField(at: "connection-ssh-port-field", in: sheet)?.stringValue, "2222",
+                       "the SSH port reverted")
+
+        try click("connection-section-limits", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.limits, in: sheet) })
+        let timeoutAgain = try XCTUnwrap(descendants(NSTextField.self, in: root).first { $0.isEditable })
+        XCTAssertEqual(timeoutAgain.stringValue, "45", "the statement timeout did not survive")
     }
 
     func testAHostKeyPromptAttachesFromAnySection() throws {

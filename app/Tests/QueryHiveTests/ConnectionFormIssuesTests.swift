@@ -66,6 +66,23 @@ final class ConnectionFormIssuesTests: XCTestCase {
                        "Host is required. Check Port (1-65535), SSH port (1-65535), CA file (not found) and Statement timeout (0-600 seconds).")
     }
 
+    func testATrinoJWTOverPreferOrHTTPIsNamedBeforeSaveBecauseTheEngineWouldRefuseIt() {
+        func fields(_ scheme: String, auth: DatabaseAuth = .jwt, kind: ConnectionKind = .trino) -> [ConnectionField] {
+            ConnectionFormIssues.fields(for: state(kind) { $0.scheme = scheme; $0.dbAuth = auth }, resolved: nil)
+        }
+        XCTAssertEqual(fields("prefer"), [.encryption])
+        XCTAssertEqual(fields("http"), [.encryption])
+        XCTAssertEqual(fields("HTTP"), [.encryption], "read as http, like TrinoTransport")
+        XCTAssertEqual(fields("https"), [])
+        XCTAssertEqual(fields(""), [], "with a token the engine reads a blank scheme as TLS")
+        XCTAssertEqual(fields("prefer", auth: .password), [], "a password login has no such rule")
+        XCTAssertEqual(fields("http", kind: .postgres), [], "JWT is Trino's alone")
+        let missing = fields("prefer")
+        XCTAssertEqual(ConnectionFormIssues.message(missing.map(\.label)), "Check Encryption (JWT needs HTTPS).")
+        XCTAssertEqual(ConnectionFormIssues.summary(missing, visible: .general), "Check Encryption (JWT needs HTTPS).")
+        XCTAssertEqual(ConnectionField.encryption.section, .general)
+    }
+
     func testTheTimeoutAcceptsABlankAndZeroToSixHundred() {
         for ok in ["", " ", "0", "60", "600"] {
             XCTAssertEqual(ConnectionFormIssues.missing(for: state { $0.timeoutText = ok }, resolved: nil), [], ok)
@@ -84,7 +101,7 @@ final class ConnectionFormIssuesTests: XCTestCase {
             XCTAssertEqual(owners.count, 1, field.rawValue)
         }
         XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .general }.map(\.rawValue),
-                       ["name", "host", "port", "user", "database", "caFile"])
+                       ["name", "host", "encryption", "port", "user", "database", "caFile"])
         XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .sshTunnel }.map(\.rawValue),
                        ["sshHost", "sshPort", "sshUser", "sshKeyFile"])
         XCTAssertEqual(ConnectionField.allCases.filter { $0.section == .limits }.map(\.rawValue), ["timeout"])

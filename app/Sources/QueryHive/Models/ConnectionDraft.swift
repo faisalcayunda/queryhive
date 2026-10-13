@@ -131,7 +131,8 @@ struct ConnectionDraft: Equatable {
         ConnectionFormState(kind: kind, name: name, host: host, port: port, user: user, database: database,
                             sshEnabled: sshEnabled, sshHost: sshHost, sshUseConfig: sshUseConfig,
                             sshPort: sshPort, sshUser: sshUser, sshAuth: sshAuth, sshKeyPath: sshKeyPath,
-                            caFile: kind == .mysql ? "" : caFile, timeoutText: timeoutText)
+                            caFile: kind == .mysql ? "" : caFile, timeoutText: timeoutText,
+                            scheme: scheme, dbAuth: dbAuth)
     }
 
     /// Whether Save has anything to save. A new connection counts once any field holds something;

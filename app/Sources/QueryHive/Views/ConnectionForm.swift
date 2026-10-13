@@ -47,30 +47,46 @@ struct ConnectionFormRow<Control: View>: View {
     static var labelWidth: CGFloat { 128 }
 
     let label: String
+    /// A sentence that explains the row and does not depend on what is chosen. It sits behind a
+    /// "?" beside the label (`HelpHint`: a tooltip on hover, a popover on click or Space) instead
+    /// of taking a line under the control. What depends on the state, and what is a warning, stays
+    /// where it can be read.
+    var hint: String?
     @ViewBuilder let control: Control
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(label)
-                .font(.ui(13))
-                .foregroundStyle(Tone.ink)
-                .lineLimit(1)
-                .frame(width: Self.labelWidth, height: 32, alignment: .leading)
-                .help(label)
-                .accessibilityHidden(true)
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.ui(13))
+                    .foregroundStyle(Tone.ink)
+                    .lineLimit(1)
+                    .help(label)
+                    .accessibilityHidden(true)
+                if let hint {
+                    HelpHint(text: hint)
+                        .background(FrameMarker(name: "connection-hint"))
+                }
+            }
+            .frame(width: Self.labelWidth, height: 32, alignment: .leading)
             VStack(alignment: .leading, spacing: 5) { control }
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 5)
         .frame(minHeight: 36, alignment: .top)
+        .background(FrameMarker(name: "connection-row-\(label)"))
     }
 }
 
 extension View {
     /// What VoiceOver calls a row's control, and whether it must be filled in. The row's visible
     /// label is hidden from VoiceOver so it is not read twice.
-    func formControl(_ label: String, required: Bool = false) -> some View {
-        accessibilityLabel(label).accessibilityHint(required ? "Required" : "")
+    ///
+    /// `hint` is the caption that moved behind the row's "?": the control keeps it as its own
+    /// accessibility hint, so it is read where the control is focused and not only on the icon.
+    func formControl(_ label: String, required: Bool = false, hint: String? = nil) -> some View {
+        accessibilityLabel(label)
+            .accessibilityHint([required ? "Required." : nil, hint].compactMap { $0 }.joined(separator: " "))
     }
 }
 
@@ -139,8 +155,10 @@ struct ConnectionFormSidebar: View {
                 ConnectionBrandTile(kind: kind, size: 36)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(kind.label).font(.ui(12, weight: .semibold)).lineLimit(1)
-                    Text(isSaved ? "Saved \(kind.label) connection." : "Not saved yet.")
-                        .font(.ui(11)).foregroundStyle(Tone.secondary).lineLimit(2)
+                    // One short line either way, so the title above does not move between a new
+                    // and a saved connection (the driver's name is the title already).
+                    Text(isSaved ? "Saved connection." : "Not saved yet.")
+                        .font(.ui(11)).foregroundStyle(Tone.secondary).lineLimit(1)
                 }
             }
             .padding(.horizontal, 12)
@@ -168,7 +186,11 @@ struct ConnectionFormSidebar: View {
     private func item(_ section: ConnectionFormSection) -> some View {
         let active = selection == section
         let count = issueCounts[section] ?? 0
-        return Button { selection = section } label: {
+        return Button {
+            // A screen reader hears the pane change; focus stays on the sidebar.
+            if selection != section { Announcer.post(section.title) }
+            selection = section
+        } label: {
             HStack(spacing: 8) {
                 Image(systemName: section.symbol)
                     .font(.system(size: 13, weight: .medium))
@@ -181,7 +203,7 @@ struct ConnectionFormSidebar: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Tone.amber)
-                        .background(FrameMarker(name: "connection-badge-\(section.rawValue)"))
+                        .background(FrameMarker(name: "connection-badge-\(section.rawValue)-\(count)"))
                         .accessibilityHidden(true)
                 }
             }
@@ -203,6 +225,9 @@ struct ConnectionFormSidebar: View {
 struct ConnectionFormHeader: View {
     let title: String
     let isDirty: Bool
+    /// Where the "Change Type…" button leads: back to the driver grid. `nil` hides it.
+    var driverName: String?
+    var onChangeType: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 12) {
@@ -215,6 +240,10 @@ struct ConnectionFormHeader: View {
                     .font(.ui(11, weight: .medium))
                     .foregroundStyle(Tone.amber)
                     .labelStyle(.titleAndIcon)
+            }
+            if let driverName {
+                PillButton(title: "Change Type…", symbol: "arrow.triangle.2.circlepath", compact: true, action: onChangeType)
+                    .help("Pick a different driver — this clears the fields that only applied to \(driverName)")
             }
         }
         .padding(.horizontal, 20)
@@ -297,11 +326,14 @@ struct ConnectionFormFooter: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Tone.amber)
                     .accessibilityHidden(true)
+                // Two lines: the first problem and the "Also see ..." that follows it both have to
+                // be readable, and the footer is 56 points tall.
                 Text(text)
                     .font(.ui(12))
                     .foregroundStyle(Tone.ink.opacity(0.85))
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .layoutPriority(-1)
             .background(FrameMarker(name: "connection-footer-problem"))
@@ -347,35 +379,28 @@ extension ConnectionEditorSheet {
 
     // MARK: General
 
+    /// General, in the order a person fills it in: where the server is, who is asking, then what is
+    /// optional. What the form requires is in the first two cards, which fit the sheet without
+    /// scrolling for every driver, so a missing required field is never hidden below the fold.
     @ViewBuilder var generalPane: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if let urlNote { tlsNote(urlNote) }
-            ConnectionCard {
-                ConnectionFormRow(label: "Name") {
-                    TextField("\(draft.kind.label) production", text: $draft.name)
-                        .field(invalid: attemptedSave && missingRequired.contains("name"))
-                        .focused($focus, equals: .name)
-                        .formControl("Name", required: true)
-                    requiredHint("name")
-                }
-                ConnectionRowDivider()
-                ConnectionFormRow(label: "Type") {
-                    HStack(spacing: 10) {
-                        ConnectionBrandTile(kind: draft.kind, size: 18)
-                        Text(draft.kind.label).font(.ui(13))
-                        Spacer(minLength: 8)
-                        PillButton(title: "Change Type…", symbol: "arrow.triangle.2.circlepath", compact: true) { step = .typePicker }
-                            .help("Pick a different driver — this clears the fields that only applied to \(draft.kind.label)")
-                    }
-                    .frame(minHeight: 32)
-                }
-            }
-            ConnectionCard(title: "Server") { serverRows }
+            // What a pasted URL said and this form could not use, behind the "?" on the card it
+            // concerns.
+            ConnectionCard(title: "Server", detail: urlNote) { serverRows }
             ConnectionCard(title: "Authentication") { authenticationRows }
+            ConnectionCard(title: "More") { moreRows }
         }
     }
 
     @ViewBuilder private var serverRows: some View {
+        ConnectionFormRow(label: "Name") {
+            TextField("\(draft.kind.label) production", text: $draft.name)
+                .field(invalid: attemptedSave && missingRequired.contains("name"))
+                .focused($focus, equals: .name)
+                .formControl("Name", required: true)
+            requiredHint("name")
+        }
+        ConnectionRowDivider()
         // The encryption control sits beside the host it is about. Trino's four outcomes are four
         // explicit choices (HTTPS verified or not, Prefer, HTTP); PostgreSQL and MySQL keep their
         // own mode words (`ConnectionTLSChoice`).
@@ -392,6 +417,7 @@ extension ConnectionEditorSheet {
                                          onSelect: { draft.setTLS($0) })
             }
             requiredHint("host")
+            requiredHint("encryption", "A JWT is only sent over HTTPS: pick an HTTPS choice, or use a password.")
             ForEach(encryptionNotes, id: \.self) { tlsNote($0) }
         }
         ConnectionRowDivider()
@@ -399,12 +425,11 @@ extension ConnectionEditorSheet {
             TextField(String(draft.kind.defaultPort), value: $draft.port, format: .number.grouping(.never))
                 .field(invalid: attemptedSave && missingRequired.contains("port"))
                 .focused($focus, equals: .port)
+                .background(FrameMarker(name: "connection-port-field"))
                 .frame(width: 96)
                 .formControl("Port", required: true)
             requiredHint("port")
         }
-        ConnectionRowDivider()
-        caRow
         ConnectionRowDivider()
         // Postgres only, and beside the field it modifies: the database named here is where
         // the tree starts, and "All Databases" puts a level holding every database this user may
@@ -437,8 +462,11 @@ extension ConnectionEditorSheet {
             }
             requiredHint("database")
         }
+    }
+
+    /// What most connections leave alone: the schema it opens in, and a CA bundle of its own.
+    @ViewBuilder private var moreRows: some View {
         if draft.kind.hasSchemaLevel {
-            ConnectionRowDivider()
             // Beside the schema it modifies, not in a section of its own: it is a property of
             // that field, and reading it as anything else was the previous layout's mistake.
             // Postgres only — it is the one driver that hides anything.
@@ -456,6 +484,8 @@ extension ConnectionEditorSheet {
                 }
             }
         }
+        if draft.kind.hasSchemaLevel { ConnectionRowDivider() }
+        caRow
     }
 
     /// What the encryption control cannot say in its own label: how the choice behaves where that is
@@ -475,27 +505,35 @@ extension ConnectionEditorSheet {
     /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store.
     @ViewBuilder private var caRow: some View {
         if draft.kind == .mysql {
-            ConnectionFormRow(label: "CA certificate") {
-                tlsNote("MySQL can't check a certificate against a CA file of your own in this build, "
-                        + "so there is no CA setting for it.")
-            }
+            ConnectionFormRow(label: "CA certificate",
+                              hint: "MySQL can't check a certificate against a CA file of your own in this build, "
+                                    + "so there is no CA setting for it.") { EmptyView() }
         } else {
-            ConnectionFormRow(label: "CA certificate") {
+            ConnectionFormRow(label: "CA certificate", hint: Self.caHint) {
                 HStack(spacing: 8) {
                     TextField("Use the system trust store", text: caFileBinding)
                         .field(invalid: attemptedSave && missingRequired.contains("caFile"))
                         .focused($focus, equals: .caFile)
-                        .formControl("CA certificate")
+                        .formControl("CA certificate", hint: Self.caHint)
                     PillButton(title: "Choose…", compact: true) { chooseFile(into: caFileBinding, title: "Choose the CA certificate") }
                     PillButton(title: "Clear", role: .quiet, compact: true) { draft.setCAFile("") }
                         .disabled(draft.caFile.isEmpty)
                 }
                 requiredHint("caFile", "File not found")
-                tlsNote("The server certificate is checked against this file only, and its name must match. "
-                        + "For an IP address the certificate needs an IP SAN.")
             }
         }
     }
+
+    private static let caHint = "The server certificate is checked against this file only, and its name must match. "
+        + "For an IP address the certificate needs an IP SAN."
+    private static let jwtHint = "JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved."
+    private static let fingerprintHint = "The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it."
+    private static let agentHint = "Uses the keys your ssh-agent offers. Nothing is stored."
+    private static let timeoutHint = "Blank follows Settings. 0 means no bound. A statement that overruns is cancelled "
+        + "on the server. The MCP server never runs unbounded: it uses this, or 60 s."
+    private static let safeModeHint = "Refused by the engine, not by this window: a `read_only` connection refuses a write "
+        + "even when the statement comes from the command line or an MCP client."
+    private static let environmentHint = "A label only. It does not change what Safe Mode allows."
 
     @ViewBuilder private var authenticationRows: some View {
         ConnectionFormRow(label: "User") {
@@ -515,19 +553,17 @@ extension ConnectionEditorSheet {
         }
         ConnectionRowDivider()
         if draft.kind == .trino, draft.dbAuth == .jwt {
-            ConnectionFormRow(label: "Token") {
+            ConnectionFormRow(label: "Token", hint: Self.jwtHint) {
                 SecureField(editingID == nil ? "Paste the token" : "Unchanged", text: $draft.secrets.jwt)
                     .field()
-                    .formControl("Token")
+                    .formControl("Token", hint: Self.jwtHint)
                 removeSavedRow(.jwt)
-                tlsNote("JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved.")
             }
         } else {
-            ConnectionFormRow(label: "Password") {
+            ConnectionFormRow(label: "Password", hint: passwordHint) {
                 SecureField(editingID == nil ? "Stored in your Keychain" : "Unchanged", text: $draft.secrets.password)
                     .field()
-                    .formControl("Password")
-                tlsNote(passwordHint)
+                    .formControl("Password", hint: passwordHint)
                 removeSavedRow(.database)
             }
         }
@@ -538,10 +574,10 @@ extension ConnectionEditorSheet {
     @ViewBuilder var sshPane: some View {
         VStack(alignment: .leading, spacing: 18) {
             ConnectionCard(title: "SSH tunnel") {
-                ConnectionFormRow(label: "Tunnel") {
+                ConnectionFormRow(label: "Tunnel", hint: Self.fingerprintHint) {
                     InlineCheckbox(label: "Connect through an SSH tunnel", isOn: $draft.sshEnabled)
                         .frame(minHeight: 32, alignment: .leading)
-                    tlsNote("The first time you connect, QueryHive shows the server's fingerprint and asks you to verify it.")
+                        .accessibilityHint(Self.fingerprintHint)
                 }
                 if draft.sshEnabled { tunnelRows }
             }
@@ -585,21 +621,21 @@ extension ConnectionEditorSheet {
                       format: .number.grouping(.never))
                 .field(invalid: attemptedSave && missingRequired.contains("sshPort"))
                 .focused($focus, equals: .sshPort)
+                .background(FrameMarker(name: "connection-ssh-port-field"))
                 .frame(width: 96)
                 .formControl("SSH port")
             requiredHint("sshPort")
         }
         ConnectionRowDivider()
-        ConnectionFormRow(label: "Authentication") {
+        // With the agent chosen, what that means is the row's hint; with another method the row has
+        // nothing to explain and the next rows are the answer.
+        ConnectionFormRow(label: "Authentication", hint: draft.sshAuth == .agent ? Self.agentHint : nil) {
             Segmented(selection: $draft.sshAuth, options: SSHAuthMethod.allCases) { $0.title }
-                .formControl("SSH authentication")
+                .formControl("SSH authentication", hint: draft.sshAuth == .agent ? Self.agentHint : nil)
         }
         switch draft.sshAuth {
         case .agent:
-            ConnectionRowDivider()
-            ConnectionFormRow(label: "Agent") {
-                tlsNote("Uses the keys your ssh-agent offers. Nothing is stored.")
-            }
+            EmptyView()
         case .key:
             ConnectionRowDivider()
             ConnectionFormRow(label: "Key file") {
@@ -638,22 +674,20 @@ extension ConnectionEditorSheet {
             // this picker only records the choice: the command line and the MCP server go through
             // the same guard, and neither has this control.
             ConnectionCard(title: "Safe Mode") {
-                ConnectionFormRow(label: "Level") {
+                ConnectionFormRow(label: "Level", hint: Self.safeModeHint) {
                     Segmented(selection: $draft.safeMode, options: ConnectionSafeMode.allCases) { $0.title }
-                        .formControl("Safe Mode")
+                        .formControl("Safe Mode", hint: Self.safeModeHint)
+                    // What the chosen level does follows the choice, and it is what the person is
+                    // promising themselves: it stays in view.
                     tlsNote(draft.safeMode.detail)
                 }
-                .help("Refused by the engine, not by this window: a `read_only` connection refuses a write "
-                      + "even when the statement comes from the command line or an MCP client.")
             }
             ConnectionCard(title: "Statement timeout") {
-                ConnectionFormRow(label: "Seconds") {
+                ConnectionFormRow(label: "Seconds", hint: Self.timeoutHint) {
                     TextField("Follow the app setting (\(model.statementTimeoutMS / 1000) s)", text: $draft.timeoutText)
                         .field(invalid: attemptedSave && missingRequired.contains("timeout"))
                         .focused($focus, equals: .timeout)
-                        .formControl("Statement timeout in seconds")
-                    tlsNote("Blank follows Settings. 0 means no bound. A statement that overruns is cancelled "
-                            + "on the server. The MCP server never runs unbounded: it uses this, or 60 s.")
+                        .formControl("Statement timeout in seconds", hint: Self.timeoutHint)
                 }
             }
         }
@@ -669,13 +703,12 @@ extension ConnectionEditorSheet {
                         .frame(minHeight: 32, alignment: .leading)
                 }
                 ConnectionRowDivider()
-                ConnectionFormRow(label: "Environment") {
+                ConnectionFormRow(label: "Environment", hint: Self.environmentHint) {
                     Segmented(selection: $draft.environment,
                               options: [ConnectionEnvironment?.none] + ConnectionEnvironment.allCases.map { Optional($0) }) {
                         $0?.title ?? "None"
                     }
-                    .formControl("Environment")
-                    tlsNote("A label only. It does not change what Safe Mode allows.")
+                    .formControl("Environment", hint: Self.environmentHint)
                 }
             }
         }
@@ -768,6 +801,27 @@ extension ConnectionKind {
         case .trino: "catalog"
         case .postgres: "schema"
         case .mysql: "database"
+        }
+    }
+}
+
+/// Hands over the window its view ends up in, as soon as it has one.
+struct ConnectionSheetWindow: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = Probe()
+        view.onWindow = onWindow
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    final class Probe: NSView {
+        var onWindow: ((NSWindow) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { onWindow?(window) }
         }
     }
 }

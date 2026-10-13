@@ -483,6 +483,12 @@ final class ChromeParityTests: XCTestCase {
                       let baseline = try? JSONDecoder().decode(Sidecar.self, from: baseJSON),
                       let basePixels = Pixels(png: basePNG) else {
                     XCTFail("[\(name)] no baseline. Record with QH_RECORD_CHROME=1 (a new scene, or a declared V-n change)")
+                    // The picture of a scene that has no baseline yet, so it can be looked at.
+                    if let dump = ProcessInfo.processInfo.environment["QH_RENDER_DIR"], !dump.isEmpty {
+                        let out = URL(fileURLWithPath: dump, isDirectory: true)
+                        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                        try? capture.png.write(to: out.appendingPathComponent("\(name).actual.png"))
+                    }
                     continue
                 }
                 guard let actualPixels = Pixels(png: capture.png) else {

@@ -157,6 +157,8 @@ struct ConnectionEditorSheet: View {
     /// A field to focus once the section that holds it is on screen: `FocusState` ignores a field
     /// that is not mounted, so the jump to another section hands it over to that section.
     @State private var pendingFocus: ConnectionField?
+    /// The window this sheet is in, once it has one.
+    @State private var sheetWindow: NSWindow?
     /// The draft the Test result on screen belongs to. The result goes when the draft stops being it:
     /// that is the person's edit, and not `load()` setting the draft the first time, which would
     /// otherwise wipe the result a snapshot scene hands in.
@@ -356,7 +358,7 @@ struct ConnectionEditorSheet: View {
             Rectangle().fill(Tone.ink.opacity(0.08)).frame(width: 1)
             VStack(spacing: 0) {
                 ConnectionFormHeader(title: editingID == nil ? "New Connection" : (draft.name.isEmpty ? "Connection" : draft.name),
-                                     isDirty: isDirty)
+                                     isDirty: isDirty, driverName: draft.kind.label) { step = .typePicker }
                 Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
                 ScrollView {
                     pane
@@ -371,12 +373,37 @@ struct ConnectionEditorSheet: View {
                     pendingFocus = nil
                     await Task.yield()
                     focus = field
+                    // A name that came with the form (from a URL) is not selected for the first
+                    // keystroke to replace: the caret goes after it.
+                    await Task.yield()
+                    if let editor = sheetWindow?.firstResponder as? NSTextView {
+                        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+                    }
                 }
                 Rectangle().fill(Tone.ink.opacity(0.08)).frame(height: 1)
                 ConnectionFormFooter(isTesting: isTesting, status: footerStatus, canSave: isDirty,
                                      onTest: runTest, onCancel: { dismiss() }, onSave: save)
             }
             .frame(minWidth: 0, maxWidth: .infinity)
+        }
+        .background(ConnectionSheetWindow { window in
+            sheetWindow = window
+            releaseInitialFocus(in: window)
+        })
+    }
+
+    /// AppKit gives the first text field of a window the focus, with its text selected, when the
+    /// window opens. For a new connection that is wanted (Name). For a saved one it would let the
+    /// first keystroke replace the connection's name, so nothing keeps the focus: it goes back to the
+    /// window until the person chooses a field. Checked a few times, because AppKit does it a
+    /// moment after the sheet is on screen, and never once the form has been touched.
+    private func releaseInitialFocus(in window: NSWindow) {
+        guard editingID != nil else { return }
+        Task { @MainActor in
+            for milliseconds in [0, 120, 350] {
+                try? await Task.sleep(for: .milliseconds(milliseconds))
+                if !isDirty, window.firstResponder is NSText { window.makeFirstResponder(nil) }
+            }
         }
     }
 
@@ -414,8 +441,12 @@ struct ConnectionEditorSheet: View {
 
     /// The snapshot scenes that open on another section, or on a new connection's form.
     private func applySnapshotHooks() {
+        // Read once: a second scene drawn in the same process must not inherit the first one's section.
         section = Self.initialSectionForSnapshot ?? .general
-        if editingID == nil, let kind = Self.newKindForSnapshot {
+        let newKind = Self.newKindForSnapshot
+        Self.initialSectionForSnapshot = nil
+        Self.newKindForSnapshot = nil
+        if editingID == nil, let kind = newKind {
             draft.choose(kind)
             step = .form
         }
@@ -566,6 +597,8 @@ struct ConnectionEditorSheet: View {
                 }
             }
         } catch {
+            // An answer like any other: it belongs to this draft, and an edit ends it.
+            resultDraft = tested
             testState = .failure("Couldn't read the saved secret for \(draft.name.isEmpty ? "this connection" : draft.name) from Keychain: \(error.localizedDescription)")
             return
         }
@@ -660,6 +693,7 @@ struct ConnectionTypeTile: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .background(FrameMarker(name: "connection-type-\(kind.rawValue)"))
     }
 }
 

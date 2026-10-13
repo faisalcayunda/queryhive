@@ -46,7 +46,7 @@ struct SSHConfigAliases {
 /// The fields of the connection form that can be missing or wrong, in the order the sheet shows
 /// them.
 enum ConnectionField: String, CaseIterable {
-    case name, host, port, user, database, sshHost, sshPort, sshUser, sshKeyFile, caFile, timeout
+    case name, host, encryption, port, user, database, sshHost, sshPort, sshUser, sshKeyFile, caFile, timeout
 
     /// The name a message uses. A label with a parenthesis is a value that is *present but wrong*;
     /// the others are values that are *missing*, and `ConnectionFormIssues.message` words them
@@ -55,6 +55,7 @@ enum ConnectionField: String, CaseIterable {
         switch self {
         case .name: "Name"
         case .host: "Host"
+        case .encryption: "Encryption (JWT needs HTTPS)"
         case .port: "Port (1-65535)"
         case .user: "User"
         case .database: "Database"
@@ -70,7 +71,7 @@ enum ConnectionField: String, CaseIterable {
     /// The pane the field is edited in.
     var section: ConnectionFormSection {
         switch self {
-        case .name, .host, .port, .user, .database, .caFile: .general
+        case .name, .host, .encryption, .port, .user, .database, .caFile: .general
         case .sshHost, .sshPort, .sshUser, .sshKeyFile: .sshTunnel
         case .timeout: .limits
         }
@@ -124,6 +125,9 @@ struct ConnectionFormState {
     var caFile = ""
     /// The per-connection statement timeout as typed, in seconds. Blank inherits.
     var timeoutText = ""
+    /// Trino's transport word and login method, which decide whether a JWT can be sent at all.
+    var scheme = ""
+    var dbAuth = DatabaseAuth.password
     /// Whether a path names a file. Injected so a test does not need the disk.
     var fileExists: (String) -> Bool = { path in
         FileManager.default.fileExists(atPath: (path as NSString).expandingTildeInPath)
@@ -143,6 +147,14 @@ enum ConnectionFormIssues {
         var out: [ConnectionField] = []
         if blank(state.name) { out.append(.name) }
         if blank(state.host) { out.append(.host) }
+        // A bearer token that could travel in clear is refused by the engine (`config.rs`, "DB_JWT is
+        // only sent over TLS"): Prefer may fall back to HTTP, and `http` is it. Said here, before the
+        // connection is tried, so Save does not store what can never connect. A blank scheme is not
+        // in this list: with a token the engine reads it as TLS.
+        if state.kind == .trino, state.dbAuth == .jwt,
+           TrinoTransport(stored: state.scheme) == .prefer || state.scheme.lowercased() == "http" {
+            out.append(.encryption)
+        }
         if !(1...65535).contains(state.port) { out.append(.port) }
         if blank(state.user) { out.append(.user) }
         if state.kind.requiresDatabase, blank(state.database) { out.append(.database) }

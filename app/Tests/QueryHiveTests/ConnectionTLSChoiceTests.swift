@@ -133,7 +133,8 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertEqual(postgres.glyph, "lock")
         XCTAssertTrue(postgres.spokenDescription.contains("not verified"))
         // A blank mode is the driver's default and reads the same way: nothing is normalised.
-        XCTAssertEqual(ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "").title, "prefer · unverified")
+        XCTAssertEqual(ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "").title,
+                       "prefer · encrypted, unverified")
         // `disable` has nothing to verify, and the engine ignores the flag for it.
         XCTAssertEqual(ConnectionTLSChoice(kind: .mysql, scheme: "", verify: false, sslmode: "disable"), .sslmode("disable"))
     }
@@ -263,7 +264,8 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                     // The engine never checks `prefer` or `require`, so they always say so; the verify
                     // words say it only when `verify` is off.
                     let checks = word.hasPrefix("verify") && verify
-                    XCTAssertEqual(d.tls.title, checks ? word : "\(word) · unverified", "\(kind) \(word) \(verify)")
+                    let unchecked = !verify && word == "prefer" ? "prefer · encrypted, unverified" : "\(word) · unverified"
+                    XCTAssertEqual(d.tls.title, checks ? word : unchecked, "\(kind) \(word) \(verify)")
                     // Choosing the word from the menu always leaves the connection verified.
                     d.setTLS(.sslmode(word))
                     XCTAssertEqual(environment(d)["DB_INSECURE"], "", "\(kind) \(word) re-picked")
@@ -280,10 +282,27 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertEqual(ConnectionTLSChoice.trinoPrefer.title, "Prefer · unverified")
     }
 
+    func testPreferThatMayFallBackAndPreferThatMustEncryptAreTwoDifferentTitles() {
+        let mayFallBack = ConnectionTLSChoice(kind: .postgres, scheme: "", verify: true, sslmode: "prefer")
+        let mustEncrypt = ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "prefer")
+        XCTAssertNotEqual(mayFallBack.title, mustEncrypt.title)
+        XCTAssertNotEqual(mayFallBack.help, mustEncrypt.help)
+        XCTAssertNotEqual(mayFallBack.spokenDescription, mustEncrypt.spokenDescription)
+        XCTAssertEqual(mayFallBack.title, "prefer · unverified")
+        XCTAssertTrue(mustEncrypt.title.contains("encrypted"))
+        XCTAssertTrue(mustEncrypt.help.contains("Encrypts and does not check"))
+        XCTAssertEqual(mayFallBack.glyph, "lock.open")
+        XCTAssertEqual(mustEncrypt.glyph, "lock")
+    }
+
     func testTheHelpDoesNotPromiseACheckThatCannotComeBack() {
         XCTAssertFalse(ConnectionTLSChoice.sslmodeUnverified("require").help.contains("turn the check"))
         XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("prefer").help.contains("fallback"))
-        XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("verify-full").help.contains("turn the check on"))
+        XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("verify-full").help.contains("Pick verify-full again to turn the check on"))
+        // The note names the exact entry the menu shows for the variant that may fall back.
+        let entry = ConnectionTLSChoice.sslmode("prefer").title
+        XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("prefer").help.contains("Pick \"\(entry)\" to allow the fallback"))
+        XCTAssertTrue(ConnectionTLSChoice.options(kind: .postgres, caFile: "").map(\.title).contains(entry))
         XCTAssertFalse(ConnectionTLSChoice.sslmode("verify-ca").help.contains("not the host name"))
         XCTAssertTrue(ConnectionTLSChoice.trinoHTTP.help.contains("443"))
         XCTAssertTrue(ConnectionTLSChoice.trinoHTTP.spokenDescription.contains("HTTPS"))
