@@ -222,6 +222,80 @@ final class SchemaOutlineTests: XCTestCase {
         XCTAssertTrue(f.catalog.expanded)
     }
 
+    // A row view is reused for rows at other levels as the tree opens, closes and scrolls. It
+    // carries one chevron, where its own level puts it, and a table carries none. The custom
+    // chevron used to have no identifier, so AppKit did not find it again: a reused row kept the
+    // old one, at the old level's indent, and got a new one beside it (two or three per row).
+    func testAReusedRowCarriesOneChevronAtItsOwnLevel() {
+        let f = fixture(tables: 0, height: 300)
+        f.catalog.children = (0..<60).map { s in
+            let schema = TreeNode.schema("ops.schema_\(s).bronze", parent: f.catalog)
+            schema.children = (0..<3).map { TreeNode.table("t\(s)_\($0)", parent: schema) }
+            return schema
+        }
+        f.refresh()
+        func check(_ step: String) {
+            f.outline.enumerateAvailableRowViews { rowView, row in
+                // Every chevron the row holds, hidden or not: a hidden one stacked under the shown
+                // one is the same leak.
+                let all = rowView.subviews.filter { $0 is ChevronButton }
+                let chevrons = all.filter { !$0.isHidden }
+                let expandable = f.outline.isExpandable(f.outline.item(atRow: row))
+                XCTAssertLessThanOrEqual(all.count, 1, "\(step): row \(row) holds \(all.count) chevrons")
+                XCTAssertEqual(chevrons.count, expandable ? 1 : 0, "\(step): row \(row) shows \(chevrons.count) chevrons")
+                if let chevron = chevrons.first {
+                    XCTAssertEqual(chevron.frame.minX, f.outline.frameOfOutlineCell(atRow: row).minX, accuracy: 0.5,
+                                   "\(step): row \(row)'s chevron is at another level's indent")
+                }
+            }
+        }
+        for s in stride(from: 0, to: 60, by: 3) { f.catalog.children![s].expanded = true }
+        f.refresh()
+        f.outline.scrollRowToVisible(f.outline.numberOfRows - 1)
+        f.window.layoutIfNeeded()
+        check("opened, at the bottom")
+        for s in stride(from: 0, to: 60, by: 3) { f.catalog.children![s].expanded = false }
+        f.refresh()
+        f.outline.scrollRowToVisible(0)
+        f.window.layoutIfNeeded()
+        check("closed, at the top")
+        f.outline.scrollRowToVisible(f.outline.numberOfRows - 1)
+        f.window.layoutIfNeeded()
+        check("closed, at the bottom")
+    }
+
+    // A scroll moves rows out from under a pointer that does not move, and AppKit rebuilds their
+    // tracking areas without sending an exit, so a row kept its hover pill until the pointer passed
+    // over it again (the tree filled with grey rows). The row asks where the pointer is instead, and
+    // only in the key window: the area is `.activeInKeyWindow`, so elsewhere no exit would follow.
+    // What this cannot hold is AppKit's side, that no exit comes; that was checked live. The key
+    // window with the pointer over the row (hover kept) needs an active app, which a test is not.
+    func testARebuiltTrackingAreaDropsAHoverThePointerHasLeft() throws {
+        let f = fixture()
+        let rowView = try XCTUnwrap(f.outline.rowView(atRow: 3, makeIfNecessary: true) as? OutlineRowView)
+        let event = try XCTUnwrap(NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [],
+                                                         timestamp: 0, windowNumber: f.window.windowNumber,
+                                                         context: nil, eventNumber: 0, trackingNumber: 0,
+                                                         userData: nil))
+        // Off every screen, so wherever the real pointer is, it is not over a row.
+        f.window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        rowView.mouseEntered(with: event)
+        XCTAssertTrue(rowView.hovering)
+        rowView.updateTrackingAreas()
+        XCTAssertFalse(rowView.hovering, "the row kept a hover the pointer had left")
+
+        // Under the real pointer, in a window that is not key: no hover, since no exit would come.
+        let inWindow = rowView.convert(NSPoint(x: rowView.bounds.midX, y: rowView.bounds.midY), to: nil)
+        let pointer = NSEvent.mouseLocation
+        f.window.setFrameOrigin(NSPoint(x: pointer.x - inWindow.x, y: pointer.y - inWindow.y))
+        XCTAssertFalse(f.window.isKeyWindow)
+        XCTAssertTrue(rowView.bounds.contains(rowView.convert(f.window.mouseLocationOutsideOfEventStream, from: nil)),
+                      "the pointer is over the row, or this proves nothing")
+        rowView.mouseEntered(with: event)
+        rowView.updateTrackingAreas()
+        XCTAssertFalse(rowView.hovering, "a window that is not key took a hover no exit will clear")
+    }
+
     // MARK: Disclosure, menu, drag
 
     func testTheDisclosureButtonIsTheChevronAndItToggles() throws {

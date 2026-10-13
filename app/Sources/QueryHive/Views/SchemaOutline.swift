@@ -444,6 +444,9 @@ final class OutlineView: NSOutlineView {
                            owner: Any?) -> NSView? {
         if identifier == NSOutlineView.disclosureButtonIdentifier {
             let button = ChevronButton()
+            // AppKit finds a row's disclosure button again by this identifier: without it, a row
+            // view reused for another row kept its old chevron and got a new one beside it.
+            button.identifier = identifier
             button.target = self
             button.action = #selector(chevronClicked(_:))
             return button
@@ -513,7 +516,7 @@ final class ChevronButton: NSButton {
 /// 6 pt rounded fill, ink 0.13 selected and 0.06 under the pointer. The one visible change (V-5):
 /// while the outline is the first responder, the selected pill also carries a 1.5 pt ring.
 final class OutlineRowView: NSTableRowView {
-    private var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
+    private(set) var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
 
     /// The chevron points down while the row is open. AppKit does not set the state of a custom
     /// disclosure button, so the row does it whenever it lays out.
@@ -566,6 +569,14 @@ final class OutlineRowView: NSTableRowView {
         for area in trackingAreas { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow],
                                        owner: self, userInfo: nil))
+        // Replacing the area sends no exit: a scroll moves rows out from under a still pointer and
+        // rebuilds their areas, and each one kept its hover pill. Ask where the pointer is instead,
+        // only where the area is live (`.activeInKeyWindow`): a window that is not key gets no exit.
+        guard let window, window.isKeyWindow else {
+            hovering = false
+            return
+        }
+        hovering = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
