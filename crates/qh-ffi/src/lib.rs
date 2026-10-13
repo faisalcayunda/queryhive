@@ -116,6 +116,7 @@ pub mod progress;
 pub mod retry;
 pub mod sql_ident;
 pub mod store_api;
+mod table_swap;
 pub mod tunnel;
 // The scaffolding has to be generated in the crate root: it defines the `UniFfiTag` the
 // other derivations name, and the module path it records is the namespace the bindings
