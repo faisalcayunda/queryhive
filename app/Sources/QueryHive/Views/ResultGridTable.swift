@@ -247,6 +247,7 @@ struct ResultGridTable: NSViewRepresentable {
                 forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.table?.invalidateBand()
                     self?.scheduleTooltips()
                     self?.followPeek()
                     // The resize cursor's rectangles are in the header's own coordinates and are

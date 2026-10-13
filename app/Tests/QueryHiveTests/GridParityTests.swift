@@ -331,6 +331,88 @@ final class GridParityTests: XCTestCase {
         return Data(bytes: bytes, count: rep.bytesPerRow * rep.pixelsHigh)
     }
 
+    // MARK: The header over scrolled rows
+
+    /// The scroll view sits the rows under the header (the clip view's top inset is the band's
+    /// height), and the band is a 30 % shade of the surface, not a slab. Rows painted there showed
+    /// through it, so on a scrolled grid the header's labels sat over row text. The band reads the
+    /// same at the top of the result and scrolled down: no row is ever drawn under it.
+    func testNoRowShowsThroughTheHeaderOnAScrolledGrid() throws {
+        // Light and dark, and scrolled down and across into the 9,000-character column.
+        for (appearance, offset) in [(NSAppearance.Name.darkAqua, NSPoint(x: 0, y: 750)),
+                                     (.aqua, NSPoint(x: 0, y: 750)), (.darkAqua, NSPoint(x: 400, y: 750))] {
+            let fixture = makeGrid(rowCount: 400)
+            fixture.window.appearance = NSAppearance(named: appearance)
+            fixture.apply()
+            GridFixture.pause(for: 0.3)
+            let header = fixture.table.header
+            let band = header.convert(header.bounds, to: fixture.scroll)
+            XCTAssertGreaterThan(band.height, 20, "the header has its height")
+            func capture() throws -> Data {
+                fixture.scroll.display()
+                let rep = try XCTUnwrap(fixture.scroll.bitmapImageRepForCachingDisplay(in: band))
+                fixture.scroll.cacheDisplay(in: band, to: rep)
+                return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            }
+            let top = try capture()
+            fixture.scroll.contentView.scroll(to: NSPoint(x: 0, y: offset.y))
+            fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+            GridFixture.pause(for: 0.3)
+            if offset.x == 0 {
+                XCTAssertEqual(try capture(), top, "\(appearance.rawValue): rows show through the header once the grid is scrolled")
+            } else {
+                // Across as well: the header scrolls with the columns, so compare it with itself scrolled
+                // across at the top of the result.
+                fixture.scroll.contentView.scroll(to: NSPoint(x: offset.x, y: -fixture.scroll.contentView.contentInsets.top))
+                fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+                GridFixture.pause(for: 0.3)
+                let across = try capture()
+                fixture.scroll.contentView.scroll(to: offset)
+                fixture.scroll.reflectScrolledClipView(fixture.scroll.contentView)
+                GridFixture.pause(for: 0.3)
+                XCTAssertEqual(try capture(), across, "\(appearance.rawValue): rows show through the header scrolled across")
+            }
+        }
+    }
+
+    /// `draw` leaves the strip under the band empty, and a move draws nothing on its own. Scrolling
+    /// up slides that empty strip down into the rows, and a header that gets shorter uncovers its
+    /// lower edge: both have to ask for the strip the band was over to be drawn again, or a band of
+    /// up to the header's height under it stays blank (no rows, stripes, gutter or selection). The
+    /// scroll is `invalidateBand`'s to cover; the header is AppKit's own `tile()`, which repaints the
+    /// whole table, and the second half holds that.
+    func testTheStripTheBandLeftIsDrawnAgain() throws {
+        let fixture = makeGrid(rowCount: 400)
+        fixture.apply()
+        GridFixture.pause(for: 0.3)
+        let clip = fixture.scroll.contentView
+        func scroll(to y: CGFloat) {
+            clip.scroll(to: NSPoint(x: 0, y: y))
+            fixture.scroll.reflectScrolledClipView(clip)
+            GridFixture.pause(for: 0.1)
+        }
+        func covered(_ slice: NSRect) -> Bool {
+            (fixture.table.invalidationLog ?? []).contains { $0.contains(slice) }
+        }
+
+        scroll(to: 750)
+        fixture.table.invalidationLog = []
+        scroll(to: 740)
+        let band = try XCTUnwrap(fixture.table.bandRect)
+        let visible = fixture.table.visibleRect
+        XCTAssertTrue(covered(NSRect(x: visible.minX, y: band.maxY, width: visible.width, height: 10)),
+                      "scrolled up 10 pt: the 10 pt under the band were left empty")
+
+        fixture.table.invalidationLog = []
+        let tall = fixture.table.headerHeight
+        fixture.table.headerHeight = tall - 10
+        GridFixture.pause(for: 0.1)
+        let shorter = try XCTUnwrap(fixture.table.bandRect)
+        XCTAssertEqual(shorter.height, band.height - 10, accuracy: 0.5, "the band follows the header")
+        XCTAssertTrue(covered(NSRect(x: visible.minX, y: shorter.maxY, width: visible.width, height: 10)),
+                      "a shorter header uncovered 10 pt that were left empty")
+    }
+
     // MARK: The cell cursor (W10-T1)
 
     private func keyEvent(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags = [],

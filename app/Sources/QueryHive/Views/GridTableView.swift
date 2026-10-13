@@ -259,6 +259,32 @@ final class GridTableView: NSTableView {
         return area
     }
 
+    /// The strip of the table under the header band, in the table's coordinates; `nil` when the
+    /// scroll view sits nothing under the header.
+    var bandRect: CGRect? {
+        guard let clip = enclosingScrollView?.contentView, clip.contentInsets.top > 0 else { return nil }
+        let band = CGRect(x: clip.bounds.minX, y: clip.bounds.minY,
+                          width: clip.bounds.width, height: clip.contentInsets.top)
+        return convert(band, from: clip)
+    }
+
+    /// The band's strip as `invalidateBand` last saw it, across the whole table.
+    private var lastBandStrip: CGRect?
+
+    /// Draws the strip under the band again, and the strip it was under before. A move draws
+    /// nothing on its own: scrolling down slides rows painted below the band up under it, and
+    /// scrolling up slides the strip `draw` left empty down into the rows. (A header that changes
+    /// height needs nothing here: `tile()` repaints the whole table.) Across the whole width, because
+    /// a horizontal scroll moves the band along the same strip.
+    func invalidateBand() {
+        let strip = bandRect.map { CGRect(x: bounds.minX, y: $0.minY, width: bounds.width, height: $0.height) }
+        // A horizontal scroll keeps the strip where it was: nothing moved under the band.
+        guard strip != lastBandStrip else { return }
+        if let old = lastBandStrip { setNeedsDisplay(old) }
+        if let strip { setNeedsDisplay(strip) }
+        lastBandStrip = strip
+    }
+
     /// Scroll one step towards a pointer held outside the rows, then carry the drag to the cell now
     /// under it. `false` when the pointer is inside, or the content cannot move any further.
     ///
@@ -361,8 +387,22 @@ final class GridTableView: NSTableView {
         lastDirty = dirtyRect
         let context = coordinator.paint
         guard !context.geometry.widths.isEmpty else { return }
+        // Wholly under the band: everything would be clipped away, so paint nothing at all.
+        if let band = bandRect, band.minY <= dirtyRect.minY, dirtyRect.maxY <= band.maxY { return }
 
         cg.saveGState()
+        // Nothing under the header: the scroll view sits the rows under the band, and the band is a
+        // 30 % shade of the surface, so a row painted there showed through it. Only the band is cut
+        // out; what lies outside the visible rect (drawn ahead for scrolling) is painted as before.
+        // A scroll moves rows already painted up under the band without a draw, so the coordinator
+        // asks for the band to be drawn again on every scroll (`invalidateBand`).
+        if let band = bandRect {
+            let above = CGRect(x: dirtyRect.minX, y: dirtyRect.minY, width: dirtyRect.width,
+                               height: max(0, band.minY - dirtyRect.minY))
+            let below = CGRect(x: dirtyRect.minX, y: band.maxY, width: dirtyRect.width,
+                               height: max(0, dirtyRect.maxY - band.maxY))
+            cg.clip(to: [above, below])
+        }
         // Flipped view: y runs down, so the text matrix has to point back up or every glyph is
         // mirrored. `textPosition` stays in the view's own coordinates, which is what the painter
         // writes.
