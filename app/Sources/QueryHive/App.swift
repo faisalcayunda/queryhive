@@ -22,6 +22,13 @@ enum QueryHiveMain {
             Snapshot.run(path: path, scene: Snapshot.requestedScene(),
                          width: Snapshot.requestedWidth() ?? Shell.minWidth)
         }
+        // `QH_SUPPORT_ROOT` runs the real app against a throwaway support directory, so a script
+        // driving the window never reads or writes the owner's connections, history or session
+        // files. Preferences (`UserDefaults`) and the Keychain are not redirected: a caller that
+        // needs those apart runs the app under a bundle id of its own.
+        if let root = ProcessInfo.processInfo.environment["QH_SUPPORT_ROOT"], !root.isEmpty {
+            ConnectionStore.root = URL(fileURLWithPath: root, isDirectory: true)
+        }
         // `--bench <scenario>` runs a measurement and exits; only `launch` comes back, to let the
         // real app start and report its own first frame.
         if CommandLine.arguments.contains("--bench") { BenchMode.run() }

@@ -52,6 +52,11 @@ struct RootView: View {
         let windowTitle = WindowTitle.make(model: model)
         NavigationSplitView(columnVisibility: columnVisibility) {
             SidebarTree()
+                // The column asks for no height of its own. The split view takes a column's minimum
+                // height from its content laid out at zero width, where the empty state's wrapping
+                // text is ~900 pt tall; as the window's minimum that pushed the content of a shorter
+                // window (857 pt on a 1470x956 display) up under the menu bar and off the bottom.
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .navigationSplitViewColumnWidth(min: Shell.sidebarMin, ideal: Shell.sidebarIdeal,
                                                 max: Shell.sidebarMax)
         } detail: {
@@ -70,9 +75,7 @@ struct RootView: View {
             .navigationTitle(windowTitle.title)
             .navigationSubtitle(windowTitle.subtitle)
         }
-        // Read here so a change of theme or of appearance re-runs `updateNSView` and the window's
-        // own background follows the canvas.
-        .background(MainWindowTag(canvas: NSColor(Tone.canvas)))
+        .background(MainWindowTag())
         .foregroundStyle(Tone.ink)
         .sheet(item: $model.editingConnection) { target in
             ConnectionEditorSheet(target: target)
@@ -212,17 +215,15 @@ enum MainWindow {
 }
 
 /// A zero-size view that tells `MainWindow` which window it landed in, and gives that window the
-/// look of the shell: a transparent title bar with no separator under it, on a window whose own
-/// background is the theme's canvas, so that nothing the system draws in the top row (a gap while
-/// the window resizes, the toolbar's fade) is the system's grey. It is here, rather than in a scene
-/// modifier, so the harness and the tests (which host `RootView` in a bare window) get the same
-/// window the app does.
+/// look of the shell: a transparent title bar with no separator under it. The theme's canvas is
+/// drawn by the content (both columns paint it under the title bar), not set as the window's
+/// `backgroundColor`: on macOS 27, in a binary linked against an older SDK (this one is stamped
+/// 14.0), a custom window background drops the frame view's material and puts the content view
+/// above the title bar's container, so the opaque canvas covered the traffic lights. It is here,
+/// rather than in a scene modifier, so the harness and the tests (which host `RootView` in a bare
+/// window) get the same window the app does.
 struct MainWindowTag: NSViewRepresentable {
-    let canvas: NSColor
-
     final class Tagger: NSView {
-        var canvas = NSColor.windowBackgroundColor
-
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             dress()
@@ -232,21 +233,14 @@ struct MainWindowTag: NSViewRepresentable {
             guard let window else { return }
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
-            window.backgroundColor = canvas
             MainActor.assumeIsolated { MainWindow.adopt(window) }
         }
     }
 
-    func makeNSView(context: Context) -> NSView {
-        let tagger = Tagger()
-        tagger.canvas = canvas
-        return tagger
-    }
+    func makeNSView(context: Context) -> NSView { Tagger() }
 
     func updateNSView(_ view: NSView, context: Context) {
-        guard let tagger = view as? Tagger else { return }
-        tagger.canvas = canvas
-        tagger.dress()
+        (view as? Tagger)?.dress()
     }
 }
 

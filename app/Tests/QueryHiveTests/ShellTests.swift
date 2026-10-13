@@ -212,6 +212,19 @@ final class ShellTests: XCTestCase {
         XCTAssertEqual(row.height, Metrics.toolbar, accuracy: 1)
     }
 
+    // With no connection the sidebar shows its empty state, whose description is ~900 pt tall when
+    // laid out at zero width, which is how the split view measures a column's minimum height. That
+    // minimum must not reach the window: on a 1470x956 display the window is 857 pt tall, and a
+    // 963 pt minimum pushed the tab strip up under the menu bar, where no click reaches it.
+    func testAnEmptySidebarLeavesTheTabStripAtTheTopOfAShortWindow() throws {
+        let rig = rig(scene: "done", height: 760, adjust: { model in
+            model.connections = []
+            model.tree = []
+        })
+        let strip = try requireFrame("tab-strip", in: rig)
+        XCTAssertEqual(rig.window.frame.height - strip.maxY, 0, accuracy: 1, "the strip starts at the window's top edge")
+    }
+
     // No toolbar title or subtitle is drawn (the window keeps both for the Window menu and
     // VoiceOver), and the system's toolbar holds nothing of the app's.
     func testNoTitleIsDrawnAndTheToolbarHoldsNothingOfTheApps() throws {
