@@ -1123,9 +1123,10 @@ final class QueryTab: Identifiable {
     /// The table a queued edit would be written to, when the app genuinely knows it.
     ///
     /// Set only by the path that wrote the SQL itself — opening a table from the tree, which runs
-    /// exactly `SELECT * FROM <name>` (`AppModel.openTable`). A hand-written query leaves this nil
-    /// and the grid cannot offer to commit: writing to a table the app guessed at from a `FROM`
-    /// clause is worse than not writing at all.
+    /// `SELECT <its columns> FROM <name>` (`SELECT *` when they are not known; `AppModel.openTable`).
+    /// The name is what is kept, never a reading of the statement, so a column list changes nothing
+    /// here. A hand-written query leaves this nil and the grid cannot offer to commit: writing to a
+    /// table the app guessed at from a `FROM` clause is worse than not writing at all.
     var sourceTable: String?
 
     /// The SQL one source resolves to. Every path out of the editor goes through this, so
