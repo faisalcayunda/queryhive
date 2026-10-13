@@ -197,18 +197,19 @@ enum ConnectionFormIssues {
         Dictionary(grouping: fields, by: \.section)
     }
 
-    /// One line for the footer. The pane in view is told first and in `message`'s words; another
-    /// pane's problems lead with its name ("SSH Tunnel: SSH host is required."), and every further
-    /// pane is pointed to ("Also see Limits."). Empty when nothing is wrong.
+    /// What the footer says, short enough for two lines in the room between its buttons (about 70
+    /// characters): the pane in view is told first, in `message`'s words, and every other pane with
+    /// something wrong is named after it ("Host is required. Also: SSH Tunnel and Limits."). A
+    /// pane's problems name their fields, which say where they are, and the sidebar's badges say
+    /// which pane, so the sentence carries no prefix. Empty when nothing is wrong.
     static func summary(_ fields: [ConnectionField], visible: ConnectionFormSection) -> String {
         let grouped = bySection(fields)
         let panes = [visible] + ConnectionFormSection.allCases.filter { $0 != visible }
         let withIssues = panes.filter { grouped[$0] != nil }
         guard let first = withIssues.first else { return "" }
         var text = message(grouped[first, default: []].map(\.label))
-        if first != visible { text = "\(first.title): \(text)" }
         let rest = withIssues.dropFirst().map(\.title)
-        if !rest.isEmpty { text += " Also see \(list(rest))." }
+        if !rest.isEmpty { text += " Also: \(list(rest))." }
         return text
     }
 

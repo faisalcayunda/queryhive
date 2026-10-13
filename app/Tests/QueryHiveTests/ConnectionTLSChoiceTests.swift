@@ -134,7 +134,7 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertTrue(postgres.spokenDescription.contains("not verified"))
         // A blank mode is the driver's default and reads the same way: nothing is normalised.
         XCTAssertEqual(ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "").title,
-                       "prefer · encrypted, unverified")
+                       "require · unverified")
         // `disable` has nothing to verify, and the engine ignores the flag for it.
         XCTAssertEqual(ConnectionTLSChoice(kind: .mysql, scheme: "", verify: false, sslmode: "disable"), .sslmode("disable"))
     }
@@ -264,7 +264,8 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                     // The engine never checks `prefer` or `require`, so they always say so; the verify
                     // words say it only when `verify` is off.
                     let checks = word.hasPrefix("verify") && verify
-                    let unchecked = !verify && word == "prefer" ? "prefer · encrypted, unverified" : "\(word) · unverified"
+                    // `prefer` with verification off is what the engine runs as `require`, and says so.
+                    let unchecked = !verify && word == "prefer" ? "require · unverified" : "\(word) · unverified"
                     XCTAssertEqual(d.tls.title, checks ? word : unchecked, "\(kind) \(word) \(verify)")
                     // Choosing the word from the menu always leaves the connection verified.
                     d.setTLS(.sslmode(word))
@@ -289,8 +290,9 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertNotEqual(mayFallBack.help, mustEncrypt.help)
         XCTAssertNotEqual(mayFallBack.spokenDescription, mustEncrypt.spokenDescription)
         XCTAssertEqual(mayFallBack.title, "prefer · unverified")
-        XCTAssertTrue(mustEncrypt.title.contains("encrypted"))
-        XCTAssertTrue(mustEncrypt.help.contains("Encrypts and does not check"))
+        XCTAssertEqual(mustEncrypt.title, "require · unverified", "what the engine runs: TLS required, certificate not checked")
+        XCTAssertTrue(mustEncrypt.help.contains("Stored as prefer"))
+        XCTAssertTrue(mustEncrypt.help.contains("runs as require"))
         XCTAssertEqual(mayFallBack.glyph, "lock.open")
         XCTAssertEqual(mustEncrypt.glyph, "lock")
     }

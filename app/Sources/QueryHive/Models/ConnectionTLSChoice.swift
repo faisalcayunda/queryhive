@@ -75,9 +75,10 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
             default: word
             }
         case .sslmodeUnverified(let word):
-            // `prefer` with verification off is not the `prefer` above: the engine then requires
-            // TLS and never falls back to clear, so the title says it encrypts.
-            word == "prefer" ? "prefer · encrypted, unverified" : "\(word) · unverified"
+            // `prefer` with verification off is not the `prefer` above: the engine runs it as
+            // `require` (it must encrypt, never falls back to clear, and does not check the
+            // certificate), and the title says what runs. The help says what is stored.
+            word == "prefer" ? "require · unverified" : "\(word) · unverified"
         }
     }
 
@@ -152,7 +153,7 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
         case .sslmodeUnverified(let word):
             switch word {
             case "prefer":
-                "Encrypts and does not check the certificate: certificate verification is off for this connection, so it always encrypts and never falls back to clear. Pick \"prefer · unverified\" to allow the fallback."
+                "Stored as prefer with certificate verification off, which the engine runs as require: it always encrypts, never falls back to clear, and does not check the certificate. Pick \"prefer · unverified\" to allow the fallback."
             case "require":
                 "Always encrypts. The certificate is not checked."
             default:

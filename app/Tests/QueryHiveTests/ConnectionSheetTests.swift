@@ -344,13 +344,163 @@ final class ConnectionSheetTests: XCTestCase {
 
     // MARK: Captions behind a "?"
 
+    /// The key a person presses to leave: Esc.
+    private func escapeEvent(in window: NSWindow) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false, keyCode: 53))
+    }
+
+    /// Clicks the "?" in the named row and returns the popover window it opens.
+    private func openHint(inRow row: String, in sheet: NSWindow, file: StaticString = #filePath, line: UInt = #line) throws -> NSWindow {
+        XCTAssertTrue(wait { self.frame("connection-row-\(row)", in: sheet) != nil }, "no \(row) row", file: file, line: line)
+        let rowFrame = try XCTUnwrap(frame("connection-row-\(row)", in: sheet), file: file, line: line)
+        let root = try XCTUnwrap(sheet.contentView, file: file, line: line)
+        let hint = try XCTUnwrap(descendants(NSView.self, in: root).first {
+            $0.identifier?.rawValue == "connection-hint" && rowFrame.contains($0.convert($0.bounds, to: nil))
+        }, "no \"?\" in the \(row) row", file: file, line: line)
+        let before = Set(popoverWindows().map(ObjectIdentifier.init))
+        let target = hint.convert(hint.bounds, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: target.midX, y: target.midY), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: sheet.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1), file: file, line: line)
+            sheet.sendEvent(event)
+            spin(0.1)
+        }
+        XCTAssertTrue(wait { popoverWindows().contains { !before.contains(ObjectIdentifier($0)) } },
+                      "clicking the \"?\" in the \(row) row did not open its hint", file: file, line: line)
+        spin(0.3)
+        return try XCTUnwrap(popoverWindows().first { !before.contains(ObjectIdentifier($0)) }, file: file, line: line)
+    }
+
+    /// The popover is as big as its sentence and no bigger: a short caption is a small popover, a long
+    /// one wraps at the maximum width and is as tall as the wrapped text needs, with no empty box.
+    func testAHintPopoverFitsItsSentence() throws {
+        func wrappedHeight(_ text: String, width: CGFloat) -> CGFloat {
+            let font = NSFont.systemFont(ofSize: 11.5)
+            return NSAttributedString(string: text, attributes: [.font: font])
+                .boundingRect(with: CGSize(width: width, height: 10_000), options: [.usesLineFragmentOrigin]).height
+        }
+        let rig = rig()
+        let trino = try XCTUnwrap(rig.model.connections.first)
+        let sheet = try openEditor(trino, in: rig, section: .appearance)
+        // Short: Appearance > Environment.
+        XCTAssertTrue(wait { self.isShowing(.appearance, in: sheet) })
+        let short = try openHint(inRow: "Environment", in: sheet).frame.size
+        NSApp.sendEvent(try escapeEvent(in: sheet))
+        XCTAssertTrue(wait { self.popoverWindows().isEmpty })
+        // Medium: SSH Tunnel > Tunnel.
+        try click("connection-section-sshTunnel", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.sshTunnel, in: sheet) })
+        let medium = try openHint(inRow: "Tunnel", in: sheet).frame.size
+        NSApp.sendEvent(try escapeEvent(in: sheet))
+        XCTAssertTrue(wait { self.popoverWindows().isEmpty })
+        // Long: General > Password, the longest caption in the sheet (a Trino connection's).
+        try click("connection-section-general", in: sheet)
+        XCTAssertTrue(wait { self.isShowing(.general, in: sheet) })
+        let long = try openHint(inRow: "Password", in: sheet).frame.size
+        NSApp.sendEvent(try escapeEvent(in: sheet))
+        XCTAssertTrue(wait { self.popoverWindows().isEmpty })
+
+        // Every caption in the sheet is longer than a line, so the width is the maximum for all; what
+        // grows is the height, with the sentence. (A sentence that fits on one line, and the width
+        // that follows it, is `HelpHintPopoverTests`.)
+        XCTAssertLessThanOrEqual(short.height, medium.height, "short \(short), medium \(medium)")
+        XCTAssertLessThan(medium.height, long.height, "medium \(medium), long \(long)")
+        // The tallest stays small, and the widest stays at the maximum (plus the padding and the arrow).
+        XCTAssertLessThan(long.height, 200, "the longest popover is \(long)")
+        XCTAssertLessThanOrEqual(long.width, HelpHint.popoverWidth + 2 * HelpHint.popoverPadding + 30)
+        // No taller than the wrapped text plus the padding (the slack is the popover's arrow).
+        let passwordHint = "Blank means no BasicAuth. Trino refuses BasicAuth over plain http, so a password forces https. "
+            + "Prefer is the exception: it starts on HTTPS and falls back to clear only when the coordinator has no TLS."
+        let wrapped = wrappedHeight(passwordHint, width: HelpHint.popoverWidth)
+        XCTAssertLessThanOrEqual(long.height, wrapped + 2 * HelpHint.popoverPadding + 30, "empty space around the text: \(long) for \(wrapped)")
+        XCTAssertGreaterThan(long.height, wrapped * 0.6, "implausibly short for the text: \(long) for \(wrapped)")
+    }
+
+    func testEscapeClosesAnOpenHintAndNotTheSheet() throws {
+        let rig = rig()
+        let sheet = try openEditor(rig.model.connections.first, in: rig)
+        XCTAssertTrue(wait { self.isShowing(.general, in: sheet) })
+        _ = try openHint(inRow: "Password", in: sheet)
+        NSApp.sendEvent(try escapeEvent(in: sheet))
+        XCTAssertTrue(wait { self.popoverWindows().isEmpty }, "Esc did not close the hint")
+        spin(0.5)
+        XCTAssertNotNil(rig.window.attachedSheet, "Esc closed the whole sheet, and with it what was typed")
+    }
+
+    func testTheFooterSummaryHasTheRoomBetweenTheButtons() throws {
+        let rig = rig()
+        let sheet = try openEditor(nil, in: rig, section: .limits, newKind: .postgres)
+        XCTAssertTrue(wait { self.frame("connection-footer-problem", in: sheet) != nil })
+        let problem = try XCTUnwrap(frame("connection-footer-problem", in: sheet))
+        // The summary is two lines at most, whichever pane is in view: the room between the footer's
+        // buttons (the content column is 619 points wide) holds about 70 characters on two lines.
+        XCTAssertLessThanOrEqual(problem.height, 34, "more than two lines: \(problem.height) pt")
+        let summary = ConnectionFormIssues.summary(ConnectionFormIssues.fields(for: {
+            var d = ConnectionDraft.new(); d.choose(.postgres); return d.formState }(), resolved: nil), visible: .limits)
+        XCTAssertEqual(summary, "Name, Host, User and Database are required.", "and it is one short sentence")
+    }
+
+    func testTheFooterButtonsStayWhereTheyAreWhetherOrNotThereIsAStatus() throws {
+        var cancels: [CGFloat] = []
+        for connection in [postgres(), nil] as [Connection?] {
+            let rig = rig()
+            let sheet = try openEditor(connection, in: rig, newKind: connection == nil ? .postgres : nil)
+            XCTAssertTrue(wait { self.frame("connection-footer-cancel", in: sheet) != nil })
+            let footer = try XCTUnwrap(frame("connection-footer", in: sheet))
+            let cancel = try XCTUnwrap(frame("connection-footer-cancel", in: sheet))
+            XCTAssertGreaterThan(cancel.minX, footer.midX, "the buttons are not at the right edge: \(cancel) in \(footer)")
+            cancels.append(cancel.minX.rounded())
+            for window in windows { if let attached = window.attachedSheet { window.endSheet(attached) } }
+            spin(0.3)
+        }
+        XCTAssertEqual(Set(cancels).count, 1, "the buttons moved between an empty footer and one with a summary: \(cancels)")
+    }
+
+    func testTheEncryptionControlIsTheSameWidthWhateverItsTitleSays() throws {
+        var widths: Set<CGFloat> = []
+        var hostWidths: Set<CGFloat> = []
+        for tweak in [{ (_: inout Connection) in }, { $0.verify = false; $0.sslmode = "prefer" }, { $0.sslmode = "verify-full"; $0.verify = false }] as [(inout Connection) -> Void] {
+            let rig = rig()
+            let sheet = try openEditor(postgres(tweak), in: rig)
+            XCTAssertTrue(wait { self.frame("connection-encryption", in: sheet) != nil })
+            widths.insert(try XCTUnwrap(frame("connection-encryption", in: sheet)).width.rounded())
+            hostWidths.insert(try XCTUnwrap(frame("connection-host-field", in: sheet)).width.rounded())
+            for window in windows { if let attached = window.attachedSheet { window.endSheet(attached) } }
+            spin(0.3)
+        }
+        XCTAssertEqual(widths, [ConnectionEncryptionMenu.width], "the control's width follows its title: \(widths)")
+        XCTAssertEqual(hostWidths.count, 1, "the host field's width changes with the stored choice: \(hostWidths)")
+    }
+
+    func testMySQLHasNoCARowAndNoMoreCard() throws {
+        let mysql = Connection(id: UUID(), name: "Reporting", color: .amber, kind: .mysql, host: "mysql.internal",
+                               port: 3306, sslmode: "disable", user: "u", database: "r", schema: "", verify: true)
+        let rig = rig()
+        let sheet = try openEditor(mysql, in: rig)
+        XCTAssertTrue(wait { self.frame("connection-row-Password", in: sheet) != nil })
+        XCTAssertNil(frame("connection-row-CA certificate", in: sheet), "a MySQL form has no CA row")
+        XCTAssertNil(frame("connection-row-Schema", in: sheet))
+        // The other drivers keep theirs.
+        let sibling = Connection(id: UUID(), name: "Warehouse", color: .violet, kind: .postgres, host: "pg.internal",
+                                 port: 5432, sslmode: "prefer", user: "analyst", database: "warehouse", schema: "public", verify: true)
+        let rig2 = self.rig()
+        let sheet2 = try openEditor(sibling, in: rig2)
+        XCTAssertTrue(wait { self.frame("connection-row-CA certificate", in: sheet2) != nil })
+    }
+
     private func popoverWindows() -> [NSWindow] {
         var found: [NSWindow] = NSApp.windows
         for window in windows {
             found += window.childWindows ?? []
             found += window.attachedSheet?.childWindows ?? []
         }
-        return found.filter { String(describing: Swift.type(of: $0)).contains("Popover") }
+        // A closed popover's window can outlive it, hidden.
+        return found.filter { String(describing: Swift.type(of: $0)).contains("Popover") && $0.isVisible }
     }
 
     /// The sentence under "Connect through an SSH tunnel" used to take two lines of the pane. It is

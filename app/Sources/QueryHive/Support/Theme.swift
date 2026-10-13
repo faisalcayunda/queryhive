@@ -859,13 +859,39 @@ struct HelpHint: View {
     static let accessibilityName = "Help"
     /// The widest the popover's text runs, in points, before it wraps.
     static let popoverWidth: CGFloat = 280
+    /// The space between the text and the edge of the popover, on every side.
+    static let popoverPadding: CGFloat = 10
+    /// How long the pointer rests on the icon before a hover opens the popover, and how long it may
+    /// be away from both the icon and the popover before one that a hover opened closes again.
+    static let hoverDelay: Duration = .milliseconds(350)
+    static let hoverGrace: Duration = .milliseconds(250)
 
     let text: String
+    /// Whether resting the pointer on the icon opens the popover (and leaving it closes one that was
+    /// opened that way). Off by default, so a screen that has always opened it by click and shown a
+    /// tooltip on hover keeps doing exactly that.
+    var opensOnHover = false
+
     @State private var hovering = false
+    @State private var overPopover = false
     @State private var showing = false
+    @State private var openedByHover = false
+    /// The width of the sentence on one line, measured by a copy of it that is never drawn. The
+    /// popover is as wide as that, or as `popoverWidth` when the sentence is longer, and as tall as
+    /// the sentence is when wrapped at that width: a short sentence gets a small popover.
+    @State private var naturalWidth: CGFloat = 0
+    @State private var pending: Task<Void, Never>?
+    @State private var escape = EscapeWhileOpen()
+
+    private var contentWidth: CGFloat {
+        naturalWidth > 0 ? min(naturalWidth.rounded(.up), Self.popoverWidth) : Self.popoverWidth
+    }
 
     var body: some View {
-        Button { showing.toggle() } label: {
+        Button {
+            // A click on a popover the pointer opened keeps it (it is pinned then); otherwise it toggles.
+            if showing, openedByHover { openedByHover = false } else { showing.toggle() }
+        } label: {
             Image(systemName: "questionmark.circle")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(hovering || showing ? Tone.ink.opacity(0.7) : Tone.secondary.opacity(0.75))
@@ -875,17 +901,116 @@ struct HelpHint: View {
                 .contentShape(Rectangle().inset(by: -4))
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(text)
+        .onHover { inside in
+            hovering = inside
+            pointerMoved()
+        }
+        .modifier(HelpHintTooltip(text: text, enabled: !opensOnHover))
         .accessibilityLabel(Self.accessibilityName)
         .accessibilityHint(text)
+        .background(alignment: .leading) {
+            Text(text)
+                .font(.ui(11.5))
+                .fixedSize()
+                .hidden()
+                .accessibilityHidden(true)
+                .background(GeometryReader { Color.clear.preference(key: HelpHintWidthKey.self, value: $0.size.width) })
+        }
+        .onPreferenceChange(HelpHintWidthKey.self) { naturalWidth = $0 }
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             Text(text)
                 .font(.ui(11.5))
                 .foregroundStyle(Tone.ink)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: Self.popoverWidth, alignment: .leading)
-                .padding(12)
+                .frame(width: contentWidth, alignment: .leading)
+                .padding(Self.popoverPadding)
+                .onHover { inside in
+                    overPopover = inside
+                    pointerMoved()
+                }
+        }
+        .onChange(of: showing) { _, open in
+            if open {
+                // The popover is not the key window, so Esc would reach the window behind it (a
+                // sheet's Cancel). While one is open Esc closes it, and nothing else.
+                escape.install { showing = false }
+            } else {
+                escape.remove()
+                openedByHover = false
+            }
+        }
+        .onDisappear {
+            pending?.cancel()
+            escape.remove()
+        }
+    }
+
+    /// A hover opens the popover once the pointer has rested, and closes one that a hover opened once
+    /// the pointer has left both the icon and the popover for a moment. Each change of the pointer
+    /// replaces what was waiting, so moving between the icon and the popover does not flicker.
+    private func pointerMoved() {
+        guard opensOnHover else { return }
+        pending?.cancel()
+        pending = Task { @MainActor in
+            if hovering, !showing {
+                try? await Task.sleep(for: Self.hoverDelay)
+                guard !Task.isCancelled, hovering else { return }
+                openedByHover = true
+                showing = true
+            } else if !hovering, !overPopover, showing, openedByHover {
+                try? await Task.sleep(for: Self.hoverGrace)
+                guard !Task.isCancelled, !hovering, !overPopover else { return }
+                showing = false
+            }
+        }
+    }
+}
+
+/// The tooltip is for the pointer that rests on the icon. A popover that opens by itself says the
+/// same thing, so one that does is not also given a tooltip.
+private struct HelpHintTooltip: ViewModifier {
+    let text: String
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled { content.help(text) } else { content }
+    }
+}
+
+private struct HelpHintWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Esc, while a help popover is open: a local key monitor that closes it and swallows the key. It
+/// exists only while the popover does, so Esc does what it always did when none is open.
+final class EscapeWhileOpen {
+    /// How many monitors are installed right now, for a test: it is one while a popover is open.
+    nonisolated(unsafe) static var installed = 0
+
+    private var token: Any?
+
+    func install(close: @escaping () -> Void) {
+        remove()
+        Self.installed += 1
+        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53 else { return event }
+            close()
+            return nil
+        }
+    }
+
+    func remove() {
+        guard let token else { return }
+        NSEvent.removeMonitor(token)
+        self.token = nil
+        Self.installed -= 1
+    }
+
+    deinit {
+        if let token {
+            NSEvent.removeMonitor(token)
+            Self.installed -= 1
         }
     }
 }

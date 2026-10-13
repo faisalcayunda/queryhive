@@ -130,20 +130,32 @@ final class ConnectionFormIssuesTests: XCTestCase {
     func testTheSummaryTellsThePaneInViewFirstAndPointsToTheOthers() {
         let all: [ConnectionField] = [.host, .sshHost, .timeout]
         XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .general),
-                       "Host is required. Also see SSH Tunnel and Limits.")
+                       "Host is required. Also: SSH Tunnel and Limits.")
         XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .sshTunnel),
-                       "SSH host is required. Also see General and Limits.")
+                       "SSH host is required. Also: General and Limits.")
         XCTAssertEqual(ConnectionFormIssues.summary(all, visible: .limits),
-                       "Check Statement timeout (0-600 seconds). Also see General and SSH Tunnel.")
+                       "Check Statement timeout (0-600 seconds). Also: General and SSH Tunnel.")
     }
 
-    func testAnotherPanesProblemsLeadWithItsName() {
+    func testAnotherPanesProblemsComeFirstWhenTheVisibleOneHasNone() {
         XCTAssertEqual(ConnectionFormIssues.summary([.sshHost, .sshUser], visible: .general),
-                       "SSH Tunnel: SSH host and SSH user are required.")
+                       "SSH host and SSH user are required.")
         XCTAssertEqual(ConnectionFormIssues.summary([.timeout], visible: .appearance),
-                       "Limits: Check Statement timeout (0-600 seconds).")
+                       "Check Statement timeout (0-600 seconds).")
         XCTAssertEqual(ConnectionFormIssues.summary([.sshHost, .timeout], visible: .appearance),
-                       "SSH Tunnel: SSH host is required. Also see Limits.")
+                       "SSH host is required. Also: Limits.")
+    }
+
+    func testTheCommonWorstCaseFitsTwoLinesInTheFooter() {
+        // A new PostgreSQL connection whose tunnel is on and whose timeout is wrong, seen from each pane:
+        // about 70 characters is what two lines hold between the footer's buttons.
+        let all: [ConnectionField] = [.name, .host, .user, .database, .sshHost, .sshUser, .timeout]
+        for section in ConnectionFormSection.allCases {
+            let text = ConnectionFormIssues.summary(all, visible: section)
+            XCTAssertLessThanOrEqual(text.count, 90, "\(section): \(text)")
+        }
+        let newPostgres: [ConnectionField] = [.name, .host, .user, .database, .sshHost]
+        XCTAssertLessThanOrEqual(ConnectionFormIssues.summary(newPostgres, visible: .limits).count, 72)
     }
 
     func testTheSummaryIsEmptyWhenNothingIsWrong() {

@@ -21,7 +21,7 @@ struct ConnectionCard<Content: View>: View {
             if let title {
                 HStack(spacing: 6) {
                     SectionLabel(text: title)
-                    if let detail { HelpHint(text: detail) }
+                    if let detail { HelpHint(text: detail, opensOnHover: true) }
                 }
             }
             VStack(alignment: .leading, spacing: 0) { content }
@@ -64,7 +64,7 @@ struct ConnectionFormRow<Control: View>: View {
                     .help(label)
                     .accessibilityHidden(true)
                 if let hint {
-                    HelpHint(text: hint)
+                    HelpHint(text: hint, opensOnHover: true)
                         .background(FrameMarker(name: "connection-hint"))
                 }
             }
@@ -95,9 +95,18 @@ extension View {
 /// when it is not one the menu offers, and is never empty. The glyph is decoration: the title and
 /// the spoken value carry the meaning.
 struct ConnectionEncryptionMenu: View {
+    /// The control is this wide whatever its title says, so the host field beside it is the same
+    /// width for every driver and every stored choice. A title that does not fit is cut, and the
+    /// whole of it is the tooltip.
+    static let width: CGFloat = 184
+
     let current: ConnectionTLSChoice
     let options: [ConnectionTLSChoice]
+    /// Something the choice's own help does not say, for the tooltip and VoiceOver.
+    var extraHelp: String?
     let onSelect: (ConnectionTLSChoice) -> Void
+
+    private var help: String { [current.help, extraHelp].compactMap { $0 }.joined(separator: " ") }
 
     var body: some View {
         Menu {
@@ -124,7 +133,7 @@ struct ConnectionEncryptionMenu: View {
                     .accessibilityHidden(true)
             }
             .padding(.horizontal, 10)
-            .frame(minWidth: 168, minHeight: 30)
+            .frame(width: Self.width, height: 30)
             .background(Tone.recess.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Tone.ink.opacity(0.1)))
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -133,9 +142,10 @@ struct ConnectionEncryptionMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(current.help)
+        .help(help)
         .accessibilityLabel("Encryption")
         .accessibilityValue(current.spokenDescription)
+        .accessibilityHint(help)
         .background(FrameMarker(name: "connection-encryption"))
     }
 }
@@ -290,12 +300,18 @@ struct ConnectionFormFooter: View {
                     .keyboardShortcut(SheetShortcut.testConnection.keyboard)
                     .help("Test Connection (\(SheetShortcut.testConnection.display))")
             }
-            if !isTesting { statusLine }
-
-            Spacer()
+            // The status has all the room between Test and Cancel, so a summary wraps at the width that
+            // is there and not at what a spacer left it. Empty while a test runs.
+            ZStack(alignment: .leading) {
+                // Takes the room even when there is nothing to say, which keeps the buttons where they are.
+                Color.clear.frame(height: 1)
+                if !isTesting { statusLine }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             PillButton(title: "Cancel", role: .quiet, action: onCancel)
                 .keyboardShortcut(.cancelAction)
+                .background(FrameMarker(name: "connection-footer-cancel"))
             HubButton(title: "Save", symbol: "checkmark", hue: .connection, action: onSave)
                 .disabled(!canSave)
                 .keyboardShortcut(.defaultAction)
@@ -388,7 +404,8 @@ extension ConnectionEditorSheet {
             // concerns.
             ConnectionCard(title: "Server", detail: urlNote) { serverRows }
             ConnectionCard(title: "Authentication") { authenticationRows }
-            ConnectionCard(title: "More") { moreRows }
+            // MySQL has no schema level and no CA setting, so it has nothing to put here.
+            if draft.kind != .mysql { ConnectionCard(title: "More") { moreRows } }
         }
     }
 
@@ -414,6 +431,7 @@ extension ConnectionEditorSheet {
                 ConnectionEncryptionMenu(current: draft.tls,
                                          options: ConnectionTLSChoice.options(kind: draft.kind, caFile: draft.caFile,
                                                                               dbAuth: draft.dbAuth),
+                                         extraHelp: draft.kind == .mysql ? Self.mysqlCAHelp : nil,
                                          onSelect: { draft.setTLS($0) })
             }
             requiredHint("host")
@@ -502,13 +520,10 @@ extension ConnectionEditorSheet {
         return notes
     }
 
-    /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store.
+    /// PostgreSQL and Trino: a CA bundle trusted instead of the platform store. MySQL has no row: the
+    /// fact that it has no CA setting is the encryption control's help (`mysqlCAHelp`).
     @ViewBuilder private var caRow: some View {
-        if draft.kind == .mysql {
-            ConnectionFormRow(label: "CA certificate",
-                              hint: "MySQL can't check a certificate against a CA file of your own in this build, "
-                                    + "so there is no CA setting for it.") { EmptyView() }
-        } else {
+        if draft.kind != .mysql {
             ConnectionFormRow(label: "CA certificate", hint: Self.caHint) {
                 HStack(spacing: 8) {
                     TextField("Use the system trust store", text: caFileBinding)
@@ -524,6 +539,8 @@ extension ConnectionEditorSheet {
         }
     }
 
+    private static let mysqlCAHelp = "MySQL can't check a certificate against a CA file of your own in this build, "
+        + "so there is no CA setting for it."
     private static let caHint = "The server certificate is checked against this file only, and its name must match. "
         + "For an IP address the certificate needs an IP SAN."
     private static let jwtHint = "JWT is sent only over HTTPS. The token is stored in your Keychain, and a blank field keeps the one saved."
