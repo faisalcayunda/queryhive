@@ -36,10 +36,13 @@ enum CompletionTrigger {
     /// Keywords after which a column or an expression is.
     static let columnKeywords: Set<String> = ["where", "on", "and", "or", "by", "having", "set"]
 
-    static func site(in text: NSString, caret: Int, dialect: EditorDialect,
-                     hyphens: Bool = false) -> CompletionSite? {
+    /// `state` is the scan of the text up to the caret when the caller has it already: the scan is
+    /// a pass over everything before the caret, and a caller asking for two readings of one word
+    /// should not pay for it twice.
+    static func site(in text: NSString, caret: Int, dialect: EditorDialect, hyphens: Bool = false,
+                     state known: SQLCaretState? = nil) -> CompletionSite? {
         guard caret <= text.length else { return nil }
-        let state = SQLCaretState.scan(text, upTo: caret, dialect: dialect)
+        let state = known ?? SQLCaretState.scan(text, upTo: caret, dialect: dialect)
         var open: Int?
         switch state.context {
         case .text: return nil

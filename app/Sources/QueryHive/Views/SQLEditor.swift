@@ -1762,9 +1762,12 @@ struct SQLEditor: NSViewRepresentable {
             let text = nsText
             let caret = textView.selectedRange().location
             var sites: [CompletionSite] = []
+            guard caret <= text.length else { return }
+            let state = SQLCaretState.scan(text, upTo: caret, dialect: parent.dialect)
             if let joined = CompletionTrigger.site(in: text, caret: caret, dialect: parent.dialect,
-                                                   hyphens: true) { sites.append(joined) }
-            if let plain = CompletionTrigger.site(in: text, caret: caret, dialect: parent.dialect),
+                                                   hyphens: true, state: state) { sites.append(joined) }
+            if let plain = CompletionTrigger.site(in: text, caret: caret, dialect: parent.dialect,
+                                                  state: state),
                plain != sites.first { sites.append(plain) }
             // Nothing to complete in a string or a comment: the user is not writing code there.
             guard !sites.isEmpty else {
