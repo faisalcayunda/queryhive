@@ -30,7 +30,7 @@ final class ConnectionTLSChoiceTests: XCTestCase {
 
     func testAnOptionListMatchesTheDriversOwnModeList() {
         for kind in [ConnectionKind.postgres, .mysql] {
-            XCTAssertEqual(ConnectionTLSChoice.options(kind: kind, caFile: "").map(\.title), kind.sslModes)
+            XCTAssertEqual(ConnectionTLSChoice.options(kind: kind, caFile: "").compactMap(\.modeWord), kind.sslModes)
         }
     }
 
@@ -49,12 +49,25 @@ final class ConnectionTLSChoiceTests: XCTestCase {
 
     func testTheCAChoicesAreAlwaysAmongTheOptions() {
         // Setting a CA moves the draft to a verifying mode (`ConnectionDraft.setCAFile`), and that
-        // mode is one the menu then still offers.
-        for kind in [ConnectionKind.trino, .postgres] {
-            var d = draft(kind)
-            d.setCAFile("/ca.pem")
-            XCTAssertTrue(ConnectionTLSChoice.options(kind: kind, caFile: d.caFile).contains(d.tls), "\(kind)")
-        }
+        // mode is one the menu then still offers. Started from modes that do not verify, so the
+        // move is something that happened.
+        var trino = draft(.trino)
+        trino.setTLS(.trinoPrefer)
+        XCTAssertEqual(trino.tls, .trinoPrefer)
+        trino.setCAFile("/ca.pem")
+        XCTAssertEqual(trino.tls, .trinoHTTPSVerified)
+        XCTAssertTrue(ConnectionTLSChoice.options(kind: .trino, caFile: trino.caFile).contains(trino.tls))
+        var http = draft(.trino)
+        http.setTLS(.trinoHTTP)
+        http.verifyTLS = false
+        http.setCAFile("/ca.pem")
+        XCTAssertEqual(http.tls, .trinoHTTPSVerified)
+        var pg = draft(.postgres)
+        pg.setTLS(.sslmode("disable"))
+        pg.verifyTLS = false
+        pg.setCAFile("/ca.pem")
+        XCTAssertEqual(pg.tls, .sslmode("verify-full"))
+        XCTAssertTrue(ConnectionTLSChoice.options(kind: .postgres, caFile: pg.caFile).contains(pg.tls))
     }
 
     // MARK: Reading what is stored
@@ -92,7 +105,7 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertEqual(postgres, .sslmodeUnverified("verify-full"))
         XCTAssertEqual(postgres.title, "verify-full · unverified")
         XCTAssertEqual(postgres.glyph, "lock")
-        XCTAssertTrue(postgres.spokenDescription.contains("not checked"))
+        XCTAssertTrue(postgres.spokenDescription.contains("not verified"))
         // A blank mode is the driver's default and reads the same way: nothing is normalised.
         XCTAssertEqual(ConnectionTLSChoice(kind: .postgres, scheme: "", verify: false, sslmode: "").title, "prefer · unverified")
         // `disable` has nothing to verify, and the engine ignores the flag for it.
@@ -156,12 +169,14 @@ final class ConnectionTLSChoiceTests: XCTestCase {
         XCTAssertEqual(d.port, 8080, "prefer moves no port")
     }
 
-    func testAModeWordWritesOnlyTheSSLMode() {
-        var d = draft(.postgres)
+    func testAModeWordWritesTheSSLModeAndTurnsVerifyOnAndNothingElse() {
+        var d = draft(.postgres) { $0.verifyTLS = false }
         let before = d
         d.setTLS(.sslmode("verify-ca"))
         XCTAssertEqual(d.sslmode, "verify-ca")
+        XCTAssertTrue(d.verifyTLS)
         d.sslmode = before.sslmode
+        d.verifyTLS = before.verifyTLS
         XCTAssertEqual(d, before)
     }
 
@@ -202,7 +217,7 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                 var d = draft(kind)
                 d.setTLS(choice)
                 let env = environment(d)
-                XCTAssertEqual(env["DB_SSLMODE"], choice.title, "\(kind) \(choice)")
+                XCTAssertEqual(env["DB_SSLMODE"], choice.modeWord, "\(kind) \(choice)")
                 XCTAssertEqual(env["DB_SCHEME"], "", "\(kind) has no scheme")
                 XCTAssertEqual(env["DB_INSECURE"], "", "\(kind) never sends the Trino verify flag unless it is off")
             }
@@ -219,13 +234,33 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                     let env = environment(d)
                     XCTAssertEqual(env["DB_SSLMODE"], word, "\(kind) \(word) \(verify)")
                     XCTAssertEqual(env["DB_INSECURE"], verify ? "" : "1", "\(kind) \(word) verify \(verify)")
-                    XCTAssertEqual(d.tls.title, verify ? word : "\(word) · unverified", "\(kind) \(word) \(verify)")
+                    // The engine never checks `prefer` or `require`, so they always say so; the verify
+                    // words say it only when `verify` is off.
+                    let checks = word.hasPrefix("verify") && verify
+                    XCTAssertEqual(d.tls.title, checks ? word : "\(word) · unverified", "\(kind) \(word) \(verify)")
                     // Choosing the word from the menu always leaves the connection verified.
                     d.setTLS(.sslmode(word))
                     XCTAssertEqual(environment(d)["DB_INSECURE"], "", "\(kind) \(word) re-picked")
                 }
             }
         }
+    }
+
+    func testTheTitlesSayUnverifiedExactlyWhereTheEngineWillNotCheck() {
+        let titles = ["disable", "prefer", "require", "verify-ca", "verify-full"].map { ConnectionTLSChoice.sslmode($0).title }
+        XCTAssertEqual(titles, ["disable", "prefer · unverified", "require · unverified", "verify-ca", "verify-full"])
+        XCTAssertEqual(ConnectionTLSChoice.sslmodeUnverified("verify-ca").title, "verify-ca · unverified")
+        XCTAssertEqual(ConnectionTLSChoice.trinoHTTPSVerified.title, "HTTPS · verified")
+        XCTAssertEqual(ConnectionTLSChoice.trinoPrefer.title, "Prefer · unverified")
+    }
+
+    func testTheHelpDoesNotPromiseACheckThatCannotComeBack() {
+        XCTAssertFalse(ConnectionTLSChoice.sslmodeUnverified("require").help.contains("turn the check"))
+        XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("prefer").help.contains("fallback"))
+        XCTAssertTrue(ConnectionTLSChoice.sslmodeUnverified("verify-full").help.contains("turn the check on"))
+        XCTAssertFalse(ConnectionTLSChoice.sslmode("verify-ca").help.contains("not the host name"))
+        XCTAssertTrue(ConnectionTLSChoice.trinoHTTP.help.contains("443"))
+        XCTAssertTrue(ConnectionTLSChoice.trinoHTTP.spokenDescription.contains("HTTPS"))
     }
 
     func testDisableWithVerifyOffStillSendsTheFlagTheEngineIgnoresForIt() {
@@ -240,7 +275,7 @@ final class ConnectionTLSChoiceTests: XCTestCase {
                                     sslmode: "", user: "u", database: "d", schema: "", verify: true)
             let sent = AppModel.connectionEnvironment(stored, secrets: ConnectionSecrets())["DB_SSLMODE"]
             let read = ConnectionTLSChoice(kind: kind, scheme: stored.scheme, verify: stored.verify, sslmode: stored.sslmode)
-            XCTAssertEqual(sent, read.title, "\(kind)")
+            XCTAssertEqual(sent, read.modeWord, "\(kind)")
         }
     }
 

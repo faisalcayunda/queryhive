@@ -160,7 +160,6 @@ struct ConnectionEditorSheet: View {
 
     private var isDirty: Bool { draft.isDirty(against: original) }
 
-
     var resolvedAlias: SSHAliasInfo? {
         if case .success(let info)? = aliasPreview { return info }
         return nil
@@ -403,7 +402,6 @@ struct ConnectionEditorSheet: View {
         step = .form
         if Self.newKindForSnapshot == nil { pendingFocus = .name }
     }
-
 
     private func applyURL() {
         let parsed: ConnectionURL.Parsed

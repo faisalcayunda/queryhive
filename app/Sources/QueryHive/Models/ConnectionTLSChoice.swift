@@ -9,12 +9,24 @@ import Foundation
 /// own SSL mode words, which already carry the verification answer (libpq's `verify-ca` and
 /// `verify-full`); MySQL has no verifying mode, and that is `ConnectionKind.sslModes`' business.
 ///
-/// **`verify` belongs to every driver.** The engine sends `DB_INSECURE` whenever it is off, and a
-/// mode other than `disable` then runs as "encrypt, do not check", `verify-full` included. So the
-/// word alone would sometimes claim a check that does not happen. A stored word with `verify`
-/// off is therefore its own case, `sslmodeUnverified`, which says so; it is read as stored and
-/// never normalised. (Imports write `verify: false` for every driver, which is how such
-/// connections exist.)
+/// **How the engine reads the stored fields**, which is what the titles say (`crates/qh-ffi/src/config.rs`,
+/// `AppModel.connectionEnvironment`):
+///
+/// - PostgreSQL and MySQL: `disable` is clear. `prefer` encrypts when the server offers it, never
+///   checks the certificate, and may fall back to clear when the server answers "no TLS". `require`
+///   always encrypts and never checks. `verify-ca` and `verify-full` always encrypt and check the
+///   certificate chain; the PostgreSQL driver checks the host name in both. MySQL has none of the
+///   verifying words.
+/// - **`verify` belongs to every driver.** The engine sends `DB_INSECURE` whenever it is off, and any
+///   mode other than `disable` then runs as "always encrypt, never check", `verify-full` included,
+///   and `prefer` loses its fallback to clear. A stored word with `verify` off is therefore its own
+///   case, `sslmodeUnverified`. It is read as stored and never normalised. (Imports write
+///   `verify: false` for every driver, which is how such connections exist.)
+/// - So "· unverified" is shown exactly when the engine will not check the certificate: `prefer` and
+///   `require` always, and `verify-ca` or `verify-full` stored with `verify` off. Trino follows the
+///   same rule: HTTPS with `verify` off and Prefer say so; HTTP has nothing to verify, but is not
+///   always clear, because a password or port 443 or 8443 raises it to HTTPS (with the stored
+///   `verify`), which its description says.
 enum ConnectionTLSChoice: Hashable, Identifiable {
     case trinoHTTPSVerified
     case trinoHTTPSUnverified
@@ -49,15 +61,28 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
         self.init(kind: draft.kind, scheme: draft.scheme, verify: draft.verifyTLS, sslmode: draft.sslmode)
     }
 
-    /// What the menu shows. Trino's are QueryHive's own wording; the others are the mode word.
+    /// What the menu shows. Trino's are QueryHive's own wording; the others are the mode word, with
+    /// "· unverified" wherever the engine will not check the certificate.
     var title: String {
         switch self {
         case .trinoHTTPSVerified: "HTTPS · verified"
         case .trinoHTTPSUnverified: "HTTPS · unverified"
         case .trinoPrefer: "Prefer · unverified"
         case .trinoHTTP: "HTTP"
-        case .sslmode(let word): word
+        case .sslmode(let word):
+            switch word {
+            case "prefer", "require": "\(word) · unverified"
+            default: word
+            }
         case .sslmodeUnverified(let word): "\(word) · unverified"
+        }
+    }
+
+    /// The mode word a PostgreSQL or MySQL choice stands for, as the engine is sent it.
+    var modeWord: String? {
+        switch self {
+        case .sslmode(let word), .sslmodeUnverified(let word): word
+        default: nil
         }
     }
 
@@ -67,18 +92,23 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
         case .trinoHTTPSVerified: "HTTPS, certificate verified"
         case .trinoHTTPSUnverified: "HTTPS, certificate not verified"
         case .trinoPrefer: "Prefer, HTTPS first and plain HTTP as a fallback, certificate not verified"
-        case .trinoHTTP: "HTTP, not encrypted"
+        case .trinoHTTP:
+            "HTTP, not encrypted unless a password is set or the port is 443 or 8443, which raise it to HTTPS"
         case .sslmode(let word):
             switch word {
             case "disable": "Disable, not encrypted"
             case "prefer": "Prefer, encrypted when the server offers it, certificate not verified"
             case "require": "Require, encrypted, certificate not verified"
-            case "verify-ca": "Verify CA, encrypted, certificate chain verified"
+            case "verify-ca": "Verify CA, encrypted, certificate chain and host name verified"
             case "verify-full": "Verify full, encrypted, certificate chain and host name verified"
             default: word
             }
         case .sslmodeUnverified(let word):
-            "\(word), certificate verification is off, so the certificate is not checked"
+            switch word {
+            case "prefer": "Prefer with certificate verification off, always encrypted, never falls back to clear, certificate not verified"
+            case "require": "Require, encrypted, certificate not verified"
+            default: "\(word) with certificate verification off, encrypted, certificate not verified"
+            }
         }
     }
 
@@ -106,18 +136,25 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
         case .trinoPrefer:
             "Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. The certificate is not checked."
         case .trinoHTTP:
-            "Plain HTTP: nothing to verify. A password still forces HTTPS — pick HTTPS to choose how that is verified."
+            "Plain HTTP: nothing to verify. A password, or port 443 or 8443, still raises it to HTTPS — pick HTTPS to choose how that is verified."
         case .sslmode(let word):
             switch word {
             case "disable": "No encryption."
             case "prefer": "Encrypts when the server offers it, and connects in clear otherwise. The certificate is not checked."
             case "require": "Always encrypts. The certificate is not checked."
-            case "verify-ca": "Always encrypts and checks the certificate chain, not the host name."
+            case "verify-ca": "Always encrypts and checks the certificate chain and the host name."
             case "verify-full": "Always encrypts, checks the certificate chain and that the host name matches."
             default: ""
             }
-        case .sslmodeUnverified:
-            "Certificate verification is off for this connection, so it encrypts without checking the certificate. Pick the mode again to turn the check back on."
+        case .sslmodeUnverified(let word):
+            switch word {
+            case "prefer":
+                "Certificate verification is off for this connection, so it always encrypts, never falls back to clear, and does not check the certificate. Pick prefer again to allow the fallback."
+            case "require":
+                "Always encrypts. The certificate is not checked."
+            default:
+                "Certificate verification is off for this connection, so it encrypts without checking the certificate. Pick the mode again to turn the check on."
+            }
         }
     }
 
@@ -125,7 +162,7 @@ enum ConnectionTLSChoice: Hashable, Identifiable {
     /// that checks the certificate, so while one is set the others are not offered (blueprint
     /// 9.1). MySQL has no CA setting and no verifying mode, so a path there changes nothing.
     static func options(kind: ConnectionKind, caFile: String) -> [ConnectionTLSChoice] {
-        let hasCA = !caFile.trimmingCharacters(in: .whitespaces).isEmpty
+        let hasCA = !caFile.trimmingCharacters(in: .whitespaces).isEmpty  // as `ConnectionDraft.hasCA`
         switch kind {
         case .trino:
             return hasCA ? [.trinoHTTPSVerified]
@@ -143,9 +180,12 @@ extension ConnectionDraft {
     /// How the form currently encrypts, read from its stored fields.
     var tls: ConnectionTLSChoice { ConnectionTLSChoice(self) }
 
-    /// Writes a choice into the stored fields and nothing else. Every PostgreSQL and MySQL mode
-    /// turns verification on (`verify` is the engine's insecure switch for them too); only the
-    /// "unverified" case, which is a stored combination and not a menu option, writes it off.
+    /// Writes a choice into the stored fields and nothing else. A PostgreSQL or MySQL mode picked
+    /// from the menu also writes `verify = true`, because `verify` is the engine's insecure switch
+    /// for them too and a pick is the person's whole answer. What that changes depends on the mode:
+    /// for `prefer` it allows the fallback to clear again, for `require` nothing, and for
+    /// `verify-ca` and `verify-full` it is what makes the verification take effect. Only the
+    /// "unverified" case, a stored combination and not a menu option, writes it off.
     ///
     /// The Trino transports go through `setScheme`, so the standard port follows as it does when
     /// the transport is picked today. `verify` is the choice's own for HTTPS and untouched for

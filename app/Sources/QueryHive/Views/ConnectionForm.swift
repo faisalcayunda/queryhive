@@ -336,7 +336,7 @@ extension ConnectionEditorSheet {
             // exact outcome. See `TrinoTransport` for how it reaches the engine.
             ConnectionFormRow(label: "Transport") {
                 Segmented(selection: trinoTransport,
-                          options: draft.caFile.isEmpty ? TrinoTransport.allCases : [.https]) { $0.label }
+                          options: draft.hasCA ? [.https] : TrinoTransport.allCases) { $0.label }
                     .formControl("Transport")
                     .help("HTTPS encrypts and checks the certificate. HTTP is clear. Prefer tries HTTPS "
                           + "first and keeps plain HTTP only for a coordinator that has no TLS at all — "
@@ -416,7 +416,7 @@ extension ConnectionEditorSheet {
             ConnectionFormRow(label: "SSL mode") {
                 // With a CA file chosen only the modes that check the certificate make sense.
                 Segmented(selection: Binding(get: { draft.sslmode }, set: { draft.setTLS(.sslmode($0)) }),
-                          options: draft.kind == .postgres && !draft.caFile.isEmpty ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
+                          options: draft.kind == .postgres && draft.hasCA ? ["verify-ca", "verify-full"] : draft.kind.sslModes) { $0 }
                     .formControl("SSL mode")
             }
         } else {
@@ -434,7 +434,7 @@ extension ConnectionEditorSheet {
                 switch TrinoTransport(stored: draft.scheme) {
                 case .https:
                     ChipToggle(label: "Verify the TLS certificate", isOn: $draft.verifyTLS)
-                        .disabled(!draft.caFile.isEmpty)
+                        .disabled(draft.hasCA)
                 case .prefer:
                     tlsNote("Prefer: HTTPS first, plain HTTP only when the coordinator has no TLS. "
                             + "The certificate is not checked.")

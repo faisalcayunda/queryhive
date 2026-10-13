@@ -174,6 +174,28 @@ final class ConnectionDraftTests: XCTestCase {
         XCTAssertEqual(draft.safeMode, .readOnly, "what the URL does not say is left alone")
     }
 
+    func testAnAppliedURLKeepsItsPortWhateverTheSchemeWasBefore() throws {
+        var draft = ConnectionDraft.new()
+        draft.scheme = "https"
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("http://h:8443/hive")))
+        XCTAssertEqual(draft.scheme, "http")
+        XCTAssertEqual(draft.port, 8443, "the URL's port is what was typed; the scheme does not rewrite it")
+    }
+
+    func testACAInTheDraftOverridesAURLThatAsksForNoEncryption() throws {
+        // The safe direction, shown on the form before anything is saved: a CA means nothing to
+        // `disable` or `http`, so the CA the person chose earlier makes the mode verify.
+        var draft = ConnectionDraft.new()
+        draft.setCAFile("/ca.pem")
+        draft.apply(try XCTUnwrap(try ConnectionURL.parse("postgresql://u@h/db?sslmode=disable")))
+        XCTAssertEqual(draft.sslmode, "verify-full")
+        var trino = ConnectionDraft.new()
+        trino.setCAFile("/ca.pem")
+        trino.apply(try XCTUnwrap(try ConnectionURL.parse("http://h:8080/hive")))
+        XCTAssertEqual(trino.scheme, "https")
+        XCTAssertTrue(trino.verifyTLS)
+    }
+
     func testApplyingAURLKeepsANameAlreadyTyped() throws {
         var draft = ConnectionDraft.new()
         draft.name = "mine"
@@ -244,6 +266,20 @@ final class ConnectionDraftTests: XCTestCase {
         XCTAssertEqual(draft.port, 9000)
     }
 
+    func testABlankSchemeIsHTTPAndFollowsThePortToo() {
+        var draft = ConnectionDraft.new()
+        draft.scheme = ""
+        draft.port = 8080
+        draft.setScheme("https")
+        XCTAssertEqual(draft.port, 8443, "the engine reads a blank scheme as plain HTTP")
+        draft.port = 8443
+        draft.scheme = "ftp"
+        draft.setScheme("https")
+        XCTAssertEqual(draft.port, 8443, "an unknown word is read as HTTP, and HTTP to HTTPS from 8443 moves nothing")
+        draft.setScheme("")
+        XCTAssertEqual(draft.port, 8080, "and a blank one is HTTP going back")
+    }
+
     func testPreferMovesNoPort() {
         var draft = ConnectionDraft.new()
         draft.scheme = "http"
@@ -274,17 +310,66 @@ final class ConnectionDraftTests: XCTestCase {
         XCTAssertTrue(draft.verifyTLS, "but the flag that switches the check off does not")
     }
 
-    func testChangingTheDriverFromAnUnverifiedTrinoStartsTheNewOneVerified() {
+    func testLeavingAnUnverifiedTrinoStartsTheNewDriverVerified() {
         var draft = ConnectionDraft.new()
         draft.verifyTLS = false
         draft.choose(.postgres)
-        XCTAssertTrue(draft.verifyTLS)
+        XCTAssertTrue(draft.verifyTLS, "the flag meant unverified HTTPS, not anything about PostgreSQL")
+        draft = .new()
         draft.verifyTLS = false
         draft.choose(.mysql)
         XCTAssertTrue(draft.verifyTLS)
+        draft = .new()
         draft.verifyTLS = false
         draft.choose(.trino)
-        XCTAssertFalse(draft.verifyTLS, "Trino keeps its own answer")
+        XCTAssertFalse(draft.verifyTLS, "choosing Trino again keeps Trino's own answer")
+    }
+
+    /// What the engine makes of a PostgreSQL or MySQL draft: `crates/qh-ffi/src/config.rs` maps the
+    /// mode word, and `DB_INSECURE` turns any mode but `disable` into one that encrypts and never
+    /// checks. Only `prefer` can fall back to clear (`qh-driver-postgres/src/tls.rs`,
+    /// `qh-driver-mysql/src/tls.rs`).
+    private enum EngineMode { case disable, prefer, require, requireNoVerify }
+
+    private func engineMode(_ draft: ConnectionDraft) -> EngineMode {
+        let env = AppModel.connectionEnvironment(draft.connection(id: id, group: nil), secrets: ConnectionSecrets())
+        let required: EngineMode
+        switch env["DB_SSLMODE"] ?? "" {
+        case "disable": required = .disable
+        case "require": required = .requireNoVerify
+        case "verify-ca", "verify-full": required = .require
+        default: required = .prefer
+        }
+        return env["DB_INSECURE"] == "1" && required != .disable ? .requireNoVerify : required
+    }
+
+    func testPickingTheSameDriverAgainChangesNothingAboutTheModeTheEngineRuns() {
+        // A Navicat import: `prefer` with verify off, which the engine runs as "must encrypt".
+        var draft = ConnectionDraft(Connection(id: id, name: "imp", color: .blue, kind: .postgres, host: "h", port: 5432,
+                                               sslmode: "", user: "u", database: "d", schema: "", verify: false))
+        XCTAssertEqual(engineMode(draft), .requireNoVerify)
+        let before = draft
+        draft.choose(.postgres)
+        XCTAssertEqual(draft, before, "Change Type then the same tile changes nothing")
+        XCTAssertEqual(engineMode(draft), .requireNoVerify, "so it may not become the mode that can connect in clear")
+        XCTAssertNotEqual(engineMode(draft), .prefer)
+    }
+
+    func testMovingBetweenPostgreSQLAndMySQLKeepsTheModeTheEngineRuns() {
+        var draft = ConnectionDraft(Connection(id: id, name: "imp", color: .blue, kind: .postgres, host: "h", port: 5432,
+                                               sslmode: "require", user: "u", database: "d", schema: "", verify: false))
+        draft.choose(.mysql)
+        XCTAssertFalse(draft.verifyTLS)
+        XCTAssertEqual(engineMode(draft), .requireNoVerify)
+    }
+
+    func testLeavingTrinoMovesTheModeToTheNewDriversDefaultNotToASilentlyWeakerOne() {
+        var draft = ConnectionDraft.new()
+        draft.verifyTLS = false
+        draft.choose(.postgres)
+        XCTAssertEqual(draft.verifyTLS, true)
+        XCTAssertEqual(draft.sslmode, "prefer")
+        XCTAssertEqual(engineMode(draft), .prefer, "the documented reset: PostgreSQL's own default, as a new connection has it")
     }
 
     func testATrinoDraftWithACAThenChangeTypeToPostgreSQLIsNotPostgreSQLWithACAAndDisable() {
