@@ -432,3 +432,8 @@ dulu diduga berbeda; yang sudah punya kasus live, jawabannya ada di berkas itu, 
 | OID objek Postgres berbeda | **Bukan regresi** | Penomoran per-cluster: server membagi 1..16383 untuk katalognya sendiri dan mulai dari 16384 untuk objek klien, lalu naik satu tiap objek. `deploy/dev/up.sh` membuang dan membuat ulang container-nya tiap start sehingga seed dijalankan berulang, jadi snapshot yang membekukan angkanya memerah tanpa perubahan engine. Dinormalisasi jadi `<OID>` di kedua normaliser, hanya pada type code dan pada sel yang memang dinamai kolom `OID` |
 | Kata-kata pada pesan error berbeda | **Bukan regresi** | Yang dikontrak adalah *informasi* (pesan, kode, posisi), bukan string identik |
 | MySQL `TIMESTAMP` dikonversi ke zona sesi | **Perbaikan disengaja** (dipertahankan) | Server yang memutuskan; perbedaan dari `DATETIME` harus terlihat, bukan disamarkan |
+
+## Menunggu server nyata: `float_roundtrip` pada Trino (14 Okt 2026)
+
+`serde_json` sekarang memakai fitur `float_roundtrip` di seluruh workspace (W13-T20, perbaikan B-1). Nilai `double` Trino dengan 16 sampai 17 digit signifikan bisa bergeser satu ULP ke nilai yang benar dibanding keluaran golden lama. Belum diukur karena kontainer tidak ada. Saat `live_cases.py` jalan lagi, klasifikasikan setiap selisih Trino `double`/`real` di sini sebagai perbaikan, bukan regresi.
+

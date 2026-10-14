@@ -163,3 +163,10 @@ Badan blueprint tidak diubah. Bila ada beda, ADR ini yang berlaku:
 - `docs/architecture/development-plan.md` §5 (W13-T20) dan §7 (rantai, O-34).
 - `docs/invariants.md` #1, #7, #11.
 - Tugas penerus: W13-T20 langkah 1 sampai 12.
+
+## Catatan implementasi (14 Okt 2026)
+
+- **Keputusan 5 (C-4) menyimpang untuk satu statement.** Probe keberadaan tabel PostgreSQL bukan varian `ProbePg` bertipe tetapi `SELECT to_regclass('<nama ter-escape>')` yang dibangun di `plan.rs` dan tetap dibaca ulang oleh `check_structure` seperti statement nyata lain. Sebabnya driver PostgreSQL hanya mengikat parameter untuk statement tanpa baris hasil, jadi probe berparameter tidak bisa jalan. Nama selalu berkualifikasi skema dan lolos `names::check`, sehingga `search_path` tidak ikut menentukan. Reviewer database menilai ini aman.
+- **Kepercayaan host key sisi tujuan (N-10)** memakai setelan tujuan tanpa prefiks dan perintah `test` biasa, bukan percobaan ulang `to_table` dengan `DEST_SSH_HOST_KEY_ACCEPT`. Kuncinya masuk `known_hosts` aplikasi yang sama dan percobaan ulang tidak menjalankan tulis kedua kali. Dinilai aman oleh dua reviewer.
+- **Sisa risiko yang belum terbukti di server nyata:** `CopyFail` dari tokio-postgres saat sink dilepas, urutan `KILL QUERY` MySQL, binding `Parameter::Bytes` ke `BLOB`/`JSON`, `affected_rows` pada INSERT multi-baris, serta angka yang dicetak MySQL untuk `FLOAT`/`DOUBLE`. Semuanya menunggu langkah 12.
+
