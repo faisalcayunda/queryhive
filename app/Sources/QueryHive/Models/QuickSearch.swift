@@ -79,7 +79,7 @@ enum QuickSearch {
             candidates.append(QuickResult(
                 id: "history:\(entry.id)",
                 action: .loadSQL(entry.sql),
-                title: firstLine(entry.sql),
+                title: oneLine(entry.sql),
                 subtitle: entry.outcome ?? "history",
                 symbol: "clock"))
         }
@@ -100,6 +100,14 @@ enum QuickSearch {
             .sorted { ($0.rank, $0.result.title.count) < ($1.rank, $1.result.title.count) }
             .prefix(limit)
             .map(\.result)
+    }
+
+    /// A statement on one line, its whitespace runs collapsed to single spaces. A history title is
+    /// searched, and a formatted statement spreads its table name over several lines (`SELECT *`
+    /// / `FROM t`), so the first line alone would hide the name.
+    static func oneLine(_ sql: String) -> String {
+        let line = sql.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return line.isEmpty ? "statement" : line
     }
 
     /// The first line of a statement that has anything on it, which is what a one-line row can

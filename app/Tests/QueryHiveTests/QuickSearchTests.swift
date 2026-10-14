@@ -90,6 +90,8 @@ final class QuickSearchTests: XCTestCase {
         XCTAssertEqual(QuickSearch.firstLine("SELECT 1\nFROM people"), "SELECT 1")
         XCTAssertEqual(QuickSearch.firstLine("   \n SELECT 2"), "SELECT 2")
         XCTAssertEqual(QuickSearch.firstLine(""), "statement")
+        XCTAssertEqual(QuickSearch.oneLine("SELECT *\n  FROM prod.orders\n"), "SELECT * FROM prod.orders")
+        XCTAssertEqual(QuickSearch.oneLine(" \n "), "statement")
         XCTAssertEqual(QuickSearch.firstLine("   "), "statement")
     }
 
