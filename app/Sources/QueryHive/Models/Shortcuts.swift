@@ -48,10 +48,11 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
 
     /// False for an action that has a key reserved but nothing to run yet, so no menu item exists
     /// and nothing may claim to bind it. `saveFile` is Save in the grid since W10-T3 (it reviews the
-    /// staged changes) and gains the editor's file save in W12-T2; the other two wait for W12-T2.
+    /// staged changes) and gains the editor's file save in W12-T2; `format` is the editor's Format
+    /// SQL (W12-T2, its first slice); `commentLine` still waits for W12-T2.
     var isAvailable: Bool {
         switch self {
-        case .commentLine, .format: false
+        case .commentLine: false
         default: true
         }
     }
@@ -228,6 +229,9 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
         // ⇧⌘Y is Xcode's binding for the bottom area.
         .toggleResultPanel: Shortcut("y", [.command, .shift]),
         .commentLine: Shortcut("/", .command),
+        // ⇧⌘L, TablePro's Format Query key. Not ⌥⌘F: that is the editor's own Replace. Not ⌥⇧F (VS
+        // Code's): without ⌘ or ⌃ it is a key that types a character.
+        .format: Shortcut("l", [.command, .shift]),
     ]
 }
 

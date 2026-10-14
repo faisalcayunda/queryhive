@@ -65,6 +65,8 @@ struct SQLEditor: NSViewRepresentable {
     /// Where the server said the last Run went wrong; underlined while the text is the one that Run
     /// sent. The editor drops it on the first edit, ahead of the model.
     var errorMark: ServerErrorMark? = nil
+    /// Told what Format SQL from the editor's context menu did, so the host can say so.
+    var onFormatted: ((SQLFormat.Outcome) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1720,6 +1722,51 @@ struct SQLEditor: NSViewRepresentable {
             storage.replaceCharacters(in: whole, with: result.text)
             textView.didChangeText()
             findQueryChanged(query)
+        }
+
+        // MARK: Format SQL (W12-T2)
+
+        /// Format the statements the selection touches, or the whole text (`SQLFormat.plan`), as one
+        /// edit of the text view: one undo step, the folds, gutter and colours moved by the same
+        /// storage edit a keystroke goes through, and the model written at once.
+        func formatSQL(options: FormatOptionsWire = SQLFormat.options()) -> SQLFormat.Outcome {
+            guard let textView, let storage = textView.textStorage else { return .nothing }
+            // Composed text is not in the storage yet, so a format now would format around it.
+            guard !textView.hasMarkedText() else {
+                return .refused("Couldn't format while text is being composed. Nothing was changed.")
+            }
+            let outcome = SQLFormat.plan(text: textView.string, selection: textView.selectedRange(),
+                                         dialect: parent.dialect, options: options)
+            guard case let .edit(range, replacement, selection) = outcome,
+                  textView.shouldChangeText(in: range, replacementString: replacement) else { return outcome }
+            // Its own undo step, not part of the typing before it. The keyword pass and the
+            // suggestion list stay out: either would be a second edit or a list nobody asked for.
+            textView.breakUndoCoalescing()
+            isUppercasing = true
+            suppressAutoTrigger = true
+            storage.replaceCharacters(in: range, with: replacement)
+            textView.didChangeText()
+            isUppercasing = false
+            textView.undoManager?.setActionName("Format SQL")
+            textView.breakUndoCoalescing()
+            textView.setSelectedRange(selection)
+            textView.scrollRangeToVisible(selection)
+            flushToModel()
+            return outcome
+        }
+
+        /// The editor's context menu, with Format SQL above AppKit's own items.
+        func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+            let item = NSMenuItem(title: ShortcutAction.format.title, action: #selector(formatFromMenu(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            menu.insertItem(item, at: 0)
+            menu.insertItem(.separator(), at: 1)
+            return menu
+        }
+
+        @objc private func formatFromMenu(_ sender: Any?) {
+            parent.onFormatted?(formatSQL())
         }
 
         // MARK: Folding

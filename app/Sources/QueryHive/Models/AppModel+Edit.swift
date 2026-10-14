@@ -112,6 +112,50 @@ extension AppModel {
         Announcer.post(reason)
     }
 
+    // MARK: Format SQL (W12-T2, blueprint w12 §3.4 and D-6)
+
+    /// Whether Format SQL has something to work on: a query tab with text, and its editor on screen.
+    /// A table opened full-window has no editor mounted, and the edit belongs to the editor, which
+    /// is what makes it one step ⌘Z takes back.
+    func canFormat(_ tab: QueryTab) -> Bool {
+        !tab.isObjects && !panelExpanded && tab.hasSQL
+    }
+
+    /// The editor of the tab in front, where the menu's Format SQL goes. Found by view type in the
+    /// main window, as `focus(.editor)` finds it: the window holds the selected tab's editor only.
+    /// A static hook so a test can hand in an editor of its own.
+    static var frontEditor: @MainActor () -> SQLEditor.Coordinator? = {
+        func find(_ view: NSView) -> SQLTextView? {
+            if let match = view as? SQLTextView { return match }
+            for sub in view.subviews { if let match = find(sub) { return match } }
+            return nil
+        }
+        let textView = (MainWindow.window?.contentView).flatMap(find)
+        return textView?.delegate as? SQLEditor.Coordinator
+    }
+
+    /// Format the selected statements, or the whole query, in the tab's editor.
+    ///
+    /// Through the editor and never by writing `tab.sql`: the editor may hold typing the model has
+    /// not been handed yet, and an outside write registers no undo step. Formatting is text only;
+    /// nothing is sent to a server.
+    @MainActor
+    func formatSQL(in tab: QueryTab) {
+        guard tab === selectedTab, canFormat(tab), let editor = Self.frontEditor() else { return }
+        reportFormat(editor.formatSQL(), in: tab)
+    }
+
+    /// What a format did, said without an alert: the text is unchanged on a refusal, so there is
+    /// nothing to answer. The reason goes to the tab's Log, as every refused edit's does.
+    func reportFormat(_ outcome: SQLFormat.Outcome, in tab: QueryTab) {
+        switch outcome {
+        case .edit: Announcer.post("SQL formatted")
+        case .unchanged: Announcer.post("Already formatted")
+        case .nothing: break
+        case .refused(let reason): refuse(reason, in: tab)
+        }
+    }
+
     // MARK: Save (⌘S, blueprint w10 D-6)
 
     /// Whether ⌘S has something to save: the selected tab holds staged changes and nothing is

@@ -555,7 +555,8 @@ struct EditorPane: View {
                       tab.caret = offset
                       model.run(tab, from: .statement)
                   },
-                  lineCount: lines, dialect: dialect, errorMark: tab.errorMark)
+                  lineCount: lines, dialect: dialect, errorMark: tab.errorMark,
+                  onFormatted: { model.reportFormat($0, in: tab) })
             .editorBox(focused: focused)
             // The tab remembers the dialect it is edited under, so Run, Export and History cut
             // statements the way the editor draws them.

@@ -44,6 +44,7 @@ enum AppMenu {
             spec(.previousTab, .tab),
             // Save replaces the system item, and Add Row sits in the Edit menu (App.swift).
             spec(.saveFile, .save),
+            spec(.format, .edit),
             spec(.addRow, .edit),
         ]
         for position in 1...9 {
@@ -88,6 +89,7 @@ enum AppMenu {
         case .peekCell: NSApp.sendAction(#selector(GridTableView.peekCell(_:)), to: nil, from: nil)
         case .saveFile: model.saveFocused()
         case .addRow: tab.map { model.addRow(in: $0) }
+        case .format: tab.map { model.formatSQL(in: $0) }
         case .toggleRecord:
             guard let tab else { break }
             tab.recordMode.toggle()
@@ -120,6 +122,7 @@ enum AppMenu {
         // moment an edit is staged. `saveFocused` decides what saving means.
         case .saveFile: return model.canSaveFocused
         case .addRow: return tab.map { model.rowEditBlockedReason(for: $0) == nil } ?? false
+        case .format: return tab.map { model.canFormat($0) } ?? false
         default: return true
         }
     }
