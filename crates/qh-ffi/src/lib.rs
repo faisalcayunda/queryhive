@@ -140,6 +140,26 @@ pub use env::{SettingError, Settings};
 pub use events::{Capture, Emitter, JsonLines, StoreEmitter};
 pub use progress::Progress;
 
+/// Which of the two connections of a copy across connections a failure belongs to.
+///
+/// The app turns it into a connection's name, so "the target refused" and "the source
+/// dropped" are never one message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSide {
+    Source,
+    Target,
+}
+
+impl ErrorSide {
+    /// The value of the `side` field of an `error` event.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ErrorSide::Source => "source",
+            ErrorSide::Target => "target",
+        }
+    }
+}
+
 /// Everything a command can fail with.
 ///
 /// The messages are the ones a user sees in the app's error bar, so they carry no
@@ -229,6 +249,16 @@ pub enum CliError {
     /// A defect in this program, including a caught panic.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// A failure that belongs to one side of a copy across connections. Reads like the error
+    /// it wraps everywhere (the same `Display`, warnings, position and host key); only the
+    /// `error` event tells it apart, with `side`. Only the transfer makes one, so every other
+    /// command's errors, and every `match` on them, are as they were.
+    #[error("{inner}")]
+    Sided {
+        side: ErrorSide,
+        inner: Box<CliError>,
+    },
 }
 
 /// What the user is told when the store cannot take the rows.
@@ -253,10 +283,31 @@ fn store_message(error: &qh_result_store::StoreError) -> String {
 }
 
 impl CliError {
+    /// This error, placed on one side of a copy across connections.
+    pub fn on(side: ErrorSide, inner: CliError) -> Self {
+        match inner {
+            // Already placed: the first placement is the one nearest the cause.
+            placed @ CliError::Sided { .. } => placed,
+            inner => CliError::Sided {
+                side,
+                inner: Box::new(inner),
+            },
+        }
+    }
+
+    /// The side of a copy this belongs to, when it was placed on one.
+    pub fn side(&self) -> Option<ErrorSide> {
+        match self {
+            CliError::Sided { side, .. } => Some(*side),
+            _ => None,
+        }
+    }
+
     /// What the error event must also report, if anything.
     pub fn warnings(&self) -> &[String] {
         match self {
             CliError::Warned { warnings, .. } => warnings,
+            CliError::Sided { inner, .. } => inner.warnings(),
             _ => &[],
         }
     }
@@ -265,6 +316,7 @@ impl CliError {
     pub fn position(&self) -> Option<u32> {
         match self {
             CliError::QueryAt { position, .. } => Some(*position),
+            CliError::Sided { inner, .. } => inner.position(),
             _ => None,
         }
     }
@@ -273,6 +325,7 @@ impl CliError {
     pub fn host_key(&self) -> Option<&qh_core::HostKeyFailure> {
         match self {
             CliError::HostKey(failure) => Some(failure),
+            CliError::Sided { inner, .. } => inner.host_key(),
             _ => None,
         }
     }
@@ -281,6 +334,7 @@ impl CliError {
     pub fn message(&self) -> String {
         match self {
             CliError::Warned { message, .. } => message.clone(),
+            CliError::Sided { inner, .. } => inner.message(),
             other => other.to_string(),
         }
     }

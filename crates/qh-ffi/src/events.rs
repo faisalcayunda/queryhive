@@ -150,6 +150,12 @@ fn event_object() -> Event {
 /// unchanged. `explain` is not asked for it, because the drivers wrap the caller's text there.
 pub fn error_event(error: &CliError, settings: &Settings) -> Json {
     let warnings = error.warnings();
+    // The host key detail is asked for per side: `SSH_HOST_KEY_DETAIL` for the connection that
+    // has no prefix, `DEST_SSH_HOST_KEY_DETAIL` for the target of a copy across connections.
+    let detail_key = match error.side() {
+        Some(crate::ErrorSide::Target) => "DEST_SSH_HOST_KEY_DETAIL",
+        _ => "SSH_HOST_KEY_DETAIL",
+    };
     event("error")
         .field("message", error.message())
         .maybe(
@@ -167,9 +173,10 @@ pub fn error_event(error: &CliError, settings: &Settings) -> Json {
             "host_key",
             error
                 .host_key()
-                .filter(|_| settings.flag("SSH_HOST_KEY_DETAIL", false))
+                .filter(|_| settings.flag(detail_key, false))
                 .map(host_key_object),
         )
+        .maybe("side", error.side().map(crate::ErrorSide::as_str))
         .build()
 }
 

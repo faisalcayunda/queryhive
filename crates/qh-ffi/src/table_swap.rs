@@ -138,7 +138,7 @@ impl Replacement {
 }
 
 /// Unique enough for one process and one moment: the clock and a counter, in hex.
-fn scratch_stamp() -> String {
+pub(crate) fn scratch_stamp() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = std::time::SystemTime::now()
@@ -178,7 +178,7 @@ fn counts_a_table(value: &Value) -> bool {
 }
 
 /// Read one statement to its end, returning the server's affected-row count.
-async fn finish_statement(
+pub(crate) async fn finish_statement(
     session: &mut Box<dyn Session>,
     sql: &str,
     timeout: Option<Duration>,

@@ -563,6 +563,12 @@ def run_case(case: LiveCase) -> tuple[int, str, str]:
         if key in os.environ
     }
     env.update(case.env_map())
+    # Any `DEST_` key, blank or not, makes `to_table` a copy to another connection instead of
+    # the `CREATE TABLE AS` the golden snapshots froze (W13-T20, N-9). The environment above
+    # is a whitelist, so none is inherited; this keeps a case from setting one by accident and
+    # states the rule where the next person adding a variable to the whitelist will read it.
+    for key in [key for key in env if key.startswith("DEST_")]:
+        del env[key]
     # The engine logs every Safe Mode decision to `DB_PATH`, or to the owner's own database
     # when none is named. A harness run is never an owner decision, so it always gets a
     # throwaway one (set after the case's settings: no case may point it elsewhere).

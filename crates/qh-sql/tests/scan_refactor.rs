@@ -889,7 +889,12 @@ fn add_surface(digest: &mut Digest, sql: &str) {
 /// `#` comment cannot swallow it. Checked: with that one suffix mapped back to `) AS
 /// queryhive_count` inside `add_surface`, the digest is still the previous constant
 /// (`0x6e16_c1bd_0d82_fdfb`), so no decision, split, classification or strip moved.
-const SURFACE_DIGEST: u64 = 0x2b8a_cad1_87f1_be0d;
+///
+/// It was retaken once more on 14 Oct 2026 for `live_cases.py` alone (W13-T20: the harness drops
+/// any `DEST_` key from a case's environment, seven lines of Python and a comment, no SQL).
+/// `qh-sql`'s sources are untouched, and `payloads_and_repository_sql_scan_identically` finds the
+/// frozen scanner agreeing on the new text of the file.
+const SURFACE_DIGEST: u64 = 0xceee_72eb_320c_42ac;
 
 #[test]
 fn the_safe_mode_surface_is_unchanged() {

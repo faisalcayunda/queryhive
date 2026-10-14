@@ -237,6 +237,45 @@ fn to_table_is_refused_by_name_even_when_it_is_not_in_scope() {
 }
 
 #[test]
+fn a_copy_to_another_connection_cannot_be_asked_for_over_mcp() {
+    // `DEST_*` is the engine's own second-connection setting. A client that sends it as a tool
+    // argument does not get a transfer: `to_table` is refused by name before any argument is
+    // read, and no other tool turns an argument into a setting it was not built to take.
+    let server = Server::new(full_token(), Vec::new());
+    let result = call(
+        &server,
+        &runtime(),
+        "to_table",
+        json!({
+            "connection": "x",
+            "sql": "select 1",
+            "DEST_DB_KIND": "postgres",
+            "DEST_DB_HOST": "elsewhere.invalid",
+            "DEST_SAFE_MODE": "full",
+        }),
+    );
+    assert_eq!(result["result"]["isError"], json!(true));
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(text.contains("not available over MCP"), "{text}");
+    assert!(!text.contains("elsewhere.invalid"), "{text}");
+
+    // And the read tools never read it: the call fails on its connection, not on a copy.
+    let result = call(
+        &server,
+        &runtime(),
+        "preview",
+        json!({"connection": "x", "sql": "select 1", "DEST_DB_KIND": "postgres"}),
+    );
+    assert_eq!(result["result"]["isError"], json!(true));
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    assert!(!text.contains("DEST_"), "{text}");
+}
+
+#[test]
 fn a_missing_tool_argument_is_a_readable_tool_error() {
     let server = Server::new(full_token(), Vec::new());
     let result = call(&server, &runtime(), "preview", json!({"connection": "x"}));

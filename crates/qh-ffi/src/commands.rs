@@ -167,7 +167,7 @@ pub(crate) fn safe_mode(settings: &Settings, engine: &dyn Engine) -> Result<Safe
 }
 
 /// Parse one Safe Mode value, refusing an unknown spelling by the setting's own name.
-fn parse_safe_mode(raw: &str, key: &str) -> Result<SafeMode, CliError> {
+pub(crate) fn parse_safe_mode(raw: &str, key: &str) -> Result<SafeMode, CliError> {
     if raw.trim().is_empty() {
         return Ok(SafeMode::Full);
     }
@@ -321,7 +321,7 @@ const REQUIRE_READ_REASON: &str =
 /// guard and was then refused here would leave a log that claims a write ran. The refusal is
 /// recorded under the connection's own mode, not `read_only`, because that is the mode the run
 /// was under, and with the sentence of this check, because the mode would not have refused it.
-fn require_read(
+pub(crate) fn require_read(
     settings: &Settings,
     mode: SafeMode,
     sql: &str,
@@ -410,8 +410,28 @@ pub(crate) fn guard_destructive(
     engine: &dyn Engine,
     statement: &str,
 ) -> Result<(), CliError> {
-    let kind = qh_sql::classify_readings(statement, dialect(settings).readings());
     let mode = destructive_mode(settings, engine)?;
+    guard_destructive_mode(
+        mode,
+        safe_mode_confirmed(settings),
+        dialect(settings),
+        statement,
+    )
+}
+
+/// [`guard_destructive`] for a caller that has already decided the mode (see
+/// [`destructive_mode_of`]): the same decision, the same sentence and the same log row.
+///
+/// The cross-connection transfer asks it of its **destination**, whose floor it builds from
+/// two sources of its own (`DEST_SAFE_MODE_FLOOR` and the top-level `SAFE_MODE_FLOOR`), so it
+/// cannot go through `Settings`.
+pub(crate) fn guard_destructive_mode(
+    mode: SafeMode,
+    confirmed: bool,
+    dialect: Dialect,
+    statement: &str,
+) -> Result<(), CliError> {
+    let kind = qh_sql::classify_readings(statement, dialect.readings());
     let (decision, reason) = match mode {
         SafeMode::Full => (Decision::Allow, None),
         // Both refusals reuse the classifier's sentence, so a `no_ddl` connection is told
@@ -419,15 +439,7 @@ pub(crate) fn guard_destructive(
         SafeMode::NoDdl | SafeMode::ReadOnly => (Decision::Refuse, mode.refusal(kind)),
         SafeMode::Confirm => (Decision::Confirm, Some(DESTRUCTIVE_CONFIRM_REASON)),
     };
-    if let Some(error) = record_decision(
-        mode,
-        safe_mode_confirmed(settings),
-        1,
-        kind,
-        statement,
-        decision,
-        reason,
-    )? {
+    if let Some(error) = record_decision(mode, confirmed, 1, kind, statement, decision, reason)? {
         return Err(CliError::Usage(error.to_string()));
     }
     Ok(())
@@ -444,19 +456,24 @@ pub(crate) fn guard_destructive(
 /// therefore only ever be stricter than the user's own choice, which is what ADR-0026
 /// promises.
 fn destructive_mode(settings: &Settings, engine: &dyn Engine) -> Result<SafeMode, CliError> {
-    let floor = safe_mode_floor(settings, engine)?;
+    Ok(destructive_mode_of(&safe_mode_floor(settings, engine)?))
+}
+
+/// [`destructive_mode`] over a floor already built: pure, so the transfer can read the entries
+/// of its destination's two floors (W13-T20 B-1) without going through `Settings`.
+pub(crate) fn destructive_mode_of(floor: &SafeModeFloor) -> SafeMode {
     let forbids_ddl = floor
         .iter()
         .filter(|(_, mode)| matches!(mode, SafeMode::NoDdl | SafeMode::ReadOnly))
         .map(|(_, mode)| mode)
         .max_by_key(|mode| mode.strictness());
     if let Some(mode) = forbids_ddl {
-        return Ok(mode);
+        return mode;
     }
     if floor.iter().any(|(_, mode)| mode == SafeMode::Confirm) {
-        return Ok(SafeMode::Confirm);
+        return SafeMode::Confirm;
     }
-    Ok(SafeMode::Full)
+    SafeMode::Full
 }
 
 /// Record the decision a mode makes about a whole operation, before its own error is raised.
@@ -583,7 +600,7 @@ fn instead_of(kind: DriverKind, levels: &[BrowseLevel]) -> String {
 }
 
 /// SQL, or the contents of `SQL_PATH`; neither being set is a usage error.
-fn source_sql(settings: &Settings) -> Result<String, CliError> {
+pub(crate) fn source_sql(settings: &Settings) -> Result<String, CliError> {
     let sql = settings.raw("SQL", "");
     if !sql.trim().is_empty() {
         return Ok(sql);
@@ -721,7 +738,7 @@ fn optional(value: String) -> Option<String> {
 }
 
 /// A column list as the app's typed headers: `[{"name": ..., "type": ...}]`.
-fn columns_json(columns: &[ColumnMeta]) -> Json {
+pub(crate) fn columns_json(columns: &[ColumnMeta]) -> Json {
     Json::Array(
         columns
             .iter()
@@ -1138,7 +1155,9 @@ async fn pump(
 /// `to_table`: have the server write the query's rows into a table.
 ///
 /// No row crosses this process: the coordinator runs the SELECT and commits the
-/// result, and this process only watches. The three modes are the three statements
+/// result, and this process only watches. (That is the one-connection command. A run with
+/// any `DEST_` setting is a copy to another connection and is [`crate::transfer`]'s: there
+/// the rows do cross this process, and nothing else about this command applies.) The three modes are the three statements
 /// `exporter/to_table.py` builds, and only the parts a driver has a level for are
 /// required — PostgreSQL ignores `TARGET_CATALOG` (the database is the connection),
 /// MySQL ignores `TARGET_SCHEMA` (it has no schema level).
@@ -1162,10 +1181,8 @@ pub async fn to_table(
     let destination = settings
         .destination()
         .map_err(|error| CliError::Usage(error.to_string()))?;
-    if destination.is_some() {
-        return Err(CliError::Usage(
-            "saving a table to another connection is not available in this build".to_owned(),
-        ));
+    if let Some(destination) = destination {
+        return crate::transfer::run(settings, destination, out, engine, cancel).await;
     }
     let sql = source_sql(settings)?;
     let safe = safe_mode(settings, engine)?;
@@ -1603,7 +1620,7 @@ async fn until_stopped<T>(
 /// returns once the coordinator has queued the statement, and only then does the session know
 /// the query id its `cancel` needs; dropping the call earlier would orphan a query nothing
 /// can name. The other drivers cancel by something they already hold, so they pass zero.
-async fn execute_until_stopped(
+pub(crate) async fn execute_until_stopped(
     cancel: &CancelFlag,
     session: &mut Box<dyn Session>,
     policy: &RetryPolicy,
@@ -1629,7 +1646,7 @@ async fn execute_until_stopped(
 /// MySQL needs none: its session publishes the connection id when it connects, the producer
 /// publishes it again when a statement starts, and the id is never cleared, so `KILL QUERY`
 /// always has an id to name.
-fn stop_grace(config: &ConnectionConfig) -> Duration {
+pub(crate) fn stop_grace(config: &ConnectionConfig) -> Duration {
     if config.kind == DriverKind::Trino {
         STOP_BUDGET
     } else {
@@ -1718,7 +1735,7 @@ pub(crate) fn cancel_timeout(ceiling: Duration) -> EngineError {
 /// slow `KILL` connection still completes; only the wait before the caller emits its `done` is
 /// bounded by [`STOP_BUDGET`]. Returns the warning to put on that `done` when the server did
 /// not confirm in time, or the cancel failed.
-async fn stop_session(
+pub(crate) async fn stop_session(
     session: Box<dyn Session>,
     cursor: Option<Box<dyn Cursor>>,
 ) -> Option<String> {

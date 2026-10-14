@@ -193,23 +193,39 @@ async fn append_is_not_offered_across_connections() {
 }
 
 #[tokio::test]
-async fn a_complete_set_is_not_a_ctas_on_the_source_either() {
-    // Until the transfer exists the answer is "not available", and the source is still
-    // untouched. A `DEST_` set must never degrade into the one-connection command.
+async fn a_complete_set_is_a_transfer_and_never_a_ctas_on_the_source() {
+    // The name is the destination kind's own: MySQL has a database, not a schema.
     for mode in [None, Some("create"), Some("replace")] {
         let mut extra = COMPLETE.to_vec();
         if let Some(mode) = mode {
             extra.push(("WRITE_MODE", mode));
         }
-        refused(&extra, "not available").await;
+        refused(&extra, "TARGET_CATALOG").await;
     }
-    // A URL in place of the kind is the other accepted shape.
-    refused(
-        &[
-            ("DEST_DB_URL", "mysql://target.invalid/db"),
-            ("DEST_SAFE_MODE", "confirm"),
-        ],
-        "not available",
-    )
-    .await;
+    // A destination that asks before it writes refuses an unconfirmed create, and a replace.
+    for (mode, mentions) in [("create", "confirm"), ("replace", "replace")] {
+        refused(
+            &[
+                ("DEST_DB_URL", "mysql://target.invalid/db"),
+                ("DEST_SAFE_MODE", "confirm"),
+                ("TARGET_CATALOG", "shop"),
+                ("WRITE_MODE", mode),
+            ],
+            mentions,
+        )
+        .await;
+    }
+    // Complete and allowed, on an engine that cannot open a second connection: an internal
+    // error that names the seam, with the source untouched.
+    let mut extra = COMPLETE.to_vec();
+    extra.push(("TARGET_CATALOG", "shop"));
+    let (result, connects, events) = to_table(&settings(&extra)).await;
+    match result {
+        Err(CliError::Internal(message)) => {
+            assert!(message.contains("for_settings"), "{message}")
+        }
+        other => panic!("expected an internal error naming the seam, got {other:?}"),
+    }
+    assert_eq!(connects, 0, "the source was reached");
+    assert_eq!(events, 1, "only the first step went out");
 }

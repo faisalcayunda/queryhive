@@ -487,8 +487,10 @@ impl qh_driver::CopyIn for FakeCopy {
         Ok(())
     }
 
+    /// The rows a text `COPY` loaded: its lines.
     async fn finish(self: Box<Self>) -> Result<u64, EngineError> {
-        Ok(self.sent.lock().expect("sent").len() as u64)
+        let sent = self.sent.lock().expect("sent");
+        Ok(sent.iter().filter(|byte| **byte == b'\n').count() as u64)
     }
 }
 
@@ -3023,7 +3025,7 @@ async fn a_bulk_copy_goes_through_the_session_wrappers_once() {
         .expect("the wrapper forwards copy_in");
     copy.send(b"1\n".to_vec()).await.expect("send");
     copy.send(b"2\n".to_vec()).await.expect("send");
-    assert_eq!(copy.finish().await.expect("finish"), 4);
+    assert_eq!(copy.finish().await.expect("finish"), 2);
     assert_eq!(world.all_executed(), ["COPY t (a) FROM STDIN"]);
     session.close().await.expect("close");
 
@@ -3038,6 +3040,64 @@ async fn a_bulk_copy_goes_through_the_session_wrappers_once() {
     drop(copy);
     assert_eq!(world.all_executed(), ["COPY t (a) FROM STDIN"]);
     leased.close().await.expect("close");
+}
+
+#[test]
+fn a_transfer_runs_through_the_host_on_two_sessions_of_its_own() {
+    // R-8: the whole command through `EngineHost::with_connector`, so a wrapper that forgot the
+    // new methods (`for_settings`, `copy_in`, `column_types`) fails here and not in the app.
+    let (world, host) = fake_host();
+    let events = run_host(
+        &host,
+        EngineCommand::ToTable,
+        &[
+            ("DB_KIND", "postgres"),
+            ("DB_HOST", "source.invalid"),
+            ("DB_USER", "u"),
+            ("SQL", "SELECT 1"),
+            ("DEST_DB_KIND", "postgres"),
+            ("DEST_DB_HOST", "target.invalid"),
+            ("DEST_DB_USER", "w"),
+            ("DEST_SAFE_MODE", "full"),
+            ("TARGET_SCHEMA", "public"),
+            ("TARGET_TABLE", "t"),
+            ("WRITE_MODE", "replace"),
+        ],
+    );
+    let done = last_event(&events, "done");
+    assert_eq!(done["rows"], 3, "{events:?}");
+    assert_eq!(done["rows_read"], 3);
+    assert_eq!(done["verified"], true);
+    assert_eq!(
+        world.connects(),
+        2,
+        "a session for each connection, none shared"
+    );
+    let executed = world.all_executed();
+    assert!(executed.contains(&"SELECT 1".to_owned()), "{executed:?}");
+    assert!(
+        executed
+            .iter()
+            .any(|sql| sql.starts_with("COPY public.qh_new_")),
+        "{executed:?}"
+    );
+    assert!(executed.contains(&"COMMIT".to_owned()), "{executed:?}");
+    let steps: Vec<&str> = events
+        .iter()
+        .filter(|event| event["event"] == "step")
+        .map(|event| event["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "connect_target",
+            "connect",
+            "prepare",
+            "write",
+            "verify",
+            "swap"
+        ]
+    );
 }
 
 #[tokio::test]

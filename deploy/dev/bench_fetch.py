@@ -239,7 +239,9 @@ def measure(kind: str, sql: str, limit: int, label: str,
 
     # The engine reads the settings below out of the environment, so the table
     # above is the single source of truth for what it connects to.
-    env = dict(os.environ)
+    # Without any `DEST_` key: one of them, even blank, makes `to_table` a copy to another
+    # connection (W13-T20), and a measurement must not depend on the shell it was started from.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("DEST_")}
     env.update(CONNECTIONS[kind])
     env["SQL"] = sql
     env["LIMIT"] = str(limit)
