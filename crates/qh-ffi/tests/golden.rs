@@ -1955,8 +1955,10 @@ async fn a_capped_preview_reports_done_without_waiting_for_the_server_to_stop() 
     let done = events.lines.last().expect("the run always reports its end");
     assert_eq!(done["truncated"], true, "{:?}", events.lines);
     assert!(done.get("warnings").is_none(), "{:?}", events.lines);
+    // The fake's cancel takes 3 s, so anything well under that proves `done` did not wait for
+    // it. A tighter bound measured the CI runner's load, not the behaviour.
     assert!(
-        elapsed < std::time::Duration::from_millis(50),
+        elapsed < std::time::Duration::from_millis(1000),
         "took {elapsed:?}"
     );
     // The stop is still issued, just not waited for.
