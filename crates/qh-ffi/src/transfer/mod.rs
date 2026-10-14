@@ -403,6 +403,8 @@ impl<'a> Dest<'a> {
             self.engine(EngineStatement::StrictMode).await?;
             self.engine(EngineStatement::Utf8mb4).await?;
             self.budget = insert_budget(self.read_max_packet().await);
+        } else {
+            self.engine(EngineStatement::ArrayNulls).await?;
         }
         self.existed = self.probe().await?;
         if self.existed && self.setup.mode == TransferMode::Create {

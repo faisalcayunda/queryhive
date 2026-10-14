@@ -56,10 +56,14 @@ pub enum EngineStatement {
     ByteaOutput,
     /// MySQL: does a table exist? Bound to the database and the table name.
     ProbeMysql,
+    /// PostgreSQL destination: an unquoted `NULL` in an array literal is a NULL. With
+    /// `array_nulls = off` it would be the string `'NULL'`, and the arrays the transfer writes
+    /// use the unquoted spelling for a missing element.
+    ArrayNulls,
 }
 
 impl EngineStatement {
-    pub const ALL: [EngineStatement; 11] = [
+    pub const ALL: [EngineStatement; 12] = [
         EngineStatement::Begin,
         EngineStatement::Commit,
         EngineStatement::Rollback,
@@ -71,6 +75,7 @@ impl EngineStatement {
         EngineStatement::IntervalStyle,
         EngineStatement::ByteaOutput,
         EngineStatement::ProbeMysql,
+        EngineStatement::ArrayNulls,
     ];
 
     /// The four statements a PostgreSQL source runs before its query (C-3).
@@ -99,6 +104,7 @@ impl EngineStatement {
                 "SELECT COUNT(*) FROM information_schema.tables \
                  WHERE table_schema = ? AND table_name = ?"
             }
+            EngineStatement::ArrayNulls => "SET array_nulls = on",
         }
     }
 
@@ -111,7 +117,8 @@ impl EngineStatement {
             | EngineStatement::ExtraFloatDigits
             | EngineStatement::DateStyle
             | EngineStatement::IntervalStyle
-            | EngineStatement::ByteaOutput => Dialect::Postgres,
+            | EngineStatement::ByteaOutput
+            | EngineStatement::ArrayNulls => Dialect::Postgres,
             EngineStatement::StrictMode
             | EngineStatement::Utf8mb4
             | EngineStatement::MaxPacket
@@ -524,7 +531,7 @@ mod tests {
             // Owned text: no placeholder but the two bound ones, no name of any server.
             assert!(!text.contains('{'), "{text}");
         }
-        assert_eq!(EngineStatement::ALL.len(), 11);
+        assert_eq!(EngineStatement::ALL.len(), 12);
     }
 
     #[test]

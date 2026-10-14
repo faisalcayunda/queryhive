@@ -689,6 +689,8 @@ async fn a_postgres_create_is_one_transaction_with_the_rows_in_a_copy() {
         dst,
         [
             "dst:connect",
+            // An unquoted NULL in an array literal is a NULL, not the string 'NULL'.
+            "dst:execute SET array_nulls = on",
             "dst:execute SELECT to_regclass('public.people')",
             "dst:execute BEGIN",
             "dst:execute CREATE TABLE public.people (id bigint, name text)",
@@ -780,15 +782,15 @@ async fn a_postgres_replace_builds_beside_the_table_and_swaps_inside_the_transac
     let out = transfer(&pairs, people(two_people()), dest).await;
     out.result.as_ref().expect("ran");
     let dst = out.lines("dst:execute");
-    assert!(dst[1].starts_with("dst:execute BEGIN"), "{dst:#?}");
-    assert!(dst[2].contains("CREATE TABLE public.qh_new_"), "{dst:#?}");
+    assert!(dst[2].starts_with("dst:execute BEGIN"), "{dst:#?}");
+    assert!(dst[3].contains("CREATE TABLE public.qh_new_"), "{dst:#?}");
     assert!(
-        dst[3].starts_with("dst:execute DROP TABLE IF EXISTS public.people"),
+        dst[4].starts_with("dst:execute DROP TABLE IF EXISTS public.people"),
         "{dst:#?}"
     );
-    assert!(dst[4].contains("ALTER TABLE public.qh_new_"), "{dst:#?}");
-    assert!(dst[4].ends_with("RENAME TO people"), "{dst:#?}");
-    assert_eq!(dst[5], "dst:execute COMMIT");
+    assert!(dst[5].contains("ALTER TABLE public.qh_new_"), "{dst:#?}");
+    assert!(dst[5].ends_with("RENAME TO people"), "{dst:#?}");
+    assert_eq!(dst[6], "dst:execute COMMIT");
     // The old table is touched only after the rows are all in.
     assert!(
         out.position("dst:copy-finish")
