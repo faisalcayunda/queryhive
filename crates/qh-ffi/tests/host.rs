@@ -2969,3 +2969,74 @@ async fn only_an_engine_that_owns_its_sessions_offers_a_second_connection() {
     // The default is "no", so an engine written for something else cannot be mistaken for one.
     assert!(Bare.for_settings(env).is_none());
 }
+
+/// A connector that remembers the database each session was opened for.
+struct DatabaseRecorder {
+    inner: FakeConnector,
+    databases: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl Connector for DatabaseRecorder {
+    fn driver(&self, kind: DriverKind) -> &dyn Driver {
+        self.inner.driver(kind)
+    }
+
+    async fn open_tunnel(
+        &self,
+        config: &ConnectionConfig,
+        settings: &Settings,
+    ) -> Result<Arc<dyn TunnelHandle>, EngineError> {
+        self.inner.open_tunnel(config, settings).await
+    }
+
+    async fn connect(
+        &self,
+        config: &ConnectionConfig,
+        tunnel: Option<&Arc<dyn TunnelHandle>>,
+    ) -> Result<Box<dyn Session>, EngineError> {
+        self.databases
+            .lock()
+            .expect("databases")
+            .push(config.database.clone());
+        self.inner.connect(config, tunnel).await
+    }
+}
+
+#[tokio::test]
+async fn a_second_mysql_connection_differing_only_in_its_database_is_opened_for_that_database() {
+    // MySQL keys a connection by its server, not its database (`DatabaseSlot::Switchable`),
+    // so the two keys are equal by design: a transfer must not refuse on key identity, and
+    // must not assume the second session inherits the first's database.
+    let world = World::new();
+    let databases = Arc::new(Mutex::new(Vec::new()));
+    let pool = qh_ffi::host::SessionPool::new(Arc::new(DatabaseRecorder {
+        inner: FakeConnector(Arc::clone(&world)),
+        databases: Arc::clone(&databases),
+    }));
+    let config = |database: &str| {
+        ConnectionConfig::new(DriverKind::Mysql, "db.example", 3306, "u")
+            .password("p")
+            .database(database)
+            .tls(TlsMode::Disable)
+    };
+    assert_eq!(
+        PoolKey::of(&config("a"), &settings(&[])),
+        PoolKey::of(&config("b"), &settings(&[]))
+    );
+
+    let source_engine = pool.long_op_engine(settings(&[]));
+    let source = source_engine.connect(&config("a")).await.expect("source");
+    let second = source_engine
+        .for_settings(settings(&[]))
+        .expect("a second engine");
+    let dest = second.connect(&config("b")).await.expect("destination");
+
+    assert_eq!(
+        *databases.lock().unwrap(),
+        [Some("a".to_owned()), Some("b".to_owned())]
+    );
+    assert_eq!(world.connects(), 2, "two sessions, not one shared");
+    source.close().await.expect("close");
+    dest.close().await.expect("close");
+}
