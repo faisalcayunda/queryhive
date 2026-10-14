@@ -467,23 +467,6 @@ fn pick(settings: &Settings, key: &str) -> (String, String) {
 ///
 /// A URL with no `//` is read as host-first, which is how a caller who pasted
 /// `host:8080/hive` expects it to behave.
-/// `url` without the `user:password@` of its authority, for a message.
-///
-/// A URL can carry the password (`DB_URL` is on the secret list for that reason), and an error
-/// that quotes the URL it could not read would print it. The last `@` before the query or the
-/// fragment ends the userinfo, so a password with a `/` or an `@` in it goes too.
-fn without_userinfo(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("//") {
-        Some((scheme, rest)) => (format!("{scheme}//"), rest),
-        None => (String::new(), url),
-    };
-    let end = rest.find(['?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
-        Some(at) => format!("{scheme}{}", &rest[at + 1..]),
-        None => url.to_owned(),
-    }
-}
-
 fn from_url(url: &str, overrides: Parts, declared_kind: bool) -> Result<Parts, ConfigError> {
     let parsed = Parsed::parse(url);
 
@@ -506,7 +489,7 @@ fn from_url(url: &str, overrides: Parts, declared_kind: bool) -> Result<Parts, C
         scheme_kind
     };
     if parsed.host.is_empty() {
-        return Err(ConfigError::NoUrlHost(without_userinfo(url)));
+        return Err(ConfigError::NoUrlHost(parsed.shown()));
     }
 
     let mut base = Parts {
@@ -673,6 +656,23 @@ impl Parsed {
             password,
             segments,
             query,
+        }
+    }
+
+    /// The URL as an error may show it: the scheme and the path, and nothing else.
+    ///
+    /// A URL carries a password in its userinfo (`user:password@`) and just as well in its query
+    /// (`?password=…`), and one that has no host is parsed from the very same pieces this reads,
+    /// so what is dropped here is exactly what `parse` took for the authority, the query and
+    /// the fragment, however the secret was spelled.
+    fn shown(&self) -> String {
+        // A password with a `/` in it ends the authority early (`postgres://:p/ss@h/db` has the
+        // authority `:p`), which leaves the rest of the userinfo in the path; an `@` there is
+        // the sign of it, and then nothing of the path is shown.
+        if self.segments.is_empty() || self.segments.iter().any(|segment| segment.contains('@')) {
+            format!("{}://", self.scheme)
+        } else {
+            format!("{}:///{}", self.scheme, self.segments.join("/"))
         }
     }
 
@@ -1256,15 +1256,26 @@ mod tests {
     }
 
     #[test]
-    fn a_url_error_never_prints_the_password_the_url_carried() {
+    fn a_url_error_shows_only_the_scheme_and_the_path() {
+        // Neither the userinfo nor the query is echoed: a password can be in either
+        // (`?password=`), and so can anything else the URL was given to carry.
         for (url, shown) in [
             ("postgres://alice:s3cret@/db", "postgres:///db"),
+            ("mysql://alice:s3cret@/db?sslmode=require", "mysql:///db"),
+            ("trino://:s3cret@/hive#frag", "trino:///hive"),
             (
-                "mysql://alice:pw@/db?sslmode=require",
-                "mysql:///db?sslmode=require",
+                "postgresql:///shop?host=db.internal&password=s3cret",
+                "postgresql:///shop",
             ),
-            ("trino://:tok@/hive#frag", "trino:///hive#frag"),
-            // Nothing to strip: shown as it is.
+            (
+                "postgres:///a/b?password=s3cret&user=x#s3cret",
+                "postgres:///a/b",
+            ),
+            ("trino://?sslmode=require", "trino://"),
+            // The authority ends at the first `/`, as it does when the URL is read: what
+            // follows an `@` there is never shown, so a password with a `/` is not either.
+            ("postgres://@/ss@h/db", "postgres://"),
+            // Nothing to hide: the same.
             ("trino:///hive", "trino:///hive"),
         ] {
             let error = build(&settings(&[("DB_URL", url)])).unwrap_err();
@@ -1274,22 +1285,13 @@ mod tests {
     }
 
     #[test]
-    fn the_userinfo_ends_at_the_last_at_sign_before_the_query() {
-        assert_eq!(without_userinfo("a://u:p@w/d@x@h/db"), "a://h/db");
-        assert_eq!(without_userinfo("a://u:p@h/db?x=a@b"), "a://h/db?x=a@b");
-        assert_eq!(without_userinfo("h:5432/db"), "h:5432/db");
-        assert_eq!(without_userinfo("u:p@h"), "h");
-        assert_eq!(without_userinfo(""), "");
-    }
-
-    #[test]
     fn a_url_with_no_host_is_refused_rather_than_read_as_a_host() {
         // A blank authority is a `ConfigError::NoUrlHost`, never a host made out of
         // what followed it: `trino://?sslmode=require` used to read as a host of
         // `?sslmode=require`, because the query was never split off.
         assert_eq!(
             build(&settings(&[("DB_URL", "trino://?sslmode=require")])).unwrap_err(),
-            ConfigError::NoUrlHost("trino://?sslmode=require".to_owned())
+            ConfigError::NoUrlHost("trino://".to_owned())
         );
         assert_eq!(
             build(&settings(&[("DB_URL", "trino:///hive")])).unwrap_err(),
