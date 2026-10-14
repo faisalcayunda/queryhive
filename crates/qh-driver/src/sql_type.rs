@@ -252,6 +252,13 @@ pub struct SqlType {
     /// Fractional-second digits of a time or timestamp. `None` is read as 6, the widest this
     /// transfer carries, so an undescribed column is never narrowed.
     pub fraction_digits: Option<u32>,
+    /// For a float or a double: the number of places after the point the server **prints** it
+    /// with, when that is fixed (MySQL's `FLOAT(M,D)`, `DOUBLE(M,D)`, and an expression such as
+    /// `PI()` or `fcol * 2` whose definition carries a count). A text read of such a value is
+    /// rounded to those places, so it is not the stored number. `None` is "every digit the
+    /// value needs" (a plain `DOUBLE`, PostgreSQL's `float8`). Not `fraction_digits`, which is
+    /// about seconds and is `None` for a count above 6.
+    pub decimals: Option<u32>,
     /// The element of an array.
     pub element: Option<Box<SqlType>>,
     /// The fields of a row.
@@ -273,6 +280,7 @@ impl SqlType {
             unsigned: false,
             time_zone: TimeZone::None,
             fraction_digits: None,
+            decimals: None,
             element: None,
             fields: Vec::new(),
             oid: None,

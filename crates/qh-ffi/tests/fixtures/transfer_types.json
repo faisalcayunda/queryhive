@@ -1127,6 +1127,64 @@
    }
   },
   {
+   "id": "mysql-double-fixed-decimals",
+   "source": "mysql",
+   "type": {
+    "base": "float64",
+    "decimals": 6
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "mysql-double-2-decimals",
+   "source": "mysql",
+   "type": {
+    "base": "float64",
+    "decimals": 2
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "mysql-float-fixed-decimals",
+   "source": "mysql",
+   "type": {
+    "base": "float32",
+    "decimals": 2
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-float8-decimals-is-not-a-mysql-thing",
+   "source": "postgres",
+   "type": {
+    "base": "float64",
+    "decimals": 2
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "double precision"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "double"
+   }
+  },
+  {
    "id": "mysql-decimal-10-2",
    "source": "mysql",
    "type": {

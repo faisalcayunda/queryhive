@@ -45,6 +45,13 @@ pub fn sql_type(column: &Column) -> SqlType {
         ty.fraction_digits = fraction;
         ty
     };
+    // The places the server prints a float with, when the definition fixes them (31 is "not
+    // fixed"): the text is rounded to them, so it is not the stored number.
+    let floating = |base| {
+        let mut ty = SqlType::of(base);
+        ty.decimals = (decimals < 31).then_some(decimals);
+        ty
+    };
     let binary = normalize::is_binary(column);
     let chars = || length / max_bytes_per_char(column.character_set());
 
@@ -56,8 +63,8 @@ pub fn sql_type(column: &Column) -> SqlType {
         ColumnType::MYSQL_TYPE_LONGLONG => integer(Base::Int64),
         // `year` is a two-byte value of 1901 to 2155 (or 0), and not flagged unsigned for it.
         ColumnType::MYSQL_TYPE_YEAR => SqlType::of(Base::Int16),
-        ColumnType::MYSQL_TYPE_FLOAT => SqlType::of(Base::Float32),
-        ColumnType::MYSQL_TYPE_DOUBLE => SqlType::of(Base::Float64),
+        ColumnType::MYSQL_TYPE_FLOAT => floating(Base::Float32),
+        ColumnType::MYSQL_TYPE_DOUBLE => floating(Base::Float64),
         ColumnType::MYSQL_TYPE_DECIMAL | ColumnType::MYSQL_TYPE_NEWDECIMAL => {
             let point = u32::from(decimals > 0);
             let sign = u32::from(!unsigned);
@@ -310,6 +317,35 @@ mod tests {
             let ty = sql_type(&column(kind, 1, 0, UTF8MB4, ColumnFlags::empty()));
             assert_eq!(ty.base, Base::Text, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_float_or_double_with_a_fixed_number_of_decimals_says_so() {
+        // Over the text protocol MySQL prints such a column with exactly that many places:
+        // `SELECT PI()` is `3.141593`, and `fcol * 2` on a `FLOAT(7,2)` is `2.20` while the
+        // double is 2.2000000476837158. 31 is "not fixed": every digit the value needs.
+        let of = |kind, decimals| {
+            sql_type(&column(kind, 22, decimals, BINARY, ColumnFlags::empty())).decimals
+        };
+        for kind in [ColumnType::MYSQL_TYPE_DOUBLE, ColumnType::MYSQL_TYPE_FLOAT] {
+            assert_eq!(of(kind, 31), None, "{kind:?}");
+            assert_eq!(of(kind, 6), Some(6), "{kind:?}");
+            assert_eq!(of(kind, 2), Some(2), "{kind:?}");
+            assert_eq!(of(kind, 0), Some(0), "{kind:?}");
+            assert_eq!(of(kind, 30), Some(30), "{kind:?}");
+        }
+        // Only floats carry it; a decimal's count is its scale, a time's its fraction.
+        assert_eq!(
+            sql_type(&column(
+                ColumnType::MYSQL_TYPE_NEWDECIMAL,
+                12,
+                2,
+                BINARY,
+                ColumnFlags::empty()
+            ))
+            .decimals,
+            None
+        );
     }
 
     #[test]

@@ -431,6 +431,14 @@ pub fn map_type(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
              copied exactly; a DOUBLE column is copied exactly",
         ),
         Base::Float32 => exact(TargetType::Float { double: false }, target),
+        // A DOUBLE whose definition fixes the places (`DOUBLE(M,D)`, `PI()`, `fcol * 2`) is
+        // printed with exactly that many: `3.141593`, `2.20` for 2.2000000476837158. A plain
+        // DOUBLE is printed with every digit it needs. Over-refusing `DOUBLE(M,D)` is accepted.
+        Base::Float64 if source == DriverKind::Mysql && ty.decimals.is_some() => refuse(
+            "MySQL sends a DOUBLE column or expression declared with a fixed number of decimals \
+             as text rounded to them, so its value cannot be copied exactly; a plain DOUBLE \
+             column is copied exactly",
+        ),
         Base::Float64 => exact(TargetType::Float { double: true }, target),
 
         Base::Decimal => map_decimal(ty, target),
@@ -1160,6 +1168,36 @@ mod tests {
         let refusal =
             plan_table(DriverKind::Mysql, Target::Postgres, &[("f", &float)]).unwrap_err();
         assert!(refusal.to_string().contains("\"f\""), "{refusal}");
+    }
+
+    #[test]
+    fn a_mysql_double_printed_with_a_fixed_number_of_decimals_is_refused() {
+        let plain = SqlType::of(Base::Float64);
+        let fixed = |places| SqlType {
+            decimals: Some(places),
+            ..SqlType::of(Base::Float64)
+        };
+        for target in Target::ALL {
+            // `DOUBLE` without places: every digit the value needs, so exact.
+            assert_eq!(
+                map_type(&plain, DriverKind::Mysql, target).outcome(),
+                Outcome::Exact
+            );
+            for places in [0, 2, 6, 30] {
+                let mapped = map_type(&fixed(places), DriverKind::Mysql, target);
+                assert_eq!(mapped.outcome(), Outcome::Refuse, "{places}");
+                let reason = mapped.note().unwrap_or_default();
+                assert!(reason.contains("fixed number of decimals"), "{reason}");
+                assert!(reason.contains("plain DOUBLE"), "{reason}");
+            }
+            // PostgreSQL and Trino never set it, and when they do it means nothing to them.
+            for source in [DriverKind::Postgres, DriverKind::Trino] {
+                assert_eq!(
+                    map_type(&fixed(2), source, target).outcome(),
+                    Outcome::Exact
+                );
+            }
+        }
     }
 
     #[test]

@@ -113,6 +113,9 @@ fn sql_type(json: &Json) -> SqlType {
     if let Some(digits) = json["fraction_digits"].as_u64() {
         ty.fraction_digits = Some(digits as u32);
     }
+    if let Some(decimals) = json["decimals"].as_u64() {
+        ty.decimals = Some(decimals as u32);
+    }
     if json["element"].is_object() {
         ty.element = Some(Box::new(sql_type(&json["element"])));
     }
