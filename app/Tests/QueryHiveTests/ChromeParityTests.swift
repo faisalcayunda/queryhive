@@ -72,6 +72,13 @@ final class ChromeParityTests: XCTestCase {
         case connectionSheet
         /// The host-key sheet on its own, for the same reason.
         case hostKeySheet
+        /// The transfer sheet on its own (W13-T20, V-17), at its fixed size.
+        case transferSheet
+        /// The Save to Table wizard's table fields, drawn directly at the popover's width (V-17). A
+        /// popover is a window `cacheDisplay` cannot see, so its own header and footer are not in
+        /// the picture; the fields are, unclipped by the popover's 396 pt scroll, so the
+        /// cross-connection block and a refused mode's reason are.
+        case tableTarget
 
         var size: CGSize {
             switch self {
@@ -79,6 +86,8 @@ final class ChromeParityTests: XCTestCase {
             case .settings: CGSize(width: 560, height: 640)
             case .connectionSheet: CGSize(width: 820, height: 620)
             case .hostKeySheet: CGSize(width: 520, height: 440)
+            case .transferSheet: TransferSheet.size
+            case .tableTarget: CGSize(width: 400, height: 760)
             }
         }
     }
@@ -117,6 +126,17 @@ final class ChromeParityTests: XCTestCase {
         Scene(name: "connection-appearance", seed: "connection-appearance", surface: .connectionSheet),
         Scene(name: "host-key-unknown", seed: "host-key-unknown", surface: .hostKeySheet),
         Scene(name: "host-key-changed", seed: "host-key-changed", surface: .hostKeySheet),
+        // V-17 (W13-T20): Save to Table writing to another connection, with the experimental switch
+        // pinned on by the seed: the wizard's fields for a copy to PostgreSQL, and the transfer
+        // sheet for a prod source.
+        //
+        // `table-target-cross-refused` (a MySQL target at Confirm) is deliberately not a baseline:
+        // under full-suite load its Database combo field draws the monospaced "reporting" two ways
+        // (about 320 px in x 23-88, y 100-113), which is no gate. The refusal sentence is covered by
+        // unit tests, and the seed stays for `--snapshot`. A future scene with a long value in that
+        // field needs the same care.
+        Scene(name: "table-target-cross", seed: "table-target-cross", surface: .tableTarget),
+        Scene(name: "transfer-sheet", seed: "transfer-sheet", surface: .transferSheet),
     ]
 
     private struct Capture {
@@ -171,6 +191,8 @@ final class ChromeParityTests: XCTestCase {
         ConnectionEditorSheet.newKindForSnapshot = nil
         HostKeyCenter.shared.dismiss()
         closeWindows()
+        // A V-17 seed pins the shared switch on; the rest of the test process must not inherit it.
+        ExperimentalFeatures.shared.unpin()
         ThemeStore.shared.unpinSurface()
         let s = savedTheme!
         ThemeStore.shared.pin(theme: s.dark, accent: s.accent, tone: s.tone, mode: s.mode,
@@ -218,6 +240,9 @@ final class ChromeParityTests: XCTestCase {
         data.firstSortDirection = .ascending
         data.gridFontSize = DataPreferences.standardGridFontSize
         setEditor(.standard, queryParameters: true)
+        // Off, as a fresh install has it: the General pane draws the switch, and the V-17 seeds pin
+        // it on for their own scenes after this.
+        ExperimentalFeatures.shared.pin(saveTableAcrossConnections: false)
     }
 
     private func setEditor(_ layout: EditorLayout, queryParameters: Bool) {
@@ -364,6 +389,17 @@ final class ChromeParityTests: XCTestCase {
             let center = HostKeyCenter.shared
             let prompt = try XCTUnwrap(center.prompt, "\(scene.name): the scene reports no host key")
             content = AnyView(HostKeySheet(prompt: prompt, center: center).environment(model))
+        case .transferSheet:
+            let transfer = try XCTUnwrap(model.transfer, "\(scene.name): the scene opens no transfer sheet")
+            model.transfer = nil
+            content = AnyView(TransferSheet(transfer: transfer).environment(model))
+        case .tableTarget:
+            let tab = try XCTUnwrap(model.selectedTab, "\(scene.name): the scene has no tab")
+            model.exportSettingsOpen = false
+            content = AnyView(TableTargetFields(tab: tab)
+                .padding(14)
+                .frame(width: scene.surface.size.width, height: scene.surface.size.height, alignment: .top)
+                .environment(model))
         }
         let seededSaved = model.savedQueries
         var isShell = false

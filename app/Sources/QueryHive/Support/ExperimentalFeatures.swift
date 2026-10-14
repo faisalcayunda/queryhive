@@ -42,4 +42,11 @@ final class ExperimentalFeatures {
         isPinned = true
         storedSaveTableAcrossConnections = saveTableAcrossConnections
     }
+
+    /// Back to the stored value, for a test process that drew a pinned scene and goes on.
+    func unpin() {
+        isPinned = false
+        storedSaveTableAcrossConnections = defaults.object(forKey: Self.saveTableAcrossConnectionsKey)
+            as? Bool ?? false
+    }
 }
