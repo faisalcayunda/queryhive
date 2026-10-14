@@ -393,6 +393,35 @@ final class SaveToTableAcrossConnectionsTests: XCTestCase {
         XCTAssertNil(model.tableCollision(for: tab), "the engine quotes a name that is not plain, so case counts")
     }
 
+    // MARK: The result panel after a copy
+
+    func testTheResultPanelSaysACopyCrossedConnectionsAndNamesTheTarget() {
+        let source = connection("Lake", .trino)
+        let target = connection("Warehouse", .postgres)
+        let (model, tab) = fixture(source: source, target: target)
+        tab.stage = .done
+        let line = TablePanel.footnote(for: tab, source: source, destination: model.tableDestination(for: tab))
+        XCTAssertEqual(line, "QueryHive copied the rows from Lake to Warehouse.")
+        tab.writeMode = .replace
+        tab.stage = .idle
+        let replacing = TablePanel.footnote(for: tab, source: source, destination: model.tableDestination(for: tab))
+        XCTAssertFalse(replacing.contains("before the query runs"), replacing)
+        XCTAssertTrue(replacing.contains("Warehouse"), replacing)
+    }
+
+    func testTheResultPanelNoLongerSaysReplaceDropsFirst() {
+        let source = connection("Lake", .trino)
+        let (model, tab) = fixture(source: source, target: connection("Warehouse", .postgres))
+        tab.targetConnectionID = nil
+        tab.writeMode = .replace
+        let line = TablePanel.footnote(for: tab, source: source, destination: model.tableDestination(for: tab))
+        XCTAssertFalse(line.contains("before the query runs"), line)
+        tab.writeMode = .create
+        XCTAssertEqual(TablePanel.footnote(for: tab, source: source, destination: model.tableDestination(for: tab)),
+                       "Trino writes the rows itself; none of them travel through this app.",
+                       "a same-connection create keeps its line")
+    }
+
     // MARK: The mode text (T-1)
 
     func testReplaceNoLongerSaysTheTableIsDroppedFirst() {

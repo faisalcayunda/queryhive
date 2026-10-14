@@ -220,7 +220,31 @@ struct TablePanel: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: QueryTab
 
-    private var driverKind: ConnectionKind { model.connection(for: tab)?.kind ?? .trino }
+    /// The one line under the panel. A copy across connections (W13-T20) says who read and who
+    /// wrote; replace says what it does since W12-T9 (T-1): build beside, then swap.
+    static func footnote(for tab: QueryTab, source: Connection?, destination: TableDestination?) -> String {
+        let replacing = tab.isDestructive && tab.stage != .done
+        if case .other(let target) = destination {
+            if replacing {
+                return "Replace builds the new table on \(target.name) and swaps it in once every row is there."
+            }
+            let verb = tab.stage == .done ? "copied" : "copies"
+            return "QueryHive \(verb) the rows from \(source?.name ?? "this tab's connection") to \(target.name)."
+        }
+        return replacing
+            ? "Replace builds the new table beside the old one and swaps it in once every row is there."
+            : "Trino writes the rows itself; none of them travel through this app."
+    }
+
+    /// The driver the target name is written for: the target's, on a copy across connections.
+    private var driverKind: ConnectionKind {
+        model.tableDestination(for: tab)?.connection?.kind ?? model.connection(for: tab)?.kind ?? .trino
+    }
+
+    private var copyTarget: Connection? {
+        if case .other(let target) = model.tableDestination(for: tab) { return target }
+        return nil
+    }
 
     private var rowsText: String {
         switch tab.stage {
@@ -234,6 +258,9 @@ struct TablePanel: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
+                    if let copyTarget {
+                        infoRow("Connection", copyTarget.name)
+                    }
                     infoRow("Target", tab.writtenTable ?? tab.target(for: driverKind), monospaced: true)
                     infoRow("Statement", tab.writeMode.statement)
                     infoRow("Rows written", rowsText)
@@ -246,9 +273,8 @@ struct TablePanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(spacing: 8) {
-                Text(tab.isDestructive && tab.stage != .done
-                     ? "Replace drops the existing table before the query runs."
-                     : "Trino writes the rows itself; none of them travel through this app.")
+                Text(Self.footnote(for: tab, source: model.connection(for: tab),
+                                   destination: model.tableDestination(for: tab)))
                     .font(.ui(11))
                     .foregroundStyle(tab.isDestructive && tab.stage != .done ? Tone.coral : Tone.secondary)
                     .lineLimit(1)

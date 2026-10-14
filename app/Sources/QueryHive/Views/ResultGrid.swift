@@ -13,7 +13,6 @@ struct ResultGrid: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
     @Bindable var tab: QueryTab
-    @State private var confirmReplace = false
 
     /// The reader card's width beside the grid. Fixed rather than resizable, for the same reason the
     /// schema inspector's is: the grid beside it scrolls on both axes, so a wider reader costs it
@@ -917,18 +916,12 @@ struct ResultGrid: View {
             }
             .disabled(reason != nil || tab.stage == .running)
             .help(reason ?? (tab.destination == .table
-                             ? "Run the query again and let Trino write every row into the table"
+                             ? "Run the query again and save every row into the table"
                              : "Run the query again and stream every row into the file"))
         }
         .padding(.horizontal, Metrics.gutter)
         .padding(.vertical, 6)
         .overlay(alignment: .top) { Rectangle().fill(Tone.ink.opacity(0.07)).frame(height: 1) }
-        .confirmationDialog("Replace \(tab.target(for: model.connection(for: tab)?.kind ?? .trino))?",
-                            isPresented: $confirmReplace) {
-            Button("Drop and Recreate", role: .destructive) { model.run(tab) }
-        } message: {
-            Text("The existing table is dropped before the query runs. If the query then fails, the table is already gone.")
-        }
     }
 }
 
