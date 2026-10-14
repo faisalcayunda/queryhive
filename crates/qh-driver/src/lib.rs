@@ -36,6 +36,7 @@ use thiserror::Error;
 
 mod ca;
 mod metadata;
+mod sql_type;
 mod tunnel;
 
 pub use ca::{CaError, TlsCa, MAX_CA_CERTIFICATES, MAX_CA_FILE_BYTES};
@@ -44,6 +45,7 @@ pub use metadata::{
     required_part, ColumnInfo, DdlRecipe, MetadataSql, ObjectDdl, ObjectKind, Rows, Step,
     TableEntry,
 };
+pub use sql_type::{Base, PgBuiltin, SqlType, TimeZone};
 pub use tunnel::{TunnelAuth, TunnelConfig};
 // Drivers write rows straight into the store's builder (W7-T1), and re-exporting it here
 // keeps the dependency edge to one crate: `qh-driver` -> `qh-columnar`.
@@ -822,6 +824,20 @@ pub trait Cursor: Send {
     /// It is only meaningful **after the cursor has been driven to its end**: the count
     /// arrives in the last page, or in the OK packet that ends the result set.
     fn affected_rows(&self) -> Option<u64> {
+        None
+    }
+
+    /// What the server said about each result column's type, in `columns` order, beyond the
+    /// name the grid shows: precision, length, sign, the PostgreSQL OID.
+    ///
+    /// A sibling of [`affected_rows`](Self::affected_rows) with a default, so a cursor that
+    /// has not been taught it (and every wrapper that forgets to forward it) answers `None`,
+    /// which a caller must read as "undescribed", never as "no columns". Like `columns`, a
+    /// Trino cursor has nothing to report until its first page names the columns.
+    ///
+    /// This is separate from `ColumnMeta::type_name` on purpose: that text is on the golden
+    /// `columns` event, which is frozen.
+    fn column_types(&self) -> Option<&[SqlType]> {
         None
     }
 }

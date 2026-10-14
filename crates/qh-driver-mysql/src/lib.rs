@@ -83,6 +83,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod describe;
 pub mod metadata;
 pub mod normalize;
 pub mod tls;
@@ -710,7 +711,7 @@ impl MysqlSession {
         } else {
             conn.prep(sql).await.ok()
         };
-        let (columns, column_types, binary) = describe(&described);
+        let (columns, types, column_types, binary) = describe(&described);
         // This describe is not the statement that runs — the producer prepares its
         // own, or runs the text it was given — so it is closed rather than left
         // occupying a slot in the connection's statement cache.
@@ -750,6 +751,7 @@ impl MysqlSession {
         if !columns.is_empty() {
             return Ok(Box::new(MysqlCursor {
                 columns,
+                types,
                 receiver,
                 pending: None,
                 finished: false,
@@ -758,7 +760,7 @@ impl MysqlSession {
         }
 
         match receiver.recv().await {
-            Some(Message::Ready { columns }) => {
+            Some(Message::Ready { columns, types }) => {
                 // No columns means nothing will stream: the producer is about to finish,
                 // and the next statement (a `COMMIT` after this `INSERT`) needs its
                 // connection, so wait for it here rather than make the caller drain a
@@ -768,6 +770,7 @@ impl MysqlSession {
                 }
                 Ok(Box::new(MysqlCursor {
                     columns,
+                    types,
                     receiver,
                     pending: None,
                     finished: false,
@@ -1048,17 +1051,19 @@ fn describe(
     statement: &Option<mysql_async::Statement>,
 ) -> (
     Vec<ColumnMeta>,
+    Vec<qh_driver::SqlType>,
     Vec<mysql_async::consts::ColumnType>,
     Vec<bool>,
 ) {
     let Some(statement) = statement else {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     };
     let columns = statement
         .columns()
         .iter()
         .map(|column| ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column)))
         .collect();
+    let types = statement.columns().iter().map(describe::sql_type).collect();
     let column_types = statement
         .columns()
         .iter()
@@ -1071,7 +1076,7 @@ fn describe(
         .iter()
         .map(normalize::is_binary)
         .collect();
-    (columns, column_types, binary)
+    (columns, types, column_types, binary)
 }
 
 /// What the producer sends the cursor.
@@ -1080,6 +1085,8 @@ enum Message {
     /// whose `columns()` is already valid.
     Ready {
         columns: Vec<ColumnMeta>,
+        /// What the column definitions say beyond the name of the type, in the same order.
+        types: Vec<qh_driver::SqlType>,
     },
     Batch(ColumnBatch),
     Failed(EngineError),
@@ -1238,6 +1245,11 @@ async fn consume<P: mysql_async::prelude::Protocol>(
                 ColumnMeta::new(column.name_str().to_string(), normalize::type_name(column))
             })
             .collect();
+        let sql_types = result
+            .columns_ref()
+            .iter()
+            .map(describe::sql_type)
+            .collect();
         let types = result
             .columns_ref()
             .iter()
@@ -1250,7 +1262,10 @@ async fn consume<P: mysql_async::prelude::Protocol>(
             .collect();
         if config
             .sender
-            .send(Message::Ready { columns })
+            .send(Message::Ready {
+                columns,
+                types: sql_types,
+            })
             .await
             .is_err()
         {
@@ -1414,6 +1429,8 @@ impl BatchBuilder {
 /// Rows from a running statement, in batches.
 struct MysqlCursor {
     columns: Vec<ColumnMeta>,
+    /// What the column definitions said beyond the type's name.
+    types: Vec<qh_driver::SqlType>,
     receiver: mpsc::Receiver<Message>,
     /// Rows the producer read beyond what the caller asked for.
     pending: Option<ColumnBatch>,
@@ -1427,6 +1444,10 @@ struct MysqlCursor {
 impl Cursor for MysqlCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn column_types(&self) -> Option<&[qh_driver::SqlType]> {
+        Some(&self.types)
     }
 
     fn affected_rows(&self) -> Option<u64> {

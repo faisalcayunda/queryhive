@@ -325,6 +325,10 @@ impl Cursor for RetryCursor {
         self.inner.affected_rows()
     }
 
+    fn column_types(&self) -> Option<&[qh_driver::SqlType]> {
+        self.inner.column_types()
+    }
+
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
         let mut attempt = 0;
         loop {

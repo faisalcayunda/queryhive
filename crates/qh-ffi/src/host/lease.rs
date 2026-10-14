@@ -104,6 +104,10 @@ impl Cursor for Tracked {
         self.inner.affected_rows()
     }
 
+    fn column_types(&self) -> Option<&[qh_driver::SqlType]> {
+        self.inner.column_types()
+    }
+
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
         match self.inner.next_batch(max_rows).await {
             Ok(Some(batch)) => {

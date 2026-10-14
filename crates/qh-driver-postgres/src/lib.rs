@@ -92,6 +92,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod describe;
 pub mod metadata;
 pub mod normalize;
 pub mod tls;
@@ -109,7 +110,7 @@ use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value, CONNECT_
 use qh_driver::{
     AnalyzeFence, BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, Cursor, Driver,
     DriverKind, ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql,
-    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, TlsMode,
+    ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, SqlType, TlsMode,
 };
 use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
 use rustls::client::danger::ServerCertVerifier;
@@ -690,7 +691,7 @@ impl Session for PostgresSession {
             .await
             .map_err(|error| map_query_error(error, sql, options.statement_timeout))?;
         self.statement_timeout = options.statement_timeout;
-        let (columns, type_names) = describe_columns(&statement);
+        let (columns, type_names, types) = describe_columns(&statement);
         let parsers = type_names
             .iter()
             .map(|name| ColumnParser::new(name))
@@ -698,6 +699,7 @@ impl Session for PostgresSession {
 
         Ok(Box::new(PostgresCursor {
             columns,
+            types,
             parsers,
             stream: Box::pin(stream),
             row_limit: options.row_limit,
@@ -895,6 +897,8 @@ fn explain_sql(sql: &str, options: ExplainOptions) -> String {
 /// Rows from a running statement, in batches.
 struct PostgresCursor {
     columns: Vec<ColumnMeta>,
+    /// What the server said about each column's type, beside the name the grid shows.
+    types: Vec<SqlType>,
     /// One per column, resolved from the type name once instead of per cell.
     parsers: Vec<ColumnParser>,
     /// Boxed and pinned: `SimpleQueryStream` is not `Unpin`.
@@ -918,6 +922,10 @@ struct PostgresCursor {
 impl Cursor for PostgresCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn column_types(&self) -> Option<&[SqlType]> {
+        Some(&self.types)
     }
 
     async fn next_batch(&mut self, max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
@@ -1125,15 +1133,17 @@ fn quote_literal(text: &str) -> String {
     }
 }
 
-fn describe_columns(statement: &Statement) -> (Vec<ColumnMeta>, Vec<String>) {
+fn describe_columns(statement: &Statement) -> (Vec<ColumnMeta>, Vec<String>, Vec<SqlType>) {
     let mut columns = Vec::with_capacity(statement.columns().len());
     let mut type_names = Vec::with_capacity(statement.columns().len());
+    let mut types = Vec::with_capacity(statement.columns().len());
     for column in statement.columns() {
         let type_name = column.type_().name();
         columns.push(ColumnMeta::new(column.name(), type_name));
         type_names.push(type_name.to_owned());
+        types.push(describe::sql_type(column.type_(), column.type_modifier()));
     }
-    (columns, type_names)
+    (columns, type_names, types)
 }
 
 /// Whether a connection failure is worth retrying.

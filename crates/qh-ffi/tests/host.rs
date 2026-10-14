@@ -472,6 +472,12 @@ impl Cursor for FakeCursor {
         &self.columns
     }
 
+    /// One 32-bit integer column, whatever the statement: enough to see a wrapper forward it.
+    fn column_types(&self) -> Option<&[qh_driver::SqlType]> {
+        static TYPES: OnceLock<Vec<qh_driver::SqlType>> = OnceLock::new();
+        Some(TYPES.get_or_init(|| vec![qh_driver::SqlType::of(qh_driver::Base::Int32)]))
+    }
+
     async fn next_batch(&mut self, _max_rows: usize) -> Result<Option<ColumnBatch>, EngineError> {
         if self.served == 1 {
             if let Some(error) = self.fail_after_first.take() {
@@ -2968,6 +2974,39 @@ async fn only_an_engine_that_owns_its_sessions_offers_a_second_connection() {
         .is_some());
     // The default is "no", so an engine written for something else cannot be mistaken for one.
     assert!(Bare.for_settings(env).is_none());
+}
+
+#[tokio::test]
+async fn the_column_types_a_driver_reports_survive_the_lease_and_the_retry_wrapper() {
+    // A wrapper that forgets a new Cursor method answers its default (R-8), so a transfer
+    // would see "undescribed" for every column. Both wrappers a command's cursor goes through.
+    let (_, host) = fake_host();
+    let pool = host.pool();
+    let engine = pool.engine(Lane::Query, settings(&[]));
+    let mut session = engine
+        .connect(&pg_config("p1"))
+        .await
+        .expect("a leased session");
+    let cursor = session
+        .execute("SELECT 1", &no_options())
+        .await
+        .expect("through the lease");
+    let types = cursor
+        .column_types()
+        .expect("the lease forwards column_types");
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].base, qh_driver::Base::Int32);
+
+    let policy = RetryPolicy::new(2, Duration::from_millis(1));
+    let cursor = retry::execute(&mut session, &policy, "SELECT 1", &no_options())
+        .await
+        .expect("through the retry wrapper");
+    let types = cursor
+        .column_types()
+        .expect("the retry wrapper forwards column_types");
+    assert_eq!(types[0].base, qh_driver::Base::Int32);
+    drop(cursor);
+    session.close().await.expect("close");
 }
 
 /// A connector that remembers the database each session was opened for.

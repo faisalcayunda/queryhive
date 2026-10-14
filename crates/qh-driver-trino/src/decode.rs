@@ -52,6 +52,7 @@
 //! spellings decode through the same branches below.
 
 use qh_core::{IntervalValue, Value};
+use qh_driver::{Base, SqlType, TimeZone};
 use serde_json::Value as Json;
 
 /// Decode one cell, given the type text Trino reported for its column.
@@ -545,6 +546,243 @@ fn unmodelled(type_text: &str, value: &Json) -> Value {
     match value {
         Json::String(text) => Value::unknown(type_text, text.clone()),
         other => Value::unknown(type_text, other.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The column's type as a descriptor
+// ---------------------------------------------------------------------------
+
+/// The structured descriptor of a column from the type text Trino reported for it (W13-T20
+/// step 4). Trino is the one server that states the whole type, parameters included, so this
+/// is a parse and nothing is guessed: a word it does not know is [`Base::Other`], with the
+/// text kept for the message.
+///
+/// `time` and `timestamp` without a precision are `(3)`, which is what Trino means by them;
+/// a precision above 6 is kept as it is, and the transfer refuses it by name (OQ-10).
+pub fn sql_type(type_text: &str) -> SqlType {
+    let text = type_text.trim();
+    let lower = text.to_ascii_lowercase();
+    let mut ty = parse_type(&lower);
+    text.clone_into(&mut ty.native);
+    ty
+}
+
+/// The numbers inside the first parentheses: `decimal(38, 10)` is `[38, 10]`.
+fn numbers(text: &str) -> Vec<u32> {
+    let Some(open) = text.find('(') else {
+        return Vec::new();
+    };
+    let inner = &text[open + 1..];
+    let inner = inner.split(')').next().unwrap_or_default();
+    inner
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect()
+}
+
+fn parse_type(text: &str) -> SqlType {
+    let zoned = text.contains("with time zone");
+    let digits = numbers(text).first().copied().unwrap_or(3);
+    let zone = if zoned {
+        TimeZone::Offset
+    } else {
+        TimeZone::None
+    };
+    if text.starts_with("timestamp") {
+        let base = if zoned {
+            Base::TimestampTz
+        } else {
+            Base::Timestamp
+        };
+        return SqlType::of(base).with_zone(zone).with_fraction(digits);
+    }
+    if text.starts_with("time") {
+        let base = if zoned { Base::TimeTz } else { Base::Time };
+        return SqlType::of(base).with_zone(zone).with_fraction(digits);
+    }
+    let name = match text.find('(') {
+        Some(index) => text[..index].trim(),
+        None => text,
+    };
+    match name {
+        "boolean" => SqlType::of(Base::Bool),
+        "tinyint" => SqlType::of(Base::Int8),
+        "smallint" => SqlType::of(Base::Int16),
+        "integer" => SqlType::of(Base::Int32),
+        "bigint" => SqlType::of(Base::Int64),
+        "real" => SqlType::of(Base::Float32),
+        "double" => SqlType::of(Base::Float64),
+        "decimal" => match numbers(text).as_slice() {
+            [] => SqlType::decimal(38, 0),
+            [precision] => SqlType::decimal(*precision, 0),
+            [precision, scale, ..] => SqlType::decimal(*precision, *scale as i32),
+        },
+        "varchar" => match numbers(text).first() {
+            Some(length) => SqlType::of(Base::Text).with_length(*length),
+            None => SqlType::of(Base::Text),
+        },
+        "char" => SqlType::of(Base::Char).with_length(numbers(text).first().copied().unwrap_or(1)),
+        "varbinary" => SqlType::of(Base::Binary),
+        "uuid" => SqlType::of(Base::Uuid),
+        "date" => SqlType::of(Base::Date),
+        "json" => SqlType::of(Base::Json),
+        "interval day to second" | "interval year to month" => SqlType::of(Base::Interval),
+        "array" => match single_argument(text, "array") {
+            Some(element) => SqlType::array_of(parse_type(&element)),
+            None => SqlType::of(Base::Other),
+        },
+        "map" => SqlType::of(Base::Map),
+        "row" => {
+            let mut ty = SqlType::of(Base::Row);
+            if let Some(fields) = arguments(text, "row") {
+                ty.fields = fields.iter().map(|field| field_type(field)).collect();
+            }
+            ty
+        }
+        _ => SqlType::of(Base::Other),
+    }
+}
+
+/// A row field is `type` or `name type`. The whole text is tried as a type first, because a
+/// type such as `timestamp(3) with time zone` has a space in it; only a text that is not one
+/// is split at its first word, which is then the field's name (or a quoted name).
+fn field_type(field: &str) -> SqlType {
+    let whole = parse_type(field);
+    if whole.base != Base::Other {
+        return whole;
+    }
+    let rest = if let Some(quoted) = field.strip_prefix('"') {
+        quoted.split_once('"').map(|(_, rest)| rest)
+    } else {
+        field.split_once(' ').map(|(_, rest)| rest)
+    };
+    rest.map(|rest| parse_type(rest.trim())).unwrap_or(whole)
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn of(text: &str) -> SqlType {
+        sql_type(text)
+    }
+
+    #[test]
+    fn the_plain_types() {
+        for (text, base) in [
+            ("boolean", Base::Bool),
+            ("tinyint", Base::Int8),
+            ("smallint", Base::Int16),
+            ("integer", Base::Int32),
+            ("bigint", Base::Int64),
+            ("real", Base::Float32),
+            ("double", Base::Float64),
+            ("varbinary", Base::Binary),
+            ("uuid", Base::Uuid),
+            ("date", Base::Date),
+            ("json", Base::Json),
+            ("ipaddress", Base::Other),
+            ("geometry", Base::Other),
+            ("HyperLogLog", Base::Other),
+            ("", Base::Other),
+        ] {
+            assert_eq!(of(text).base, base, "{text}");
+        }
+        assert_eq!(of(" BigInt ").base, Base::Int64);
+        assert_eq!(of("Geometry").native, "Geometry");
+    }
+
+    #[test]
+    fn decimals_and_text_carry_their_parameters() {
+        let ty = of("decimal(38, 10)");
+        assert_eq!(
+            (ty.base, ty.precision, ty.scale),
+            (Base::Decimal, Some(38), Some(10))
+        );
+        let ty = of("decimal(5)");
+        assert_eq!((ty.precision, ty.scale), (Some(5), Some(0)));
+        let ty = of("decimal");
+        assert_eq!((ty.precision, ty.scale), (Some(38), Some(0)));
+        assert_eq!(of("varchar").length, None);
+        assert_eq!(of("varchar(20)").length, Some(20));
+        assert_eq!(of("char(5)").length, Some(5));
+        assert_eq!(of("char").length, Some(1));
+    }
+
+    #[test]
+    fn times_carry_their_precision_and_their_zone_and_default_to_three() {
+        let ty = of("timestamp(6)");
+        assert_eq!(
+            (ty.base, ty.fraction_digits, ty.time_zone),
+            (Base::Timestamp, Some(6), TimeZone::None)
+        );
+        let ty = of("timestamp(9) with time zone");
+        assert_eq!(
+            (ty.base, ty.fraction_digits, ty.time_zone),
+            (Base::TimestampTz, Some(9), TimeZone::Offset)
+        );
+        let ty = of("timestamp");
+        assert_eq!((ty.base, ty.fraction_digits), (Base::Timestamp, Some(3)));
+        let ty = of("time(12)");
+        assert_eq!((ty.base, ty.fraction_digits), (Base::Time, Some(12)));
+        let ty = of("time");
+        assert_eq!(ty.fraction_digits, Some(3));
+        // Both spellings of a zoned time are a zoned time, whatever the value decoder can read.
+        for text in ["time(3) with time zone", "time with time zone"] {
+            let ty = of(text);
+            assert_eq!(
+                (ty.base, ty.time_zone),
+                (Base::TimeTz, TimeZone::Offset),
+                "{text}"
+            );
+        }
+        assert_eq!(of("timestamp with time zone").base, Base::TimestampTz);
+    }
+
+    #[test]
+    fn intervals_arrive_in_upper_case() {
+        assert_eq!(of("INTERVAL DAY TO SECOND").base, Base::Interval);
+        assert_eq!(of("interval year to month").base, Base::Interval);
+    }
+
+    #[test]
+    fn containers_nest() {
+        let ty = of("array(integer)");
+        assert_eq!(ty.base, Base::Array);
+        assert_eq!(ty.element.expect("an element").base, Base::Int32);
+        let ty = of("array(array(decimal(10, 2)))");
+        let inner = ty.element.expect("an element");
+        assert_eq!(inner.base, Base::Array);
+        let leaf = inner.element.expect("a leaf");
+        assert_eq!(
+            (leaf.base, leaf.precision, leaf.scale),
+            (Base::Decimal, Some(10), Some(2))
+        );
+        let ty = of("array(timestamp(3) with time zone)");
+        assert_eq!(ty.element.expect("an element").base, Base::TimestampTz);
+        assert_eq!(of("map(varchar, bigint)").base, Base::Map);
+        assert_eq!(
+            of("array").base,
+            Base::Other,
+            "an array with no element is not described"
+        );
+    }
+
+    #[test]
+    fn row_fields_are_types_with_or_without_a_name() {
+        let ty = of("row(integer, varchar(3))");
+        let fields: Vec<(Base, Option<u32>)> = ty
+            .fields
+            .iter()
+            .map(|field| (field.base, field.length))
+            .collect();
+        assert_eq!(fields, [(Base::Int32, None), (Base::Text, Some(3))]);
+        let ty =
+            of(r#"row(a integer, "b c" timestamp(3) with time zone, timestamp(6) with time zone)"#);
+        let bases: Vec<Base> = ty.fields.iter().map(|field| field.base).collect();
+        assert_eq!(bases, [Base::Int32, Base::TimestampTz, Base::TimestampTz]);
+        assert_eq!(of("row()").fields.len(), 0);
     }
 }
 

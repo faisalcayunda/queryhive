@@ -1391,6 +1391,7 @@ impl Session for TrinoSession {
             .update_count
             .and_then(|count| u64::try_from(count).ok());
         let columns = columns_of(&page);
+        let types = types_of(&columns);
         let pending: VecDeque<Vec<Value>> = page.rows.take().unwrap_or_default().into();
         let finished = page.next_uri.is_none();
 
@@ -1402,6 +1403,7 @@ impl Session for TrinoSession {
             running: Arc::clone(&self.running),
             next_uri: page.next_uri,
             columns,
+            types,
             pending,
             finished,
             affected,
@@ -1558,6 +1560,9 @@ struct TrinoCursor {
     running: Shared,
     next_uri: Option<String>,
     columns: Vec<ColumnMeta>,
+    /// The structured type of each column, parsed from the same text as `columns` and set
+    /// with it: empty until the columns are known.
+    types: Vec<qh_driver::SqlType>,
     pending: VecDeque<Vec<Value>>,
     finished: bool,
     /// Rows the statement wrote, when the server has said. The count arrives in the
@@ -1633,6 +1638,7 @@ impl TrinoCursor {
                     .iter()
                     .map(|column| ColumnMeta::new(column.name.clone(), column.type_text.clone()))
                     .collect();
+                self.types = types_of(&self.columns);
             }
         }
 
@@ -1687,6 +1693,10 @@ impl TrinoCursor {
 impl Cursor for TrinoCursor {
     fn columns(&self) -> &[ColumnMeta] {
         &self.columns
+    }
+
+    fn column_types(&self) -> Option<&[qh_driver::SqlType]> {
+        Some(&self.types)
     }
 
     fn affected_rows(&self) -> Option<u64> {
@@ -1831,6 +1841,14 @@ impl TrinoCursor {
 // ---------------------------------------------------------------------------
 // Pages into batches
 // ---------------------------------------------------------------------------
+
+/// The descriptors of columns whose type text is `ColumnMeta::type_name`.
+fn types_of(columns: &[ColumnMeta]) -> Vec<qh_driver::SqlType> {
+    columns
+        .iter()
+        .map(|column| decode::sql_type(&column.type_name))
+        .collect()
+}
 
 fn columns_of(page: &Page) -> Vec<ColumnMeta> {
     page.columns
@@ -2364,6 +2382,10 @@ mod tests {
                 .iter()
                 .map(|column| ColumnMeta::new(column.name.clone(), column.type_text.clone()))
                 .collect(),
+            types: wire
+                .iter()
+                .map(|column| decode::sql_type(&column.type_text))
+                .collect(),
             pending: decode_rows(&wire, rows).into(),
             finished: true,
             affected: None,
@@ -2374,6 +2396,24 @@ mod tests {
             timeout: None,
             sql: String::new(),
         }
+    }
+
+    #[test]
+    fn a_cursor_reports_the_types_of_its_columns_and_none_before_it_has_columns() {
+        let cursor = cursor_over(&["a", "b"], &[]);
+        let types = cursor.column_types().expect("described");
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].base, qh_driver::Base::Int64);
+        assert_eq!(types[0].native, "bigint");
+        // `types_of` is what both places that learn the columns call.
+        let columns = vec![
+            ColumnMeta::new("t", "timestamp(9) with time zone"),
+            ColumnMeta::new("d", "decimal(38, 10)"),
+        ];
+        let described = types_of(&columns);
+        assert_eq!(described[0].fraction_digits, Some(9));
+        assert_eq!(described[1].precision, Some(38));
+        assert!(types_of(&[]).is_empty());
     }
 
     #[tokio::test]
