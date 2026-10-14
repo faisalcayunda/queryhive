@@ -421,6 +421,15 @@ pub fn map_type(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
             }
         }
 
+        // MySQL prints a FLOAT over the text protocol with at most 6 significant digits
+        // (`my_gcvt` capped at FLT_DIG), so `123456.7` and `1.2345678` reach the engine already
+        // rounded, and writing them would present a rounded value as the exact one. A DOUBLE is
+        // printed with enough digits to read back exactly. (A binary-protocol read would carry
+        // the four bytes of the float itself; that is a later item.)
+        Base::Float32 if source == DriverKind::Mysql => refuse(
+            "MySQL sends a FLOAT as text rounded to 6 significant digits, so its value cannot be \
+             copied exactly; a DOUBLE column is copied exactly",
+        ),
         Base::Float32 => exact(TargetType::Float { double: false }, target),
         Base::Float64 => exact(TargetType::Float { double: true }, target),
 
@@ -1127,6 +1136,30 @@ mod tests {
         let plan = plan_table(DriverKind::Postgres, Target::Postgres, &[("a", &good)]).unwrap();
         let sql = plan.create_table_sql("t");
         assert_eq!(sql, "CREATE TABLE t (a integer)");
+    }
+
+    #[test]
+    fn a_mysql_float_is_refused_because_its_text_is_rounded_and_a_double_is_not() {
+        let float = SqlType::of(Base::Float32);
+        let double = SqlType::of(Base::Float64);
+        for target in Target::ALL {
+            let mapped = map_type(&float, DriverKind::Mysql, target);
+            assert_eq!(mapped.outcome(), Outcome::Refuse, "{target:?}");
+            let reason = mapped.note().unwrap_or_default();
+            assert!(reason.contains("6 significant digits"), "{reason}");
+            assert!(reason.contains("DOUBLE"), "{reason}");
+            // The other sources print a float4 with every digit it needs.
+            for source in [DriverKind::Postgres, DriverKind::Trino] {
+                assert_eq!(map_type(&float, source, target).outcome(), Outcome::Exact);
+            }
+            assert_eq!(
+                map_type(&double, DriverKind::Mysql, target).outcome(),
+                Outcome::Exact
+            );
+        }
+        let refusal =
+            plan_table(DriverKind::Mysql, Target::Postgres, &[("f", &float)]).unwrap_err();
+        assert!(refusal.to_string().contains("\"f\""), "{refusal}");
     }
 
     #[test]

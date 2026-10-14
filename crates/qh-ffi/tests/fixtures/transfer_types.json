@@ -1099,18 +1099,16 @@
    }
   },
   {
-   "id": "mysql-float",
+   "id": "mysql-float-refused",
    "source": "mysql",
    "type": {
     "base": "float32"
    },
    "postgres": {
-    "outcome": "exact",
-    "ddl": "real"
+    "outcome": "refuse"
    },
    "mysql": {
-    "outcome": "exact",
-    "ddl": "float"
+    "outcome": "refuse"
    }
   },
   {
