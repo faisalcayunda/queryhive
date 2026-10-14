@@ -81,7 +81,7 @@ secrecy.workspace = true
 # golden harness compares parsed values rather than bytes, so the frozen snapshots
 # under `tests/golden/` stay comparable even though `tools/golden/normalise.py`
 # sorts the keys it writes.
-serde_json = "1"
+serde_json.workspace = true
 # The control plane only (ADR-0004): errors and typed values, not the grid data plane,
 # which is a handle and an offset buffer precisely because marshalling every cell as a
 # string is the problem this migration exists to remove.
