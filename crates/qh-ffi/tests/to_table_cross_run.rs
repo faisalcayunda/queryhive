@@ -1550,6 +1550,37 @@ async fn the_source_must_be_one_read_and_the_sources_safe_mode_still_applies() {
 }
 
 #[tokio::test]
+async fn a_bad_connection_url_is_placed_on_its_side_and_never_echoes_its_password() {
+    // The destination's URL has a password and no host.
+    let mut pairs = SOURCE.to_vec();
+    pairs.extend(with(
+        &TO_POSTGRES,
+        &[
+            ("DEST_DB_URL", "postgres://alice:s3cret-pw@/db"),
+            ("DEST_DB_HOST", ""),
+        ],
+    ));
+    let out = transfer(&pairs, people(two_people()), DestScript::default()).await;
+    let (side, message) = sided(&out.result);
+    assert_eq!(side, ErrorSide::Target);
+    assert!(!message.contains("s3cret-pw"), "{message}");
+    assert!(message.contains("host"), "{message}");
+    assert!(out.untouched());
+
+    // The same on the source side.
+    let mut pairs = with(
+        &SOURCE,
+        &[("DB_URL", "trino://bob:other-pw@/hive"), ("DB_HOST", "")],
+    );
+    pairs.extend(TO_POSTGRES);
+    let out = transfer(&pairs, people(two_people()), DestScript::default()).await;
+    let (side, message) = sided(&out.result);
+    assert_eq!(side, ErrorSide::Source);
+    assert!(!message.contains("other-pw"), "{message}");
+    assert!(out.untouched());
+}
+
+#[tokio::test]
 async fn trino_is_not_a_destination() {
     let mut pairs = SOURCE.to_vec();
     pairs.extend(with(&TO_POSTGRES, &[("DEST_DB_KIND", "trino")]));

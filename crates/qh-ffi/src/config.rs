@@ -467,6 +467,23 @@ fn pick(settings: &Settings, key: &str) -> (String, String) {
 ///
 /// A URL with no `//` is read as host-first, which is how a caller who pasted
 /// `host:8080/hive` expects it to behave.
+/// `url` without the `user:password@` of its authority, for a message.
+///
+/// A URL can carry the password (`DB_URL` is on the secret list for that reason), and an error
+/// that quotes the URL it could not read would print it. The last `@` before the query or the
+/// fragment ends the userinfo, so a password with a `/` or an `@` in it goes too.
+fn without_userinfo(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("//") {
+        Some((scheme, rest)) => (format!("{scheme}//"), rest),
+        None => (String::new(), url),
+    };
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}{}", &rest[at + 1..]),
+        None => url.to_owned(),
+    }
+}
+
 fn from_url(url: &str, overrides: Parts, declared_kind: bool) -> Result<Parts, ConfigError> {
     let parsed = Parsed::parse(url);
 
@@ -489,7 +506,7 @@ fn from_url(url: &str, overrides: Parts, declared_kind: bool) -> Result<Parts, C
         scheme_kind
     };
     if parsed.host.is_empty() {
-        return Err(ConfigError::NoUrlHost(url.to_owned()));
+        return Err(ConfigError::NoUrlHost(without_userinfo(url)));
     }
 
     let mut base = Parts {
@@ -1236,6 +1253,33 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[test]
+    fn a_url_error_never_prints_the_password_the_url_carried() {
+        for (url, shown) in [
+            ("postgres://alice:s3cret@/db", "postgres:///db"),
+            (
+                "mysql://alice:pw@/db?sslmode=require",
+                "mysql:///db?sslmode=require",
+            ),
+            ("trino://:tok@/hive#frag", "trino:///hive#frag"),
+            // Nothing to strip: shown as it is.
+            ("trino:///hive", "trino:///hive"),
+        ] {
+            let error = build(&settings(&[("DB_URL", url)])).unwrap_err();
+            assert_eq!(error, ConfigError::NoUrlHost(shown.to_owned()), "{url}");
+            assert!(!error.to_string().contains("s3cret"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_userinfo_ends_at_the_last_at_sign_before_the_query() {
+        assert_eq!(without_userinfo("a://u:p@w/d@x@h/db"), "a://h/db");
+        assert_eq!(without_userinfo("a://u:p@h/db?x=a@b"), "a://h/db?x=a@b");
+        assert_eq!(without_userinfo("h:5432/db"), "h:5432/db");
+        assert_eq!(without_userinfo("u:p@h"), "h");
+        assert_eq!(without_userinfo(""), "");
     }
 
     #[test]

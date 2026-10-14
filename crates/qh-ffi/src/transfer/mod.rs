@@ -160,11 +160,12 @@ fn setup(
             "Save to Table across connections takes exactly one statement, and this has {count}"
         )));
     }
-    let source_mode = safe_mode(source, engine)?;
+    let source_mode = safe_mode(source, engine).map_err(on_source)?;
     require_read(source, source_mode, &body, SOURCE_ONLY)?;
 
-    let source_config = connection(source, engine)?;
-    let dest_config = connection(dest, engine)?;
+    // A setting the connection cannot be built from belongs to the side whose setting it is.
+    let source_config = connection(source, engine).map_err(on_source)?;
+    let dest_config = connection(dest, engine).map_err(on_target)?;
     let Some(target) = Target::of(dest_config.kind) else {
         return Err(CliError::Usage(
             "a table can be saved across connections to PostgreSQL or MySQL; Trino is not a \
@@ -202,7 +203,7 @@ fn setup(
     // The destination's decision about the plan, from its two floors: its own
     // `DEST_SAFE_MODE_FLOOR` and the top-level `SAFE_MODE_FLOOR`, each an entry.
     let dest_dialect = dialect(dest);
-    let mut floor = safe_mode_floor(dest, engine)?;
+    let mut floor = safe_mode_floor(dest, engine).map_err(on_target)?;
     let pinned = settings.text("SAFE_MODE_FLOOR", "");
     if !pinned.is_empty() {
         floor.raise(
@@ -222,8 +223,8 @@ fn setup(
     // destination refuses must not leave a row saying its SELECT was allowed to run.
     guard_for(source, source_mode, &body)?;
 
-    let source_timeout = statement_timeout(source)?;
-    let dest_timeout = statement_timeout(dest)?;
+    let source_timeout = statement_timeout(source).map_err(on_source)?;
+    let dest_timeout = statement_timeout(dest).map_err(on_target)?;
     Ok(Setup {
         body,
         source_config,
