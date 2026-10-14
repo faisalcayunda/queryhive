@@ -285,9 +285,10 @@ final class AppModel {
     var exportSettingsOpen = false
     /// Whether the wizard's panel is on screen, as its own appear and disappear say. The flag above
     /// can be true with nothing showing; this is what tells the two apart.
-    var exportWizardShown = false
+    /// Read only by `toggleExportWizard`, never drawn, so no view is invalidated when it changes.
+    @ObservationIgnored var exportWizardShown = false
     /// When the popover last closed itself (a click outside it), in `systemUptime` seconds.
-    var exportWizardDismissedAt: TimeInterval = -.infinity
+    @ObservationIgnored var exportWizardDismissedAt: TimeInterval = -.infinity
 
     /// Which column's filter popover is open, by column index. On the model for the same reason as
     /// the two above: a snapshot has no way to click a header funnel.

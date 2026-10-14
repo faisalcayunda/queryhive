@@ -32,11 +32,10 @@ extension AppModel {
         return nil
     }
 
-    /// Why Export is dim. Everything Run needs, plus somewhere to put the result.
+    /// Why the wizard's Export (and ⌘⇧E) is dim: everything Run needs, plus somewhere to put the
+    /// result. The footer's Export, which only opens the wizard, asks `exportWizardBlockedReason`.
     func runBlockedReason(for tab: QueryTab) -> String? {
-        if connections.isEmpty { return "Add a connection first" }
-        if connection(for: tab) == nil { return "Choose a connection" }
-        if !tab.hasSQL { return "Write a query" }
+        if let reason = exportWizardBlockedReason(for: tab) { return reason }
         switch tab.destination {
         case .file:
             if tab.trimmedName.isEmpty { return "Name the output file" }

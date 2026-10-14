@@ -14,8 +14,9 @@ extension AppModel {
     /// action runs in the same click and writes `true` again, while the popover is on its way out.
     /// The flag stayed true with no wizard on screen (a hosted SDK 27 window showed it again about
     /// 500 ms later; the SDK 14 app is assumed to show nothing), and every later press wrote the
-    /// `true` it already held, so the button did nothing. Whatever the order of those two writes, this never leaves the flag true without a
-    /// wizard to show for it, and no state makes a press a no-op twice in a row.
+    /// `true` it already held, so the button did nothing. Whatever the order of those two writes,
+    /// this never leaves the flag true after a press without a wizard on screen, and no state makes
+    /// two presses in a row do nothing.
     func toggleExportWizard(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         if exportSettingsOpen, exportWizardShown {
             // Open and on screen: this press is the one that closes it.
@@ -25,13 +26,24 @@ extension AppModel {
             // rather than opening it again under the pointer.
             exportSettingsOpen = false
         } else if exportSettingsOpen {
-            // Set, with nothing showing. Writing `true` again changes nothing, so clear it and set
-            // it on the next turn, where the popover sees a change it can present.
+            // Set, with nothing showing. Writing `true` again changes nothing, and writing `false`
+            // then `true` a turn later relies on SwiftUI drawing in between (a menu's tracking loop
+            // need not). Clear it only: the next press is a plain open, a change SwiftUI has seen.
             exportSettingsOpen = false
-            DispatchQueue.main.async { [weak self] in self?.exportSettingsOpen = true }
         } else {
             exportSettingsOpen = true
         }
+    }
+
+    /// Why the footer's Export cannot open the wizard: there is nothing to export yet. What the
+    /// wizard itself sets (a folder, a file name, a target) is not on this list. The wizard is where
+    /// those are set, so it has to stay reachable while they are missing; its own Export button
+    /// still waits for `runBlockedReason(for:)`.
+    func exportWizardBlockedReason(for tab: QueryTab) -> String? {
+        if connections.isEmpty { return "Add a connection first" }
+        if connection(for: tab) == nil { return "Choose a connection" }
+        if !tab.hasSQL { return "Write a query" }
+        return nil
     }
 
     /// The popover's own write to the flag: it closes itself on a click outside it, and that close

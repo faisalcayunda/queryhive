@@ -907,17 +907,21 @@ struct ResultGrid: View {
                 .help("How many rows Run fetches. It does not change the query; the engine stops reading here.")
             }
 
-            let reason = model.runBlockedReason(for: tab)
             // Opens the same wizard the Run menu does: one rule for every Export in the app —
-            // you see where it is going before it goes.
+            // you see where it is going before it goes. Dim only while there is nothing to export:
+            // a missing folder, file name or target is set in the wizard, so it must not lock the
+            // wizard out (with the rows filling the window this is the only way in).
+            let blocked = model.exportWizardBlockedReason(for: tab)
+            let unfinished = model.runBlockedReason(for: tab)
             PillButton(title: tab.destination == .table ? "Save to Table" : "Export",
                        symbol: tab.destination == .table ? "square.and.arrow.down" : "arrow.down.doc") {
                 model.toggleExportWizard()
             }
-            .disabled(reason != nil || tab.stage == .running)
-            .help(reason ?? (tab.destination == .table
-                             ? "Run the query again and save every row into the table"
-                             : "Run the query again and stream every row into the file"))
+            .disabled(blocked != nil || tab.stage == .running)
+            .help(blocked ?? unfinished.map { "Set up the export first: \($0)" }
+                  ?? (tab.destination == .table
+                      ? "Run the query again and save every row into the table"
+                      : "Run the query again and stream every row into the file"))
         }
         .padding(.horizontal, Metrics.gutter)
         .padding(.vertical, 6)
