@@ -34,7 +34,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind};
 use qh_driver::{
-    BrowseLevel, Capabilities, ConnectionConfig, Cursor, DriverKind, ExecuteOptions,
+    BrowseLevel, Capabilities, ConnectionConfig, CopyIn, Cursor, DriverKind, ExecuteOptions,
     ExplainOptions, ObjectPath, ObjectsPage, Parameter, Session,
 };
 use qh_sql::{Dialect, StatementKind};
@@ -223,12 +223,14 @@ pub(crate) enum Fate {
 enum Op<'a> {
     Execute(&'a str, &'a ExecuteOptions),
     Bound(&'a str, &'a [Parameter], &'a ExecuteOptions),
+    CopyIn(&'a str, &'a ExecuteOptions),
     Browse(BrowseLevel, &'a ObjectPath, bool),
     Objects(&'a ObjectPath),
 }
 
 enum Reply {
     Cursor(Box<dyn Cursor>),
+    Copy(Box<dyn CopyIn>),
     Names(Vec<String>),
     Page(ObjectsPage),
 }
@@ -403,6 +405,7 @@ impl Held {
                 .execute_bound(sql, parameters, options)
                 .await
                 .map(Reply::Cursor),
+            Op::CopyIn(sql, options) => session.copy_in(sql, options).await.map(Reply::Copy),
             Op::Browse(level, path, include_system) => session
                 .browse(level, path, include_system)
                 .await
@@ -511,6 +514,21 @@ impl Session for Held {
         };
         self.query_id = self.session().query_id();
         Ok(self.track(cursor, options))
+    }
+
+    /// Forwarded, and never sent again: a bulk load is a write, so even a lease whose
+    /// connection was lost fails it instead of replaying it on a replacement. (A transfer
+    /// opens its sessions unleased and never reaches the lease path; this keeps a wrapper
+    /// from answering the trait's default for a session that can copy.)
+    async fn copy_in(
+        &mut self,
+        statement: &str,
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn CopyIn>, EngineError> {
+        match self.call(false, Op::CopyIn(statement, options)).await? {
+            Reply::Copy(copy) => Ok(copy),
+            _ => unreachable!("a copy_in answers with a copy"),
+        }
     }
 
     async fn browse(

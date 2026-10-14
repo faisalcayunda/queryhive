@@ -1344,6 +1344,9 @@ fn mysql_value(value: &Parameter) -> mysql_async::Value {
         Parameter::UInt(number) => mysql_async::Value::UInt(*number),
         Parameter::Float(number) => mysql_async::Value::Double(*number),
         Parameter::Text(text) => mysql_async::Value::Bytes(text.as_bytes().to_vec()),
+        // Sent as a binary parameter: no escaping of its own, and none that depends on the
+        // session's `sql_mode`.
+        Parameter::Bytes(bytes) => mysql_async::Value::Bytes(bytes.clone()),
     }
 }
 
@@ -1925,6 +1928,10 @@ mod tests {
     fn a_bound_value_keeps_its_native_shape() {
         // The prepared protocol carries the variant, so this is typed rather than
         // every-value-as-text.
+        assert_eq!(
+            mysql_value(&Parameter::Bytes(vec![0, 0xff, b'\'', b'\\'])),
+            mysql_async::Value::Bytes(vec![0, 0xff, b'\'', b'\\'])
+        );
         assert_eq!(mysql_value(&Parameter::Null), mysql_async::Value::NULL);
         assert_eq!(
             mysql_value(&Parameter::Bool(true)),

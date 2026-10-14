@@ -9,7 +9,9 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-futures-util = { version = "0.3", default-features = false }
+# `sink`: the bulk `COPY` writer is a `Sink`, and `tokio-postgres` already enables the feature,
+# so naming it here changes no lock entry.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 qh-core.workspace = true
 qh-driver.workspace = true
 qh-sql.workspace = true

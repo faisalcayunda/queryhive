@@ -165,6 +165,8 @@ struct World {
 #[derive(Default)]
 struct Probe {
     id: usize,
+    /// The bytes every `CopyIn` of this session was sent.
+    copied: Arc<Mutex<Vec<u8>>>,
     password: Option<String>,
     tunnel_port: Option<u16>,
     executed: Mutex<Vec<String>>,
@@ -435,6 +437,21 @@ impl Session for FakeSession {
         Ok(())
     }
 
+    async fn copy_in(
+        &mut self,
+        statement: &str,
+        _options: &ExecuteOptions,
+    ) -> Result<Box<dyn qh_driver::CopyIn>, EngineError> {
+        self.probe
+            .executed
+            .lock()
+            .expect("executed")
+            .push(statement.to_owned());
+        Ok(Box::new(FakeCopy {
+            sent: Arc::clone(&self.probe.copied),
+        }))
+    }
+
     async fn reset(&mut self) -> Result<(), EngineError> {
         self.probe.resets_started.fetch_add(1, Ordering::SeqCst);
         let delay = *self.world.reset_delay.lock().expect("delay");
@@ -456,6 +473,22 @@ impl Session for FakeSession {
     async fn close(self: Box<Self>) -> Result<(), EngineError> {
         self.probe.closed.store(true, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+struct FakeCopy {
+    sent: Arc<Mutex<Vec<u8>>>,
+}
+
+#[async_trait]
+impl qh_driver::CopyIn for FakeCopy {
+    async fn send(&mut self, data: Vec<u8>) -> Result<(), EngineError> {
+        self.sent.lock().expect("sent").extend(data);
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<u64, EngineError> {
+        Ok(self.sent.lock().expect("sent").len() as u64)
     }
 }
 
@@ -2974,6 +3007,37 @@ async fn only_an_engine_that_owns_its_sessions_offers_a_second_connection() {
         .is_some());
     // The default is "no", so an engine written for something else cannot be mistaken for one.
     assert!(Bare.for_settings(env).is_none());
+}
+
+#[tokio::test]
+async fn a_bulk_copy_goes_through_the_session_wrappers_once() {
+    // Forwarded (a wrapper must not answer the trait's "no bulk path" default for a session
+    // that has one), and it reaches the driver once: a write is not replayed.
+    let (world, host) = fake_host();
+    let pool = host.pool();
+    let engine = pool.long_op_engine(settings(&[]));
+    let mut session = engine.connect(&pg_config("p1")).await.expect("session");
+    let mut copy = session
+        .copy_in("COPY t (a) FROM STDIN", &no_options())
+        .await
+        .expect("the wrapper forwards copy_in");
+    copy.send(b"1\n".to_vec()).await.expect("send");
+    copy.send(b"2\n".to_vec()).await.expect("send");
+    assert_eq!(copy.finish().await.expect("finish"), 4);
+    assert_eq!(world.all_executed(), ["COPY t (a) FROM STDIN"]);
+    session.close().await.expect("close");
+
+    // The same through a lease, which is the path with a reconnect rule.
+    let (world, host) = fake_host();
+    let engine = host.pool().engine(Lane::Query, settings(&[]));
+    let mut leased = engine.connect(&pg_config("p1")).await.expect("leased");
+    let copy = leased
+        .copy_in("COPY t (a) FROM STDIN", &no_options())
+        .await
+        .expect("a lease forwards copy_in");
+    drop(copy);
+    assert_eq!(world.all_executed(), ["COPY t (a) FROM STDIN"]);
+    leased.close().await.expect("close");
 }
 
 #[tokio::test]

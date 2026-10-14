@@ -248,6 +248,29 @@ pub enum Parameter {
     UInt(u64),
     Float(f64),
     Text(String),
+    /// Raw bytes: a `bytea`, a `BLOB`, a `VARBINARY`.
+    ///
+    /// Added for the cross-connection copy (ADR-0046, amending ADR-0028): a binary value bound
+    /// into a MySQL `INSERT` must not become a literal in the statement text, where its escaping
+    /// depends on `NO_BACKSLASH_ESCAPES`. PostgreSQL binds it as `bytea` text; Trino binds
+    /// nothing, so it never sees one.
+    Bytes(Vec<u8>),
+}
+
+/// A `COPY ... FROM STDIN` in progress: the rows go in as chunks of the server's text format,
+/// and the statement is not done until [`finish`](CopyIn::finish) says so.
+///
+/// Dropping it without calling `finish` aborts the copy (PostgreSQL's `CopyFail`), so nothing
+/// that was sent is kept. That is the guarantee a transaction around it relies on, and the
+/// reason `finish` consumes the value.
+#[async_trait]
+pub trait CopyIn: Send {
+    /// Send one chunk. A chunk may end anywhere, even inside a row: the server reads the
+    /// concatenation of everything sent.
+    async fn send(&mut self, data: Vec<u8>) -> Result<(), EngineError>;
+
+    /// End the copy and return the rows the server says it loaded.
+    async fn finish(self: Box<Self>) -> Result<u64, EngineError>;
 }
 
 /// How to run one statement.
@@ -700,6 +723,23 @@ pub trait Session: Send {
     async fn cancel(&self) -> Result<(), EngineError>;
 
     async fn close(self: Box<Self>) -> Result<(), EngineError>;
+
+    /// Start a bulk load: `statement` is a `COPY ... FROM STDIN` the caller built, and the
+    /// returned [`CopyIn`] takes the data.
+    ///
+    /// A sibling of [`execute`](Self::execute) with a default that refuses, so a driver with no
+    /// bulk path (MySQL and Trino write by `INSERT`) says so by name instead of pretending.
+    /// The statement is the caller's responsibility to have decided on; this does not
+    /// classify it. `options.statement_timeout` bounds it as it bounds any statement.
+    async fn copy_in(
+        &mut self,
+        _statement: &str,
+        _options: &ExecuteOptions,
+    ) -> Result<Box<dyn CopyIn>, EngineError> {
+        Err(EngineError::Usage {
+            message: "this driver has no bulk COPY path".to_owned(),
+        })
+    }
 
     /// Put the session back to the state a new connection starts in, so a pool can hand it to
     /// the next run.
@@ -1289,6 +1329,26 @@ mod tests {
             EngineError::Usage { message } => {
                 assert!(message.contains("cannot bind"), "{message}");
             }
+            other => panic!("expected a usage error, got {other:?}"),
+        }
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_driver_with_no_bulk_path_refuses_a_copy_by_name() {
+        let driver = FakeDriver {
+            kind: DriverKind::Mysql,
+            connects: Arc::new(AtomicUsize::new(0)),
+        };
+        let config = ConnectionConfig::new(DriverKind::Mysql, "127.0.0.1", 3306, "qh");
+        let mut session = driver.connect(&config).await.unwrap();
+        let error = session
+            .copy_in("COPY t FROM STDIN", &ExecuteOptions::default())
+            .await
+            .err()
+            .expect("the default has no bulk path");
+        match error {
+            EngineError::Usage { message } => assert!(message.contains("COPY"), "{message}"),
             other => panic!("expected a usage error, got {other:?}"),
         }
         session.close().await.unwrap();

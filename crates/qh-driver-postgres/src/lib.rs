@@ -104,12 +104,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use normalize::ColumnParser;
 use qh_core::{ColumnBatch, ColumnMeta, EngineError, FailureKind, Value, CONNECT_TIMEOUT};
 use qh_driver::{
-    AnalyzeFence, BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, Cursor, Driver,
-    DriverKind, ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql,
+    AnalyzeFence, BrowseLevel, Capabilities, ChunkBuilder, ConnectionConfig, CopyIn, Cursor,
+    Driver, DriverKind, ExecuteOptions, ExplainFormat, ExplainOptions, ExplainSupport, MetadataSql,
     ObjectPath, ObjectsPage, Parameter, ParameterStyle, Session, SqlType, TlsMode,
 };
 use qh_sql::{scan_dialect, statement_count_dialect, strip_terminator_dialect, Dialect};
@@ -608,6 +608,38 @@ fn postgres_text(value: &Parameter) -> Option<String> {
         }),
         Parameter::Float(number) => Some(number.to_string()),
         Parameter::Text(text) => Some(text.clone()),
+        // `bytea` input in its hex form, which the server reads whatever `bytea_output` says.
+        Parameter::Bytes(bytes) => Some(format!("\\x{}", qh_core::render::hex_encode(bytes))),
+    }
+}
+
+/// A `COPY ... FROM STDIN` in progress. Dropping it before `finish` drops the sink, which sends
+/// `CopyFail` and leaves nothing loaded.
+struct PostgresCopyIn {
+    /// Pinned: the sink is not `Unpin`, and `finish` is called on a pinned reference.
+    sink: Pin<Box<tokio_postgres::CopyInSink<BytesMut>>>,
+    /// The statement, for an error message.
+    statement: String,
+    timeout: Option<Duration>,
+}
+
+#[async_trait]
+impl CopyIn for PostgresCopyIn {
+    async fn send(&mut self, data: Vec<u8>) -> Result<(), EngineError> {
+        // One copy of the chunk into the sink's buffer type. The chunk is about a megabyte at
+        // most (the transfer's window), so this is the cheap end of the round trip.
+        self.sink
+            .send(BytesMut::from(&data[..]))
+            .await
+            .map_err(|error| map_query_error(error, &self.statement, self.timeout))
+    }
+
+    async fn finish(mut self: Box<Self>) -> Result<u64, EngineError> {
+        self.sink
+            .as_mut()
+            .finish()
+            .await
+            .map_err(|error| map_query_error(error, &self.statement, self.timeout))
     }
 }
 
@@ -706,6 +738,32 @@ impl Session for PostgresSession {
             emitted: 0,
             finished: false,
             affected: None,
+            timeout: options.statement_timeout,
+        }))
+    }
+
+    async fn copy_in(
+        &mut self,
+        statement: &str,
+        options: &ExecuteOptions,
+    ) -> Result<Box<dyn CopyIn>, EngineError> {
+        self.ensure_open()?;
+        // The same bound every statement runs under, sent first and only when it changed.
+        if let Some(set) = timeout_statement(self.statement_timeout, options.statement_timeout) {
+            self.client
+                .batch_execute(&set)
+                .await
+                .map_err(|error| infra_error(error, &set, options.statement_timeout))?;
+        }
+        self.statement_timeout = options.statement_timeout;
+        let sink = self
+            .client
+            .copy_in::<str, BytesMut>(statement)
+            .await
+            .map_err(|error| map_query_error(error, statement, options.statement_timeout))?;
+        Ok(Box::new(PostgresCopyIn {
+            sink: Box::pin(sink),
+            statement: statement.to_owned(),
             timeout: options.statement_timeout,
         }))
     }
@@ -1418,6 +1476,15 @@ mod tests {
 
     #[test]
     fn a_bound_value_gets_the_servers_own_text() {
+        // Bytes are `bytea` hex input, which the server reads whatever `bytea_output` is.
+        assert_eq!(
+            postgres_text(&Parameter::Bytes(vec![0, 1, 0xff, b'\\'])).as_deref(),
+            Some("\\x0001ff5c")
+        );
+        assert_eq!(
+            postgres_text(&Parameter::Bytes(Vec::new())).as_deref(),
+            Some("\\x")
+        );
         assert_eq!(postgres_text(&Parameter::Null), None);
         assert_eq!(
             postgres_text(&Parameter::Bool(true)).as_deref(),
