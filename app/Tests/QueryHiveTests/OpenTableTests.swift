@@ -2,34 +2,57 @@ import XCTest
 
 @testable import QueryHive
 
-/// Opening a table from the object tree writes its column list, not `SELECT *`.
+/// Opening a table from the object tree writes its column list, not `SELECT *`, laid out the way
+/// Format SQL lays it out: each clause on a line of its own, and two or more columns one per line.
 final class OpenTableStatementTests: XCTestCase {
-    func testTheColumnsAreListedInTheTablesOrder() {
+    func testTheColumnsAreListedOnePerLineInTheTablesOrder() {
         XCTAssertEqual(OpenTableStatement.sql(table: "hive.analytics.penerima_manfaat",
                                               columns: ["id", "nama", "tanggal_lahir"], kind: .trino),
-                       "SELECT id, nama, tanggal_lahir FROM hive.analytics.penerima_manfaat")
+                       "SELECT\n    id,\n    nama,\n    tanggal_lahir\nFROM hive.analytics.penerima_manfaat")
         XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: ["z", "a", "m"], kind: .postgres),
-                       "SELECT z, a, m FROM t", "the table's order, not alphabetical")
+                       "SELECT\n    z,\n    a,\n    m\nFROM t", "the table's order, not alphabetical")
+    }
+
+    /// The formatter keeps a one-item list on the `SELECT` line, so this does too.
+    func testOneColumnStaysOnTheSelectLine() {
+        XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: ["id"], kind: .trino), "SELECT id\nFROM t")
     }
 
     func testAColumnIsQuotedOnlyWhenItNeedsIt() {
         let columns = ["id", "Nama", "tanggal lahir", "order", "1st", "a\"b"]
         XCTAssertEqual(OpenTableStatement.sql(table: "\"public\".\"t\"", columns: columns, kind: .postgres),
-                       "SELECT id, \"Nama\", \"tanggal lahir\", \"order\", \"1st\", \"a\"\"b\" FROM \"public\".\"t\"")
+                       "SELECT\n    id,\n    \"Nama\",\n    \"tanggal lahir\",\n    \"order\",\n    \"1st\",\n"
+                       + "    \"a\"\"b\"\nFROM \"public\".\"t\"")
         XCTAssertEqual(OpenTableStatement.sql(table: "`db`.`t`", columns: ["id", "key", "a`b"], kind: .mysql),
-                       "SELECT id, `key`, `a``b` FROM `db`.`t`")
+                       "SELECT\n    id,\n    `key`,\n    `a``b`\nFROM `db`.`t`")
     }
 
-    func testNoColumnsIsTheOldSelectStar() {
-        XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: [], kind: .trino), "SELECT * FROM t")
+    func testNoColumnsIsSelectStarOnTwoLines() {
+        XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: [], kind: .trino), "SELECT *\nFROM t")
     }
 
     func testAVeryWideTableKeepsSelectStar() {
         let wide = (1...OpenTableStatement.maxColumns).map { "c\($0)" }
-        XCTAssertTrue(OpenTableStatement.sql(table: "t", columns: wide, kind: .trino).hasPrefix("SELECT c1, c2"),
+        XCTAssertTrue(OpenTableStatement.sql(table: "t", columns: wide, kind: .trino).hasPrefix("SELECT\n    c1,\n    c2,\n"),
                       "exactly the limit still lists them")
-        XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: wide + ["one_more"], kind: .trino), "SELECT * FROM t")
+        XCTAssertEqual(OpenTableStatement.sql(table: "t", columns: wide + ["one_more"], kind: .trino), "SELECT *\nFROM t")
         XCTAssertEqual(OpenTableStatement.maxColumns, 200)
+    }
+
+    /// The text a table opens with is already what Format SQL makes of it, in every dialect, so
+    /// formatting a freshly opened table changes nothing.
+    func testFormatSQLLeavesTheOpenedStatementAsItIs() {
+        let tables: [ConnectionKind: String] = [.trino: "prod.public.orders", .postgres: "\"public\".\"Orders\"",
+                                                .mysql: "`shop`.`orders`"]
+        let lists = [[], ["id"], ["id", "created-at", "Nama", "order", "a\"b", "x`y"]]
+        for (kind, table) in tables {
+            for columns in lists {
+                let sql = OpenTableStatement.sql(table: table, columns: columns, kind: kind)
+                XCTAssertEqual(SQLFormat.plan(text: sql, selection: NSRange(location: 0, length: 0),
+                                              dialect: kind.editorDialect, options: SQLFormat.options(tabWidth: 4)),
+                               .unchanged, "\(kind): \(sql)")
+            }
+        }
     }
 }
 
@@ -66,7 +89,8 @@ final class OpenTableModelTests: XCTestCase {
     }
 
     private let qualified = "\"public\".\"penerima_manfaat\""
-    private let explicit = "SELECT id, \"Nama\", \"order\" FROM \"public\".\"penerima_manfaat\""
+    private let explicit = "SELECT\n    id,\n    \"Nama\",\n    \"order\"\nFROM \"public\".\"penerima_manfaat\""
+    private var star: String { "SELECT *\nFROM \(qualified)" }
 
     /// The runs against the database, not the bookkeeping around them (the history write after a run).
     private func previews(_ engine: MockEngine) -> [MockEngine.Invocation] {
@@ -97,12 +121,12 @@ final class OpenTableModelTests: XCTestCase {
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         // At once, as before: the tab is there holding the query it runs.
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star)
         XCTAssertTrue(wait { tab.sql == self.explicit }, "the text did not become the column list: \(tab.sql)")
         waitForTheRunToEnd(tab)
         // One query on the server, and it is the `SELECT *` as it always was, not a one-row probe.
         XCTAssertEqual(previews(engine).count, 1, "a second query was run: \(engine.calls.map(\.command))")
-        XCTAssertEqual(previews(engine)[0].env["SQL"], "SELECT * FROM \(qualified)")
+        XCTAssertEqual(previews(engine)[0].env["SQL"], star)
         XCTAssertNotEqual(previews(engine)[0].env["LIMIT"], "1")
         // The table the grid writes to, and the text a search, a sort or a count wraps, follow.
         XCTAssertEqual(tab.sourceTable, qualified)
@@ -117,7 +141,7 @@ final class OpenTableModelTests: XCTestCase {
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         waitForTheRunToEnd(tab)
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "exactly as today")
+        XCTAssertEqual(tab.sql, star, "exactly as today")
         XCTAssertEqual(previews(engine).count, 1)
         XCTAssertEqual(tab.previewError, "connection refused", "the run's own error, and nothing else")
     }
@@ -132,10 +156,10 @@ final class OpenTableModelTests: XCTestCase {
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         waitForTheRunToEnd(tab)
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "the header arrived and the run still failed")
-        XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star, "the header arrived and the run still failed")
+        XCTAssertEqual(tab.previewedSQL, star)
         let mark = try XCTUnwrap(tab.errorMark, "the server's error position was dropped")
-        XCTAssertEqual(mark.sqlSnapshot, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(mark.sqlSnapshot, star)
     }
 
     func testAStoppedRunLeavesSelectStar() throws {
@@ -145,7 +169,7 @@ final class OpenTableModelTests: XCTestCase {
         let tab = try XCTUnwrap(model.selectedTab)
         waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.preview?.stopped, true)
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star)
     }
 
     func testARunThatCannotStartLeavesSelectStar() throws {
@@ -154,7 +178,7 @@ final class OpenTableModelTests: XCTestCase {
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         waitForTheRunToEnd(tab)
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star)
     }
 
     func testATableThatReportsNoColumnsKeepsSelectStar() throws {
@@ -163,8 +187,8 @@ final class OpenTableModelTests: XCTestCase {
         model.openTable(node)
         let tab = try XCTUnwrap(model.selectedTab)
         waitForTheRunToEnd(tab)
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
-        XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star)
+        XCTAssertEqual(tab.previewedSQL, star)
     }
 
     func testTheLimitIsTwoHundredColumnsAsTheModelSeesIt() throws {
@@ -175,10 +199,10 @@ final class OpenTableModelTests: XCTestCase {
             let tab = try XCTUnwrap(model.selectedTab)
             waitForTheRunToEnd(tab)
             if count == OpenTableStatement.maxColumns {
-                XCTAssertTrue(tab.sql.hasPrefix("SELECT c1, c2, "), "\(count) columns are listed: \(tab.sql.prefix(40))")
-                XCTAssertTrue(tab.sql.hasSuffix(", c200 FROM \(qualified)"))
+                XCTAssertTrue(tab.sql.hasPrefix("SELECT\n    c1,\n    c2,\n"), "\(count) columns are listed: \(tab.sql.prefix(40))")
+                XCTAssertTrue(tab.sql.hasSuffix(",\n    c200\nFROM \(qualified)"))
             } else {
-                XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)", "\(count) columns keep the star")
+                XCTAssertEqual(tab.sql, star, "\(count) columns keep the star")
             }
         }
     }
@@ -191,7 +215,7 @@ final class OpenTableModelTests: XCTestCase {
         tab.sql = "SELECT 1"   // before the run's answer, which arrives on the main queue
         waitForTheRunToEnd(tab)
         XCTAssertEqual(tab.sql, "SELECT 1", "the person's text was written over")
-        XCTAssertEqual(tab.previewedSQL, "SELECT * FROM \(qualified)", "and the run's record is still what ran")
+        XCTAssertEqual(tab.previewedSQL, star, "and the run's record is still what ran")
     }
 
     /// Typing the editor has not written back yet is handed to the model by `flushEditors`, and the
@@ -219,7 +243,7 @@ final class OpenTableModelTests: XCTestCase {
         let tab = try XCTUnwrap(model.selectedTab)
         model.tabs.removeAll { $0 === tab }
         spinLoop()
-        XCTAssertEqual(tab.sql, "SELECT * FROM \(qualified)")
+        XCTAssertEqual(tab.sql, star)
     }
 
     func testTheSecondRunOfTheColumnListIsAnOrdinaryRunOfWhatTheEditorShows() throws {
