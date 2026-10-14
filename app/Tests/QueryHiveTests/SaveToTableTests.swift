@@ -365,4 +365,69 @@ final class SaveToTableAcrossConnectionsTests: XCTestCase {
         XCTAssertNil(tab.targetConnectionID, "the tab's own connection is stored as no target")
         XCTAssertEqual([tab.targetCatalog, tab.targetSchema], ["hive", "analytics"])
     }
+
+    func testChoosingAnotherConnectionLeavesAppendForCreate() {
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Warehouse", .postgres))
+        tab.targetConnectionID = nil
+        tab.writeMode = .append
+        model.chooseTargetConnection(model.connections[1].id, for: tab)
+        XCTAssertEqual(tab.writeMode, .create, "the wizard does not show append there, so it cannot stay selected")
+    }
+
+    // MARK: The "exists" hint (blueprint §8.3)
+
+    func testTheHintReadsTheTargetsOwnTablesAndSaysWhatTheModeWillDo() {
+        let target = connection("Warehouse", .postgres)
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: target)
+        tab.targetCatalog = "hive"  // a Trino leftover the PostgreSQL target has no part for
+        tab.targetSchema = "public"
+        tab.targetTable = "people"
+        XCTAssertNil(model.tableCollision(for: tab), "nothing fetched, nothing claimed")
+        model.tableOptions[model.tableOptionKey(target.id, catalog: "", schema: "public")] = ["people", "orders"]
+        XCTAssertEqual(model.tableCollision(for: tab), "Exists, Create will fail")
+        tab.writeMode = .replace
+        XCTAssertEqual(model.tableCollision(for: tab), "Will be replaced")
+        tab.targetTable = "fresh"
+        XCTAssertNil(model.tableCollision(for: tab))
+        tab.targetTable = "People"
+        XCTAssertNil(model.tableCollision(for: tab), "the engine quotes a name that is not plain, so case counts")
+    }
+
+    // MARK: The mode text (T-1)
+
+    func testReplaceNoLongerSaysTheTableIsDroppedFirst() {
+        XCTAssertEqual(WriteMode.replace.statement, "REPLACE TABLE")
+        XCTAssertFalse(WriteMode.replace.help.contains("already gone"))
+        XCTAssertTrue(WriteMode.replace.help.contains("stays as it was"))
+        XCTAssertTrue(WriteMode.replace.detail?.contains("grants") == true, "N-7")
+        XCTAssertNil(WriteMode.create.detail)
+    }
+}
+
+/// The experimental switch (ADR-0046 decision 13): off unless turned on, and a render's pin is never
+/// written anywhere.
+final class ExperimentalFeaturesTests: XCTestCase {
+    private func scratch() -> (UserDefaults, String) {
+        let suite = "qh-test-experimental-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return (defaults, suite)
+    }
+
+    func testItIsOffUntilTurnedOnAndRemembersTheChoice() {
+        let (defaults, _) = scratch()
+        XCTAssertFalse(ExperimentalFeatures(defaults: defaults).saveTableAcrossConnections)
+        ExperimentalFeatures(defaults: defaults).saveTableAcrossConnections = true
+        XCTAssertTrue(ExperimentalFeatures(defaults: defaults).saveTableAcrossConnections)
+    }
+
+    func testAPinIsForThisProcessOnly() {
+        let (defaults, _) = scratch()
+        let features = ExperimentalFeatures(defaults: defaults)
+        features.pin(saveTableAcrossConnections: true)
+        XCTAssertTrue(features.saveTableAcrossConnections)
+        features.saveTableAcrossConnections = true
+        XCTAssertNil(defaults.object(forKey: ExperimentalFeatures.saveTableAcrossConnectionsKey),
+                     "a snapshot must not switch the feature on for the installed app")
+    }
 }

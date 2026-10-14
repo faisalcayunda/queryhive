@@ -958,6 +958,38 @@ enum Snapshot {
             tab.targetSchema = "analytics"
             tab.targetTable = "penerima_manfaat_2026"
             model.targetPopoverOpen = true
+        case "table-target-cross", "table-target-cross-refused", "transfer-sheet":
+            // V-17 (W13-T20): Save to Table writing to another connection. The switch is pinned on
+            // for this process only, so drawing the feature never turns it on for the installed app.
+            ExperimentalFeatures.shared.pin(saveTableAcrossConnections: true)
+            // A prod source, so the wizard's and the sheet's prod banner are in the picture.
+            model.connections[0].environment = .prod
+            let refused = scene == "table-target-cross-refused"
+            // The refused scene writes to MySQL at Confirm, which asks once for a create and refuses
+            // a replace; the other two write to the PostgreSQL warehouse, which has no label.
+            if refused { model.connections[3].safeMode = .confirm }
+            let target = model.connections[refused ? 3 : 2]
+            tab.destination = .table
+            tab.targetConnectionID = target.id
+            tab.targetCatalog = refused ? "reporting" : ""
+            tab.targetSchema = refused ? "" : "public"
+            tab.targetTable = "penerima_manfaat_2026"
+            tab.writeMode = refused ? .replace : .create
+            // The target's own namespaces and tables, as a fetch would have left them: the scene must
+            // not depend on a server (`SilentEngine` answers nothing).
+            model.catalogOptions[my.id] = ["reporting", "archive"]
+            model.schemaOptions["\(pg.id.uuidString)|"] = ["public", "staging"]
+            model.tableOptions[model.tableOptionKey(target.id, catalog: tab.targetCatalog,
+                                                    schema: tab.targetSchema)] = ["penerima_manfaat_2026"]
+            if scene == "transfer-sheet" {
+                let request = RunConfirmation.transferRequest(
+                    source: model.connections[0], target: target, mode: tab.writeMode,
+                    table: target.kind.targetParts.map(tab.targetValue))
+                model.transfer = TableTransfer(tabID: tab.id, request: request, sql: tab.sql,
+                                               sourceID: primary.id, target: target)
+            } else {
+                model.exportSettingsOpen = true
+            }
         case "disabled":
             // No connection and no SQL: the primary action in its "not yet" state, which is what
             // a user sees the moment the app opens.

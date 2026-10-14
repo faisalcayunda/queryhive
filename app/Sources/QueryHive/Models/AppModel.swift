@@ -309,6 +309,10 @@ final class AppModel {
     /// Keys with a fetch in flight, so a field can say it is working instead of looking empty.
     var loadingOptions: Set<String> = []
 
+    /// Tables fetched for one target namespace, keyed by "connection|catalog|schema", for the
+    /// wizard's "exists" hint (W13-T20, blueprint §8.3). A hint only: the engine's probe decides.
+    var tableOptions: [String: [String]] = [:]
+
     // MARK: Editor suggestions
 
 

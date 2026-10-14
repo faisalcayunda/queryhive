@@ -627,6 +627,56 @@ extension AppModel {
         "\(connectionID.uuidString)|\(catalog)"
     }
 
+    /// The key `tableOptions` holds one namespace's tables under.
+    func tableOptionKey(_ connectionID: UUID, catalog: String, schema: String) -> String {
+        "\(connectionID.uuidString)|\(catalog)|\(schema)"
+    }
+
+    /// Fetches the tables of the namespace a table target names, with the target connection's own
+    /// settings, so the wizard can say a name is taken before anything runs (blueprint §8.3).
+    ///
+    /// Only the parts the target's driver has are read: PostgreSQL's schema in the connection's
+    /// database, MySQL's database, Trino's catalog and schema. A failed fetch leaves no entry, and
+    /// the hint is then silent; the engine's own probe is what refuses a create over a table.
+    func loadTableOptions(for connectionID: UUID?, catalog: String, schema: String) {
+        guard let connectionID, let connection = connections.first(where: { $0.id == connectionID }) else { return }
+        let parts = connection.kind.targetParts
+        let catalog = parts.contains(.catalog) ? catalog : ""
+        let schema = parts.contains(.schema) ? schema : ""
+        guard parts.contains(.catalog) ? !catalog.isEmpty : true,
+              parts.contains(.schema) ? !schema.isEmpty : true else { return }
+        let key = tableOptionKey(connectionID, catalog: catalog, schema: schema)
+        let loading = "tables|" + key
+        guard tableOptions[key] == nil, !loadingOptions.contains(loading) else { return }
+        guard var env = try? connectionEnvironment(connection) else { return }
+        env["RETRIES"] = "2"
+        if !catalog.isEmpty { env["DB_DATABASE"] = catalog }
+        if !schema.isEmpty { env["DB_SCHEMA"] = schema }
+        loadingOptions.insert(loading)
+        Engine.current.run("tables", env: env, onEvent: { [weak self] event in
+            guard event.event == "tables" else { return }
+            self?.tableOptions[key] = event.names ?? []
+        }, onExit: { [weak self] _, _ in
+            self?.loadingOptions.remove(loading)
+        })
+    }
+
+    /// What the wizard says beside a table name the target already has, or `nil` when the name is
+    /// free or not known to be taken.
+    func tableCollision(for tab: QueryTab) -> String? {
+        guard tab.destination == .table, let target = tableDestination(for: tab)?.connection,
+              !tab.trimmedTable.isEmpty else { return nil }
+        let parts = target.kind.targetParts
+        let key = tableOptionKey(target.id, catalog: parts.contains(.catalog) ? tab.trimmedCatalog : "",
+                                 schema: parts.contains(.schema) ? tab.trimmedSchema : "")
+        guard tableOptions[key]?.contains(tab.trimmedTable) == true else { return nil }
+        switch tab.writeMode {
+        case .create: return "Exists, Create will fail"
+        case .replace: return "Will be replaced"
+        case .append: return nil
+        }
+    }
+
     func isLoadingOptions(for connectionID: UUID?, catalog: String = "") -> Bool {
         guard let connectionID else { return false }
         return loadingOptions.contains(optionKey(connectionID, catalog))
@@ -703,6 +753,9 @@ extension AppModel {
         tab.targetConnectionID = next
         tab.targetCatalog = ""
         tab.targetSchema = ""
+        // Append is not offered across connections (OQ-5), and the wizard does not show it there,
+        // so a tab left on it would be blocked by a choice it cannot see.
+        if next != nil, tab.writeMode == .append { tab.writeMode = .create }
         prepareTableDestination(tab)
     }
 

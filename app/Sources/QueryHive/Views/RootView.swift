@@ -83,7 +83,7 @@ struct RootView: View {
         }
         // An SSH host key the engine refused, asked about here while no connection sheet is up; the
         // sheet asks over itself (`ConnectionEditorSheet`), because a sheet can't open over a sheet.
-        .hostKeySheet(active: model.editingConnection == nil)
+        .hostKeySheet(active: model.editingConnection == nil && model.transfer == nil)
         // The engine's `confirm` Safe Mode level, asked where the engine cannot: one approval per
         // run, never remembered. The closure the model holds is what starts the approved run.
         .sheet(item: $model.pendingConfirmation) { pending in
@@ -94,6 +94,11 @@ struct RootView: View {
                     pending.approve()
                 },
                 onCancel: { model.pendingConfirmation = nil })
+        }
+        // A copy across connections (W13-T20): asked about, run and reported in one sheet.
+        .sheet(item: $model.transfer) { transfer in
+            TransferSheet(transfer: transfer)
+                .environment(model)
         }
         // The import mapping sheet, for a file the user picked.
         .sheet(item: $model.importDraft) { draft in

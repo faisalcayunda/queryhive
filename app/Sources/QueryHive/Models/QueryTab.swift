@@ -126,7 +126,8 @@ enum WriteMode: String, CaseIterable, Identifiable {
     var statement: String {
         switch self {
         case .create: "CREATE TABLE"
-        case .replace: "DROP + CREATE TABLE"
+        // W12-T9: the new table is built under a scratch name and swapped in, not dropped first.
+        case .replace: "REPLACE TABLE"
         case .append: "INSERT INTO"
         }
     }
@@ -134,8 +135,20 @@ enum WriteMode: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .create: "Creates the table. Fails if it already exists."
-        case .replace: "Drops the existing table first, then recreates it from the query. If the query then fails, the old table is already gone."
+        case .replace: "Builds the new table beside the old one and swaps it in once every row is there. If the query fails first, the old table stays as it was."
         case .append: "Inserts the query's rows into an existing table."
+        }
+    }
+
+    /// The rest of what a mode does, for the "?" beside it. Only replace has more to say (N-7).
+    var detail: String? {
+        switch self {
+        case .replace:
+            "The new table has the query's columns only: no keys, indexes, defaults, triggers or "
+                + "grants, and a MySQL grant made on the old table's name does not move to the new one. "
+                + "If QueryHive itself is killed during a MySQL copy, a qh_new_… table can be left "
+                + "behind; the old table is untouched."
+        case .create, .append: nil
         }
     }
 }
