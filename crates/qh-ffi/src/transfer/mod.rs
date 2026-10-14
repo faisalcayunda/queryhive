@@ -63,16 +63,11 @@ use crate::commands::{
     parse_safe_mode, require_read, safe_mode, safe_mode_floor, source_sql, statement_timeout,
     stop_grace, stop_session, STOP_CEILING,
 };
-use crate::env::{Destination, Settings, TransferMode, DEST_PREFIX};
+use crate::env::{Destination, Settings, TransferMode};
 use crate::events::{event, Emitter};
 use crate::progress::PROGRESS_MS_DEFAULT;
 use crate::table_swap::{finish_statement, scratch_stamp};
 use crate::{CancelFlag, CliError, Engine, ErrorSide};
-
-/// Whether these settings ask for a copy across connections: any `DEST_` key, blank or not.
-pub fn requested(settings: &Settings) -> bool {
-    settings.has_prefixed(DEST_PREFIX)
-}
 
 /// Why the source statement may be read and nothing else, in the log.
 const SOURCE_ONLY: &str = "Save to Table across connections reads the source and nothing else";
@@ -733,10 +728,11 @@ impl<'a> Dest<'a> {
     /// warnings: what, if anything, was left behind.
     async fn abort(mut self) -> Vec<String> {
         let mut warnings = Vec::new();
-        // The copy in flight is dropped, which sends `CopyFail`; a cancel first, bounded, for
-        // the statement that may still be running.
-        if self.window.take().is_some() {
+        // The statement that may still be running is cancelled first, bounded; only then is the
+        // copy dropped, which is what sends `CopyFail`.
+        if let Some(window) = self.window.take() {
             let _ = cancel_bounded(STOP_CEILING, self.session.cancel()).await;
+            drop(window);
         }
         if self.transaction {
             // Under the same statement bound as everything before it: the PostgreSQL driver sends

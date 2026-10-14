@@ -1044,6 +1044,13 @@ async fn a_stop_cancels_the_source_before_dropping_its_cursor_and_writes_nothing
     out.result.as_ref().expect("a Stop is a done");
     cancel_before_drop(&out);
     assert!(out.has("dst:copy-fail"), "the open copy is aborted");
+    // On the destination too: the statement still running is cancelled, and only then is the
+    // copy dropped (which is what sends `CopyFail`).
+    assert!(
+        out.position("dst:cancel") < out.position("dst:copy-fail"),
+        "{:#?}",
+        out.log
+    );
     assert!(out.has("dst:execute ROLLBACK"));
     assert!(!out.has("dst:execute COMMIT"));
     let done = out.event("done");

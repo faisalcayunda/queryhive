@@ -1176,8 +1176,8 @@ pub async fn to_table(
     // a `DEST_` key of any kind, blank included, asks for a second connection, and a set
     // that is partial or empty must never fall through to the `CREATE TABLE AS` below,
     // which would run on the SOURCE connection under the `TARGET_*` name (W13-T20, §3.2).
-    // The transfer itself is not built yet, so a complete set is refused too; it replaces
-    // this refusal.
+    // `Settings::destination` refuses every such set that is not usable, and hands a usable
+    // one to the transfer.
     let destination = settings
         .destination()
         .map_err(|error| CliError::Usage(error.to_string()))?;
