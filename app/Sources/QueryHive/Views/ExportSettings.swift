@@ -18,7 +18,7 @@ struct DestinationPopover: View {
     @State private var confirmReplace = false
 
     private var showing: Binding<Bool> {
-        Binding(get: { model.exportSettingsOpen }, set: { model.exportSettingsOpen = $0 })
+        Binding(get: { model.exportSettingsOpen }, set: { model.exportWizardPresented($0) })
     }
 
     /// Why the wizard's own button is dim — the same reason the old toolbar button was, now that
@@ -142,7 +142,9 @@ struct DestinationPopover: View {
             .padding(14)
         }
         .frame(width: 400)
+        .onDisappear { model.exportWizardShown = false }
         .onAppear {
+            model.exportWizardShown = true
             // The target's catalogs and schemas, which are this tab's own unless a copy names
             // another connection.
             let target = model.tableDestination(for: tab)?.connection?.id ?? tab.connectionID

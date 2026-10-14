@@ -3,6 +3,44 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 extension AppModel {
+    /// How close after the popover closed itself a press still belongs to the same click.
+    static let exportWizardSameClick: TimeInterval = 0.5
+
+    /// What the footer's Export and the Run menu's Export… do: open the wizard, or close it when it
+    /// is open.
+    ///
+    /// A bare `exportSettingsOpen = true` got stuck. With the wizard open, a click on Export is a
+    /// click outside the popover: the popover closes itself and writes `false`, then the button's
+    /// action runs in the same click and writes `true` again, while the popover is on its way out.
+    /// The flag stayed true with no wizard on screen (a hosted SDK 27 window showed it again about
+    /// 500 ms later; the SDK 14 app is assumed to show nothing), and every later press wrote the
+    /// `true` it already held, so the button did nothing. Whatever the order of those two writes, this never leaves the flag true without a
+    /// wizard to show for it, and no state makes a press a no-op twice in a row.
+    func toggleExportWizard(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        if exportSettingsOpen, exportWizardShown {
+            // Open and on screen: this press is the one that closes it.
+            exportSettingsOpen = false
+        } else if now - exportWizardDismissedAt < Self.exportWizardSameClick {
+            // The same click already closed it (the popover wrote `false` first); leave it closed
+            // rather than opening it again under the pointer.
+            exportSettingsOpen = false
+        } else if exportSettingsOpen {
+            // Set, with nothing showing. Writing `true` again changes nothing, so clear it and set
+            // it on the next turn, where the popover sees a change it can present.
+            exportSettingsOpen = false
+            DispatchQueue.main.async { [weak self] in self?.exportSettingsOpen = true }
+        } else {
+            exportSettingsOpen = true
+        }
+    }
+
+    /// The popover's own write to the flag: it closes itself on a click outside it, and that close
+    /// is remembered so the press that caused it does not reopen it (`toggleExportWizard`).
+    func exportWizardPresented(_ open: Bool, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        if !open, exportSettingsOpen { exportWizardDismissedAt = now }
+        exportSettingsOpen = open
+    }
+
     func rememberDestination(_ tab: QueryTab) {
         UserDefaults.standard.set(tab.outputDirectory?.path, forKey: "lastOutputDirectory")
         UserDefaults.standard.set(tab.format.rawValue, forKey: "lastFormat")

@@ -420,7 +420,7 @@ struct QueryActions: View {
                 // worth seeing every time — it can drop a table — and the settings belong to the
                 // moment of exporting, not to a menu item of their own.
                 Button(tab.destination == .table ? "Save to Table…" : "Export…") {
-                    model.exportSettingsOpen = true
+                    model.toggleExportWizard()
                 }
             } label: {
                 Image(systemName: "chevron.down")

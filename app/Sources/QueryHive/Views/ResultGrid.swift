@@ -912,7 +912,7 @@ struct ResultGrid: View {
             // you see where it is going before it goes.
             PillButton(title: tab.destination == .table ? "Save to Table" : "Export",
                        symbol: tab.destination == .table ? "square.and.arrow.down" : "arrow.down.doc") {
-                model.exportSettingsOpen = true
+                model.toggleExportWizard()
             }
             .disabled(reason != nil || tab.stage == .running)
             .help(reason ?? (tab.destination == .table
