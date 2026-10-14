@@ -171,6 +171,36 @@ final class TableTransferConfirmationTests: XCTestCase {
         XCTAssertTrue(engine.calls.isEmpty)
     }
 
+    func testASourceEditedWhileTheSheetIsUpRunsNothing() throws {
+        let engine = MockEngine()
+        engine.answer("to_table", with: .events([]))
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Warehouse", .postgres),
+                                   engine: engine)
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        // Nothing the sheet names: the source now reads as another user, through a bastion.
+        model.connections[0].user = "admin"
+        model.connections[0].sshHost = "bastion.corp"
+        model.approveTransfer(transfer)
+        XCTAssertEqual(transfer.phase, .failed)
+        XCTAssertTrue(engine.calls.isEmpty)
+    }
+
+    /// The tab switched to File while the sheet was up: approving must not run a `to_table` with no
+    /// `DEST_` key, which would be a confirmed `CREATE TABLE … AS` on the source.
+    func testATabThatIsNoLongerATableDestinationRunsNothing() throws {
+        let engine = MockEngine()
+        engine.answer("to_table", with: .events([]))
+        let (model, tab) = fixture(source: connection("Lake", .trino, safeMode: .confirm),
+                                   target: connection("Warehouse", .postgres), engine: engine)
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        tab.destination = .file
+        model.approveTransfer(transfer)
+        XCTAssertEqual(transfer.phase, .failed)
+        XCTAssertTrue(engine.calls.isEmpty, "\(engine.calls.map(\.env))")
+    }
+
     // MARK: An approved copy, through a scripted engine
 
     private func events(_ lines: [String]) throws -> [Event] {
@@ -298,7 +328,7 @@ final class TableTransferConfirmationTests: XCTestCase {
         let request = RunConfirmation.transferRequest(source: connection("Lake", .trino),
                                                       target: connection("Warehouse", .postgres),
                                                       mode: .create, table: ["public", "people"])
-        let transfer = TableTransfer(tabID: UUID(), request: request, sql: "SELECT 1", sourceID: UUID(),
+        let transfer = TableTransfer(tabID: UUID(), request: request, sql: "SELECT 1", source: connection("Lake", .trino),
                                      target: connection("Warehouse", .postgres))
         XCTAssertEqual(transfer.stopUnconfirmedLine, "Stopped after rows were read; check Warehouse for the table.")
     }
@@ -365,7 +395,7 @@ final class TableTransferConfirmationTests: XCTestCase {
         let request = RunConfirmation.transferRequest(source: connection("Lake", .trino),
                                                       target: connection("Warehouse", .postgres),
                                                       mode: .create, table: ["public", "people"])
-        let transfer = TableTransfer(tabID: tab.id, request: request, sql: "SELECT 1", sourceID: UUID(),
+        let transfer = TableTransfer(tabID: tab.id, request: request, sql: "SELECT 1", source: connection("Lake", .trino),
                                      target: connection("Warehouse", .postgres))
         AppModel.applyTransferEvent(done, to: tab, transfer: transfer, source: "Lake", target: "Warehouse")
         XCTAssertNil(tab.writtenTable, "a stopped copy has no table to report")

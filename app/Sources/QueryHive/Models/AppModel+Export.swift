@@ -392,7 +392,7 @@ extension AppModel {
         }
         let request = RunConfirmation.transferRequest(source: source, target: target, mode: tab.writeMode,
                                                       table: target.kind.targetParts.map(tab.targetValue))
-        transfer = TableTransfer(tabID: tab.id, request: request, sql: sql, sourceID: source.id,
+        transfer = TableTransfer(tabID: tab.id, request: request, sql: sql, source: source,
                                  target: target)
     }
 
@@ -402,7 +402,11 @@ extension AppModel {
     func approveTransfer(_ transfer: TableTransfer) {
         guard transfer.mayApprove, let tab = tabs.first(where: { $0.id == transfer.tabID }),
               tab.stage != .running else { return }
-        guard let source = connection(for: tab), source.id == transfer.sourceID,
+        // Both connections whole, not only the fields the sheet shows: a source that now reads as
+        // another user or through another bastion is not the copy that was approved. And the tab
+        // must still be a table destination, or the settings below would be an export's.
+        guard tab.destination == .table,
+              let source = connection(for: tab), source == transfer.source,
               case .other(let target) = tableDestination(for: tab), target == transfer.target,
               runBlockedReason(for: tab) == nil,
               RunConfirmation.transferRequest(source: source, target: target, mode: tab.writeMode,
@@ -430,6 +434,12 @@ extension AppModel {
         do {
             // Both connections' settings, each from its own Keychain items, before anything runs.
             env = try overrides(for: tab, connection: source, sql: transfer.sql, confirmed: true)
+            // Defence in depth: settings with no `DEST_` key are the one-connection `to_table`, and
+            // with `confirmed` they would carry a confirmation the person gave for something else.
+            guard env.keys.contains(where: { $0.hasPrefix(HostKeyGate.destinationPrefix) }) else {
+                throw EngineLaunchError(message: "The copy's settings name no target connection, so "
+                                            + "nothing ran. Close this and save to the table again.")
+            }
         } catch {
             let message = (error as? EngineLaunchError)?.message ?? error.localizedDescription
             transfer.phase = .failed

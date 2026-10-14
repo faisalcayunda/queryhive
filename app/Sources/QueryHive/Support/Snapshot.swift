@@ -986,7 +986,7 @@ enum Snapshot {
                     source: model.connections[0], target: target, mode: tab.writeMode,
                     table: target.kind.targetParts.map(tab.targetValue))
                 model.transfer = TableTransfer(tabID: tab.id, request: request, sql: tab.sql,
-                                               sourceID: primary.id, target: target)
+                                               source: model.connections[0], target: target)
             } else {
                 model.exportSettingsOpen = true
             }

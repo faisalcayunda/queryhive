@@ -88,8 +88,9 @@ final class TableTransfer: Identifiable {
     let request: RunConfirmation.TransferRequest
     /// The statement the source runs, fixed when the sheet opened, so what runs is what was asked.
     let sql: String
-    /// The two connections as they were when the sheet opened; approval checks they still are.
-    let sourceID: UUID
+    /// The two connections as they were when the sheet opened, whole: approval checks they still
+    /// are, field for field, not only what the sheet happened to show.
+    let source: Connection
     let target: Connection
 
     var phase: Phase = .confirming
@@ -106,12 +107,12 @@ final class TableTransfer: Identifiable {
     var fallbacks: [String] = []
     var failure: String?
 
-    init(tabID: UUID, request: RunConfirmation.TransferRequest, sql: String, sourceID: UUID,
+    init(tabID: UUID, request: RunConfirmation.TransferRequest, sql: String, source: Connection,
          target: Connection) {
         self.tabID = tabID
         self.request = request
         self.sql = sql
-        self.sourceID = sourceID
+        self.source = source
         self.target = target
     }
 
