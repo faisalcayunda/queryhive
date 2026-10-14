@@ -518,7 +518,7 @@ extension AppModel {
             case .stopped:
                 tab.stage = .idle
                 tab.note(.warning, transfer.nothingWritten.map { "Stopped. \($0)" }
-                         ?? "Stopped. The warnings above say what was left on \(names.target).")
+                         ?? "Stopped. The engine's warnings are above.")
                 transfer.phase = .stopped
                 self?.reportLongRun(.toTable, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
             case .unknown:

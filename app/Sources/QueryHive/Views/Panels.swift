@@ -233,7 +233,9 @@ struct TablePanel: View {
         }
         return replacing
             ? "Replace builds the new table beside the old one and swaps it in once every row is there."
-            : "Trino writes the rows itself; none of them travel through this app."
+            // One connection: the server runs `CREATE TABLE … AS` (or `INSERT … SELECT`) itself,
+            // for all three drivers (`commands.rs` `to_table`), so it is named, not assumed Trino.
+            : "\(source?.kind.label ?? "The server") writes the rows itself; none of them travel through this app."
     }
 
     /// The driver the target name is written for: the target's, on a copy across connections.

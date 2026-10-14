@@ -307,6 +307,29 @@ final class TableTransferConfirmationTests: XCTestCase {
         XCTAssertFalse(log.contains { $0.contains("Nothing was written") }, "\(log)")
     }
 
+    /// A stop whose warnings are about the source must not be introduced as what was left on the
+    /// target: the lead-in is neutral.
+    func testAStopsWarningsAreNotAttributedToTheTarget() throws {
+        let engine = MockEngine()
+        let sourceWarning = "the server did not confirm the stop; the statement may still be running"
+        engine.answer("to_table", with: .events(try events([
+            #"{"event":"done","rows":0,"rows_read":40,"table":"public.people","cancelled":true,"verified":false,"warnings":["stopped; nothing was written to public.people","\#(sourceWarning)"]}"#,
+        ])))
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Warehouse", .postgres),
+                                   engine: engine)
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        model.approveTransfer(transfer)
+        settle { transfer.phase != .running }
+        XCTAssertEqual(transfer.phase, .stopped)
+        XCTAssertEqual(transfer.warnings, [sourceWarning])
+        XCTAssertNil(transfer.nothingWritten)
+        XCTAssertEqual(TableTransfer.warningsLeadIn, "The engine reported:")
+        let log = tab.logLines.map(\.text)
+        XCTAssertTrue(log.contains("Stopped. The engine's warnings are above."), "\(log)")
+        XCTAssertFalse(log.contains { $0.contains("left on Warehouse") }, "\(log)")
+    }
+
     func testAFailureThatLeftNothingSaysNothingWasWritten() throws {
         let engine = MockEngine()
         engine.answer("to_table", with: .failure(events: try events([

@@ -171,10 +171,10 @@ struct TransferSheet: View {
         }
     }
 
-    /// What the sheet says instead of "nothing was written" when the engine reported what it left.
-    private var leftBehind: String {
-        "The engine reported what it left on \(request.target.name):"
-    }
+    /// What the sheet says instead of "nothing was written" when the engine reported warnings.
+    /// Neutral, because not every warning is about the target: the source's "the server did not
+    /// confirm the stop" rides on the same list.
+    private var leftBehind: String { TableTransfer.warningsLeadIn }
 
     private var progressLine: String {
         "\(pluralized(transfer.rowsWritten, "row")) written · \(pluralized(transfer.rowsRead, "row")) read"

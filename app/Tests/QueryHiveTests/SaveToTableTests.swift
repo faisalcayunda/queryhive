@@ -422,6 +422,18 @@ final class SaveToTableAcrossConnectionsTests: XCTestCase {
                        "a same-connection create keeps its line")
     }
 
+    /// On one connection every driver's server runs the `CREATE TABLE … AS` itself, so the line
+    /// names that driver rather than always saying Trino.
+    func testTheSameConnectionLineNamesTheSourcesOwnDriver() {
+        for (kind, label) in [(ConnectionKind.postgres, "PostgreSQL"), (.mysql, "MySQL")] {
+            let source = connection("Warehouse", kind)
+            let (model, tab) = fixture(source: source, target: connection("Lake", .trino))
+            tab.targetConnectionID = nil
+            XCTAssertEqual(TablePanel.footnote(for: tab, source: source, destination: model.tableDestination(for: tab)),
+                           "\(label) writes the rows itself; none of them travel through this app.")
+        }
+    }
+
     // MARK: The mode text (T-1)
 
     func testReplaceNoLongerSaysTheTableIsDroppedFirst() {

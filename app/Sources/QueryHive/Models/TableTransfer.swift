@@ -76,7 +76,9 @@ final class TableTransfer: Identifiable {
         case confirming
         case running
         case finished
-        /// Stop reached the engine before the table was in place: nothing was written.
+        /// The engine answered Stop with `done{cancelled: true}`: the table was not put in place.
+        /// Whether anything was left on the target (a scratch table, say) is in `warnings`;
+        /// `nothingWritten` says "nothing" only when there are none.
         case stopped
         case failed
         /// Stopped, and the engine never said how far it got (`TransferOutcome.unknown`).
@@ -126,6 +128,10 @@ final class TableTransfer: Identifiable {
     var nothingWritten: String? {
         warnings.isEmpty ? "Nothing was written to \(request.target.name)." : nil
     }
+
+    /// What introduces the engine's warnings when they are the outcome. Neutral: a warning can be
+    /// about the source (a stop the server did not confirm) or a column, not only the target.
+    static let warningsLeadIn = "The engine reported:"
 
     /// What a stop the engine never answered says: the rows may or may not be on the target.
     var stopUnconfirmedLine: String {
