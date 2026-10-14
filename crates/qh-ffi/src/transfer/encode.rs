@@ -562,7 +562,25 @@ fn mysql_value(sql: &SqlType, target: &TargetType, value: &Value) -> Result<Mysq
             })
         }
 
-        Base::Float32 | Base::Float64 => match value {
+        // A float4 arrives as the double its shortest text parses to, which for the largest
+        // ones sits a hair above `f32::MAX` and which a strict MySQL refuses as out of range.
+        // Narrowed back to the float it was (the nearest `f32` is that float, as the text was
+        // its shortest form) and widened again, which is exact. A number no float holds is a
+        // refusal, never an infinity or a zero.
+        Base::Float32 => match value {
+            Value::Float(number) if number.is_finite() => {
+                let narrowed = *number as f32;
+                if narrowed.is_infinite() || (narrowed == 0.0 && *number != 0.0) {
+                    return Err(Rule::OutOfRange {
+                        what: "a number outside the range of a float",
+                    });
+                }
+                Ok(MysqlCell::Float(f64::from(narrowed)))
+            }
+            Value::Float(_) => Err(Rule::NonFinite),
+            _ => Err(wrong("a floating-point number")),
+        },
+        Base::Float64 => match value {
             Value::Float(number) if number.is_finite() => Ok(MysqlCell::Float(*number)),
             Value::Float(_) => Err(Rule::NonFinite),
             _ => Err(wrong("a floating-point number")),
@@ -1725,6 +1743,44 @@ mod tests {
                 Rule::NonFinite
             );
         }
+    }
+
+    #[test]
+    fn a_float4_is_narrowed_to_the_float_it_was_before_it_is_bound_into_a_mysql_float() {
+        // PostgreSQL prints float4 max as 3.40282347e+38, which parses to a double a hair above
+        // f32::MAX: bound as it is, a strict MySQL refuses it as out of range.
+        let my = column(
+            SqlType::of(Base::Float32),
+            DriverKind::Postgres,
+            Target::Mysql,
+        );
+        let bind = |number: f64| mysql_cell(&my, &Value::Float(number));
+        let printed: f64 = "3.40282347e+38".parse().unwrap();
+        assert_eq!(
+            bind(printed).unwrap(),
+            MysqlCell::Float(f64::from(f32::MAX))
+        );
+        // The shortest text of a float4 is the nearest f32 again, and that is what is bound.
+        assert_eq!(bind(0.1).unwrap(), MysqlCell::Float(f64::from(0.1f32)));
+        assert_eq!(bind(0.0).unwrap(), MysqlCell::Float(0.0));
+        // A number a float cannot hold at all is a refusal, never an infinity or a zero.
+        for number in [1e39, -1e39, 1e-50, -1e-50] {
+            assert!(
+                matches!(bind(number), Err(Rule::OutOfRange { .. })),
+                "{number}"
+            );
+        }
+        assert_eq!(bind(f64::NAN), Err(Rule::NonFinite));
+        // A double column is not narrowed.
+        let double = column(
+            SqlType::of(Base::Float64),
+            DriverKind::Postgres,
+            Target::Mysql,
+        );
+        assert_eq!(
+            mysql_cell(&double, &Value::Float(0.1)).unwrap(),
+            MysqlCell::Float(0.1)
+        );
     }
 
     #[test]
