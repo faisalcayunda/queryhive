@@ -155,6 +155,73 @@ so a finished export does not leave a panel over the result it just produced.
 
 One rule for every Export in the app: you see where it is going before it goes.
 
+### Saving a result to a table on another connection
+
+Save to Table can write a query's rows into a table on a **different** saved connection: a Trino
+result into PostgreSQL, PostgreSQL into MySQL, and so on (W13-T20, ADR-0046). On one connection the
+server runs `CREATE TABLE … AS` itself and no row reaches the app; across connections the engine
+reads the rows from one server and writes them into the other, so this path is built to be seen
+before it runs and to say plainly how it ended.
+
+**Behind a switch.** Settings › General › Experimental › "Save to a table on another connection",
+**off by default** until one run against real servers has passed (ADR-0046 decision 13). Off, the
+feature does not exist: the wizard has no connection picker, no "exists" hint and no
+cross-connection block, and no run carries a `DEST_` setting. A tab that still names another
+connection from a session saved while the switch was on is blocked ("Saving to another connection
+is off in Settings"), never quietly redirected to its own connection. The switch has its own store
+with a non-persisting pin, so a `--snapshot` render that draws the feature does not turn it on.
+
+**The wizard.** With the switch on, the table destination gains a **Connection** menu at the top: a
+fixed-width `Menu`, not a nested popover. Its first item is "Same connection (<name>)"; each other
+connection is listed with its driver, its environment label and its Safe Mode. Trino connections are
+listed but disabled, because Trino is written to only by its own coordinator. Everything below the
+picker follows the **target**: the fields are the target driver's parts (PostgreSQL a schema, MySQL
+a database), their choices come from the target, and the summary reads "<mode> <table> on
+<target>". Choosing a connection starts its parts from that connection's own defaults and keeps the
+table name. Append is not offered across connections. Under the table name, an "exists" hint
+fetched from the target says "Exists, Create will fail" (coral) or "Will be replaced" (amber). It is
+a hint only: the engine's own probe decides. Inside the wizard's fixed scroll, a cross-connection
+block says who reads and who writes, that the new table has the query's columns only, and which
+statement bound the source runs under. Banners appear when either side's certificate is not
+checked, and when a prod source copies to a target that is not prod.
+
+**Refusals, said before anything runs.** The Save to Table button stays dim, with the reason beside
+it, for each of these:
+- "Choose the target connection again": the saved target was deleted, or a restored value is not a
+  connection.
+- "Trino can't be written to from another connection".
+- "Append isn't offered across connections".
+- The target's own Safe Mode refuses the mode: "<target> is Read only: nothing is written there",
+  "<target> is No DDL: it refuses CREATE TABLE", or "<target> is Confirm: it refuses replacing a
+  table". A refused mode is greyed in the list with that sentence in place of its help.
+
+**The transfer sheet, every time.** Pressing Save to Table never runs a copy; it opens a fixed-size
+sheet, whatever either side's Safe Mode is, with no "don't ask again". It shows both connections
+side by side: name, environment label, driver, `host:port`, database, TLS (amber when unverified)
+and Safe Mode. Under them come the statement and the target name (quoted the way the target's
+dialect writes it) and a sentence saying what the copy does. When the source is labelled Prod and
+the target is not (unlabelled included), a coral banner and the tick "I understand rows from <A>
+will be copied to <B>" gate the approve button. Approval is checked against the connections as
+they are at that moment; if either was edited, or the tab stopped being a table destination,
+nothing runs. The sheet then stays up through the run, showing rows written and rows read, the
+current step, and **Stop**. **Hide** closes it and leaves the copy running, reported in its tab.
+
+**How it ends, in words that are true.**
+- Finished: "<N> rows copied from <A> to <B> · <table> (verified)", followed by the engine's
+  notes about columns that were widened or written as text.
+- Failed: the engine's message, prefixed with the connection it happened on ("Warehouse:
+  permission denied …"). "Nothing was written to <B>." is said only when the engine reported
+  nothing left; otherwise the sheet says "The engine reported:" and lists its warnings (a leftover
+  `qh_new_…` table, a transaction it could not roll back).
+- Stopped (the engine's own `done{cancelled}`): "Nothing was written to <B>." under the same rule.
+- Stopped, with no answer from the engine: "Stopped after rows were read; check <B> for the table."
+- Stop pressed as the copy finishes: the engine still swaps the table in, and its late `done` is
+  delivered (a run with a `DEST_` setting keeps its events after Stop), so the outcome is reported
+  as finished.
+
+The baselines are V-17. The sheet and the wizard's fields are drawn directly by `ChromeParityTests`,
+because a popover is a window `cacheDisplay` cannot see.
+
 ### One toolbar, one Export button
 
 The toolbar had become a settings panel with a Run button on it: a File/Table switch, a format
@@ -899,8 +966,10 @@ Events:
 ### The table destination
 
 `to_table` is the opposite trade to `export`. Nothing is streamed back: the engine opens one
-connection, runs `CREATE TABLE … AS <select>` (or `DROP TABLE IF EXISTS` + `CREATE`, or
-`INSERT INTO … <select>`) and the database writes the rows itself. A 500M-row CTAS costs the
+connection, runs `CREATE TABLE … AS <select>` (or, for replace, the same into a scratch table and a
+swap; or `INSERT INTO … <select>`) and the database writes the rows itself. (A run with a `DEST_`
+setting is the copy across connections described under "Saving a result to a table on another
+connection", where the rows do pass through the engine.) A 500M-row CTAS costs the
 client one request and some polling, not 500M rows over the wire.
 
 That means the streaming path is unusable here — it exists to pull rows and explicitly rejects a
@@ -919,10 +988,10 @@ count arrives with. Three consequences follow, and all three are behaviour rathe
   `stats_callback`, and no Rust driver has that stream; `docs/golden-deltas.md` D-6 records it as
   the known limitation it is.
 
-`replace` deserves its own warning: `DROP TABLE IF EXISTS` runs **before** the query. If the
-CREATE then fails, the old table is gone — and the engine says so, because `CliError::Warned`
-carries the `dropped the existing table <name>` warning it had already earned even though the next
-statement failed. The toolbar draws Replace in coral and asks for confirmation before starting.
+`replace` builds the new table beside the old one under a scratch name and swaps it in only once
+the query has finished (W12-T9), so a query that fails, or a Stop during the build, leaves the old
+table as it was. The new table has the query's columns only: no keys, indexes, triggers or grants.
+The wizard draws Replace in coral and asks for confirmation before starting.
 
 The target catalog/schema are deliberately **not** the session's `DB_DATABASE`/`DB_SCHEMA`:
 a query may read from one database and write into another.
