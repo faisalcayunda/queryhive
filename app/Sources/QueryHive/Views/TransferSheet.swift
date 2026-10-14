@@ -83,7 +83,7 @@ struct TransferSheet: View {
         case .confirming: request.title
         case .running: "Copying to \(request.target.name)…"
         case .finished: "Copied to \(request.target.name)"
-        case .stopped: "Stopped"
+        case .stopped, .stopUnconfirmed: "Stopped"
         case .failed: "The copy did not finish"
         }
     }
@@ -93,7 +93,7 @@ struct TransferSheet: View {
         case .confirming: request.destructive ? "exclamationmark.triangle.fill" : "arrow.left.arrow.right"
         case .running: "arrow.left.arrow.right"
         case .finished: "checkmark.circle.fill"
-        case .stopped: "stop.circle"
+        case .stopped, .stopUnconfirmed: "stop.circle"
         case .failed: "xmark.octagon.fill"
         }
     }
@@ -103,7 +103,7 @@ struct TransferSheet: View {
         case .confirming: request.destructive ? Tone.coral : Tone.accent
         case .running: Tone.accent
         case .finished: Tone.mint
-        case .stopped: Tone.amber
+        case .stopped, .stopUnconfirmed: Tone.amber
         case .failed: Tone.coral
         }
     }
@@ -150,6 +150,12 @@ struct TransferSheet: View {
                     .font(.ui(11))
                     .foregroundStyle(Tone.secondary)
             }
+            warnings
+        case .stopUnconfirmed:
+            Text(transfer.stopUnconfirmedLine)
+                .font(.ui(12))
+                .foregroundStyle(Tone.ink)
+                .fixedSize(horizontal: false, vertical: true)
             warnings
         case .failed:
             Text(transfer.failure ?? "The copy failed.")
@@ -216,7 +222,7 @@ struct TransferSheet: View {
                 PillButton(title: "Stop", symbol: "stop.fill", role: .destructive) {
                     if let tab = model.tabs.first(where: { $0.id == transfer.tabID }) { model.stop(tab) }
                 }
-            case .finished, .stopped, .failed:
+            case .finished, .stopped, .failed, .stopUnconfirmed:
                 PillButton(title: "Close", role: .secondary) { model.dismissTransfer() }
                     .keyboardShortcut(.cancelAction)
             }

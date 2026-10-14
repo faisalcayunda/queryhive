@@ -292,6 +292,40 @@ final class TableTransferConfirmationTests: XCTestCase {
         XCTAssertEqual(transfer.nothingWritten, "Nothing was written to Warehouse.")
     }
 
+    /// Review B-2: a Stop the engine never answered is not "nothing written".
+    func testAStopWithNoAnswerSaysToCheckTheTarget() {
+        XCTAssertEqual(TransferOutcome.of(status: 0, done: nil, stopRequested: true), .unknown)
+        let request = RunConfirmation.transferRequest(source: connection("Lake", .trino),
+                                                      target: connection("Warehouse", .postgres),
+                                                      mode: .create, table: ["public", "people"])
+        let transfer = TableTransfer(tabID: UUID(), request: request, sql: "SELECT 1", sourceID: UUID(),
+                                     target: connection("Warehouse", .postgres))
+        XCTAssertEqual(transfer.stopUnconfirmedLine, "Stopped after rows were read; check Warehouse for the table.")
+    }
+
+    /// Stop pressed while the copy finishes: the engine's late `done` reaches the app (a `DEST_` run
+    /// keeps its events after Stop) and the table is reported as written, with its warning.
+    func testStopPressedAsTheCopyFinishesReportsTheTableItPutInPlace() throws {
+        let engine = MockEngine()
+        engine.answer("to_table", with: .events(try events([
+            #"{"event":"step","step":"swap"}"#,
+            #"{"event":"done","rows":3,"rows_read":3,"table":"public.people","mode":"replace","cancelled":false,"verified":true,"warnings":["the old table was kept as qh_old_1"]}"#,
+        ])))
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Warehouse", .postgres),
+                                   engine: engine)
+        tab.writeMode = .replace
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        model.approveTransfer(transfer)
+        model.stop(tab)  // before the scripted events arrive
+        XCTAssertTrue(engine.runs.first?.terminated == true)
+        settle { transfer.phase != .running }
+        XCTAssertEqual(transfer.phase, .finished)
+        XCTAssertEqual(tab.writtenTable, "public.people")
+        XCTAssertEqual(transfer.warnings, ["the old table was kept as qh_old_1"])
+        XCTAssertFalse(tab.logLines.contains { $0.text.contains("Nothing was written") })
+    }
+
     func testStopFollowedByAnErrorIsAFailureNotAStop() {
         XCTAssertEqual(TransferOutcome.of(status: 1, done: nil, stopRequested: true), .failed,
                        "only the engine's own done{cancelled} says the stop ended the copy cleanly")

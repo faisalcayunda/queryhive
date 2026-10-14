@@ -79,6 +79,8 @@ final class TableTransfer: Identifiable {
         /// Stop reached the engine before the table was in place: nothing was written.
         case stopped
         case failed
+        /// Stopped, and the engine never said how far it got (`TransferOutcome.unknown`).
+        case stopUnconfirmed
     }
 
     let id = UUID()
@@ -124,6 +126,11 @@ final class TableTransfer: Identifiable {
         warnings.isEmpty ? "Nothing was written to \(request.target.name)." : nil
     }
 
+    /// What a stop the engine never answered says: the rows may or may not be on the target.
+    var stopUnconfirmedLine: String {
+        "Stopped after rows were read; check \(request.target.name) for the table."
+    }
+
     /// The one-line outcome the sheet and the log show for a finished copy.
     var summary: String {
         let table = self.table ?? request.table
@@ -140,6 +147,9 @@ enum TransferOutcome: Equatable {
     case finished
     case stopped
     case failed
+    /// Stop was pressed and the run ended cleanly without a `done`: nobody said whether the table
+    /// went in, so the app does not say either way (review B-2).
+    case unknown
 
     ///
     /// `.stopped` is the engine's own word for it, `done{cancelled: true}`, and nothing else: a Stop
@@ -147,6 +157,7 @@ enum TransferOutcome: Equatable {
     static func of(status: Int32, done: Event?, stopRequested: Bool) -> TransferOutcome {
         if let done, done.cancelled != true, done.table != nil, status == 0 { return .finished }
         if done?.cancelled == true { return .stopped }
+        if done == nil, status == 0, stopRequested { return .unknown }
         return .failed
     }
 }

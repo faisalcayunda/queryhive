@@ -511,6 +511,11 @@ extension AppModel {
                          ?? "Stopped. The warnings above say what was left on \(names.target).")
                 transfer.phase = .stopped
                 self?.reportLongRun(.toTable, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
+            case .unknown:
+                tab.stage = .idle
+                tab.note(.warning, transfer.stopUnconfirmedLine)
+                transfer.phase = .stopUnconfirmed
+                self?.reportLongRun(.toTable, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
             case .failed:
                 let reason = message.map { Self.attributed($0, side: side, source: names.source,
                                                            target: names.target) }

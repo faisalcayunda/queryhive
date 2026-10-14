@@ -129,7 +129,8 @@ struct RustEngine: DatabaseEngine {
             return nil
         }
 
-        let handle = RustRun(command: command)
+        let handle = RustRun(command: command,
+                             deliversAfterStop: RustRun.deliversAfterStop(command: command, env: env))
         Self.running.insert(handle)
         // The keys, not just the values: `Setting` is a record, and the app's dictionary is
         // already exactly that. `map` keeps the caller's dictionary iteration order out of the
@@ -237,7 +238,8 @@ struct RustEngine: DatabaseEngine {
             onExit(Self.cannotStart, "The result store is not backed by the engine (\(type(of: store.handle))).")
             return nil
         }
-        let handle = RustRun(command: command)
+        let handle = RustRun(command: command,
+                             deliversAfterStop: RustRun.deliversAfterStop(command: command, env: env))
         Self.running.insert(handle)
         let settings = env.map { Setting(key: $0.key, value: $0.value) }
         let cancel = RunCancel()
@@ -361,7 +363,9 @@ final class Sink: EventSink, @unchecked Sendable {
             // A stopped `preview`/`explain` still owes the app its rows and the `done{cancelled}`
             // that says it was stopped: `terminate()` sets `isStopped` before the engine has
             // answered, so dropping here threw the partial result away. Their call sites already
-            // discard a superseded run by token. Every other command keeps the drop.
+            // discard a superseded run by token. So does a copy across connections, whose last
+            // events say whether the table went in (`RustRun.deliversAfterStop(command:env:)`).
+            // Every other run keeps the drop.
             guard !handle.isStopped || handle.deliversAfterStop else { return }
             deliver(event)
         }
@@ -398,8 +402,24 @@ final class RustRun: EngineRun, Hashable {
     private(set) var cancelHandle: RunCancel?
     private var stopped = false
 
-    init(command: String) {
+    /// `deliversAfterStop` is decided per run, from its settings (`deliversAfterStop(command:env:)`);
+    /// `nil` takes the command's own answer.
+    init(command: String, deliversAfterStop: Bool? = nil) {
         self.command = command
+        keepsEventsAfterStop = deliversAfterStop ?? Self.deliversAfterStop(command: command, env: [:])
+    }
+
+    private let keepsEventsAfterStop: Bool
+
+    /// Whether a run of `command` with `env` keeps delivering its events after Stop.
+    ///
+    /// `preview` and `explain` end a Stop with `done{cancelled}` and the rows fetched so far. A copy
+    /// across connections (any `DEST_` setting, W13-T20) checks Stop only between batches and then
+    /// still flushes, verifies and swaps the table in: the `done` that says the table exists, and
+    /// the warning naming an old table it kept, arrive after `terminate()`, and dropping them told
+    /// the user nothing was written (review B-2). A `to_table` on one connection keeps the drop.
+    static func deliversAfterStop(command: String, env: [String: String]) -> Bool {
+        command == "preview" || command == "explain" || env.keys.contains { $0.hasPrefix("DEST_") }
     }
 
     /// The caller's cancel handle, handed over by `run` before the FFI call starts. Locked
@@ -411,9 +431,8 @@ final class RustRun: EngineRun, Hashable {
         self.cancelHandle = cancel
     }
 
-    /// Whether the events that arrive after `terminate()` still matter: the two commands whose Stop
-    /// ends in a `done{cancelled}` with the rows fetched so far.
-    var deliversAfterStop: Bool { command == "preview" || command == "explain" }
+    /// Whether the events that arrive after `terminate()` still matter for this run.
+    var deliversAfterStop: Bool { keepsEventsAfterStop }
 
     /// Whether the caller has stopped waiting for this run.
     var isStopped: Bool {

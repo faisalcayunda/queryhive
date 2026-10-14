@@ -87,6 +87,69 @@ final class StopDeliveryTests: XCTestCase {
         XCTAssertTrue(seen.isEmpty)
     }
 
+    // MARK: A copy across connections (W13-T20, review B-2)
+
+    private let copiedLine = #"{"event":"done","rows":3,"rows_read":3,"table":"public.people","cancelled":false,"verified":true,"warnings":["the old table was kept as qh_old_1"]}"#
+
+    /// The engine checks Stop between batches and then still flushes, verifies and swaps: the
+    /// `done` that says the table is in place arrives after `terminate()`, and dropping it made the
+    /// app say nothing was written.
+    func testAStoppedCopyAcrossConnectionsStillDeliversItsDone() {
+        let env = ["DB_KIND": "trino", "DEST_DB_KIND": "postgres", "DEST_SAFE_MODE": "full"]
+        let run = RustRun(command: "to_table",
+                          deliversAfterStop: RustRun.deliversAfterStop(command: "to_table", env: env))
+        var seen: [Event] = []
+        let delivered = expectation(description: "done delivered")
+        let sink = Sink(handle: run, onEvent: { seen.append($0); delivered.fulfill() })
+        run.terminate()
+        sink.onEvent(line: copiedLine)
+        wait(for: [delivered], timeout: 2)
+        XCTAssertEqual(seen.first?.verified, true)
+        XCTAssertEqual(seen.first?.warnings, ["the old table was kept as qh_old_1"])
+    }
+
+    /// A same-connection `to_table` keeps the drop, so a switch-off app behaves as it always did.
+    func testAStoppedSameConnectionTableRunStillDropsItsEvents() {
+        let env = ["DB_KIND": "trino", "TARGET_TABLE": "people"]
+        let run = RustRun(command: "to_table",
+                          deliversAfterStop: RustRun.deliversAfterStop(command: "to_table", env: env))
+        var seen: [Event] = []
+        let sink = Sink(handle: run, onEvent: { seen.append($0) })
+        run.terminate()
+        sink.onEvent(line: copiedLine)
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+        XCTAssertTrue(seen.isEmpty)
+    }
+
+    func testTheRuleIsPerRun() {
+        XCTAssertTrue(RustRun.deliversAfterStop(command: "preview", env: [:]))
+        XCTAssertTrue(RustRun.deliversAfterStop(command: "explain", env: [:]))
+        XCTAssertTrue(RustRun.deliversAfterStop(command: "to_table", env: ["DEST_DB_KIND": "mysql"]))
+        XCTAssertTrue(RustRun.deliversAfterStop(command: "to_table", env: ["DEST_": ""]),
+                      "a blank DEST_ key is still a copy across connections to the engine")
+        XCTAssertFalse(RustRun.deliversAfterStop(command: "to_table", env: ["TARGET_TABLE": "t"]))
+        XCTAssertFalse(RustRun.deliversAfterStop(command: "export", env: [:]))
+    }
+
+    /// `MockEngine` follows the same rule, so a test cannot hand the app an event the real engine
+    /// would have dropped.
+    func testTheScriptedEngineDropsWhatTheRealOneDrops() {
+        let done = try! XCTUnwrap(EngineWire.event(in: Data(copiedLine.utf8)))
+        for (env, expected) in [(["TARGET_TABLE": "t"], 0), (["DEST_DB_KIND": "postgres"], 1)] {
+            let engine = MockEngine()
+            engine.answer("to_table", with: .events([done]))
+            var seen = 0
+            let exited = expectation(description: "exit")
+            let handle = engine.run("to_table", env: env, onEvent: { _ in seen += 1 },
+                                    onExit: { _, _ in exited.fulfill() })
+            handle?.terminate()
+            wait(for: [exited], timeout: 2)
+            XCTAssertEqual(seen, expected, "\(env)")
+        }
+    }
+
     /// The whole Run path with a scripted engine: partial rows survive and history says cancelled.
     func testAStoppedRunKeepsItsRowsAndRecordsCancelled() {
         let key = "recordsHistory"

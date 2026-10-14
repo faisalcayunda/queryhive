@@ -99,20 +99,31 @@ final class MockEngine: DatabaseEngine, @unchecked Sendable {
             return nil
         }
 
-        switch answer {
-        case .cannotStart(let reason):
+        if case .cannotStart(let reason) = answer {
             // Before returning, so the caller's one failure path works the way the protocol says.
             onExit(-1, reason)
             return nil
-        case .events(let events):
-            deliver(events, status: 0, stderr: "", onEvent: onEvent, onExit: onExit)
-        case .failure(let events, let status, let reason):
-            deliver(events, status: status, stderr: reason, onEvent: onEvent, onExit: onExit)
         }
         let handle = MockRun(command: command)
         lock.lock()
         handles.append(handle)
         lock.unlock()
+        // The real engine's drop rule (`RustRun.deliversAfterStop`): after `terminate()` only the
+        // runs that still owe the app their ending get their events, so a test cannot hand the app
+        // an event the real one would have thrown away.
+        let keeps = RustRun.deliversAfterStop(command: command, env: env)
+        let gated: (Event) -> Void = { event in
+            guard !handle.terminated || keeps else { return }
+            onEvent(event)
+        }
+        switch answer {
+        case .cannotStart:
+            break
+        case .events(let events):
+            deliver(events, status: 0, stderr: "", onEvent: gated, onExit: onExit)
+        case .failure(let events, let status, let reason):
+            deliver(events, status: status, stderr: reason, onEvent: gated, onExit: onExit)
+        }
         return handle
     }
 
