@@ -250,6 +250,53 @@ final class TableTransferConfirmationTests: XCTestCase {
         XCTAssertNil(tab.writtenTable)
     }
 
+    /// Review B-1: the engine puts what it left on the target on the `error` event. A failure that
+    /// left a scratch table, or a transaction it could not roll back, must say so, and must never
+    /// claim nothing was written.
+    func testAFailureThatLeftSomethingBehindSaysSoAndNeverThatNothingWasWritten() throws {
+        let engine = MockEngine()
+        let leftover = "the temporary table qh_new_20261014 was left behind on reporting"
+        engine.answer("to_table", with: .failure(events: try events([
+            #"{"event":"step","step":"write"}"#,
+            #"{"event":"error","message":"Duplicate entry","side":"target","warnings":["\#(leftover)"]}"#,
+        ]), status: 1, reason: "exit 1"))
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Shop", .mysql),
+                                   engine: engine)
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        model.approveTransfer(transfer)
+        settle { transfer.phase != .running }
+
+        XCTAssertEqual(transfer.phase, .failed)
+        XCTAssertEqual(transfer.failure, "Shop: Duplicate entry")
+        XCTAssertEqual(transfer.warnings, [leftover])
+        XCTAssertEqual(tab.warnings, [leftover])
+        XCTAssertNil(transfer.nothingWritten, "the sheet shows the engine's warnings as the outcome instead")
+        let log = tab.logLines.map(\.text)
+        XCTAssertTrue(log.contains(leftover), "\(log)")
+        XCTAssertFalse(log.contains { $0.contains("Nothing was written") }, "\(log)")
+    }
+
+    func testAFailureThatLeftNothingSaysNothingWasWritten() throws {
+        let engine = MockEngine()
+        engine.answer("to_table", with: .failure(events: try events([
+            #"{"event":"error","message":"connection refused","side":"source"}"#,
+        ]), status: 1, reason: "exit 1"))
+        let (model, tab) = fixture(source: connection("Lake", .trino), target: connection("Warehouse", .postgres),
+                                   engine: engine)
+        model.run(tab)
+        let transfer = try XCTUnwrap(model.transfer)
+        model.approveTransfer(transfer)
+        settle { transfer.phase != .running }
+        XCTAssertEqual(transfer.phase, .failed)
+        XCTAssertEqual(transfer.nothingWritten, "Nothing was written to Warehouse.")
+    }
+
+    func testStopFollowedByAnErrorIsAFailureNotAStop() {
+        XCTAssertEqual(TransferOutcome.of(status: 1, done: nil, stopRequested: true), .failed,
+                       "only the engine's own done{cancelled} says the stop ended the copy cleanly")
+    }
+
     func testAConfirmTargetIsConfirmedByTheSheetsApprovalAlone() throws {
         let engine = MockEngine()
         engine.answer("to_table", with: .events([]))
@@ -276,7 +323,6 @@ final class TableTransferConfirmationTests: XCTestCase {
         let done = try XCTUnwrap(EngineWire.event(in: Data(
             #"{"event":"done","rows":0,"rows_read":40,"table":"public.people","cancelled":true,"verified":false,"warnings":["stopped; nothing was written to public.people","the scratch table qh_new_1 could not be dropped"]}"#.utf8)))
         XCTAssertEqual(TransferOutcome.of(status: 0, done: done, stopRequested: true), .stopped)
-        XCTAssertEqual(TransferOutcome.of(status: 1, done: nil, stopRequested: true), .stopped)
         XCTAssertEqual(TransferOutcome.of(status: 1, done: nil, stopRequested: false), .failed)
         XCTAssertEqual(TransferOutcome.of(status: 0, done: nil, stopRequested: false), .failed,
                        "a clean exit with no table reported is not a finished copy")

@@ -141,9 +141,10 @@ struct TransferSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             columnNotes
         case .stopped:
-            Text("Nothing was written to \(request.target.name).")
+            Text(transfer.nothingWritten ?? leftBehind)
                 .font(.ui(12))
                 .foregroundStyle(Tone.ink)
+                .fixedSize(horizontal: false, vertical: true)
             if transfer.rowsRead > 0 {
                 Text("\(pluralized(transfer.rowsRead, "row")) had been read from \(request.source.name).")
                     .font(.ui(11))
@@ -156,11 +157,17 @@ struct TransferSheet: View {
                 .foregroundStyle(Tone.coral)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Nothing was written to \(request.target.name); the run's log has the details.")
+            Text(transfer.nothingWritten.map { "\($0) The run's log has the details." } ?? leftBehind)
                 .font(.ui(11))
                 .foregroundStyle(Tone.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             warnings
         }
+    }
+
+    /// What the sheet says instead of "nothing was written" when the engine reported what it left.
+    private var leftBehind: String {
+        "The engine reported what it left on \(request.target.name):"
     }
 
     private var progressLine: String {

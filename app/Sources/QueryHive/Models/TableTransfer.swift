@@ -116,6 +116,14 @@ final class TableTransfer: Identifiable {
     /// Whether the approve button may be pressed.
     var mayApprove: Bool { phase == .confirming && (!request.needsAcknowledgement || acknowledged) }
 
+    /// "Nothing was written to <target>." for a copy that ended without its table, and **only**
+    /// when the engine reported nothing it left there. A failure or a stop that left a scratch
+    /// table, a transaction it could not roll back, or an old table kept under another name says so
+    /// in its warnings, and those are the outcome then (review B-1).
+    var nothingWritten: String? {
+        warnings.isEmpty ? "Nothing was written to \(request.target.name)." : nil
+    }
+
     /// The one-line outcome the sheet and the log show for a finished copy.
     var summary: String {
         let table = self.table ?? request.table
@@ -133,9 +141,12 @@ enum TransferOutcome: Equatable {
     case stopped
     case failed
 
+    ///
+    /// `.stopped` is the engine's own word for it, `done{cancelled: true}`, and nothing else: a Stop
+    /// followed by an error exit is a failure, whose warnings say what it left behind.
     static func of(status: Int32, done: Event?, stopRequested: Bool) -> TransferOutcome {
         if let done, done.cancelled != true, done.table != nil, status == 0 { return .finished }
-        if done?.cancelled == true || stopRequested { return .stopped }
+        if done?.cancelled == true { return .stopped }
         return .failed
     }
 }

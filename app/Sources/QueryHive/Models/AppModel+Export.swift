@@ -507,7 +507,8 @@ extension AppModel {
                 self?.reportLongRun(.toTable, .done, tab: tab, elapsed: elapsed, rows: tab.rows)
             case .stopped:
                 tab.stage = .idle
-                tab.note(.warning, "Stopped. Nothing was written to \(names.target).")
+                tab.note(.warning, transfer.nothingWritten.map { "Stopped. \($0)" }
+                         ?? "Stopped. The warnings above say what was left on \(names.target).")
                 transfer.phase = .stopped
                 self?.reportLongRun(.toTable, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
             case .failed:
@@ -546,6 +547,12 @@ extension AppModel {
         case "error":
             tab.note(.error, attributed(event.message ?? "Engine error", side: event.side,
                                         source: source, target: target))
+            // What the failure left on the target rides on the error itself: a scratch table it
+            // could not drop, a transaction it could not roll back (review B-1).
+            let warnings = event.warnings ?? []
+            tab.warnings = warnings
+            transfer.warnings = warnings
+            for warning in warnings { tab.note(.warning, warning) }
             tab.panel = .log
         case "step":
             tab.step = event.step
