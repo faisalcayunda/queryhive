@@ -200,9 +200,13 @@ final class HostKeyGateTests: XCTestCase {
         let rig = Rig()
         rig.engine.script["to_table"] = ([try errorEvent()], 1)
         rig.engine.script["test"] = ([], 0)
-        rig.run("to_table", ["DB_HOST": "db-a", "SSH_HOST": "bastion.a", "DEST_DB_HOST": "db-b"])
+        rig.run("to_table", ["DB_HOST": "db-a", "SSH_HOST": "bastion.a", "DEST_DB_HOST": "db-b",
+                             "DEST_DB_PASSWORD": "b-secret", "DEST_SSH_PASSWORD": "b-ssh"])
         rig.center.trust(try XCTUnwrap(rig.center.prompt))
-        XCTAssertEqual(rig.pinned.first?.env["DB_HOST"], "db-a")
+        let env = rig.pinned.first?.env ?? [:]
+        XCTAssertEqual(env["DB_HOST"], "db-a")
+        XCTAssertFalse(env.keys.contains { $0.hasPrefix("DEST_") },
+                       "the target's secrets are not held for a refusal on the source's bastion")
     }
 
     func testAWarmUpNeverPromptsAndNeverAsksForTheDetail() {

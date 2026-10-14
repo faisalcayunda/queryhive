@@ -69,9 +69,11 @@ final class HostKeyGate: DatabaseEngine, @unchecked Sendable {
         { [center] event in
             onEvent(event)
             guard event.event == "error", let detail = event.hostKey else { return }
-            // The engine names the side whose bastion refused; the target's is asked about with
-            // the target's own settings, never the source's.
-            let held = event.side == "target" ? Self.destinationEnvironment(env) : env
+            // The engine names the side whose bastion refused; each is asked about with its own
+            // settings only. The center holds them for minutes, so a refusal on the source's bastion
+            // must not keep the target's password and SSH secrets alongside.
+            let held = event.side == "target" ? Self.destinationEnvironment(env)
+                                              : env.filter { !$0.key.hasPrefix(Self.destinationPrefix) }
             let report = { center.report(detail, env: held) }
             if Thread.isMainThread { report() } else { DispatchQueue.main.async(execute: report) }
         }
