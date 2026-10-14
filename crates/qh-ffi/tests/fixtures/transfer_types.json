@@ -1,0 +1,5320 @@
+{
+ "schema": 1,
+ "doc": [
+  "Data for tests/transfer_types.rs. `types`: every source type against both dialects with exactly",
+  "one outcome (exact, widened, text_fallback, refuse) and the DDL. `values`: for one column and one",
+  "source/target pair, each value either `ok` with the text the target takes, or `refuse` with the rule.",
+  "A PostgreSQL target writes `copy` (the field as it appears in the COPY stream, escapes included);",
+  "a MySQL target writes the bound parameter as {text|int|uint|float|bytes|null}.",
+  "Types: {base, precision, scale, length, unsigned, time_zone, fraction_digits, element, oid, native}.",
+  "Values: null, {bool}, {int:\"n\"}, {uint:\"n\"}, {float:\"x\"}, {decimal:[\"unscaled\",scale]}, {text},",
+  "{bytes:\"hex\"}, {date:days}, {time:micros}, {timestamp:[\"micros\",offset|null]},",
+  "{interval:[months,days,\"micros\"]}, {json}, {array}, {row}, {map:[[k,v]]}, {unknown:[type,text]}.",
+  "C-1: money is refused. C-2: the closed PostgreSQL spellings are forwarded PostgreSQL to",
+  "PostgreSQL only. B-4: only the variant a type is read as is accepted."
+ ],
+ "types": [
+  {
+   "id": "pg-bool",
+   "source": "postgres",
+   "type": {
+    "base": "bool"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "boolean"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "tinyint(1)"
+   }
+  },
+  {
+   "id": "pg-int2",
+   "source": "postgres",
+   "type": {
+    "base": "int16"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   }
+  },
+  {
+   "id": "pg-int4",
+   "source": "postgres",
+   "type": {
+    "base": "int32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "int"
+   }
+  },
+  {
+   "id": "pg-int8",
+   "source": "postgres",
+   "type": {
+    "base": "int64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   }
+  },
+  {
+   "id": "pg-float4",
+   "source": "postgres",
+   "type": {
+    "base": "float32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "real"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "float"
+   }
+  },
+  {
+   "id": "pg-float8",
+   "source": "postgres",
+   "type": {
+    "base": "float64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "double precision"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "double"
+   }
+  },
+  {
+   "id": "numeric-typmod-10-2",
+   "source": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(10,2)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "decimal(10,2)"
+   }
+  },
+  {
+   "id": "numeric-typmod-65-30",
+   "source": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 65,
+    "scale": 30
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(65,30)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "decimal(65,30)"
+   }
+  },
+  {
+   "id": "numeric-typmod-100-2-refused-by-mysql",
+   "source": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 100,
+    "scale": 2
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(100,2)"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "numeric-unbounded-to-mysql",
+   "source": "postgres",
+   "type": {
+    "base": "decimal"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "decimal(65,30)"
+   }
+  },
+  {
+   "id": "numeric-negative-scale",
+   "source": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 5,
+    "scale": -2
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-varchar-20",
+   "source": "postgres",
+   "type": {
+    "base": "text",
+    "length": 20
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varchar(20)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "varchar(20)"
+   }
+  },
+  {
+   "id": "pg-text",
+   "source": "postgres",
+   "type": {
+    "base": "text"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longtext"
+   }
+  },
+  {
+   "id": "pg-bpchar-5",
+   "source": "postgres",
+   "type": {
+    "base": "char",
+    "length": 5
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "char(5)"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "char(5)"
+   }
+  },
+  {
+   "id": "char-no-length",
+   "source": "postgres",
+   "type": {
+    "base": "char"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "bytea",
+   "source": "postgres",
+   "type": {
+    "base": "binary"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bytea"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longblob"
+   }
+  },
+  {
+   "id": "uuid-pg",
+   "source": "postgres",
+   "type": {
+    "base": "uuid"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "uuid"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "char(36)"
+   }
+  },
+  {
+   "id": "pg-date",
+   "source": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "date"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "date"
+   }
+  },
+  {
+   "id": "pg-time-6",
+   "source": "postgres",
+   "type": {
+    "base": "time",
+    "fraction_digits": 6
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "time(6)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "time(6)"
+   }
+  },
+  {
+   "id": "pg-time-unspecified",
+   "source": "postgres",
+   "type": {
+    "base": "time"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "time(6)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "time(6)"
+   }
+  },
+  {
+   "id": "pg-timetz-6",
+   "source": "postgres",
+   "type": {
+    "base": "timetz",
+    "fraction_digits": 6
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timetz(6)"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-timestamp-6",
+   "source": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamp(6)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "datetime(6)"
+   }
+  },
+  {
+   "id": "timestamptz-to-pg-from-pg",
+   "source": "postgres",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 6
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamptz(6)"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "datetime(6)"
+   }
+  },
+  {
+   "id": "interval-pg",
+   "source": "postgres",
+   "type": {
+    "base": "interval"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "interval"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "json-to-pg-from-pg",
+   "source": "postgres",
+   "type": {
+    "base": "json"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "json"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "jsonb-to-pg-from-pg",
+   "source": "postgres",
+   "type": {
+    "base": "jsonb"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-pg-int4",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32",
+     "oid": 23
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-int2",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int16"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "smallint[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-text",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "text"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "text[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-varchar-5",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "text",
+     "length": 5
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varchar(5)[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-inet",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "builtin:inet"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "inet[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-of-money",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "other",
+     "oid": 790
+    }
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "array-pg-of-array",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "array",
+     "element": {
+      "base": "int32"
+     }
+    }
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "enum-pg",
+   "source": "postgres",
+   "type": {
+    "base": "enum"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "varchar(255)"
+   }
+  },
+  {
+   "id": "pg-builtin-inet",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:inet"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "inet"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-cidr",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:cidr"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "cidr"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-macaddr",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:macaddr"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "macaddr"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-macaddr8",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:macaddr8"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "macaddr8"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-xml",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:xml"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "xml"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-tsvector",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:tsvector"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "tsvector"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-tsquery",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:tsquery"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "tsquery"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-point",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:point"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "point"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-line",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:line"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "line"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-lseg",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:lseg"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "lseg"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-box",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:box"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "box"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-path",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:path"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "path"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-polygon",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:polygon"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "polygon"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-circle",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:circle"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "circle"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-bit-8",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:bit",
+    "length": 8
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bit(8)"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-bit-no-length",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:bit"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-varbit",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:varbit"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varbit"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-builtin-varbit-16",
+   "source": "postgres",
+   "type": {
+    "base": "builtin:varbit",
+    "length": 16
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varbit(16)"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-money",
+   "source": "postgres",
+   "type": {
+    "base": "other",
+    "oid": 790,
+    "native": "money"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-oid",
+   "source": "postgres",
+   "type": {
+    "base": "other",
+    "oid": 26,
+    "native": "oid"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-regclass",
+   "source": "postgres",
+   "type": {
+    "base": "other",
+    "oid": 2205,
+    "native": "regclass"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "pg-extension-type",
+   "source": "postgres",
+   "type": {
+    "base": "other",
+    "oid": 16999,
+    "native": "hstore"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "malicious-native-other",
+   "source": "postgres",
+   "type": {
+    "base": "other",
+    "oid": 16999,
+    "native": "int); DROP TABLE x; --"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "malicious-native-int4",
+   "source": "postgres",
+   "type": {
+    "base": "int32",
+    "native": "int); DROP TABLE x; --"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "int"
+   }
+  },
+  {
+   "id": "malicious-native-array",
+   "source": "postgres",
+   "type": {
+    "base": "array",
+    "native": "int[]; DROP TABLE x",
+    "element": {
+     "base": "int32",
+     "native": "x); --"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer[]"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "mysql-tinyint",
+   "source": "mysql",
+   "type": {
+    "base": "int8"
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "tinyint"
+   }
+  },
+  {
+   "id": "tinyint1",
+   "source": "mysql",
+   "type": {
+    "base": "int8",
+    "length": 1
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "tinyint"
+   }
+  },
+  {
+   "id": "mysql-tinyint-unsigned",
+   "source": "mysql",
+   "type": {
+    "base": "int8",
+    "unsigned": true
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "tinyint unsigned"
+   }
+  },
+  {
+   "id": "mysql-smallint",
+   "source": "mysql",
+   "type": {
+    "base": "int16"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   }
+  },
+  {
+   "id": "mysql-smallint-unsigned",
+   "source": "mysql",
+   "type": {
+    "base": "int16",
+    "unsigned": true
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "smallint unsigned"
+   }
+  },
+  {
+   "id": "mysql-mediumint",
+   "source": "mysql",
+   "type": {
+    "base": "int24"
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "mediumint"
+   }
+  },
+  {
+   "id": "mysql-mediumint-unsigned",
+   "source": "mysql",
+   "type": {
+    "base": "int24",
+    "unsigned": true
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "mediumint unsigned"
+   }
+  },
+  {
+   "id": "mysql-int",
+   "source": "mysql",
+   "type": {
+    "base": "int32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "int"
+   }
+  },
+  {
+   "id": "mysql-int-unsigned",
+   "source": "mysql",
+   "type": {
+    "base": "int32",
+    "unsigned": true
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "bigint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "int unsigned"
+   }
+  },
+  {
+   "id": "mysql-bigint",
+   "source": "mysql",
+   "type": {
+    "base": "int64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   }
+  },
+  {
+   "id": "unsigned-bigint",
+   "source": "mysql",
+   "type": {
+    "base": "int64",
+    "unsigned": true
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "numeric(20,0)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "bigint unsigned"
+   }
+  },
+  {
+   "id": "mysql-year",
+   "source": "mysql",
+   "type": {
+    "base": "int16"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   }
+  },
+  {
+   "id": "mysql-float",
+   "source": "mysql",
+   "type": {
+    "base": "float32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "real"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "float"
+   }
+  },
+  {
+   "id": "mysql-double",
+   "source": "mysql",
+   "type": {
+    "base": "float64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "double precision"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "double"
+   }
+  },
+  {
+   "id": "mysql-decimal-10-2",
+   "source": "mysql",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(10,2)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "decimal(10,2)"
+   }
+  },
+  {
+   "id": "mysql-decimal-38-10",
+   "source": "mysql",
+   "type": {
+    "base": "decimal",
+    "precision": 38,
+    "scale": 10
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(38,10)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "decimal(38,10)"
+   }
+  },
+  {
+   "id": "mysql-varchar-255",
+   "source": "mysql",
+   "type": {
+    "base": "text",
+    "length": 255
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varchar(255)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "varchar(255)"
+   }
+  },
+  {
+   "id": "mysql-varchar-20000",
+   "source": "mysql",
+   "type": {
+    "base": "text",
+    "length": 20000
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varchar(20000)"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "mediumtext"
+   }
+  },
+  {
+   "id": "mysql-text",
+   "source": "mysql",
+   "type": {
+    "base": "text"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longtext"
+   }
+  },
+  {
+   "id": "mysql-char-10",
+   "source": "mysql",
+   "type": {
+    "base": "char",
+    "length": 10
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "char(10)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "char(10)"
+   }
+  },
+  {
+   "id": "mysql-binary-16",
+   "source": "mysql",
+   "type": {
+    "base": "binary",
+    "length": 16
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bytea"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "varbinary(16)"
+   }
+  },
+  {
+   "id": "mysql-varbinary-70000",
+   "source": "mysql",
+   "type": {
+    "base": "binary",
+    "length": 70000
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bytea"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longblob"
+   }
+  },
+  {
+   "id": "mysql-blob",
+   "source": "mysql",
+   "type": {
+    "base": "binary"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bytea"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longblob"
+   }
+  },
+  {
+   "id": "mysql-date",
+   "source": "mysql",
+   "type": {
+    "base": "date"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "date"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "date"
+   }
+  },
+  {
+   "id": "mysql-datetime-6",
+   "source": "mysql",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamp(6)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "datetime(6)"
+   }
+  },
+  {
+   "id": "mysql-timestamp-session",
+   "source": "mysql",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6,
+    "time_zone": "session"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "timestamp(6)"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "datetime(6)"
+   }
+  },
+  {
+   "id": "mysql-time-3",
+   "source": "mysql",
+   "type": {
+    "base": "time",
+    "fraction_digits": 3
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "time(3)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "time(3)"
+   }
+  },
+  {
+   "id": "json-to-pg-from-mysql",
+   "source": "mysql",
+   "type": {
+    "base": "json"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "json"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "enum-mysql",
+   "source": "mysql",
+   "type": {
+    "base": "enum"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "varchar(255)"
+   }
+  },
+  {
+   "id": "set-mysql",
+   "source": "mysql",
+   "type": {
+    "base": "set"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "varchar(255)"
+   }
+  },
+  {
+   "id": "bit-to-anything-mysql",
+   "source": "mysql",
+   "type": {
+    "base": "other",
+    "native": "bit(8)"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "mysql-geometry",
+   "source": "mysql",
+   "type": {
+    "base": "other",
+    "native": "geometry"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "mysql-vector",
+   "source": "mysql",
+   "type": {
+    "base": "other",
+    "native": "vector(3)"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "trino-boolean",
+   "source": "trino",
+   "type": {
+    "base": "bool"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "boolean"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "tinyint(1)"
+   }
+  },
+  {
+   "id": "trino-tinyint",
+   "source": "trino",
+   "type": {
+    "base": "int8"
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "tinyint"
+   }
+  },
+  {
+   "id": "trino-smallint",
+   "source": "trino",
+   "type": {
+    "base": "int16"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "smallint"
+   }
+  },
+  {
+   "id": "trino-integer",
+   "source": "trino",
+   "type": {
+    "base": "int32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "int"
+   }
+  },
+  {
+   "id": "trino-bigint",
+   "source": "trino",
+   "type": {
+    "base": "int64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "bigint"
+   }
+  },
+  {
+   "id": "trino-real",
+   "source": "trino",
+   "type": {
+    "base": "float32"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "real"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "float"
+   }
+  },
+  {
+   "id": "trino-double",
+   "source": "trino",
+   "type": {
+    "base": "float64"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "double precision"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "double"
+   }
+  },
+  {
+   "id": "trino-decimal-38-10",
+   "source": "trino",
+   "type": {
+    "base": "decimal",
+    "precision": 38,
+    "scale": 10
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(38,10)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "decimal(38,10)"
+   }
+  },
+  {
+   "id": "trino-decimal-38-35",
+   "source": "trino",
+   "type": {
+    "base": "decimal",
+    "precision": 38,
+    "scale": 35
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(38,35)"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "trino-varchar",
+   "source": "trino",
+   "type": {
+    "base": "text"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longtext"
+   }
+  },
+  {
+   "id": "trino-varchar-20",
+   "source": "trino",
+   "type": {
+    "base": "text",
+    "length": 20
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "varchar(20)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "varchar(20)"
+   }
+  },
+  {
+   "id": "trino-varchar-huge",
+   "source": "trino",
+   "type": {
+    "base": "text",
+    "length": 2000000000
+   },
+   "postgres": {
+    "outcome": "widened",
+    "ddl": "text"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longtext"
+   }
+  },
+  {
+   "id": "trino-char-5",
+   "source": "trino",
+   "type": {
+    "base": "char",
+    "length": 5
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "char(5)"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "char(5)"
+   }
+  },
+  {
+   "id": "trino-varbinary",
+   "source": "trino",
+   "type": {
+    "base": "binary"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "bytea"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "longblob"
+   }
+  },
+  {
+   "id": "uuid-trino",
+   "source": "trino",
+   "type": {
+    "base": "uuid"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "uuid"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "char(36)"
+   }
+  },
+  {
+   "id": "trino-date",
+   "source": "trino",
+   "type": {
+    "base": "date"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "date"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "date"
+   }
+  },
+  {
+   "id": "trino-time-3",
+   "source": "trino",
+   "type": {
+    "base": "time",
+    "fraction_digits": 3
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "time(3)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "time(3)"
+   }
+  },
+  {
+   "id": "trino-time-9",
+   "source": "trino",
+   "type": {
+    "base": "time",
+    "fraction_digits": 9
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "trino-time-tz",
+   "source": "trino",
+   "type": {
+    "base": "timetz",
+    "fraction_digits": 3
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "trino-timestamp-3",
+   "source": "trino",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 3
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamp(3)"
+   },
+   "mysql": {
+    "outcome": "exact",
+    "ddl": "datetime(3)"
+   }
+  },
+  {
+   "id": "trino-timestamp-9",
+   "source": "trino",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 9
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "timestamptz-to-mysql-from-trino",
+   "source": "trino",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 3,
+    "time_zone": "offset"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamptz(3)"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "datetime(3)"
+   }
+  },
+  {
+   "id": "trino-timestamptz-9",
+   "source": "trino",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 9,
+    "time_zone": "offset"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "interval-trino",
+   "source": "trino",
+   "type": {
+    "base": "interval"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "interval"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  },
+  {
+   "id": "json-to-pg-from-trino",
+   "source": "trino",
+   "type": {
+    "base": "json"
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "json"
+   },
+   "mysql": {
+    "outcome": "widened",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-integer",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "integer[]"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-varchar",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "text"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "text[]"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-decimal",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "decimal",
+     "precision": 10,
+     "scale": 2
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "numeric(10,2)[]"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-timestamp",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "timestamp",
+     "fraction_digits": 3
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "timestamp(3)[]"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-uuid",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "uuid"
+    }
+   },
+   "postgres": {
+    "outcome": "exact",
+    "ddl": "uuid[]"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-tinyint-widened-element",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int8"
+    }
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-nested",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "array",
+     "element": {
+      "base": "int32"
+     }
+    }
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "array-trino-of-map",
+   "source": "trino",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "map"
+    }
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "trino-map",
+   "source": "trino",
+   "type": {
+    "base": "map"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "trino-row",
+   "source": "trino",
+   "type": {
+    "base": "row"
+   },
+   "postgres": {
+    "outcome": "text_fallback",
+    "ddl": "jsonb"
+   },
+   "mysql": {
+    "outcome": "text_fallback",
+    "ddl": "json"
+   }
+  },
+  {
+   "id": "trino-ipaddress",
+   "source": "trino",
+   "type": {
+    "base": "other",
+    "native": "ipaddress"
+   },
+   "postgres": {
+    "outcome": "refuse"
+   },
+   "mysql": {
+    "outcome": "refuse"
+   }
+  }
+ ],
+ "values": [
+  {
+   "id": "bool-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "bool"
+   },
+   "cases": [
+    {
+     "value": {
+      "bool": true
+     },
+     "ok": {
+      "copy": "t"
+     }
+    },
+    {
+     "value": {
+      "bool": false
+     },
+     "ok": {
+      "copy": "f"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "true"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "bool-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "bool"
+   },
+   "cases": [
+    {
+     "value": {
+      "bool": true
+     },
+     "ok": {
+      "int": "1"
+     }
+    },
+    {
+     "value": {
+      "bool": false
+     },
+     "ok": {
+      "int": "0"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "null": true
+     }
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "tinyint1-mysql-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "int8",
+    "length": 1
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "1"
+     },
+     "ok": {
+      "int": "1"
+     }
+    },
+    {
+     "value": {
+      "int": "-128"
+     },
+     "ok": {
+      "int": "-128"
+     }
+    },
+    {
+     "value": {
+      "int": "127"
+     },
+     "ok": {
+      "int": "127"
+     }
+    },
+    {
+     "value": {
+      "int": "128"
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "bool": true
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "null": true
+     }
+    }
+   ]
+  },
+  {
+   "id": "tinyint1-mysql-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "int8",
+    "length": 1
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "1"
+     },
+     "ok": {
+      "copy": "1"
+     }
+    },
+    {
+     "value": {
+      "int": "-128"
+     },
+     "ok": {
+      "copy": "-128"
+     }
+    },
+    {
+     "value": {
+      "int": "-129"
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "unsigned-tinyint-mysql-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "int8",
+    "unsigned": true
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "255"
+     },
+     "ok": {
+      "copy": "255"
+     }
+    },
+    {
+     "value": {
+      "int": "256"
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "int": "-1"
+     },
+     "refuse": "out_of_range"
+    }
+   ]
+  },
+  {
+   "id": "unsigned-bigint-mysql-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "int64",
+    "unsigned": true
+   },
+   "cases": [
+    {
+     "value": {
+      "uint": "18446744073709551615"
+     },
+     "ok": {
+      "copy": "18446744073709551615"
+     }
+    },
+    {
+     "value": {
+      "int": "0"
+     },
+     "ok": {
+      "copy": "0"
+     }
+    },
+    {
+     "value": {
+      "int": "-1"
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "text": "5"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "float": "5"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "unsigned-bigint-mysql-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "int64",
+    "unsigned": true
+   },
+   "cases": [
+    {
+     "value": {
+      "uint": "18446744073709551615"
+     },
+     "ok": {
+      "uint": "18446744073709551615"
+     }
+    },
+    {
+     "value": {
+      "int": "5"
+     },
+     "ok": {
+      "int": "5"
+     }
+    },
+    {
+     "value": {
+      "uint": "9223372036854775808"
+     },
+     "ok": {
+      "uint": "9223372036854775808"
+     }
+    }
+   ]
+  },
+  {
+   "id": "int32-trino-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "int32"
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "2147483647"
+     },
+     "ok": {
+      "copy": "2147483647"
+     }
+    },
+    {
+     "value": {
+      "int": "-2147483648"
+     },
+     "ok": {
+      "copy": "-2147483648"
+     }
+    },
+    {
+     "value": {
+      "int": "2147483648"
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "int64-pg-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "int64"
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "-9223372036854775808"
+     },
+     "ok": {
+      "int": "-9223372036854775808"
+     }
+    },
+    {
+     "value": {
+      "uint": "9223372036854775808"
+     },
+     "refuse": "out_of_range"
+    }
+   ]
+  },
+  {
+   "id": "float64-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "float64"
+   },
+   "cases": [
+    {
+     "value": {
+      "float": "0.1"
+     },
+     "ok": {
+      "copy": "0.1"
+     }
+    },
+    {
+     "value": {
+      "float": "-0"
+     },
+     "ok": {
+      "copy": "-0"
+     }
+    },
+    {
+     "value": {
+      "float": "1e21"
+     },
+     "ok": {
+      "copy": "1000000000000000000000"
+     }
+    },
+    {
+     "value": {
+      "float": "NaN"
+     },
+     "ok": {
+      "copy": "NaN"
+     }
+    },
+    {
+     "value": {
+      "float": "Infinity"
+     },
+     "ok": {
+      "copy": "Infinity"
+     }
+    },
+    {
+     "value": {
+      "float": "-Infinity"
+     },
+     "ok": {
+      "copy": "-Infinity"
+     }
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "decimal": [
+       "1",
+       0
+      ]
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "float64-pg-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "float64"
+   },
+   "cases": [
+    {
+     "value": {
+      "float": "0.5"
+     },
+     "ok": {
+      "float": "0.5"
+     }
+    },
+    {
+     "value": {
+      "float": "NaN"
+     },
+     "refuse": "non_finite"
+    },
+    {
+     "value": {
+      "float": "Infinity"
+     },
+     "refuse": "non_finite"
+    },
+    {
+     "value": {
+      "float": "-Infinity"
+     },
+     "refuse": "non_finite"
+    }
+   ]
+  },
+  {
+   "id": "float32-trino-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "float32"
+   },
+   "cases": [
+    {
+     "value": {
+      "float": "0.1"
+     },
+     "ok": {
+      "copy": "0.1"
+     }
+    },
+    {
+     "value": {
+      "float": "3.4028235e38"
+     },
+     "ok": {
+      "copy": "340282350000000000000000000000000000000"
+     }
+    }
+   ]
+  },
+  {
+   "id": "numeric-typmod-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "cases": [
+    {
+     "value": {
+      "decimal": [
+       "12345",
+       2
+      ]
+     },
+     "ok": {
+      "copy": "123.45"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "5",
+       0
+      ]
+     },
+     "ok": {
+      "copy": "5"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "-5",
+       3
+      ]
+     },
+     "refuse": "scale"
+    },
+    {
+     "value": {
+      "decimal": [
+       "15000",
+       4
+      ]
+     },
+     "ok": {
+      "copy": "1.50"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "12345678",
+       4
+      ]
+     },
+     "refuse": "scale"
+    },
+    {
+     "value": {
+      "decimal": [
+       "9999999999",
+       2
+      ]
+     },
+     "ok": {
+      "copy": "99999999.99"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "99999999999",
+       2
+      ]
+     },
+     "refuse": "whole_digits"
+    },
+    {
+     "value": {
+      "decimal": [
+       "0",
+       2
+      ]
+     },
+     "ok": {
+      "copy": "0.00"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    },
+    {
+     "value": {
+      "text": "abc"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "1.5"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "int": "5"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-numeric-nan",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "NaN"
+     },
+     "ok": {
+      "copy": "NaN"
+     }
+    },
+    {
+     "value": {
+      "text": "Infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "-Infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "nan"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "+Infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": " NaN"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "NaN "
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "inf"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "1e5"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": ""
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-numeric-infinity-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "NaN"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "Infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "-Infinity"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-numeric-special-from-mysql",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "NaN"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "Infinity"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "numeric-unbounded-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "decimal"
+   },
+   "cases": [
+    {
+     "value": {
+      "decimal": [
+       "123456789012345678901234567890123456789",
+       0
+      ]
+     },
+     "ok": {
+      "copy": "123456789012345678901234567890123456789"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "1",
+       38
+      ]
+     },
+     "ok": {
+      "copy": "0.00000000000000000000000000000000000001"
+     }
+    },
+    {
+     "value": {
+      "text": "NaN"
+     },
+     "ok": {
+      "copy": "NaN"
+     }
+    },
+    {
+     "value": {
+      "text": "Infinity"
+     },
+     "ok": {
+      "copy": "Infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "-Infinity"
+     },
+     "ok": {
+      "copy": "-Infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "12345678901234567890123456789012345678901"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "numeric-unbounded-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "decimal"
+   },
+   "cases": [
+    {
+     "value": {
+      "decimal": [
+       "1",
+       30
+      ]
+     },
+     "ok": {
+      "text": "0.000000000000000000000000000001"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "1",
+       31
+      ]
+     },
+     "refuse": "scale"
+    },
+    {
+     "value": {
+      "decimal": [
+       "11111111111111111111111111111111111",
+       0
+      ]
+     },
+     "ok": {
+      "text": "11111111111111111111111111111111111"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "111111111111111111111111111111111111",
+       0
+      ]
+     },
+     "refuse": "whole_digits"
+    },
+    {
+     "value": {
+      "decimal": [
+       "10",
+       31
+      ]
+     },
+     "ok": {
+      "text": "0.000000000000000000000000000001"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "null": true
+     }
+    }
+   ]
+  },
+  {
+   "id": "trino-decimal-38-10-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "decimal",
+    "precision": 38,
+    "scale": 10
+   },
+   "cases": [
+    {
+     "value": {
+      "decimal": [
+       "12345678901234567890123456781234567890",
+       10
+      ]
+     },
+     "ok": {
+      "copy": "1234567890123456789012345678.1234567890"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "-1",
+       10
+      ]
+     },
+     "ok": {
+      "copy": "-0.0000000001"
+     }
+    }
+   ]
+  },
+  {
+   "id": "numeric-typmod-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "decimal",
+    "precision": 10,
+    "scale": 2
+   },
+   "cases": [
+    {
+     "value": {
+      "decimal": [
+       "12345",
+       2
+      ]
+     },
+     "ok": {
+      "text": "123.45"
+     }
+    },
+    {
+     "value": {
+      "decimal": [
+       "12345678",
+       4
+      ]
+     },
+     "refuse": "scale"
+    },
+    {
+     "value": {
+      "decimal": [
+       "99999999999",
+       2
+      ]
+     },
+     "refuse": "whole_digits"
+    }
+   ]
+  },
+  {
+   "id": "text-escapes-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "text"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "a\\b\nc\td\re"
+     },
+     "ok": {
+      "copy": "a\\\\b\\nc\\td\\re"
+     }
+    },
+    {
+     "value": {
+      "text": "\\N"
+     },
+     "ok": {
+      "copy": "\\\\N"
+     }
+    },
+    {
+     "value": {
+      "text": ""
+     },
+     "ok": {
+      "copy": ""
+     }
+    },
+    {
+     "value": {
+      "text": "日本語😀"
+     },
+     "ok": {
+      "copy": "日本語😀"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    },
+    {
+     "value": {
+      "bytes": "6162"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "text-nul-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "text",
+    "length": 10
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "ok"
+     },
+     "ok": {
+      "copy": "ok"
+     }
+    },
+    {
+     "value": {
+      "text": "a\u0000b"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "text": "\u0000"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "text": "12345678901"
+     },
+     "refuse": "too_long"
+    }
+   ]
+  },
+  {
+   "id": "text-nul-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "text",
+    "length": 10
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "a\u0000b"
+     },
+     "ok": {
+      "text": "a\u0000b"
+     }
+    },
+    {
+     "value": {
+      "text": "ok"
+     },
+     "ok": {
+      "text": "ok"
+     }
+    }
+   ]
+  },
+  {
+   "id": "text-utf8mb4-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "text",
+    "length": 4
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "日本語😀"
+     },
+     "ok": {
+      "text": "日本語😀"
+     }
+    },
+    {
+     "value": {
+      "text": "日本語😀!"
+     },
+     "refuse": "too_long"
+    }
+   ]
+  },
+  {
+   "id": "char-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "char",
+    "length": 3
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "ab "
+     },
+     "ok": {
+      "copy": "ab "
+     }
+    },
+    {
+     "value": {
+      "text": "abcd"
+     },
+     "refuse": "too_long"
+    }
+   ]
+  },
+  {
+   "id": "char-trino-to-mysql",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "char",
+    "length": 3
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "ab "
+     },
+     "ok": {
+      "text": "ab "
+     }
+    }
+   ]
+  },
+  {
+   "id": "varchar-huge-trino-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "text",
+    "length": 2000000000
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     "ok": {
+      "copy": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     }
+    }
+   ]
+  },
+  {
+   "id": "enum-mysql-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "enum"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "happy"
+     },
+     "ok": {
+      "copy": "happy"
+     }
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "a\u0000"
+     },
+     "refuse": "nul"
+    }
+   ]
+  },
+  {
+   "id": "enum-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "enum"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "happy"
+     },
+     "ok": {
+      "text": "happy"
+     }
+    },
+    {
+     "value": {
+      "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     },
+     "refuse": "too_long"
+    }
+   ]
+  },
+  {
+   "id": "set-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "set"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "a,b"
+     },
+     "ok": {
+      "copy": "a,b"
+     }
+    }
+   ]
+  },
+  {
+   "id": "bytea-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "binary"
+   },
+   "cases": [
+    {
+     "value": {
+      "bytes": "0001ff"
+     },
+     "ok": {
+      "copy": "\\\\x0001ff"
+     }
+    },
+    {
+     "value": {
+      "bytes": ""
+     },
+     "ok": {
+      "copy": "\\\\x"
+     }
+    },
+    {
+     "value": {
+      "text": "\\x00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "bytea-pg-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "binary"
+   },
+   "cases": [
+    {
+     "value": {
+      "bytes": "0001ff"
+     },
+     "ok": {
+      "bytes": "0001ff"
+     }
+    },
+    {
+     "value": {
+      "bytes": ""
+     },
+     "ok": {
+      "bytes": ""
+     }
+    },
+    {
+     "value": {
+      "text": "x"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "binary-16-mysql-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "binary",
+    "length": 16
+   },
+   "cases": [
+    {
+     "value": {
+      "bytes": "00000000000000000000000000000000"
+     },
+     "ok": {
+      "bytes": "00000000000000000000000000000000"
+     }
+    },
+    {
+     "value": {
+      "bytes": "0000000000000000000000000000000000"
+     },
+     "refuse": "too_long"
+    }
+   ]
+  },
+  {
+   "id": "uuid-pg-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "uuid"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "123e4567-e89b-12d3-a456-426614174000"
+     },
+     "ok": {
+      "copy": "123e4567-e89b-12d3-a456-426614174000"
+     }
+    },
+    {
+     "value": {
+      "text": "123E4567-E89B-12D3-A456-426614174000"
+     },
+     "ok": {
+      "copy": "123E4567-E89B-12D3-A456-426614174000"
+     }
+    },
+    {
+     "value": {
+      "text": "not-a-uuid"
+     },
+     "refuse": "not_canonical"
+    },
+    {
+     "value": {
+      "text": "123e4567e89b12d3a456426614174000"
+     },
+     "refuse": "not_canonical"
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "uuid-to-mysql",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "uuid"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "123e4567-e89b-12d3-a456-426614174000"
+     },
+     "ok": {
+      "text": "123e4567-e89b-12d3-a456-426614174000"
+     }
+    },
+    {
+     "value": {
+      "text": "123e4567"
+     },
+     "refuse": "not_canonical"
+    }
+   ]
+  },
+  {
+   "id": "mysql-zero-date",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0000-00-00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "date": 0
+     },
+     "ok": {
+      "copy": "1970-01-01"
+     }
+    },
+    {
+     "value": {
+      "date": -1
+     },
+     "ok": {
+      "copy": "1969-12-31"
+     }
+    },
+    {
+     "value": {
+      "date": 19782
+     },
+     "ok": {
+      "copy": "2024-02-29"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "mysql-zero-date-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0000-00-00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "2021-00-10"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "date": 0
+     },
+     "ok": {
+      "text": "1970-01-01"
+     }
+    }
+   ]
+  },
+  {
+   "id": "mysql-invalid-datetime-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "2021-02-30 00:00:00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0000-00-00 00:00:00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "0",
+       null
+      ]
+     },
+     "ok": {
+      "copy": "1970-01-01 00:00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1500000",
+       null
+      ]
+     },
+     "ok": {
+      "copy": "1970-01-01 00:00:01.500000"
+     }
+    }
+   ]
+  },
+  {
+   "id": "mysql-invalid-datetime-to-mysql",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0000-00-00 00:00:00"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "0",
+       null
+      ]
+     },
+     "ok": {
+      "text": "1970-01-01 00:00:00"
+     }
+    }
+   ]
+  },
+  {
+   "id": "mysql-date-range",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "date": -354285
+     },
+     "ok": {
+      "text": "1000-01-01"
+     }
+    },
+    {
+     "value": {
+      "date": -354286
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "date": 2932896
+     },
+     "ok": {
+      "text": "9999-12-31"
+     }
+    },
+    {
+     "value": {
+      "date": 2932897
+     },
+     "refuse": "out_of_range"
+    }
+   ]
+  },
+  {
+   "id": "pg-date-before-year-1",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "date": -800000
+     },
+     "refuse": "out_of_range"
+    }
+   ]
+  },
+  {
+   "id": "mysql-datetime-range",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 0
+   },
+   "cases": [
+    {
+     "value": {
+      "timestamp": [
+       "-30610224000000000",
+       null
+      ]
+     },
+     "ok": {
+      "text": "1000-01-01 00:00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "-30610310400000000",
+       null
+      ]
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "253402300799000000",
+       null
+      ]
+     },
+     "ok": {
+      "text": "9999-12-31 23:59:59"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "253402300800000000",
+       null
+      ]
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1500000",
+       null
+      ]
+     },
+     "refuse": "fraction"
+    }
+   ]
+  },
+  {
+   "id": "pg-date-infinity",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "ok": {
+      "copy": "infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "-infinity"
+     },
+     "ok": {
+      "copy": "-infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "Infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "infinity "
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "+infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "date": 0
+     },
+     "ok": {
+      "copy": "1970-01-01"
+     }
+    }
+   ]
+  },
+  {
+   "id": "pg-date-infinity-from-mysql",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-date-infinity-from-trino",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-date-infinity-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 BC"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-date-bc",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0044-03-15 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "10000-03-15 BC"
+     },
+     "ok": {
+      "copy": "10000-03-15 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "044-03-15 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-3-15 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 bc"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 BC "
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "٠٠٤٤-03-15 BC"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-datestyle-dmy-bc",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "date"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "15/03/0044 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "03/15/0044 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "15.03.0044 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "Mar 15 0044 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "1999-01-08"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-timestamp-bc",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30.5 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30.5 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30.123456 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30.123456 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30.1234567 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30+01 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30. BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "ok": {
+      "copy": "infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "-infinity"
+     },
+     "ok": {
+      "copy": "-infinity"
+     }
+    }
+   ]
+  },
+  {
+   "id": "pg-timestamptz-bc",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30+01 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30+01 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30.25-07:30 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30.25-07:30 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30+01:02:03 BC"
+     },
+     "ok": {
+      "copy": "0044-03-15 10:20:30+01:02:03 BC"
+     }
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30+1 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "0044-03-15 10:20:30+01:02:03:04 BC"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "infinity"
+     },
+     "ok": {
+      "copy": "infinity"
+     }
+    },
+    {
+     "value": {
+      "text": "-infinity"
+     },
+     "ok": {
+      "copy": "-infinity"
+     }
+    }
+   ]
+  },
+  {
+   "id": "pg-timetz",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "timetz",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "10:20:30+07"
+     },
+     "ok": {
+      "copy": "10:20:30+07"
+     }
+    },
+    {
+     "value": {
+      "text": "10:20:30.5-07:30"
+     },
+     "ok": {
+      "copy": "10:20:30.5-07:30"
+     }
+    },
+    {
+     "value": {
+      "text": "10:20:30"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "10:20:30 +07"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "10:20:30.1234567+07"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "time": 0
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "mysql-time-range",
+   "source": "mysql",
+   "target": "mysql",
+   "type": {
+    "base": "time",
+    "fraction_digits": 0
+   },
+   "cases": [
+    {
+     "value": {
+      "time": -3020399000000
+     },
+     "ok": {
+      "text": "-838:59:59"
+     }
+    },
+    {
+     "value": {
+      "time": 3020399000000
+     },
+     "ok": {
+      "text": "838:59:59"
+     }
+    },
+    {
+     "value": {
+      "time": 3020400000000
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "time": 0
+     },
+     "ok": {
+      "text": "00:00:00"
+     }
+    },
+    {
+     "value": {
+      "interval": [
+       0,
+       0,
+       "0"
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "mysql-time-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "time",
+    "fraction_digits": 3
+   },
+   "cases": [
+    {
+     "value": {
+      "time": 86399000000
+     },
+     "ok": {
+      "copy": "23:59:59"
+     }
+    },
+    {
+     "value": {
+      "time": 86400000000
+     },
+     "ok": {
+      "copy": "24:00:00"
+     }
+    },
+    {
+     "value": {
+      "time": 90000000000
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "time": -1000000
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "time": 1000
+     },
+     "ok": {
+      "copy": "00:00:00.001000"
+     }
+    },
+    {
+     "value": {
+      "time": 1500
+     },
+     "refuse": "fraction"
+    },
+    {
+     "value": {
+      "interval": [
+       0,
+       0,
+       "0"
+      ]
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "12:00:00"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "timestamptz-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 3,
+    "time_zone": "offset"
+   },
+   "cases": [
+    {
+     "value": {
+      "timestamp": [
+       "1769835600000000",
+       25200
+      ]
+     },
+     "ok": {
+      "copy": "2026-01-31 05:00:00+00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1769835600000000",
+       25632
+      ]
+     },
+     "ok": {
+      "copy": "2026-01-31 05:00:00+00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1769835600123000",
+       0
+      ]
+     },
+     "ok": {
+      "copy": "2026-01-31 05:00:00.123000+00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1769835600123456",
+       0
+      ]
+     },
+     "refuse": "fraction"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1769835600000000",
+       null
+      ]
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    },
+    {
+     "value": {
+      "unknown": [
+       "timestamp(9) with time zone",
+       "2026-01-01 00:00:00.123456789 +00:00"
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "timestamptz-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "timestamptz",
+    "fraction_digits": 6
+   },
+   "cases": [
+    {
+     "value": {
+      "timestamp": [
+       "1769835600000000",
+       25200
+      ]
+     },
+     "ok": {
+      "text": "2026-01-31 05:00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1769835600123456",
+       3600
+      ]
+     },
+     "ok": {
+      "text": "2026-01-31 05:00:00.123456"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "-30610310400000000",
+       0
+      ]
+     },
+     "refuse": "out_of_range"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "0",
+       null
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "mysql-timestamp-session-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 6,
+    "time_zone": "session"
+   },
+   "cases": [
+    {
+     "value": {
+      "timestamp": [
+       "1769835600000000",
+       null
+      ]
+     },
+     "ok": {
+      "copy": "2026-01-31 05:00:00"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "0",
+       3600
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "timestamp-naive-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 3
+   },
+   "cases": [
+    {
+     "value": {
+      "timestamp": [
+       "1000",
+       null
+      ]
+     },
+     "ok": {
+      "copy": "1970-01-01 00:00:00.001000"
+     }
+    },
+    {
+     "value": {
+      "timestamp": [
+       "1500",
+       null
+      ]
+     },
+     "refuse": "fraction"
+    },
+    {
+     "value": {
+      "timestamp": [
+       "-1000000",
+       null
+      ]
+     },
+     "ok": {
+      "copy": "1969-12-31 23:59:59"
+     }
+    }
+   ]
+  },
+  {
+   "id": "interval",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "interval"
+   },
+   "cases": [
+    {
+     "value": {
+      "interval": [
+       14,
+       -3,
+       "-3500000"
+      ]
+     },
+     "ok": {
+      "copy": "P14M-3DT-3.500000S"
+     }
+    },
+    {
+     "value": {
+      "interval": [
+       0,
+       0,
+       "0"
+      ]
+     },
+     "ok": {
+      "copy": "P0M0DT0S"
+     }
+    },
+    {
+     "value": {
+      "interval": [
+       0,
+       0,
+       "1"
+      ]
+     },
+     "ok": {
+      "copy": "P0M0DT0.000001S"
+     }
+    },
+    {
+     "value": {
+      "interval": [
+       -1,
+       0,
+       "0"
+      ]
+     },
+     "ok": {
+      "copy": "P-1M0DT0S"
+     }
+    },
+    {
+     "value": {
+      "text": "1 day"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "interval-trino",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "interval"
+   },
+   "cases": [
+    {
+     "value": {
+      "interval": [
+       0,
+       3,
+       "14706000000"
+      ]
+     },
+     "ok": {
+      "copy": "P0M3DT14706S"
+     }
+    }
+   ]
+  },
+  {
+   "id": "json-to-pg",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "json"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "{\"a\":1,\"a\":2}"
+     },
+     "ok": {
+      "copy": "{\"a\":1,\"a\":2}"
+     }
+    },
+    {
+     "value": {
+      "json": "null"
+     },
+     "ok": {
+      "copy": "null"
+     }
+    },
+    {
+     "value": {
+      "json": "{\"a\":\"x\\u0000y\"}"
+     },
+     "ok": {
+      "copy": "{\"a\":\"x\\\\u0000y\"}"
+     }
+    },
+    {
+     "value": {
+      "json": "{"
+     },
+     "refuse": "not_json"
+    },
+    {
+     "value": {
+      "text": "{\"a\":1}"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "bytes": "7b7d"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "jsonb-to-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "jsonb"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "{\"b\":1,\"a\":[1,2]}"
+     },
+     "ok": {
+      "copy": "{\"b\":1,\"a\":[1,2]}"
+     }
+    },
+    {
+     "value": {
+      "json": "{\"a\":{\"a\":1},\"b\":[{\"a\":1},{\"a\":2}]}"
+     },
+     "ok": {
+      "copy": "{\"a\":{\"a\":1},\"b\":[{\"a\":1},{\"a\":2}]}"
+     }
+    },
+    {
+     "value": {
+      "json": "{\"a\":1,\"a\":2}"
+     },
+     "refuse": "duplicate_key"
+    },
+    {
+     "value": {
+      "json": "{\"a\":1,\"\\u0061\":2}"
+     },
+     "refuse": "duplicate_key"
+    },
+    {
+     "value": {
+      "json": "{"
+     },
+     "refuse": "not_json"
+    }
+   ]
+  },
+  {
+   "id": "jsonb-nul",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "jsonb"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "{\"a\":\"x\\u0000y\"}"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "json": "{\"x\\u0000\":1}"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "json": "[\"\\u0000\"]"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "json": "{\"a\":\"\\\\u0000\"}"
+     },
+     "ok": {
+      "copy": "{\"a\":\"\\\\\\\\u0000\"}"
+     }
+    }
+   ]
+  },
+  {
+   "id": "json-duplicate-keys",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "json"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "{\"a\":1,\"a\":2}"
+     },
+     "refuse": "duplicate_key"
+    },
+    {
+     "value": {
+      "json": "[{\"a\":1,\"a\":2}]"
+     },
+     "refuse": "duplicate_key"
+    },
+    {
+     "value": {
+      "json": "{\"a\":1,\"b\":2}"
+     },
+     "ok": {
+      "text": "{\"a\":1,\"b\":2}"
+     }
+    },
+    {
+     "value": {
+      "json": "{\"a\":\"x\\u0000y\"}"
+     },
+     "ok": {
+      "text": "{\"a\":\"x\\u0000y\"}"
+     }
+    },
+    {
+     "value": {
+      "json": "["
+     },
+     "refuse": "not_json"
+    }
+   ]
+  },
+  {
+   "id": "array-trino",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "array": [
+       {
+        "int": "1"
+       },
+       null,
+       {
+        "int": "3"
+       }
+      ]
+     },
+     "ok": {
+      "copy": "{\"1\",NULL,\"3\"}"
+     }
+    },
+    {
+     "value": {
+      "array": []
+     },
+     "ok": {
+      "copy": "{}"
+     }
+    },
+    {
+     "value": {
+      "array": [
+       {
+        "text": "x"
+       }
+      ]
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "text": "{1}"
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    }
+   ]
+  },
+  {
+   "id": "array-trino-varchar",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "text"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "array": [
+       {
+        "text": "a\"b"
+       },
+       {
+        "text": "NULL"
+       },
+       {
+        "text": "c\\d"
+       },
+       null
+      ]
+     },
+     "ok": {
+      "copy": "{\"a\\\\\"b\",\"NULL\",\"c\\\\\\\\d\",NULL}"
+     }
+    },
+    {
+     "value": {
+      "array": [
+       {
+        "text": "a\u0000"
+       }
+      ]
+     },
+     "refuse": "nul"
+    }
+   ]
+  },
+  {
+   "id": "array-trino-to-mysql",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "array": [
+       {
+        "int": "1"
+       },
+       null,
+       {
+        "int": "3"
+       }
+      ]
+     },
+     "ok": {
+      "text": "[1,null,3]"
+     }
+    },
+    {
+     "value": {
+      "array": []
+     },
+     "ok": {
+      "text": "[]"
+     }
+    },
+    {
+     "value": {
+      "text": "[1]"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "array-trino-nested-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "array",
+     "element": {
+      "base": "int32"
+     }
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "array": [
+       {
+        "array": [
+         {
+          "int": "1"
+         }
+        ]
+       },
+       {
+        "array": [
+         {
+          "int": "2"
+         },
+         {
+          "int": "3"
+         }
+        ]
+       },
+       {
+        "array": []
+       }
+      ]
+     },
+     "ok": {
+      "copy": "[[1],[2,3],[]]"
+     }
+    },
+    {
+     "value": {
+      "array": [
+       {
+        "unknown": [
+         "x",
+         "y"
+        ]
+       }
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "array-trino-widened-element-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int8"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "array": [
+       {
+        "int": "1"
+       },
+       {
+        "int": "2"
+       }
+      ]
+     },
+     "ok": {
+      "copy": "[1,2]"
+     }
+    }
+   ]
+  },
+  {
+   "id": "array-pg",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "{1,2,3}"
+     },
+     "ok": {
+      "copy": "{1,2,3}"
+     }
+    },
+    {
+     "value": {
+      "text": "{{1,2},{3,4}}"
+     },
+     "ok": {
+      "copy": "{{1,2},{3,4}}"
+     }
+    },
+    {
+     "value": {
+      "text": "{}"
+     },
+     "ok": {
+      "copy": "{}"
+     }
+    },
+    {
+     "value": {
+      "text": "{\"a b\",NULL}"
+     },
+     "ok": {
+      "copy": "{\"a b\",NULL}"
+     }
+    },
+    {
+     "value": null,
+     "ok": {
+      "copy": "\\N"
+     }
+    },
+    {
+     "value": {
+      "text": "{1,\u0000}"
+     },
+     "refuse": "nul"
+    }
+   ]
+  },
+  {
+   "id": "array-pg-bounds",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "array",
+    "element": {
+     "base": "int32"
+    }
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "[0:1]={5,6}"
+     },
+     "refuse": "array_bounds"
+    },
+    {
+     "value": {
+      "text": "[2:3]={5,6}"
+     },
+     "refuse": "array_bounds"
+    },
+    {
+     "value": {
+      "text": "1,2"
+     },
+     "refuse": "not_an_array"
+    },
+    {
+     "value": {
+      "text": "{1,2"
+     },
+     "refuse": "not_an_array"
+    },
+    {
+     "value": {
+      "array": [
+       {
+        "int": "1"
+       }
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "map-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "map"
+   },
+   "cases": [
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "k"
+        },
+        {
+         "decimal": [
+          "150",
+          2
+         ]
+        }
+       ],
+       [
+        {
+         "int": "2"
+        },
+        null
+       ]
+      ]
+     },
+     "ok": {
+      "copy": "{\"k\":1.50,\"2\":null}"
+     }
+    },
+    {
+     "value": {
+      "map": []
+     },
+     "ok": {
+      "copy": "{}"
+     }
+    },
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "a\"b"
+        },
+        {
+         "text": "c"
+        }
+       ]
+      ]
+     },
+     "ok": {
+      "copy": "{\"a\\\\\"b\":\"c\"}"
+     }
+    },
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "k"
+        },
+        {
+         "bytes": "01"
+        }
+       ]
+      ]
+     },
+     "refuse": "wrong_kind"
+    },
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "k"
+        },
+        {
+         "float": "NaN"
+        }
+       ]
+      ]
+     },
+     "refuse": "non_finite"
+    },
+    {
+     "value": {
+      "array": []
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "map-duplicate-key",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "map"
+   },
+   "cases": [
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "int": "1"
+        },
+        null
+       ],
+       [
+        {
+         "text": "1"
+        },
+        null
+       ]
+      ]
+     },
+     "refuse": "duplicate_key"
+    },
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "a"
+        },
+        null
+       ],
+       [
+        {
+         "text": "a"
+        },
+        null
+       ]
+      ]
+     },
+     "refuse": "duplicate_key"
+    }
+   ]
+  },
+  {
+   "id": "row-to-mysql",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "row"
+   },
+   "cases": [
+    {
+     "value": {
+      "row": [
+       {
+        "int": "1"
+       },
+       {
+        "text": "x"
+       }
+      ]
+     },
+     "ok": {
+      "text": "[1,\"x\"]"
+     }
+    },
+    {
+     "value": {
+      "row": [
+       {
+        "timestamp": [
+         "0",
+         null
+        ]
+       },
+       {
+        "date": 0
+       },
+       {
+        "time": 3600000000
+       }
+      ]
+     },
+     "ok": {
+      "text": "[\"1970-01-01 00:00:00\",\"1970-01-01\",\"01:00:00\"]"
+     }
+    },
+    {
+     "value": {
+      "row": [
+       {
+        "unknown": [
+         "x",
+         "y"
+        ]
+       }
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "row-nul-to-pg",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "row"
+   },
+   "cases": [
+    {
+     "value": {
+      "row": [
+       {
+        "int": "1"
+       },
+       {
+        "text": "x\u0000"
+       }
+      ]
+     },
+     "refuse": "nul"
+    }
+   ]
+  },
+  {
+   "id": "pg-builtin-inet",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "builtin:inet"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "192.168.0.1/24"
+     },
+     "ok": {
+      "copy": "192.168.0.1/24"
+     }
+    },
+    {
+     "value": {
+      "text": "a\u0000"
+     },
+     "refuse": "nul"
+    },
+    {
+     "value": {
+      "int": "1"
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "pg-builtin-bit",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "builtin:bit",
+    "length": 8
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "10101010"
+     },
+     "ok": {
+      "copy": "10101010"
+     }
+    }
+   ]
+  },
+  {
+   "id": "pg-builtin-point",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "builtin:point"
+   },
+   "cases": [
+    {
+     "value": {
+      "text": "(1.5,2)"
+     },
+     "ok": {
+      "copy": "(1.5,2)"
+     }
+    }
+   ]
+  },
+  {
+   "id": "unknown-to-anything",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "timestamp",
+    "fraction_digits": 3
+   },
+   "cases": [
+    {
+     "value": {
+      "unknown": [
+       "timestamp(9)",
+       "2026-01-01 00:00:00.123456789"
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "unknown-to-anything-int",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "int64"
+   },
+   "cases": [
+    {
+     "value": {
+      "unknown": [
+       "x",
+       "1"
+      ]
+     },
+     "refuse": "wrong_kind"
+    }
+   ]
+  },
+  {
+   "id": "malicious-native-value",
+   "source": "postgres",
+   "target": "postgres",
+   "type": {
+    "base": "int32",
+    "native": "int); DROP TABLE x; --"
+   },
+   "cases": [
+    {
+     "value": {
+      "int": "5"
+     },
+     "ok": {
+      "copy": "5"
+     }
+    }
+   ]
+  }
+ ]
+}
