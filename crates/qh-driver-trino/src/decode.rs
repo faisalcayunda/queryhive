@@ -795,6 +795,34 @@ mod tests {
     }
 
     #[test]
+    fn a_double_is_the_nearest_f64_to_the_digits_trino_sent() {
+        // serde_json reads a float with a fast path that can land one ULP away from the
+        // correctly rounded value for 17 significant digits. The transfer writes this value
+        // into another database as an exact `double`, so it has to be the nearest f64, which
+        // is what `str::parse` gives and what the `float_roundtrip` feature makes serde_json
+        // give too. These are digits Trino prints for doubles (shortest round-trip form).
+        for text in [
+            "0.12345678901234567",
+            "0.1",
+            "1.7976931348623157e308",
+            "5e-324",
+            "2.2250738585072014e-308",
+            "123456789.12345678",
+            "0.30000000000000004",
+            "9007199254740993.0",
+            "4.35",
+            "1e23",
+        ] {
+            let expected: f64 = text.parse().expect("an f64");
+            assert_eq!(
+                decode("double", &json(text)),
+                Value::Float(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_null_is_a_null_for_every_type() {
         // Checked before the type is looked at, so a column of any type can hold
         // one and no branch has to remember to handle it.
