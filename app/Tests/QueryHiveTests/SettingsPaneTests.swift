@@ -95,4 +95,21 @@ final class HelpHintTests: XCTestCase {
     func testThePopoverIsNarrowerThanTheSettingsWindow() {
         XCTAssertEqual(HelpHint.popoverWidth, 280)
     }
+
+    /// The transfer sheet's prod tick gates its approve button (W13-T20), so VoiceOver has to hear
+    /// whether it is ticked: a toggle, with checked or unchecked as its value.
+    func testTheInlineCheckboxReadsAsAToggleWithItsState() throws {
+        let theme = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/QueryHive/Support/Theme.swift")
+        let text = try String(contentsOf: theme, encoding: .utf8)
+        let start = try XCTUnwrap(text.range(of: "struct InlineCheckbox: View"))
+        let end = try XCTUnwrap(text.range(of: "func pluralized", range: start.upperBound..<text.endIndex))
+        let source = String(text[start.lowerBound..<end.lowerBound])
+        for needle in [".accessibilityAddTraits(.isToggle)", ".accessibilityValue(Self.spokenValue(isOn))"] {
+            XCTAssertTrue(source.contains(needle), "InlineCheckbox is missing \(needle)")
+        }
+        XCTAssertEqual(InlineCheckbox.spokenValue(true), "checked")
+        XCTAssertEqual(InlineCheckbox.spokenValue(false), "unchecked")
+    }
 }

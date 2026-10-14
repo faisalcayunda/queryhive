@@ -720,6 +720,10 @@ struct InlineCheckbox: View {
     @Binding var isOn: Bool
     @State private var hovering = false
 
+    /// What VoiceOver reads as the box's value. The transfer sheet's prod tick gates its approve
+    /// button, so a person who cannot see the square has to hear whether it is ticked.
+    static func spokenValue(_ isOn: Bool) -> String { isOn ? "checked" : "unchecked" }
+
     var body: some View {
         Button { isOn.toggle() } label: {
             HStack(spacing: 6) {
@@ -735,6 +739,8 @@ struct InlineCheckbox: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(Self.spokenValue(isOn))
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isOn)
     }
