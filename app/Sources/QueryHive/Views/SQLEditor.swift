@@ -684,7 +684,7 @@ struct SQLEditor: NSViewRepresentable {
             appliedLayout = layout
             // A larger font moves every line below the first, and the text in view would slide away:
             // the line at the top of the view is held through the change (D-16). Measured before
-            // anything below touches the layout, which already moves the view (the wrap pass resets
+            // anything below touches the layout, which already moves the view (the wrap pass re-sizes
             // the container).
             let resized = previous != nil && previous?.fontSize != layout.fontSize
             let anchor = resized ? topVisibleCharacter() : nil
@@ -799,12 +799,33 @@ struct SQLEditor: NSViewRepresentable {
         /// tracks the text view's width wraps, and one with an unbounded width scrolls.
         private func applyWrap(_ layout: EditorLayout) {
             guard let textView, let container = textView.textContainer else { return }
+            let wasScrolling = textView.isHorizontallyResizable
             textView.isHorizontallyResizable = !layout.wordWrap
             container.widthTracksTextView = layout.wordWrap
-            container.containerSize = NSSize(width: layout.wordWrap ? 0 : CGFloat.greatestFiniteMagnitude,
-                                             height: CGFloat.greatestFiniteMagnitude)
             textView.autoresizingMask = layout.wordWrap ? [.width] : []
             scrollView?.hasHorizontalScroller = !layout.wordWrap
+            guard layout.wordWrap else {
+                container.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                 height: CGFloat.greatestFiniteMagnitude)
+                return
+            }
+            // Sized here, not left to `widthTracksTextView`: that only re-reads the width when the text
+            // view's frame changes, and every switch in Settings runs this pass without changing a frame.
+            // The container used to be set 0 pt wide and wait for a resize that never came; an app linked
+            // against SDK 14 lays a 0 pt container out as nothing, so flipping any editor switch blanked
+            // the text. While wrap was off the text view grew sideways, so turning it back on narrows it
+            // to what is visible (the clip view reaches under the gutter by its left inset); any other
+            // switch leaves the frame alone.
+            if wasScrolling, let clip = scrollView?.contentView {
+                let visible = clip.bounds.width - clip.contentInsets.left - clip.contentInsets.right
+                if visible > 0, textView.frame.width > visible + 0.5 {
+                    clip.scroll(to: NSPoint(x: -clip.contentInsets.left, y: clip.bounds.minY))
+                    scrollView?.reflectScrolledClipView(clip)
+                    textView.setFrameSize(NSSize(width: visible, height: textView.frame.height))
+                }
+            }
+            let inside = textView.frame.width - 2 * textView.textContainerInset.width
+            container.containerSize = NSSize(width: max(0, inside), height: CGFloat.greatestFiniteMagnitude)
         }
 
         /// Tab stops at the chosen width. A paragraph style is an attribute, so the text already
