@@ -31,10 +31,34 @@ final class HostKeyGate: DatabaseEngine, @unchecked Sendable {
     }
 
     /// Asks for the detail on any run that opens a tunnel. The caller never has to remember.
+    ///
+    /// A copy across connections (W13-T20) can open two, and the engine asks per side: a bastion
+    /// under `DEST_SSH_HOST` gets `DEST_SSH_HOST_KEY_DETAIL`.
     private static func detailed(_ env: [String: String]) -> [String: String] {
-        guard let host = env["SSH_HOST"], !host.isEmpty else { return env }
         var out = env
-        out["SSH_HOST_KEY_DETAIL"] = "1"
+        for prefix in ["", destinationPrefix] {
+            guard let host = env[prefix + "SSH_HOST"], !host.isEmpty else { continue }
+            out[prefix + "SSH_HOST_KEY_DETAIL"] = "1"
+        }
+        return out
+    }
+
+    /// The prefix a copy across connections puts on the target's settings.
+    static let destinationPrefix = "DEST_"
+
+    /// The target connection's own settings out of a copy's environment: every `DEST_` key with the
+    /// prefix taken off, plus `DB_PATH`, and nothing of the source's.
+    ///
+    /// What the center keeps for a refusal on the target side. Trusting the key re-runs `test`
+    /// with these, so the pinned run reaches the target's bastion with the target's credentials,
+    /// and records the key in the app's file the target's `SSH_APP_KNOWN_HOSTS` names.
+    static func destinationEnvironment(_ env: [String: String]) -> [String: String] {
+        var out: [String: String] = [:]
+        for (key, value) in env where key.hasPrefix(destinationPrefix) {
+            let bare = String(key.dropFirst(destinationPrefix.count))
+            if !bare.isEmpty { out[bare] = value }
+        }
+        out["DB_PATH"] = env["DB_PATH"]
         return out
     }
 
@@ -45,7 +69,10 @@ final class HostKeyGate: DatabaseEngine, @unchecked Sendable {
         { [center] event in
             onEvent(event)
             guard event.event == "error", let detail = event.hostKey else { return }
-            let report = { center.report(detail, env: env) }
+            // The engine names the side whose bastion refused; the target's is asked about with
+            // the target's own settings, never the source's.
+            let held = event.side == "target" ? Self.destinationEnvironment(env) : env
+            let report = { center.report(detail, env: held) }
             if Thread.isMainThread { report() } else { DispatchQueue.main.async(execute: report) }
         }
     }

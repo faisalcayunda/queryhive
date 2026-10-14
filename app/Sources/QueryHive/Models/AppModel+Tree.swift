@@ -673,8 +673,11 @@ extension AppModel {
 
     /// Switching a tab to a table destination starts from the connection's own catalog/schema and
     /// the output name, so the common case needs no typing.
+    ///
+    /// The defaults are the **target** connection's: the tab's own, or the one a copy across
+    /// connections names (W13-T20). A target that cannot be resolved gets none.
     func prepareTableDestination(_ tab: QueryTab) {
-        guard let connection = connection(for: tab) else { return }
+        guard let connection = tableDestination(for: tab)?.connection else { return }
         // The three drivers do not share a target shape (`ConnectionKind.targetParts`): Postgres
         // writes inside the database it is already connected to, so it has no catalog part, and
         // MySQL has no schema. Only the parts the driver actually has get a default.
@@ -686,6 +689,21 @@ extension AppModel {
             }
         }
         if tab.trimmedTable.isEmpty { tab.targetTable = tab.trimmedName }
+    }
+
+    /// Points a table destination at a connection: `nil`, or the tab's own, for the server-side
+    /// copy on that connection; another for a copy across connections (W13-T20).
+    ///
+    /// The database and schema belonged to the connection that was there before, and a part the
+    /// new connection's driver does not have must not linger to be sent (blueprint §8.2), so both
+    /// start again from the new connection's own; the table name is kept.
+    func chooseTargetConnection(_ id: UUID?, for tab: QueryTab) {
+        let next = id == tab.connectionID ? nil : id
+        guard next != tab.targetConnectionID else { return }
+        tab.targetConnectionID = next
+        tab.targetCatalog = ""
+        tab.targetSchema = ""
+        prepareTableDestination(tab)
     }
 
     /// A table's context menu asks for truncate or drop: the engine's `table_op`, through the same

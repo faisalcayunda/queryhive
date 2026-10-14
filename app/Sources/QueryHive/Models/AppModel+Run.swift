@@ -42,12 +42,33 @@ extension AppModel {
             if tab.trimmedName.isEmpty { return "Name the output file" }
             if tab.outputDirectory == nil { return "Choose an output folder" }
         case .table:
-            // Only the parts this driver's wizard shows; see `ConnectionKind.targetParts`.
-            if let kind = connection(for: tab)?.kind, let part = tab.missingTargetPart(for: kind) {
+            guard let destination = tableDestination(for: tab) else { break }
+            if let blocked = destination.blockedReason { return blocked }
+            if case .other(let target) = destination,
+               let refused = TableDestination.refusal(target: target, mode: tab.writeMode) {
+                return refused
+            }
+            // Only the parts the **target's** driver has (`ConnectionKind.targetParts`): a copy to
+            // MySQL names a database whatever the source is.
+            if let kind = destination.connection?.kind, let part = tab.missingTargetPart(for: kind) {
                 return "Name the target \(part)"
             }
         }
         return nil
+    }
+
+    /// Where the tab's table destination writes. `nil` only when the tab has no connection.
+    ///
+    /// No target, or the tab's own connection by identity, is the server-side `CREATE TABLE … AS`
+    /// on that connection. Any other identity is a copy across connections, and it resolves only
+    /// to a connection saved **now** with the switch on; otherwise it is a blocked case, never the
+    /// tab's own connection (B-6).
+    func tableDestination(for tab: QueryTab) -> TableDestination? {
+        guard let source = connection(for: tab) else { return nil }
+        guard let id = tab.targetConnectionID, id != source.id else { return .same(source) }
+        guard experiments.saveTableAcrossConnections else { return .switchedOff }
+        guard let target = connections.first(where: { $0.id == id }) else { return .missing }
+        return .other(target)
     }
 
     /// Navicat's split, and the reason this app is a query editor rather than a one-way pipe:
@@ -748,10 +769,20 @@ extension AppModel {
     /// `confirmed` carries the user's approval of a `confirm`-level write into the run's own
     /// environment. It is never stored: the engine's whole model of a confirmation is that one run
     /// carries the flag.
+    ///
+    /// A table destination on another connection (W13-T20) adds that connection's settings under
+    /// `DEST_` (`transferSettings`), and then `confirmed` means the transfer sheet was approved: the
+    /// source only reads, so the confirmation goes to the target alone, and only when its level asks.
     func overrides(for tab: QueryTab, connection: Connection,
                            sql: String, confirmed: Bool = false) throws -> [String: String] {
         var env = try connectionEnvironment(connection)
-        env.merge(RunConfirmation.approvalSettings(confirmed)) { _, new in new }
+        var transferTarget: Connection?
+        if tab.destination == .table, case .other(let target) = tableDestination(for: tab) {
+            transferTarget = target
+        }
+        if transferTarget == nil {
+            env.merge(RunConfirmation.approvalSettings(confirmed)) { _, new in new }
+        }
         // Same context rule as a preview: an export runs where the cascade says it runs.
         env["DB_DATABASE"] = database(for: tab)
         env["DB_SCHEMA"] = schema(for: tab)
@@ -784,7 +815,35 @@ extension AppModel {
             env["TARGET_SCHEMA"] = tab.trimmedSchema
             env["TARGET_TABLE"] = tab.trimmedTable
             env["WRITE_MODE"] = tab.writeMode.rawValue
+            if let target = transferTarget {
+                // PF-23: a source that waits for the target is a slow consumer, and a server-side
+                // bound cuts it off mid-copy. The app's own default is lifted for this run; a bound
+                // the connection sets for itself is the person's choice and stays (OQ-13).
+                if connection.statementTimeoutMS == nil { env["STATEMENT_TIMEOUT_MS"] = "0" }
+                let request = RunConfirmation.transferRequest(
+                    source: connection, target: target, mode: tab.writeMode,
+                    table: target.kind.targetParts.map(tab.targetValue))
+                env.merge(try transferSettings(target: target)) { _, new in new }
+                if confirmed {
+                    env.merge(RunConfirmation.transferApprovalSettings(request)) { _, new in new }
+                }
+            }
         }
         return env
+    }
+
+    /// The target connection's settings for a copy across connections, each key under `DEST_`
+    /// (`crates/qh-ffi/src/env.rs`, ADR-0046 decision 1).
+    ///
+    /// The same mapping and the same Keychain rules as any run on that connection
+    /// (`connectionEnvironment`): its own items, read the way a run reads them, and an error that
+    /// names it. It throws before anything runs, so a copy never starts with one side's
+    /// credentials missing. `DB_PATH` is left out: the engine reads the top-level one only.
+    func transferSettings(target: Connection) throws -> [String: String] {
+        var settings: [String: String] = [:]
+        for (key, value) in try connectionEnvironment(target) where key != "DB_PATH" {
+            settings[HostKeyGate.destinationPrefix + key] = value
+        }
+        return settings
     }
 }

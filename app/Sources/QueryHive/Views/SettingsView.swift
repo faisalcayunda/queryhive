@@ -499,6 +499,14 @@ struct GeneralSettings: View {
                     .disabled(isAtDefaults)
                 }
             }
+
+            // ADR-0046 decision 13: built and tested, not yet run against real servers, so it is
+            // off until the owner turns it on. Off, Save to Table has no connection picker at all.
+            SettingsCard(title: "Experimental",
+                         detail: "Built and tested, but not yet proven against real servers. Off "
+                             + "until you turn it on.") {
+                ExperimentalToggle(features: model.experiments)
+            }
         }
     }
 
@@ -514,6 +522,30 @@ struct GeneralSettings: View {
             && store.darkTheme == .midnight && store.lightTheme == .daylight
             && store.accent == .ice && store.tone == .glow && store.glow == 1.0
             && store.uiFontFamily == FontChoice.system && store.codeFontFamily == FontChoice.system
+    }
+}
+
+/// The Experimental card's switch, with the sentence that says what turning it on does behind a
+/// "?" rather than under it.
+private struct ExperimentalToggle: View {
+    @Bindable var features: ExperimentalFeatures
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Save to a table on another connection")
+                .font(.ui(11.5))
+                .foregroundStyle(Tone.ink.opacity(0.9))
+            HelpHint(text: "Save to Table can then write a query's rows into a table on a different "
+                + "saved connection: QueryHive reads them from one server and writes them into the "
+                + "other, under the target's own Safe Mode, and asks before every copy.")
+            Spacer(minLength: 12)
+            Toggle("", isOn: $features.saveTableAcrossConnections)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .accessibilityLabel("Save to a table on another connection")
+        }
+        .padding(.vertical, 6)
     }
 }
 

@@ -139,6 +139,13 @@ final class AppModel {
     /// Export, Explain, Count and the tree's truncate/drop — goes through the same question.
     var pendingConfirmation: PendingConfirmation?
 
+    /// The copy across connections whose sheet is up: asking, running, or reporting (W13-T20).
+    var transfer: TableTransfer?
+
+    /// The switches for work not yet proven against a real server. Shared in the app; a test hands
+    /// in one over a scratch `UserDefaults`.
+    var experiments: ExperimentalFeatures = .shared
+
     /// The import the sheet is editing, or `nil` when no sheet is open.
     var importDraft: ImportDraft?
 

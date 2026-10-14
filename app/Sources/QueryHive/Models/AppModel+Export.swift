@@ -194,6 +194,21 @@ extension AppModel {
             return
         }
         let sql = substituting ?? tab.sql(for: source)
+        // A table on another connection is its own path (W13-T20): it always asks first, on the
+        // transfer sheet, whatever either side's Safe Mode is (B-6). A target that cannot be
+        // resolved stops here rather than falling back to this tab's own connection.
+        if tab.destination == .table, let destination = tableDestination(for: tab) {
+            switch destination {
+            case .same:
+                break
+            case .switchedOff, .missing:
+                refuseTableRun(tab, reason: destination.blockedReason ?? "Choose the target connection again")
+                return
+            case .other(let target):
+                askTransfer(tab, sql: sql, source: connection, target: target)
+                return
+            }
+        }
         let command = tab.destination == .table ? "to_table" : "export"
         // A write run on a `confirm` connection asks first. A table destination's own statements
         // are the generated DROP/CREATE/INSERT rather than the caller's SELECT, so those are what
@@ -355,6 +370,242 @@ extension AppModel {
             for warning in tab.warnings { tab.note(.warning, warning) }
         default:
             break
+        }
+    }
+}
+
+// MARK: Save to Table across connections (W13-T20)
+
+extension AppModel {
+    /// A table run that cannot start, said where a table run reports.
+    private func refuseTableRun(_ tab: QueryTab, reason: String) {
+        tab.note(.error, reason)
+        tab.panel = .log
+        panelCollapsed = false
+    }
+
+    /// Opens the transfer sheet for a copy to `target`. Nothing runs until it is approved.
+    func askTransfer(_ tab: QueryTab, sql: String, source: Connection, target: Connection) {
+        if let blocked = runBlockedReason(for: tab) {
+            refuseTableRun(tab, reason: blocked)
+            return
+        }
+        let request = RunConfirmation.transferRequest(source: source, target: target, mode: tab.writeMode,
+                                                      table: target.kind.targetParts.map(tab.targetValue))
+        transfer = TableTransfer(tabID: tab.id, request: request, sql: sql, sourceID: source.id,
+                                 target: target)
+    }
+
+    /// The sheet's approve button. The target is resolved again by identity first: the sheet may
+    /// have stood open while a connection was edited or deleted, and what runs has to be exactly
+    /// what the sheet named (B-6).
+    func approveTransfer(_ transfer: TableTransfer) {
+        guard transfer.mayApprove, let tab = tabs.first(where: { $0.id == transfer.tabID }),
+              tab.stage != .running else { return }
+        guard let source = connection(for: tab), source.id == transfer.sourceID,
+              case .other(let target) = tableDestination(for: tab), target == transfer.target,
+              runBlockedReason(for: tab) == nil,
+              RunConfirmation.transferRequest(source: source, target: target, mode: tab.writeMode,
+                                              table: target.kind.targetParts.map(tab.targetValue))
+                == transfer.request
+        else {
+            transfer.phase = .failed
+            transfer.failure = "The connections or the target changed while this was open, so nothing "
+                + "ran. Close it and save to the table again."
+            return
+        }
+        startTransfer(transfer, tab: tab, source: source, target: target)
+    }
+
+    /// Closes the sheet. A copy that is still running goes on, reported in its tab, and Stop still
+    /// reaches it from there.
+    func dismissTransfer() {
+        transfer = nil
+    }
+
+    private func startTransfer(_ transfer: TableTransfer, tab: QueryTab, source: Connection,
+                               target: Connection) {
+        // The statement is the one `run` read (after its own flush) when the sheet opened.
+        let env: [String: String]
+        do {
+            // Both connections' settings, each from its own Keychain items, before anything runs.
+            env = try overrides(for: tab, connection: source, sql: transfer.sql, confirmed: true)
+        } catch {
+            let message = (error as? EngineLaunchError)?.message ?? error.localizedDescription
+            transfer.phase = .failed
+            transfer.failure = message
+            tab.stage = .failed
+            tab.failure = message
+            tab.failureDetail = ""
+            tab.note(.error, message)
+            tab.panel = .log
+            return
+        }
+        panelCollapsed = false
+        tab.stage = .running
+        tab.step = nil
+        tab.rows = 0
+        tab.columns = []
+        tab.files = []
+        tab.warnings = []
+        tab.queryID = nil
+        tab.failure = nil
+        tab.failureDetail = ""
+        tab.cancelled = false
+        tab.stopping = false
+        tab.startedAt = .now
+        tab.finishedAt = .now
+        tab.panel = .log
+        tab.writtenTable = nil
+        tab.note(.info, "\(source.name) · \(source.displayTarget) → \(target.name) · \(target.displayTarget)")
+        tab.note(.info, "\(tab.writeMode.statement) \(transfer.request.table) on \(target.name)")
+        transfer.phase = .running
+
+        let run = UUID()
+        tab.runToken = run
+        var message: String?
+        var side: String?
+        var done: Event?
+        let names = (source: source.name, target: target.name)
+        let progress = MainActor.assumeIsolated {
+            FileProgress(finderTarget: FileProgress.finderTarget(for: tab),
+                         total: FileProgress.knownTotal(for: tab, sql: transfer.sql))
+        }
+        // `engine` rather than `Engine.current`: the same engine in the app, and one a test can
+        // hand a script to.
+        tab.process = engine.run("to_table", env: env, onEvent: { event in
+            guard tab.runToken == run else { return }
+            if event.event == "error" {
+                message = event.message
+                side = event.side
+            }
+            if event.event == "done" { done = event }
+            if event.event == "progress", let rows = event.rows {
+                MainActor.assumeIsolated { progress.update(rows: rows) }
+            }
+            Self.applyTransferEvent(event, to: tab, transfer: transfer, source: names.source,
+                                    target: names.target)
+        }, onExit: { [weak self] status, log in
+            MainActor.assumeIsolated { progress.finish() }
+            guard tab.runToken == run else { return }
+            PerfSignposts.cancelEnd()
+            tab.process = nil
+            tab.stopping = false
+            let stopRequested = tab.cancelled
+            tab.cancelled = false
+            let elapsed = Date.now.timeIntervalSince(tab.startedAt)
+            switch TransferOutcome.of(status: status, done: done, stopRequested: stopRequested) {
+            case .finished:
+                if stopRequested {
+                    tab.note(.info, "Stop came after every row was verified, so the table was put in place.")
+                }
+                tab.finishedAt = .now
+                tab.step = "finish"
+                tab.stage = .done
+                tab.panel = .files
+                transfer.phase = .finished
+                self?.reportLongRun(.toTable, .done, tab: tab, elapsed: elapsed, rows: tab.rows)
+            case .stopped:
+                tab.stage = .idle
+                tab.note(.warning, "Stopped. Nothing was written to \(names.target).")
+                transfer.phase = .stopped
+                self?.reportLongRun(.toTable, .cancelled, tab: tab, elapsed: elapsed, rows: tab.rows)
+            case .failed:
+                let reason = message.map { Self.attributed($0, side: side, source: names.source,
+                                                           target: names.target) }
+                    ?? (status == 0 ? "The engine exited without reporting completion."
+                                    : "The engine exited with status \(status).")
+                tab.stage = .failed
+                tab.failure = reason
+                tab.failureDetail = log
+                tab.note(.error, reason)
+                tab.panel = .log
+                transfer.phase = .failed
+                transfer.failure = reason
+                self?.reportLongRun(.toTable, .failed, tab: tab, elapsed: elapsed, failure: reason)
+            }
+        })
+    }
+
+    /// An engine message with the connection it belongs to in front, from the `error` event's
+    /// `side`: on a copy across connections "connection refused" alone does not say which server.
+    static func attributed(_ message: String, side: String?, source: String, target: String) -> String {
+        switch side {
+        case "source": "\(source): \(message)"
+        case "target": "\(target): \(message)"
+        default: message
+        }
+    }
+
+    /// What one event of a copy across connections does to its tab and its sheet. Static, so it can
+    /// be tested without an engine, and separate from `handle`: this path's `start` is the table's
+    /// shape, not an export's (N-11), and its `rows` are the rows the target acknowledged.
+    static func applyTransferEvent(_ event: Event, to tab: QueryTab, transfer: TableTransfer,
+                                   source: String, target: String) {
+        switch event.event {
+        case "error":
+            tab.note(.error, attributed(event.message ?? "Engine error", side: event.side,
+                                        source: source, target: target))
+            tab.panel = .log
+        case "step":
+            tab.step = event.step
+            transfer.step = event.step
+            if let line = transferStepLine(event.step, source: source, target: target) {
+                tab.note(.info, line)
+            }
+        case "start":
+            tab.columns = event.columns ?? []
+            tab.queryID = event.queryId
+            tab.note(.info, "Query \(event.queryId ?? "(no id)") · \(pluralized(tab.columns.count, "column"))"
+                     + " → \(pluralized(event.targetColumns?.count ?? tab.columns.count, "column")) on \(target)")
+            for fallback in event.fallbacks ?? [] {
+                let line = "Column \(fallback.column) (\(fallback.from)) is written as \(fallback.to): "
+                    + "\(target) has no faithful type for it"
+                transfer.fallbacks.append(line)
+                tab.note(.warning, line)
+            }
+        case "progress":
+            if let rows = event.rows {
+                tab.rows = rows
+                transfer.rowsWritten = rows
+            }
+            if let read = event.rowsRead { transfer.rowsRead = read }
+        case "done":
+            transfer.rowsRead = event.rowsRead ?? transfer.rowsRead
+            tab.queryID = event.queryId ?? tab.queryID
+            let warnings = event.warnings ?? []
+            if event.cancelled == true {
+                // Nothing reached the table. The engine's own first line says so in its words; the
+                // log says it in the app's when the run exits, with the target's name.
+                let rest = warnings.filter { !$0.hasPrefix("stopped; nothing was written") }
+                tab.warnings = rest
+                transfer.warnings = rest
+                for warning in rest { tab.note(.warning, warning) }
+                return
+            }
+            tab.rows = event.rows ?? tab.rows
+            transfer.rowsWritten = tab.rows
+            tab.writtenTable = event.table
+            transfer.table = event.table
+            transfer.verified = event.verified ?? false
+            tab.warnings = warnings
+            transfer.warnings = warnings
+            tab.note(.success, transfer.summary)
+            for warning in warnings { tab.note(.warning, warning) }
+        default:
+            break
+        }
+    }
+
+    /// The log line for each step of a copy, naming the connection the step happens on.
+    static func transferStepLine(_ step: String?, source: String, target: String) -> String? {
+        switch step {
+        case "connect_target": "Connecting to \(target)…"
+        case "connect": "Connecting to \(source)…"
+        case "write": "Writing rows into \(target)"
+        case "verify": "Checking that \(target) holds every row read"
+        case "swap": "Putting the table in place on \(target)"
+        default: nil
         }
     }
 }

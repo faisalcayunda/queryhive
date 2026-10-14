@@ -76,6 +76,99 @@ enum RunConfirmation {
     static func approvalSettings(_ approved: Bool) -> [String: String] {
         approved ? ["SAFE_MODE_CONFIRMED": "1"] : [:]
     }
+
+    // MARK: Save to Table across connections (W13-T20, B-2 and B-6)
+
+    /// One end of a copy across connections, as the transfer sheet names it.
+    struct TransferSide: Equatable {
+        var name: String
+        /// The driver's own name, "PostgreSQL".
+        var kind: String
+        /// `host:port`, the address the engine dials (before any tunnel).
+        var address: String
+        /// The connection's database (Trino: its catalog), empty when it names none.
+        var database: String
+        var environment: ConnectionEnvironment?
+        /// The connection's encryption as its editor names it ("require · unverified").
+        var tls: String
+        /// Whether the engine will not check the certificate on this side.
+        var tlsUnverified: Bool
+        var safeMode: ConnectionSafeMode
+    }
+
+    /// The question every copy across connections asks before anything runs.
+    struct TransferRequest: Equatable {
+        var source: TransferSide
+        var target: TransferSide
+        /// The target table, each part quoted for the target's dialect (`SQLIdentifierQuoting`).
+        var table: String
+        var mode: WriteMode
+        var title: String
+        /// What the copy does, in a sentence under the two connections.
+        var note: String
+        var confirmTitle: String
+        /// Replace drops a table on the target: the sheet uses the destructive colour.
+        var destructive: Bool
+        /// The target's Safe Mode is Confirm, so the approval is also the one confirmation its
+        /// engine waits for (`DEST_SAFE_MODE_CONFIRMED=1`, this run only).
+        var confirmsTargetSafeMode: Bool
+        /// The source is labelled prod and the target is not (unlabelled included, OQ-3): the
+        /// approval waits for an explicit tick.
+        var needsAcknowledgement: Bool
+        /// The sentence beside that tick.
+        var acknowledgement: String
+    }
+
+    /// The transfer sheet for a copy from `source` to `target`. **Never `nil`**: unlike `request`,
+    /// which stays quiet below `confirm`, every copy across connections is asked about whatever
+    /// either side's Safe Mode is, and there is no "don't ask again" (B-6). Rows leave one server
+    /// for another, and the person approving it has to see both by name, address and label first.
+    ///
+    /// `parts` are the target name's parts the target's driver has (`ConnectionKind.targetParts`),
+    /// written with `SQLIdentifierQuoting.quoted` so a name holding the dialect's quote character is
+    /// shown as the statement would spell it (B-3d), not as `qualifiedName` does.
+    static func transferRequest(source: Connection, target: Connection, mode: WriteMode,
+                                table parts: [String]) -> TransferRequest {
+        let table = parts.map { SQLIdentifierQuoting.quoted($0, for: target.kind) }.joined(separator: ".")
+        let replacing = mode == .replace
+        let confirm = target.safeMode == .confirm
+        let crossesProduction = source.environment == .prod && target.environment != .prod
+        var note = "QueryHive reads the rows from \(source.name) and writes them to \(target.name). "
+            + "The table gets the query's columns only: no keys, indexes, defaults, triggers or grants."
+        if replacing {
+            note += " The new table is built beside the old one and takes its name when every row is in; "
+                + "if anything fails first, the old table is left as it was."
+        }
+        if confirm {
+            note += " Safe Mode is Confirm on \(target.name), so its engine creates the table only "
+                + "after this approval. The approval covers this one run and is not remembered."
+        }
+        return TransferRequest(
+            source: side(source), target: side(target), table: table, mode: mode,
+            title: replacing ? "Replace a table on \(target.name)?" : "Copy rows to \(target.name)?",
+            note: note,
+            confirmTitle: replacing ? "Replace Table" : "Copy Rows",
+            destructive: replacing,
+            confirmsTargetSafeMode: confirm,
+            needsAcknowledgement: crossesProduction,
+            acknowledgement: "I understand rows from \(source.name) will be copied to \(target.name)")
+    }
+
+    private static func side(_ connection: Connection) -> TransferSide {
+        let tls = ConnectionTLSChoice(kind: connection.kind, scheme: connection.scheme,
+                                      verify: connection.verify, sslmode: connection.sslmode)
+        return TransferSide(name: connection.name, kind: connection.kind.label,
+                            address: "\(connection.host):\(connection.port)",
+                            database: connection.database, environment: connection.environment,
+                            tls: tls.title, tlsUnverified: tls.title.hasSuffix("· unverified"),
+                            safeMode: connection.safeMode)
+    }
+
+    /// The settings an approved transfer sheet adds, to that run only. The source only reads, so it
+    /// never gets a confirmation; the target gets one only when its level waits for it.
+    static func transferApprovalSettings(_ request: TransferRequest) -> [String: String] {
+        request.confirmsTargetSafeMode ? ["DEST_SAFE_MODE_CONFIRMED": "1"] : [:]
+    }
 }
 
 /// What one statement does, as far as the app needs to tell a write from a read.

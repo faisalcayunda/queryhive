@@ -158,6 +158,53 @@ final class HostKeyGateTests: XCTestCase {
                        "warmUp comes from a protocol extension; a wrapper that forgot it would switch warm-up off for the whole app")
     }
 
+    // MARK: A copy across connections has two bastions (W13-T20)
+
+    func testATargetBastionGetsItsOwnDetailFlag() {
+        let rig = Rig()
+        rig.run("to_table", ["DB_HOST": "db", "DEST_SSH_HOST": "bastion.b", "DEST_DB_HOST": "db-b"])
+        let env = rig.engine.runs.first?.env ?? [:]
+        XCTAssertEqual(env["DEST_SSH_HOST_KEY_DETAIL"], "1", "the engine asks per side")
+        XCTAssertNil(env["SSH_HOST_KEY_DETAIL"], "the source has no bastion")
+    }
+
+    func testBothBastionsAskForTheirDetail() {
+        let rig = Rig()
+        rig.run("to_table", ["SSH_HOST": "bastion.a", "DEST_SSH_HOST": "bastion.b"])
+        let env = rig.engine.runs.first?.env ?? [:]
+        XCTAssertEqual(env["SSH_HOST_KEY_DETAIL"], "1")
+        XCTAssertEqual(env["DEST_SSH_HOST_KEY_DETAIL"], "1")
+    }
+
+    func testATargetSideRefusalIsTrustedWithTheTargetsOwnSettings() throws {
+        let rig = Rig()
+        let line = #"{"event":"error","message":"the bastion's host key is not trusted","side":"target","host_key":{"state":"unknown","host":"bastion.b","port":22,"key_type":"ssh-ed25519","fingerprint":"\#(fingerprint)"}}"#
+        rig.engine.script["to_table"] = ([try XCTUnwrap(EngineWire.event(in: Data(line.utf8)))], 1)
+        rig.engine.script["test"] = ([], 0)
+        rig.run("to_table", ["DB_HOST": "db-a", "DB_PASSWORD": "a-secret", "SSH_HOST": "bastion.a",
+                             "DEST_DB_HOST": "db-b", "DEST_DB_PASSWORD": "b-secret",
+                             "DEST_SSH_HOST": "bastion.b", "DB_PATH": "/tmp/qh.sqlite3"])
+        let prompt = try XCTUnwrap(rig.center.prompt)
+        rig.center.trust(prompt)
+        let call = try XCTUnwrap(rig.pinned.first)
+        XCTAssertEqual(call.env["DB_HOST"], "db-b", "the pinned run reaches the target")
+        XCTAssertEqual(call.env["DB_PASSWORD"], "b-secret")
+        XCTAssertEqual(call.env["SSH_HOST"], "bastion.b")
+        XCTAssertEqual(call.env["SSH_HOST_KEY_ACCEPT"], fingerprint)
+        XCTAssertEqual(call.env["DB_PATH"], "/tmp/qh.sqlite3")
+        XCTAssertFalse(call.env.values.contains("a-secret"), "nothing of the source's rides along")
+        XCTAssertFalse(call.env.keys.contains { $0.hasPrefix("DEST_") })
+    }
+
+    func testASourceSideRefusalIsHeldAsItAlwaysWas() throws {
+        let rig = Rig()
+        rig.engine.script["to_table"] = ([try errorEvent()], 1)
+        rig.engine.script["test"] = ([], 0)
+        rig.run("to_table", ["DB_HOST": "db-a", "SSH_HOST": "bastion.a", "DEST_DB_HOST": "db-b"])
+        rig.center.trust(try XCTUnwrap(rig.center.prompt))
+        XCTAssertEqual(rig.pinned.first?.env["DB_HOST"], "db-a")
+    }
+
     func testAWarmUpNeverPromptsAndNeverAsksForTheDetail() {
         let rig = Rig()
         rig.gate.warmUp(env: tunnel)

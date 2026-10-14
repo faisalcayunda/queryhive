@@ -405,6 +405,16 @@ final class QueryTab: Identifiable {
     var targetSchema = ""
     var targetTable = ""
     var writeMode: WriteMode = .create
+    /// The saved connection the table is written to, when it is not this tab's own (W13-T20).
+    ///
+    /// `nil` means the tab's own connection, which is the `CREATE TABLE … AS` the server runs by
+    /// itself. A value is only ever resolved by identity (`AppModel.tableDestination(for:)`); one
+    /// that no longer names a saved connection blocks the run and is **never** read as `nil`,
+    /// because that would turn a copy meant for another server into a table on this one.
+    var targetConnectionID: UUID?
+    /// The identity a restored target that was not a UUID is given: the all-zero UUID, which
+    /// `UUID()` never produces, so it names no connection and the run waits for a new choice.
+    static let unresolvableConnection = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     /// Filled from the `done` event of a table run.
     var writtenTable: String?
     /// 0 means "one file, however big it gets".
@@ -1202,7 +1212,8 @@ final class QueryTab: Identifiable {
     var trimmedSchema: String { targetSchema.trimmingCharacters(in: .whitespaces) }
     var trimmedTable: String { targetTable.trimmingCharacters(in: .whitespaces) }
 
-    private func targetValue(_ part: TargetPart) -> String {
+    /// One part of the target's name, trimmed. The transfer sheet quotes each part on its own.
+    func targetValue(_ part: TargetPart) -> String {
         switch part {
         case .catalog: trimmedCatalog
         case .schema: trimmedSchema

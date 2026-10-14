@@ -62,6 +62,32 @@ struct Event: Decodable {
     /// The coordinator's own state string, carried on `to_table` progress events.
     var state: String?
 
+    // `to_table` across connections (W13-T20, `crates/qh-ffi/src/transfer/mod.rs`). On that path
+    // `rows` is what the target acknowledged and `rows_read` what the source handed over.
+
+    /// `progress` / `done`: the rows read from the source. `rows_read` on the wire.
+    var rowsRead: Int?
+    /// `done`: whether the rows read equal the rows the target acknowledged. Only `true` when they
+    /// do; a stopped run says `false`.
+    var verified: Bool?
+    /// `done`: the target's driver word (`postgres`, `mysql`). `target_kind` on the wire.
+    var targetKind: String?
+    /// `start`: the table the target gets, column by column, in its own type words.
+    /// `target_columns` on the wire.
+    var targetColumns: [Column]?
+    /// `start`: the columns written as text because the target has no faithful type for them.
+    var fallbacks: [Fallback]?
+    /// `error`: which connection the failure belongs to, `source` or `target`. Absent on every
+    /// other command, whose one connection is never in doubt.
+    var side: String?
+
+    /// One column a copy across connections writes as text, with the type it came from.
+    struct Fallback: Decodable, Equatable {
+        var column: String
+        var from: String
+        var to: String
+    }
+
     /// `history` command: one row per execution, newest first.
     var entries: [HistoryEntry]?
     /// `saved_queries` command, `list` action: the stored statements in name order. Its own key

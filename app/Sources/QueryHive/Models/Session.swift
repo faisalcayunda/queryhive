@@ -35,6 +35,10 @@ struct SessionTab: Codable, Equatable {
     var targetSchema: String
     var targetTable: String
     var writeMode: String
+    /// The target connection's UUID when a table goes to another connection, or `nil` for the
+    /// tab's own. Optional and left out of the blob when `nil`, so a session written before it
+    /// existed decodes unchanged and a tab that never named one writes the same blob as before.
+    var targetConnection: String?
 }
 
 extension SessionTab {
@@ -55,6 +59,7 @@ extension SessionTab {
         targetSchema = tab.targetSchema
         targetTable = tab.targetTable
         writeMode = tab.writeMode.rawValue
+        targetConnection = tab.targetConnectionID?.uuidString
     }
 
     /// The tab this snapshot describes.
@@ -82,6 +87,12 @@ extension SessionTab {
         tab.targetSchema = targetSchema
         tab.targetTable = targetTable
         tab.writeMode = WriteMode(rawValue: writeMode) ?? .create
+        // A text that is not a UUID is not "no target": read as `nil` it would send a table meant
+        // for another server to this tab's own. It becomes an identity no connection has, so the
+        // run stays blocked until a connection is chosen again.
+        if let targetConnection {
+            tab.targetConnectionID = UUID(uuidString: targetConnection) ?? QueryTab.unresolvableConnection
+        }
         return tab
     }
 }
