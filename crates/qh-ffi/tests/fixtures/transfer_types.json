@@ -4629,6 +4629,172 @@
    ]
   },
   {
+   "id": "json-numbers-to-mysql",
+   "source": "postgres",
+   "target": "mysql",
+   "type": {
+    "base": "json"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "{\"a\":12345678901234567890.123456789}"
+     },
+     "refuse": "json_number"
+    },
+    {
+     "value": {
+      "json": "[18446744073709551616]"
+     },
+     "refuse": "json_number"
+    },
+    {
+     "value": {
+      "json": "[-9223372036854775809]"
+     },
+     "refuse": "json_number"
+    },
+    {
+     "value": {
+      "json": "[1e999]"
+     },
+     "refuse": "not_json"
+    },
+    {
+     "value": {
+      "json": "[1e-999]"
+     },
+     "refuse": "json_number"
+    },
+    {
+     "value": {
+      "json": "[0.12345678901234567]"
+     },
+     "refuse": "json_number"
+    },
+    {
+     "value": {
+      "json": "[18446744073709551615, -9223372036854775808, 0, -0]"
+     },
+     "ok": {
+      "text": "[18446744073709551615, -9223372036854775808, 0, -0]"
+     }
+    },
+    {
+     "value": {
+      "json": "[0.1, 1.5, 1e3, 1E-2, -0.0, 3.14159, 1.7976931348623157e308]"
+     },
+     "ok": {
+      "text": "[0.1, 1.5, 1e3, 1E-2, -0.0, 3.14159, 1.7976931348623157e308]"
+     }
+    },
+    {
+     "value": {
+      "json": "{\"s\":\"12345678901234567890123.5\",\"k\":[]}"
+     },
+     "ok": {
+      "text": "{\"s\":\"12345678901234567890123.5\",\"k\":[]}"
+     }
+    }
+   ]
+  },
+  {
+   "id": "json-numbers-to-pg-jsonb-are-exact",
+   "source": "mysql",
+   "target": "postgres",
+   "type": {
+    "base": "jsonb"
+   },
+   "cases": [
+    {
+     "value": {
+      "json": "[12345678901234567890.123456789]"
+     },
+     "ok": {
+      "copy": "[12345678901234567890.123456789]"
+     }
+    }
+   ]
+  },
+  {
+   "id": "trino-decimals-in-a-map-to-mysql",
+   "source": "trino",
+   "target": "mysql",
+   "type": {
+    "base": "map"
+   },
+   "cases": [
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "price"
+        },
+        {
+         "decimal": [
+          "150",
+          2
+         ]
+        }
+       ]
+      ]
+     },
+     "ok": {
+      "text": "{\"price\":1.50}"
+     }
+    },
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "big"
+        },
+        {
+         "decimal": [
+          "123456789012345678901234567890",
+          5
+         ]
+        }
+       ]
+      ]
+     },
+     "refuse": "json_number"
+    }
+   ]
+  },
+  {
+   "id": "trino-decimals-in-a-map-to-pg-stay-exact",
+   "source": "trino",
+   "target": "postgres",
+   "type": {
+    "base": "map"
+   },
+   "cases": [
+    {
+     "value": {
+      "map": [
+       [
+        {
+         "text": "big"
+        },
+        {
+         "decimal": [
+          "123456789012345678901234567890",
+          5
+         ]
+        }
+       ]
+      ]
+     },
+     "ok": {
+      "copy": "{\"big\":1234567890123456789012345.67890}"
+     }
+    }
+   ]
+  },
+  {
    "id": "array-trino",
    "source": "trino",
    "target": "postgres",

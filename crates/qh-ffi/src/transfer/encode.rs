@@ -76,6 +76,9 @@ pub enum Rule {
         max: u32,
     },
     DuplicateKey,
+    /// A JSON number MySQL `json` cannot keep as written: it stores a number as a 64-bit
+    /// integer or a double, and rounds anything else.
+    JsonNumber,
     NotJson,
     /// A PostgreSQL array with a lower bound other than 1 cannot be written as is (N-8).
     ArrayBounds,
@@ -102,6 +105,7 @@ impl Rule {
             Rule::NonFinite => "non_finite",
             Rule::Fraction { .. } => "fraction",
             Rule::DuplicateKey => "duplicate_key",
+            Rule::JsonNumber => "json_number",
             Rule::NotJson => "not_json",
             Rule::ArrayBounds => "array_bounds",
             Rule::NotAnArray => "not_an_array",
@@ -138,6 +142,9 @@ impl std::fmt::Display for Rule {
                 "has more than the column's {max} fractional-second digits"
             ),
             Rule::DuplicateKey => formatter.write_str("a JSON object repeats a key"),
+            Rule::JsonNumber => formatter.write_str(
+                "a JSON number MySQL would round: it keeps only 64-bit integers and doubles",
+            ),
             Rule::NotJson => formatter.write_str("the text is not valid JSON"),
             Rule::ArrayBounds => {
                 formatter.write_str("an array whose lower bound is not 1 cannot be written as is")
@@ -972,13 +979,96 @@ fn json_for_jsonb(text: &str) -> Result<(), Rule> {
     Ok(())
 }
 
-/// MySQL `json` keeps the last of a repeated key: refused rather than changed.
+/// MySQL `json` keeps the last of a repeated key, and keeps a number only as a signed or
+/// unsigned 64-bit integer or a double: refused rather than changed.
 fn json_for_mysql(text: &str) -> Result<(), Rule> {
     json_valid(text)?;
     if has_duplicate_keys(text) {
         return Err(Rule::DuplicateKey);
     }
+    json_numbers_fit_mysql(text)
+}
+
+/// Every number token of valid JSON `text`, outside its strings, must be one MySQL keeps as it
+/// was written: an integer that fits `i64` or `u64`, or a number with a point or an exponent
+/// whose nearest `f64`, printed in its shortest round-trip form, is the very same decimal value
+/// (so `0.1`, `1.50` and `1e3` pass, and `12345678901234567890.123456789` does not).
+fn json_numbers_fit_mysql(text: &str) -> Result<(), Rule> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    index += 1;
+                }
+                // The token is ASCII, so both ends are character boundaries.
+                if !mysql_keeps_number(&text[start..index]) {
+                    return Err(Rule::JsonNumber);
+                }
+            }
+            _ => index += 1,
+        }
+    }
     Ok(())
+}
+
+fn mysql_keeps_number(token: &str) -> bool {
+    if !token.contains(['.', 'e', 'E']) {
+        return token.parse::<i64>().is_ok() || token.parse::<u64>().is_ok();
+    }
+    let Ok(nearest) = token.parse::<f64>() else {
+        return false;
+    };
+    if !nearest.is_finite() {
+        return false;
+    }
+    match (decimal_value(token), decimal_value(&format!("{nearest:e}"))) {
+        (Some(written), Some(kept)) => written == kept,
+        _ => false,
+    }
+}
+
+/// A decimal number's value as `(negative, digits, power of ten)` with no leading or trailing
+/// zero digit, so two spellings of one value compare equal. Zero is `(false, "", 0)`.
+fn decimal_value(token: &str) -> Option<(bool, String, i64)> {
+    let (negative, rest) = match token.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (rest, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut power = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    let digits = format!("{whole}{fraction}");
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let digits = digits.trim_start_matches('0');
+    let trimmed = digits.trim_end_matches('0');
+    if trimmed.is_empty() {
+        return Some((false, String::new(), 0));
+    }
+    power = power.checked_add(i64::try_from(digits.len() - trimmed.len()).ok()?)?;
+    Some((negative, trimmed.to_owned(), power))
 }
 
 /// Whether any JSON object in `text` repeats a key, after the keys' escapes are decoded.
@@ -1755,6 +1845,77 @@ mod tests {
                 .rule,
             Rule::NotJson
         );
+    }
+
+    #[test]
+    fn mysql_json_keeps_a_number_only_as_a_64_bit_integer_or_a_double() {
+        let my = column(SqlType::of(Base::Json), DriverKind::Postgres, Target::Mysql);
+        let json = |text: &str| mysql_cell(&my, &Value::Json(text.into()));
+        for refused in [
+            "12345678901234567890.123456789",
+            "[1, 12345678901234567890123]",
+            "18446744073709551616",
+            "-9223372036854775809",
+            "{\"a\": [0.12345678901234567]}",
+            "1e-999",
+            "4.9e-325",
+        ] {
+            assert_eq!(json(refused).unwrap_err(), Rule::JsonNumber, "{refused}");
+        }
+        for kept in [
+            "18446744073709551615",
+            "-9223372036854775808",
+            "0",
+            "-0",
+            "0.1",
+            "1.50",
+            "1e3",
+            "1E+3",
+            "-1.5e-7",
+            "123456.789",
+            "1.7976931348623157e308",
+            "5e-324",
+            "{\"s\": \"12345678901234567890123\", \"n\": [1, 2.5]}",
+        ] {
+            assert!(json(kept).is_ok(), "{kept}");
+        }
+        // A number too large for a double is not even JSON to the parser that reads it first.
+        assert_eq!(json("1e999").unwrap_err(), Rule::NotJson);
+        // A number inside a string is a string, wherever its quotes and escapes fall.
+        assert!(json(r#"["1\"2345678901234567890123", "\\"]"#).is_ok());
+        // PostgreSQL's jsonb keeps numeric exactly, so the same digits go there.
+        let jsonb = pg(SqlType::of(Base::Jsonb), DriverKind::Mysql);
+        assert!(row_of(
+            &[jsonb],
+            &[Value::Json("[12345678901234567890.123456789]".into())]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_trino_decimal_inside_a_composite_goes_to_mysql_only_if_a_double_holds_it() {
+        let map = column(SqlType::of(Base::Map), DriverKind::Trino, Target::Mysql);
+        let entry = |unscaled: i128, scale: u8| {
+            Value::Map(vec![(
+                Value::Text("v".into()),
+                Value::Decimal { unscaled, scale },
+            )])
+        };
+        assert_eq!(
+            mysql_cell(&map, &entry(150, 2)).unwrap(),
+            MysqlCell::Text("{\"v\":1.50}".into())
+        );
+        assert_eq!(
+            mysql_cell(&map, &entry(123_456_789_012_345_678_901_234_567_890, 5)).unwrap_err(),
+            Rule::JsonNumber
+        );
+        // The same decimal to jsonb is exact.
+        let to_pg = pg(SqlType::of(Base::Map), DriverKind::Trino);
+        assert!(row_of(
+            &[to_pg],
+            &[entry(123_456_789_012_345_678_901_234_567_890, 5)]
+        )
+        .is_ok());
     }
 
     #[test]

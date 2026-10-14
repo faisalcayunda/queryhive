@@ -565,7 +565,7 @@ pub fn map_type(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
             Target::Mysql => widened(
                 TargetType::Json,
                 target,
-                "MySQL json normalises key order and spacing",
+                "MySQL json normalises key order and spacing, and keeps a number only as a 64-bit integer or a double (a value with any other number is refused)",
             ),
         },
         Base::Jsonb => match target {
@@ -573,7 +573,7 @@ pub fn map_type(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
             Target::Mysql => widened(
                 TargetType::Json,
                 target,
-                "MySQL json normalises key order and spacing",
+                "MySQL json normalises key order and spacing, and keeps a number only as a 64-bit integer or a double (a value with any other number is refused)",
             ),
         },
 
@@ -592,9 +592,9 @@ pub fn map_type(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
                 TargetType::Json,
                 target,
                 if ty.base == Base::Row {
-                    "a row is written as a json array; its field names are not kept"
+                    "a row is written as a json array; its field names are not kept, and its numbers are kept only as 64-bit integers or doubles"
                 } else {
-                    "a map is written as a json object"
+                    "a map is written as a json object; its numbers are kept only as 64-bit integers or doubles, so a decimal a double cannot hold is refused"
                 },
             ),
         },
@@ -717,7 +717,7 @@ fn map_array(ty: &SqlType, source: DriverKind, target: Target) -> Mapping {
                 fallback(
                     TargetType::Json,
                     target,
-                    "MySQL has no array type; written as json",
+                    "MySQL has no array type; written as json, whose numbers are kept only as 64-bit integers or doubles",
                 )
             }
         }
