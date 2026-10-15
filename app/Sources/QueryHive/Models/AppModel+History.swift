@@ -200,10 +200,17 @@ extension AppModel {
     ///
     /// Replaces the editor's text rather than opening a tab: the list is a way back to something
     /// the user already wrote, and a second tab for the same statement is how a person ends up
-    /// with five copies of one query. Undo still brings back what was there.
+    /// with five copies of one query. The write registers no undo step, so a tab holding unsaved
+    /// text is not replaced: the statement opens in a new tab on the same connection instead.
     func loadIntoEditor(_ sql: String, in tab: QueryTab) {
-        tab.sql = sql
-        tab.panel = .result
+        var target = tab
+        if tab.hasUnsavedSQL {
+            newTab(connectionID: tab.connectionID)
+            target = selectedTab ?? tab
+        }
+        // The app's text, not the person's: a clean tab stays clean (`applyGeneratedSQL`).
+        target.applyGeneratedSQL(sql)
+        target.panel = .result
         panelCollapsed = false
     }
 

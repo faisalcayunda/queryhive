@@ -21,7 +21,7 @@ enum AppMenu {
         var list = [
             spec(.newQuery, .file, "New Query"),
             spec(.closeTab, .file, "Close Query"),
-            spec(.openFile, .file, "Load SQL File…"),
+            spec(.openFile, .file, "Open SQL File…"),
             spec(.openQuickly, .file, "Open Quickly…"),
             spec(.run, .query),
             spec(.runScript, .query),
@@ -44,6 +44,7 @@ enum AppMenu {
             spec(.previousTab, .tab),
             // Save replaces the system item, and Add Row sits in the Edit menu (App.swift).
             spec(.saveFile, .save),
+            spec(.saveFileAs, .save, "Save As…"),
             spec(.format, .edit),
             spec(.addRow, .edit),
         ]
@@ -68,7 +69,7 @@ enum AppMenu {
         switch ShortcutAction(rawValue: spec.id) {
         case .newQuery: model.newTab()
         case .closeTab: model.closeSelectedTab()
-        case .openFile: tab?.loadSQLFromFile()
+        case .openFile: model.openSQLFilesPanel()
         case .openQuickly: model.openQuickly()
         case .run: model.runSelectedTab()
         case .runScript: tab.map { model.run($0, from: .all) }
@@ -88,6 +89,7 @@ enum AppMenu {
         // it answers only while it is the first responder, which is when a peek means anything.
         case .peekCell: NSApp.sendAction(#selector(GridTableView.peekCell(_:)), to: nil, from: nil)
         case .saveFile: model.saveFocused()
+        case .saveFileAs: model.saveFocusedAs()
         case .addRow: tab.map { model.addRow(in: $0) }
         case .format: tab.map { model.formatSQL(in: $0) }
         case .toggleRecord:
@@ -107,7 +109,7 @@ enum AppMenu {
         let tab = model.selectedTab
         let blocked = tab.map { model.runBlockedReason(for: $0) != nil } ?? true
         switch ShortcutAction(rawValue: spec.id) {
-        case .openFile, .closeTab, .toggleResultPanel, .focusEditor, .focusResults, .toggleRecord: return tab != nil
+        case .closeTab, .toggleResultPanel, .focusEditor, .focusResults, .toggleRecord: return tab != nil
         case .run: return tab?.previewing != true
         case .runScript, .explain, .exportData: return !blocked
         case .countRows: return tab?.previewedSQL?.isEmpty == false && tab?.countingRows == false
@@ -121,6 +123,7 @@ enum AppMenu {
         // From observed state, not the focus (which is asked, never observed): the item is right the
         // moment an edit is staged. `saveFocused` decides what saving means.
         case .saveFile: return model.canSaveFocused
+        case .saveFileAs: return tab.map(model.canSaveSQLAs) ?? false
         case .addRow: return tab.map { model.rowEditBlockedReason(for: $0) == nil } ?? false
         case .format: return tab.map { model.canFormat($0) } ?? false
         default: return true

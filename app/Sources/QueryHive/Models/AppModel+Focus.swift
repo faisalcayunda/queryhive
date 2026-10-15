@@ -301,12 +301,30 @@ extension AppModel {
         return alert.runModal() == .alertSecondButtonReturn
     }
 
-    /// One question for a set of tabs about to close, and `true` when there is nothing to ask or the
-    /// answer is to go on. Asked once however many tabs there are, so "Close Other Tabs" is one
-    /// dialog and not one per tab.
+    /// The one gate every way of closing tabs goes through, and `true` when all of `doomed` may go.
+    ///
+    /// It asks, in this order, before anything closes or is saved:
+    ///  1. the existing question about staged grid changes, exports and applies, once for the set;
+    ///  2. for each tab with unsaved SQL, in strip order, Save / Discard / Cancel.
+    /// Only then are the tabs that answered Save written. Cancel anywhere, a cancelled save panel or
+    /// a failed write (which says why in an alert) answers `false`, and the caller closes nothing.
+    /// Asking first and saving after means a Cancel in the middle of a set has written nothing.
     private func confirmClosing(_ doomed: [QueryTab]) -> Bool {
+        // Typing from the last 150 ms is not in `tab.sql` yet, and a tab that looks clean would close
+        // without asking.
+        Self.flushEditorsNow()
         let work = unsavedWork(in: doomed)
-        return work.isEmpty || Self.confirmDiscard(work, .closeTabs(doomed.count))
+        if !work.isEmpty, !Self.confirmDiscard(work, .closeTabs(doomed.count)) { return false }
+        var saving: [QueryTab] = []
+        for tab in doomed where tab.hasUnsavedSQL {
+            switch Self.confirmSave(Self.displayName(of: tab)) {
+            case .cancel: return false
+            case .discard: continue
+            case .save: saving.append(tab)
+            }
+        }
+        for tab in saving where save(tab) != .saved { return false }
+        return true
     }
 
     /// `true` when the app may quit now: nothing is at stake, or the person said to go on. The one
@@ -317,12 +335,18 @@ extension AppModel {
         return work.isEmpty || Self.confirmDiscard(work, .quit)
     }
 
-    /// Close one tab, after asking when it holds staged changes or a running export. `confirmed` is
-    /// for a caller that has already asked about a set of tabs. Answers whether the tab was closed.
+    /// Close one tab, after asking when it holds staged changes, a running export or unsaved SQL.
+    /// Answers whether the tab was closed.
     @discardableResult
-    func closeTab(_ id: UUID, confirmed: Bool = false) -> Bool {
-        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return false }
-        if !confirmed, !confirmClosing([tabs[index]]) { return false }
+    func closeTab(_ id: UUID) -> Bool {
+        guard let tab = tabs.first(where: { $0.id == id }), confirmClosing([tab]) else { return false }
+        removeTab(id)
+        return true
+    }
+
+    /// The close itself, with no question: only the callers that have passed `confirmClosing`.
+    private func removeTab(_ id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         // Both runs, then the stores (§19): `preview` and `explain` live in `previewProcess`, and a
         // query still waiting on the server would otherwise run on for a tab nobody can see.
         tabs[index].process?.terminate()
@@ -339,7 +363,6 @@ extension AppModel {
             syncPanelToSelectedTab()
         }
         saveSession()
-        return true
     }
 
     func closeSelectedTab() {
@@ -350,12 +373,12 @@ extension AppModel {
     /// Close every tab but this one.
     ///
     /// The named tab stays selected, so the one the user was looking at does not move under the
-    /// pointer. Every tab goes through `closeTab`, which terminates a running tab's process — the
+    /// pointer. Every tab goes through `removeTab`, which terminates a running tab's process — the
     /// same thing the single-tab close does, and the reason these do not edit the array themselves.
     func closeOtherTabs(keeping id: UUID) {
         let others = tabs.filter { $0.id != id }
         guard confirmClosing(others) else { return }
-        for other in others { closeTab(other.id, confirmed: true) }
+        for other in others { removeTab(other.id) }
         selectTab(id)
     }
 
@@ -364,7 +387,7 @@ extension AppModel {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let after = Array(tabs.suffix(from: index + 1))
         guard confirmClosing(after) else { return }
-        for other in after { closeTab(other.id, confirmed: true) }
+        for other in after { removeTab(other.id) }
     }
 
     /// Close every tab running on one connection (query tabs and object tabs), asking once when any
@@ -373,7 +396,7 @@ extension AppModel {
     func closeTabs(of connectionID: UUID) -> Bool {
         let doomed = tabs.filter { $0.connectionID == connectionID || $0.objectScope?.connectionID == connectionID }
         guard confirmClosing(doomed) else { return false }
-        for tab in doomed { closeTab(tab.id, confirmed: true) }
+        for tab in doomed { removeTab(tab.id) }
         return true
     }
 
@@ -384,10 +407,11 @@ extension AppModel {
     func closeAllTabs() {
         let all = tabs
         guard confirmClosing(all) else { return }
-        for tab in all { closeTab(tab.id, confirmed: true) }
+        for tab in all { removeTab(tab.id) }
     }
 
     func selectTab(_ id: UUID) {
+        let switched = selectedTabID != id
         selectedTabID = id
         // A tab in the background keeps its store, which spills first when the budget asks, but not
         // the pages Swift cached from it (NFR-P3).
@@ -405,6 +429,8 @@ extension AppModel {
         }
         saveSession()
         warmUp(for: selectedTab)
+        // Last, with the tab already in front: the question about a changed file is about this tab.
+        if switched, let tab = selectedTab { checkExternalChange(tab) }
     }
 
     /// The results Open Quickly is showing, best first.

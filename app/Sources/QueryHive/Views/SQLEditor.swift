@@ -67,6 +67,9 @@ struct SQLEditor: NSViewRepresentable {
     var errorMark: ServerErrorMark? = nil
     /// Told what Format SQL from the editor's context menu did, so the host can say so.
     var onFormatted: ((SQLFormat.Outcome) -> Void)? = nil
+    /// `.sql` and `.txt` files dropped on the editor. It is the view under the pointer, so the window's
+    /// own drop target (`Workspace`) would never hear of them; answers whether they were taken.
+    var onDropFiles: (([URL]) -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -202,6 +205,9 @@ struct SQLEditor: NSViewRepresentable {
         // that can only mean "I am looking somewhere else now".
         textView.onClick = { [weak coordinator = context.coordinator] in
             coordinator?.dismissCompletionOnClick()
+        }
+        textView.onFileDrop = { [weak coordinator = context.coordinator] urls in
+            coordinator?.parent.onDropFiles?(urls) ?? false
         }
         // Whatever the tab was holding when it opened — restored SQL, a loaded file, a table just
         // double-clicked — is coloured once here. `updateNSView` cannot do it: it returns early
@@ -2377,6 +2383,35 @@ final class SQLTextView: NSTextView {
     /// Called before a click in the text is handled. A click moves the caret, so a suggestion list
     /// still anchored to the old one is pointing at the wrong word; closing it is this hook's job.
     var onClick: (() -> Void)?
+
+    /// Told of `.sql` and `.txt` files dropped on the text; answers whether it took them. Without it,
+    /// or for a drop of anything else, the text view does what it always did.
+    var onFileDrop: (([URL]) -> Bool)?
+
+    /// The `.sql` and `.txt` files on a drag pasteboard.
+    static func droppedSQLFiles(from pasteboard: NSPasteboard) -> [URL] {
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self],
+                                          options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.filter(AppModel.isSQLFile)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if onFileDrop != nil, !Self.droppedSQLFiles(from: sender.draggingPasteboard).isEmpty { return .copy }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        if onFileDrop != nil, !Self.droppedSQLFiles(from: sender.draggingPasteboard).isEmpty { return .copy }
+        return super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if let onFileDrop {
+            let files = Self.droppedSQLFiles(from: sender.draggingPasteboard)
+            if !files.isEmpty { return onFileDrop(files) }
+        }
+        return super.performDragOperation(sender)
+    }
 
     /// The bands drawn behind the text, painted in order: the caret's statement first, its line
     /// over it. Behind the text rather than over it, which is what keeps the selection, the syntax

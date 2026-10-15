@@ -39,6 +39,15 @@ struct SessionTab: Codable, Equatable {
     /// tab's own. Optional and left out of the blob when `nil`, so a session written before it
     /// existed decodes unchanged and a tab that never named one writes the same blob as before.
     var targetConnection: String?
+    /// The `.sql` file the tab is bound to, as a path, and the hash of the content it was last known
+    /// to hold (blueprint w12 D-19). Optional and left out of the blob for a tab with no file, so a
+    /// blob written before they existed decodes unchanged.
+    var file: String?
+    var fileHash: String?
+    /// Whether the text differs from what was last saved. Written for every tab by a build that
+    /// knows the key; `nil` means a blob from an older build, whose unbound text is treated as unsaved
+    /// (`tab()`) so an upgrade never marks anyone's restored work clean.
+    var dirty: Bool?
 }
 
 extension SessionTab {
@@ -60,6 +69,9 @@ extension SessionTab {
         targetTable = tab.targetTable
         writeMode = tab.writeMode.rawValue
         targetConnection = tab.targetConnectionID?.uuidString
+        file = tab.file?.url.path
+        fileHash = tab.file?.lastKnown.sha256
+        dirty = tab.isDirty
     }
 
     /// The tab this snapshot describes.
@@ -73,6 +85,16 @@ extension SessionTab {
     func tab() -> QueryTab {
         let tab = QueryTab(title: title, id: UUID(uuidString: id) ?? UUID())
         tab.sql = sql
+        // The session's text wins over the disk's (D-19), and nothing is read or run here: the binding
+        // is rebuilt from the path and the hash, and a file that changed or went missing is found by
+        // the check on selecting the tab, or by the hash check before a save.
+        if let file, !file.isEmpty {
+            tab.file = FileBinding(url: URL(fileURLWithPath: file), lastKnown: .restored(sha256: fileHash ?? ""),
+                                   eol: nil, hadBOM: nil)
+        }
+        // `tab.sql =` counted as an edit. Clean only when the session says so; a blob from before the
+        // key existed has no answer, and text nobody saved is not assumed saved.
+        if dirty == false || (dirty == nil && tab.file == nil && !tab.hasSQL) { tab.markSaved() }
         tab.connectionID = connection.flatMap(UUID.init(uuidString:))
         tab.destination = Destination(rawValue: destination) ?? .file
         tab.format = ExportFormat(rawValue: format) ?? .csv

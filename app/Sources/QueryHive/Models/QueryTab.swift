@@ -316,6 +316,44 @@ struct ObjectScope: Equatable {
     }
 }
 
+/// What a tab that is bound to a `.sql` file remembers about the file (blueprint w12 §6, D-18).
+struct FileBinding: Equatable {
+    /// The line ending the file used. The editor's text is always `\n`; this is put back on save.
+    enum LineEnding: String, Equatable {
+        case lf, crlf, cr
+
+        var text: String {
+            switch self {
+            case .lf: "\n"
+            case .crlf: "\r\n"
+            case .cr: "\r"
+            }
+        }
+    }
+
+    /// The file as it was when the tab last read or wrote it. The cheap check on selecting a tab
+    /// compares `mtimeNS` and `size`; the check before a save compares `sha256`.
+    struct Stamp: Equatable {
+        var mtimeNS: Int64
+        var size: Int64
+        var sha256: String
+
+        /// A restored tab knows the hash its text was last saved under but not the file's mtime,
+        /// so the first look at the disk compares content.
+        static func restored(sha256: String) -> Stamp { Stamp(mtimeNS: 0, size: -1, sha256: sha256) }
+    }
+
+    var url: URL
+    var lastKnown: Stamp
+    /// `nil` until known: a tab restored from the session did not read the file, and learns both from
+    /// the bytes the first save reads anyway.
+    var eol: LineEnding?
+    var hadBOM: Bool?
+    /// The disk content the person chose to keep their own text over ("Keep Mine"). While the file is
+    /// still that content, saving goes straight to the second confirmation instead of asking again.
+    var keptOver: Stamp?
+}
+
 @Observable
 final class QueryTab: Identifiable {
     enum Stage { case idle, running, done, failed }
@@ -386,7 +424,76 @@ final class QueryTab: Identifiable {
         didSet {
             // The mark says where the server found fault in a text that no longer exists.
             if let mark = errorMark, sql != mark.sqlSnapshot { errorMark = nil }
+            // A count, not a comparison with the saved text: the editor writes this at most every
+            // 150 ms and a document can be megabytes (blueprint w12 §6). The editor only writes it
+            // after a real edit, and the app's own writes go through `applyGeneratedSQL`,
+            // `loadSaved` or `markSaved`, which move the saved mark with the count.
+            sqlEdits &+= 1
+            refreshUnsaved()
         }
+    }
+
+    // MARK: File
+
+    /// The file this tab is bound to, when it was opened from one or saved to one.
+    var file: FileBinding? {
+        didSet { refreshUnsaved() }
+    }
+
+    /// How many times `sql` has been written, and the count at the last point the text was known to
+    /// be on disk (or, for a tab with no file, the last point it was the app's own text rather than
+    /// the person's). The two differ exactly when there is something to save.
+    @ObservationIgnored private(set) var sqlEdits = 0
+    @ObservationIgnored private(set) var savedEdits = 0
+
+    /// Whether the text differs from what was last saved, by the counters alone.
+    var isDirty: Bool { sqlEdits != savedEdits }
+
+    /// What the tab chip and the close prompt act on: the text has been edited since it was saved,
+    /// and there is something to lose. An unbound tab whose text is blank has nothing to save, so
+    /// typing and clearing leaves it clean for the purpose; a bound one always has, because saving
+    /// an emptied tab empties the file.
+    ///
+    /// Stored, and refreshed only when it changes, so a tab chip that reads it is redrawn on the
+    /// transition and not on every write of the editor's text.
+    private(set) var hasUnsavedSQL = false
+
+    private func refreshUnsaved() {
+        let now = isDirty && (file != nil || !Self.isBlank(sql))
+        if now != hasUnsavedSQL { hasUnsavedSQL = now }
+    }
+
+    /// Whitespace only. Stops at the first character that is not, so it costs nothing on a real query.
+    private static func isBlank(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+
+    /// The text is the saved text: it was just read from the file, or just written to it.
+    func markSaved() {
+        savedEdits = sqlEdits
+        refreshUnsaved()
+    }
+
+    /// The text is not the saved text, whatever the counters say (Keep Mine, a file that vanished).
+    func markDirty() {
+        sqlEdits &+= 1
+        refreshUnsaved()
+    }
+
+    /// Text the app wrote itself (a table's generated `SELECT`, a query loaded from the history). It
+    /// is not the person's work, so a tab that was clean stays clean and closing it asks nothing.
+    /// Two cases stay dirty: a tab that already held unsaved text (this replaced it), and a tab bound
+    /// to a file (the text no longer matches the file, whoever wrote it).
+    func applyGeneratedSQL(_ text: String) {
+        let wasClean = !isDirty
+        sql = text
+        if wasClean, file == nil { markSaved() }
+    }
+
+    /// Text that is the content of the file now: a load, a reload.
+    func loadSaved(_ text: String) {
+        sql = text
+        markSaved()
     }
     var connectionID: UUID?
 
@@ -1321,23 +1428,6 @@ final class QueryTab: Identifiable {
             NSWorkspace.shared.activateFileViewerSelecting(existing)
         } else if let directory = outputDirectory, FileManager.default.fileExists(atPath: directory.path) {
             NSWorkspace.shared.open(directory)
-        }
-    }
-
-    func loadSQLFromFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = AppModel.sqlContentTypes
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        loadSQL(from: url)
-    }
-
-    func loadSQL(from url: URL) {
-        do {
-            sql = try String(contentsOf: url, encoding: .utf8)
-            if title.hasPrefix("Query ") { title = url.deletingPathExtension().lastPathComponent }
-        } catch {
-            note(.error, "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)")
         }
     }
 }

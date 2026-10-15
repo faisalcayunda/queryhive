@@ -294,6 +294,10 @@ enum Snapshot {
         // the budget is small: a fixture is a few dozen rows.
         RustEngine.ensureStoresConfigured(spillDir: nil, budgetBytes: 64 << 20)
         let model = AppModel()
+        // Every scene writes `tab.sql` after the tab exists, which counts as an edit. A scene shows the
+        // state the app reaches, in which generated and seeded text is saved text: no tab chip may
+        // wear an unsaved mark, or the recorded baselines would move. Runs on every return below.
+        defer { for tab in model.tabs { tab.markSaved() } }
         let primary = Connection(id: UUID(), name: "Trino production", color: .blue, kind: .trino,
                                  host: "trino.internal", port: 8443, scheme: "https",
                                  user: "faisal", database: "hive", schema: "analytics", verify: true)

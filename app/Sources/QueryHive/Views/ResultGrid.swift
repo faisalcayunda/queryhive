@@ -99,7 +99,7 @@ struct ResultGrid: View {
     private func takeReviewRequest() {
         guard tab.reviewRequested else { return }
         tab.reviewRequested = false
-        if model.canSaveFocused { openReview() }
+        if model.canReviewStagedEdits { openReview() }
     }
 
     /// Open the review sheet. The open cell editor is staged first, so the plan the sheet shows and

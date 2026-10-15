@@ -156,27 +156,49 @@ extension AppModel {
         }
     }
 
-    // MARK: Save (⌘S, blueprint w10 D-6)
+    // MARK: Save (⌘S, blueprint w10 D-6, w12 §6)
 
-    /// Whether ⌘S has something to save: the selected tab holds staged changes and nothing is
-    /// replacing its rows or applying them. Read from observed state, not from the focus, so the
-    /// menu item is right the moment an edit is staged (the focus is asked, never observed).
-    var canSaveFocused: Bool {
+    /// Whether the selected tab holds staged grid changes that ⌘S would put up for review, and
+    /// nothing is replacing its rows or applying them. Read from observed state, not from the focus
+    /// (the focus is asked, never observed), so it is right the moment an edit is staged.
+    var canReviewStagedEdits: Bool {
         guard let tab = selectedTab else { return false }
         return (!tab.cellEdits.isEmpty || tab.hasOpenCellEdit) && !tab.viewBusy && !tab.applying
     }
 
-    /// ⌘S: open the review of the selected tab's staged changes, which is what saving means for a
-    /// grid. The editor's own file save is W12-T2's; until it lands there is nothing else for the
-    /// key to mean, so it does not look at the focus.
+    /// Whether ⌘S has something to do: the review of staged changes, or saving the SQL. While changes
+    /// are staged the answer is only the review's: a busy grid disables ⌘S rather than letting it
+    /// save the SQL past changes nobody has reviewed.
+    var canSaveFocused: Bool {
+        guard let tab = selectedTab else { return false }
+        if !tab.cellEdits.isEmpty || tab.hasOpenCellEdit { return canReviewStagedEdits }
+        return canSaveSQL(tab)
+    }
+
+    /// ⌘S, the one dispatcher behind the one menu item: staged grid changes open their review, which
+    /// is what saving means for a grid; otherwise the selected tab's SQL is saved to its file (Save
+    /// As when it has none). The grid's changes win while there are any, because they exist nowhere
+    /// else and the menu shortcut is matched before the responder chain can choose: when the grid is
+    /// busy the review cannot open, and then nothing happens (the SQL is not saved past them).
     func saveFocused() {
-        guard canSaveFocused, let tab = selectedTab else { return }
-        // What is typed in the open editor is staged first, or the review would not show it.
-        tab.endCellEdit()
-        guard !tab.cellEdits.isEmpty else { return }
-        tab.panel = .result
-        panelCollapsed = false
-        tab.reviewRequested = true
+        guard let tab = selectedTab else { return }
+        if !tab.cellEdits.isEmpty || tab.hasOpenCellEdit {
+            guard canReviewStagedEdits else { return }
+            // What is typed in the open editor is staged first, or the review would not show it.
+            tab.endCellEdit()
+            if !tab.cellEdits.isEmpty {
+                tab.panel = .result
+                panelCollapsed = false
+                tab.reviewRequested = true
+            }
+            return
+        }
+        if canSaveSQL(tab) { save(tab) }
+    }
+
+    /// ⇧⌘S.
+    func saveFocusedAs() {
+        if let tab = selectedTab, canSaveSQLAs(tab) { saveAs(tab) }
     }
 
     /// Run a reviewed plan of deletes, updates and inserts in one transaction.

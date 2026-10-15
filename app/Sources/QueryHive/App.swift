@@ -102,7 +102,7 @@ struct QueryHiveApp: App {
                 Button("Import Connections from DBeaver…") { model.presentDBeaverImport() }
                 Button("Import Connections from DataGrip…") { model.presentDataGripImport() }
             }
-            // Save is the review of the staged grid changes until the editor's file save arrives
+            // Save is the review of the staged grid changes, or the tab's SQL saved to its file
             // (W12-T2); it is the one item that replaces the system's.
             CommandGroup(replacing: .saveItem) { items(.save) }
             CommandGroup(after: .pasteboard) { items(.edit) }

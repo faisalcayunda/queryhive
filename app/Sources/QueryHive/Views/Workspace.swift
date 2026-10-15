@@ -55,6 +55,9 @@ struct Workspace: View {
             }
         }
         .background(Backdrop(hue: .exporter))
+        // `.sql` and `.txt` files dropped anywhere on the workspace open in tabs of their own (the editor
+        // takes the same drop itself, for it is the view under the pointer there: `SQLTextView`).
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in model.openDroppedProviders(providers) }
         // ⌘= for Increase Font Size, the key the menu's ⌘+ does not answer on a US keyboard (once).
         .onAppear { model.installFontKeys() }
         // As a background, not a wrapper: a GeometryReader around the stack would propose its own
@@ -226,7 +229,8 @@ struct TabChipSpec: Equatable {
     let glyph: Glyph
     let actions: [String]
 
-    init(title: String, stage: QueryTab.Stage, isSelected: Bool, badges: [BadgeSpec] = []) {
+    init(title: String, stage: QueryTab.Stage, isSelected: Bool, badges: [BadgeSpec] = [],
+         unsaved: Bool = false) {
         label = title
         self.isSelected = isSelected
         actions = ["Close"]
@@ -239,9 +243,12 @@ struct TabChipSpec: Equatable {
         }
         // The connection's limits are part of what the tab is, so they are read with it:
         // "running. Environment: production. Safe Mode: Confirm."
-        value = badges.isEmpty
+        // The unsaved dot is a shape for the eye; this is its word, so it does not depend on seeing it.
+        let words = [stageWord].compactMap { $0 } + (unsaved ? ["unsaved changes"] : [])
+            + badges.map(\.accessibility)
+        value = badges.isEmpty && !unsaved
             ? stageWord
-            : ([stageWord].compactMap { $0 } + badges.map(\.accessibility)).joined(separator: ". ") + "."
+            : words.joined(separator: ". ") + "."
     }
 }
 
@@ -254,7 +261,8 @@ struct TabChip: View {
     private var selected: Bool { model.selectedTabID == tab.id }
     private var badges: [BadgeSpec] { BadgeSpec.badges(for: model.connection(for: tab), in: .tabChip) }
     private var spec: TabChipSpec {
-        TabChipSpec(title: tab.title, stage: tab.stage, isSelected: selected, badges: badges)
+        TabChipSpec(title: tab.title, stage: tab.stage, isSelected: selected, badges: badges,
+                    unsaved: tab.hasUnsavedSQL)
     }
     private var closeVisible: Bool { hovering || selected }
 
@@ -268,6 +276,14 @@ struct TabChip: View {
                         .font(.ui(12, weight: selected ? .semibold : .regular))
                         .lineLimit(1)
                         .foregroundStyle(Tone.ink.opacity(selected ? 1 : 0.75))
+                    // A dot, not a colour: unsaved SQL (NFR-A3). Not drawn at all when saved, so a
+                    // saved tab's chip is exactly what it was.
+                    if tab.hasUnsavedSQL {
+                        Circle()
+                            .fill(Tone.ink.opacity(0.7))
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                    }
                     ConnectionBadges(specs: badges)
                         .accessibilityHidden(true)
                 }
@@ -311,7 +327,8 @@ struct TabChip: View {
             Divider()
             Button("Close All") { model.closeAllTabs() }
         }
-        .help(tab.summary)
+        // A bound tab says where its file is; the full path is what tells two `query.sql` apart.
+        .help(tab.file?.url.path ?? tab.summary)
     }
 
     /// A shape as well as a colour, so the stage does not depend on telling two hues apart. The
@@ -556,7 +573,8 @@ struct EditorPane: View {
                       model.run(tab, from: .statement)
                   },
                   lineCount: lines, dialect: dialect, errorMark: tab.errorMark,
-                  onFormatted: { model.reportFormat($0, in: tab) })
+                  onFormatted: { model.reportFormat($0, in: tab) },
+                  onDropFiles: { model.openDropped($0) })
             .editorBox(focused: focused)
             // The tab remembers the dialect it is edited under, so Run, Export and History cut
             // statements the way the editor draws them.

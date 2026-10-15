@@ -58,16 +58,10 @@ extension AppModel {
         UserDefaults.standard.set(tab.format.rawValue, forKey: "lastFormat")
     }
 
-    /// Opens a `.sql` file into a fresh query tab rather than the one that is already open, so
-    /// running a script never overwrites work in progress.
+    /// Opens `.sql` files into fresh query tabs on this connection, so a file never overwrites work in
+    /// progress (`openFile`).
     func runSQLFile(connectionID: UUID) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = Self.sqlContentTypes
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a .sql file to open in a new query"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        newTab(connectionID: connectionID)
-        selectedTab?.loadSQL(from: url)
+        openSQLFilesPanel(connectionID: connectionID)
     }
 
     /// Opens the import sheet for a file the user picks, with the active tab's connection as the

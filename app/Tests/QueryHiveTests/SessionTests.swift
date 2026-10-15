@@ -114,6 +114,105 @@ final class SessionTests: XCTestCase {
         XCTAssertEqual(model.selectedTabID, model.tabs.first?.id, "and it is the tab in front")
     }
 
+    // MARK: Files and unsaved text (blueprint w12 D-19)
+
+    /// A blob written before `file`, `fileHash` and `dirty` existed: the shape of every session on a
+    /// disk today. It must still decode, and an upgrade must not mark anyone's restored work clean.
+    private let oldBlob = """
+        {"id":"\(UUID().uuidString)","title":"Old","sql":"SELECT my_old_work","destination":"file","format":"csv",
+         "outputName":"out","rowLimit":100,"contextDatabase":"","contextSchema":"","targetCatalog":"",
+         "targetSchema":"","targetTable":"","writeMode":"create"}
+        """
+
+    func testABlobWrittenBeforeTheFileKeysDecodesAndItsTextIsTreatedAsUnsaved() throws {
+        let snapshot = try JSONDecoder().decode(SessionTab.self, from: Data(oldBlob.utf8))
+        XCTAssertNil(snapshot.file)
+        XCTAssertNil(snapshot.fileHash)
+        XCTAssertNil(snapshot.dirty)
+
+        let tab = snapshot.tab()
+
+        XCTAssertEqual(tab.sql, "SELECT my_old_work")
+        XCTAssertTrue(tab.hasUnsavedSQL, "no answer from the old build, so the text is not assumed saved")
+        XCTAssertNil(tab.file)
+    }
+
+    func testAnOldBlobWithNoTextRestoresCleanAndAnEmptyTabAsksNothing() throws {
+        var snapshot = try JSONDecoder().decode(SessionTab.self, from: Data(oldBlob.utf8))
+        snapshot.sql = ""
+        XCTAssertFalse(snapshot.tab().hasUnsavedSQL)
+    }
+
+    func testTheNewKeysRoundTripAndAnUnboundTabLeavesOutTheFileKeys() throws {
+        let tab = QueryTab(title: "plain")
+        tab.sql = "SELECT 1"
+        tab.markSaved()
+        let json = String(data: try JSONEncoder().encode(SessionTab(tab)), encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("\"dirty\":false"), "written for every tab, so false is not read as 'old blob'")
+        XCTAssertFalse(json.contains("\"file\":"))
+        XCTAssertFalse(json.contains("\"fileHash\":"))
+        XCTAssertFalse(SessionTab(tab).tab().hasUnsavedSQL, "a clean tab comes back clean")
+
+        tab.sql = "SELECT 2"
+        XCTAssertEqual(SessionTab(tab).dirty, true)
+        XCTAssertTrue(SessionTab(tab).tab().hasUnsavedSQL)
+    }
+
+    func testABoundTabComesBackBoundWithTheHashItWasSavedUnderAndTheSessionsText() throws {
+        let tab = QueryTab(title: "report.sql")
+        tab.sql = "SELECT edited"
+        tab.file = FileBinding(url: URL(fileURLWithPath: "/tmp/qh-nonexistent/report.sql"),
+                               lastKnown: .init(mtimeNS: 7, size: 3, sha256: "abc123"), eol: .crlf, hadBOM: true)
+        // Edited since it was saved.
+
+        let snapshot = SessionTab(tab)
+        XCTAssertEqual(snapshot.file, "/tmp/qh-nonexistent/report.sql")
+        XCTAssertEqual(snapshot.fileHash, "abc123")
+        XCTAssertEqual(snapshot.dirty, true)
+
+        let restored = snapshot.tab()
+        XCTAssertEqual(restored.file?.url.path, "/tmp/qh-nonexistent/report.sql", "no disk was read: the file is not even there")
+        XCTAssertEqual(restored.file?.lastKnown.sha256, "abc123", "the hash it was saved under, not whatever is on disk now")
+        XCTAssertNil(restored.file?.eol, "learned from the bytes at the first save")
+        XCTAssertEqual(restored.sql, "SELECT edited")
+        XCTAssertTrue(restored.hasUnsavedSQL)
+        XCTAssertEqual(restored.stage, .idle)
+        XCTAssertNil(restored.preview)
+    }
+
+    /// The whole path through the real engine: a bound, edited tab is in the session, the file on
+    /// disk says something else, and the restore keeps the session's text, binds the file, leaves the
+    /// file alone and runs nothing.
+    @MainActor
+    func testRestoringABoundDirtyTabKeepsTheSessionsSQLRunsNothingAndLeavesTheFileAlone() async throws {
+        let file = try ConnectionStore.directory().appendingPathComponent("restored.sql")
+        try Data("SELECT on_disk".utf8).write(to: file)
+        var snapshot = SessionTab(QueryTab(title: "restored.sql"))
+        snapshot.sql = "SELECT my_unsaved_edit"
+        snapshot.file = file.path
+        snapshot.fileHash = "hash-of-an-older-save"
+        snapshot.dirty = true
+        let database = try ConnectionStore.directory().appendingPathComponent("queryhive.sqlite3")
+        await seedSession([snapshot], active: snapshot.id, database: database.path)
+
+        let model = AppModel(persistsSession: true)
+        let engine = MockEngine()
+        model.engine = engine
+        let deadline = Date().addingTimeInterval(5)
+        while model.tabs.first?.hasSQL != true, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let tab = try XCTUnwrap(model.tabs.first)
+        XCTAssertEqual(tab.sql, "SELECT my_unsaved_edit", "the session's text wins over the disk's")
+        XCTAssertEqual(tab.file?.url.path, file.path)
+        XCTAssertTrue(tab.hasUnsavedSQL)
+        XCTAssertEqual(tab.stage, .idle)
+        XCTAssertNil(tab.preview)
+        XCTAssertTrue(engine.calls.isEmpty, "restoring executes nothing")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "SELECT on_disk", "and writes nothing")
+    }
+
     /// Writes a session through the real engine, the way a previous launch would have.
     @MainActor
     private func seedSession(_ tabs: [SessionTab], active: String?, database: String) async {

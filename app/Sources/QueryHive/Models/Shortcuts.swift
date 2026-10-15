@@ -32,6 +32,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     case fontSmaller
     case fontReset
     case addRow
+    /// Last, so the Keyboard pane (which lists every action in this order) gains its row at the end.
+    case saveFileAs
 
     /// Whether a scheme chooses the key or the macOS convention applies in every scheme.
     enum Scope { case scheme, platform }
@@ -47,8 +49,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
     }
 
     /// False for an action that has a key reserved but nothing to run yet, so no menu item exists
-    /// and nothing may claim to bind it. `saveFile` is Save in the grid since W10-T3 (it reviews the
-    /// staged changes) and gains the editor's file save in W12-T2; `format` is the editor's Format
+    /// and nothing may claim to bind it. `saveFile` is one dispatcher: it reviews staged grid changes
+    /// (W10-T3) and otherwise saves the tab's SQL to its file (W12-T2); `format` is the editor's Format
     /// SQL (W12-T2, its first slice); `commentLine` still waits for W12-T2.
     var isAvailable: Bool {
         switch self {
@@ -88,6 +90,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable {
         case .fontSmaller: "Decrease Font Size"
         case .fontReset: "Actual Size"
         case .addRow: "Add Row"
+        case .saveFileAs: "Save As"
         }
     }
 }
@@ -171,6 +174,7 @@ enum ShortcutScheme: String, CaseIterable, Identifiable {
     static let platformTable: [ShortcutAction: Shortcut] = [
         .stop: Shortcut(".", .command),
         .saveFile: Shortcut("s", .command),
+        .saveFileAs: Shortcut("s", [.command, .shift]),
         .closeTab: Shortcut("w", .command),
         // ⇧⌘O, one shift away from Open File (⌘O).
         .openQuickly: Shortcut("o", [.command, .shift]),

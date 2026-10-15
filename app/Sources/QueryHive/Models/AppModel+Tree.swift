@@ -35,7 +35,8 @@ extension AppModel {
         tab.sourceTable = name
         let kind = node.connectionKind
         let star = OpenTableStatement.sql(table: name, columns: [], kind: kind)
-        tab.sql = star
+        // Generated, so closing this tab asks nothing until the person edits it.
+        tab.applyGeneratedSQL(star)
         preview(tab, onSuccess: { [weak self, weak tab] reported in
             guard let self, let tab, self.tabs.contains(where: { $0 === tab }) else { return }
             self.writeColumnList(reported.map(\.name), table: name, kind: kind, over: star, in: tab)
@@ -57,19 +58,17 @@ extension AppModel {
     /// The run's recorded text follows, when it is still that run's, so a later search, sort or row
     /// count wraps what the editor shows.
     ///
-    /// That string write registers no undo step and does not clear the undo stack (the history
-    /// loader's comment says otherwise, wrongly). One rare hazard follows: a person who types into the
-    /// fresh tab and undoes back to exactly the `SELECT *` before the run finishes has a redo stack
-    /// that no longer matches the text, and redoing then applies at the wrong place. The tab keeps no
-    /// edit count to tell that from an untouched one, so it is not guarded; the run that has to finish
-    /// first is the one that returned a one-screen result, and the window is that long.
+    /// That string write registers no undo step and does not clear the undo stack. A person who types
+    /// into the fresh tab and undoes back to exactly the `SELECT *` before the run finishes would
+    /// leave a redo stack that no longer matches the text, so a tab the person has edited (the
+    /// counter moved) is left alone even when its text is that `SELECT *` again.
     private func writeColumnList(_ names: [String], table: String, kind: ConnectionKind,
                                  over star: String, in tab: QueryTab) {
         Self.flushEditorsNow()
-        guard tab.sql == star else { return }
+        guard tab.sql == star, !tab.isDirty else { return }
         let list = OpenTableStatement.sql(table: table, columns: names, kind: kind)
         guard list != star else { return }
-        tab.sql = list
+        tab.applyGeneratedSQL(list)
         if tab.previewedSQL == star { tab.previewedSQL = list }
         if tab.previewBaseSQL == star { tab.previewBaseSQL = list }
     }
