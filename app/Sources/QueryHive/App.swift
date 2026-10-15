@@ -99,6 +99,8 @@ struct QueryHiveApp: App {
                 Button("Import Data from File…") { model.presentImport() }
                     .disabled(model.connections.isEmpty)
                 Button("Import Connections from Navicat…") { model.presentNavicatImport() }
+                Button("Import Connections from DBeaver…") { model.presentDBeaverImport() }
+                Button("Import Connections from DataGrip…") { model.presentDataGripImport() }
             }
             // Save is the review of the staged grid changes until the editor's file save arrives
             // (W12-T2); it is the one item that replaces the system's.

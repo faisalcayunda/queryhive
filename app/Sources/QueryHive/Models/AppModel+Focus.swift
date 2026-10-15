@@ -367,6 +367,16 @@ extension AppModel {
         for other in after { closeTab(other.id, confirmed: true) }
     }
 
+    /// Close every tab running on one connection (query tabs and object tabs), asking once when any
+    /// holds work that cannot be recovered. `false` when the person declined, and nothing closed.
+    @discardableResult
+    func closeTabs(of connectionID: UUID) -> Bool {
+        let doomed = tabs.filter { $0.connectionID == connectionID || $0.objectScope?.connectionID == connectionID }
+        guard confirmClosing(doomed) else { return false }
+        for tab in doomed { closeTab(tab.id, confirmed: true) }
+        return true
+    }
+
     /// Close every tab, leaving the workspace empty.
     ///
     /// `tabCounter` is deliberately not reset: `newTab` names from it, and going back to "Query 1"

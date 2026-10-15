@@ -456,6 +456,30 @@ extension AppModel {
         selectedNodeID = nil
     }
 
+    /// Closes one connection: the tabs running on it close first (one question when any holds
+    /// unrecoverable work, and declining it leaves everything as it was), so nothing is left that
+    /// could fetch through it again. Then, **in the tree**, its subtree collapses to the root row and
+    /// every fetch is forgotten, so it reads as idle. What goes is the loaded tree, replies still on
+    /// their way, and the "connected this session" mark that lets completion open a tunnel.
+    ///
+    /// It does not close the engine's pooled sessions or the SSH tunnel behind them: the host keeps
+    /// those per connection until `IDLE_TTL` (5 min) expires them, and the FFI has no call to drop
+    /// one early (`SessionPool` can retire a key, but `EngineHost` does not expose it).
+    func closeConnection(_ id: UUID) {
+        guard let root = connectionNode(for: id), closeTabs(of: id) else { return }
+        func reset(_ node: TreeNode) {
+            node.children?.forEach(reset)
+            node.children = nil
+            node.error = nil
+            node.loading = false
+            forgetCompletionState(of: node)
+            node.expanded = false
+        }
+        reset(root)
+        connectedThisSession.remove(id)
+        if let selected = selectedNodeID, connectionID(fromNodeID: selected) == id { selectedNodeID = root.id }
+    }
+
     /// Runs one engine browse command for a node that has never been expanded. `RETRIES` is
     /// dropped to 2: a typo'd catalog name should come back quickly, not after five backoffs.
     ///

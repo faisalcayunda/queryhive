@@ -69,6 +69,35 @@ final class TreeMenuTests: XCTestCase {
             "New Connection in Group", "-", "Rename Group…", "Delete Group", "-", "Refresh"])
     }
 
+    func testCloseConnectionIsOfferedOnceOpenAndPutsTheConnectionBackToIdle() {
+        let (model, root) = model(.trino)
+        let id = root.connectionID!
+        XCTAssertFalse(titles(TreeMenu.items(for: root, in: model)).contains("Close Connection"))
+        let catalog = TreeNode.catalog("c", parent: root)
+        (root.children, root.expanded, catalog.children) = ([catalog], true, [])
+        model.selectedNodeID = catalog.id
+        model.connectedThisSession.insert(id)
+        XCTAssertEqual(model.connectionState(for: id), .connected)
+        let close = TreeMenu.items(for: root, in: model).first { $0.title == "Close Connection" }
+        close?.action?()
+        XCTAssertNotNil(close)
+        XCTAssertEqual(model.connectionState(for: id), .idle)
+        XCTAssertFalse(root.expanded)
+        XCTAssertFalse(model.connectedThisSession.contains(id))
+        XCTAssertEqual(model.selectedNodeID, root.id)
+    }
+
+    func testCloseConnectionClosesItsTabsAndLeavesOtherConnectionsAlone() {
+        let (model, root) = model(.trino)
+        let id = root.connectionID!, other = UUID()
+        model.tabs = []
+        model.newTab(connectionID: id)
+        model.newTab(connectionID: other)
+        model.newTab(connectionID: id)
+        model.closeConnection(id)
+        XCTAssertEqual(model.tabs.compactMap(\.connectionID), [other])
+    }
+
     func testTheMenuBecomesAnNSMenuWithTicksAndSubmenus() {
         let (model, node) = model(.postgres)
         let menu = OutlineCoordinator.menu(from: TreeMenu.items(for: node, in: model))

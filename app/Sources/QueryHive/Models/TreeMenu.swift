@@ -32,6 +32,10 @@ enum TreeMenu {
             // connection, and a group is not this case.
             guard let id = node.connectionID else { return [] }
             var items = [Item(title: "Open Connection") { model.expand(node) }]
+            // Only once there is something to close: an idle connection has fetched nothing.
+            if model.connectionState(for: id) != .idle {
+                items.append(Item(title: "Close Connection") { model.closeConnection(id) })
+            }
             // Only Postgres filters system schemas and hides other databases away, so only there do
             // the two switches reveal anything.
             if let connection = model.connections.first(where: { $0.id == id }), connection.kind == .postgres {
