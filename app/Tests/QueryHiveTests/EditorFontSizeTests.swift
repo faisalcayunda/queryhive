@@ -46,6 +46,21 @@ final class EditorFontSizeTests: XCTestCase {
         XCTAssertEqual(Announcer.last, "Editor text size 12.5 points")
     }
 
+    /// The family used to reach the Settings sample and nothing else: the editor re-applied its font
+    /// only when the size moved, and an unchanged layout is skipped.
+    func testChoosingACodeFamilyRestylesTheOpenEditor() throws {
+        let family = try XCTUnwrap(["Menlo", "Monaco", "Courier New"].first {
+            FontChoice.resolve($0, size: 12, weight: .regular) != nil
+        })
+        let editor = try EditorTestHost(sql: "SELECT 1;")
+        host = editor
+        XCTAssertNotEqual(editor.textView.font?.familyName, family)
+        ThemeStore.shared.codeFontFamily = family
+        editor.pump(until: { editor.textView.font?.familyName == family }, timeout: 3)
+        XCTAssertEqual(editor.textView.font?.familyName, family)
+        XCTAssertEqual(editor.ruler.numberFont.familyName, family)
+    }
+
     func testTheKeysStopAtTheEndsAndSaySo() {
         let model = AppModel(persistsSession: false)
         EditorPreferences.shared.fontSize = 28

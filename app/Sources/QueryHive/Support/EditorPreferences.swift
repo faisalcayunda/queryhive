@@ -192,13 +192,18 @@ struct EditorLayout: Equatable {
     var runButtonPerStatement: Bool
     var tabWidth: Int
     var fontSize: Double
+    /// The code-font family, which lives in `ThemeStore`. Part of the layout so that choosing a
+    /// family reaches the text view: an unchanged layout is skipped, and the family alone did not
+    /// change it.
+    var codeFontFamily: String
 
     /// What an untouched install has, for anything that needs a layout without a store behind it.
     static let standard = EditorLayout(showLineNumbers: true, highlightCurrentLine: true,
                                        highlightCurrentStatement: true, wordWrap: true,
                                        codeFolding: true, showInvisibles: false,
                                        autoUppercaseKeywords: false, runButtonPerStatement: true,
-                                       tabWidth: 4, fontSize: EditorPreferences.standardFontSize)
+                                       tabWidth: 4, fontSize: EditorPreferences.standardFontSize,
+                                       codeFontFamily: "")
 
     static var current: EditorLayout {
         let prefs = EditorPreferences.shared
@@ -211,6 +216,7 @@ struct EditorLayout: Equatable {
                             autoUppercaseKeywords: prefs.autoUppercaseKeywords,
                             runButtonPerStatement: prefs.runButtonPerStatement,
                             tabWidth: prefs.tabWidth,
-                            fontSize: prefs.fontSize)
+                            fontSize: prefs.fontSize,
+                            codeFontFamily: ThemeStore.shared.codeFontFamily)
     }
 }

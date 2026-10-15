@@ -688,7 +688,10 @@ struct SQLEditor: NSViewRepresentable {
             // the line at the top of the view is held through the change (D-16). Measured before
             // anything below touches the layout, which already moves the view (the wrap pass re-sizes
             // the container).
-            let resized = previous != nil && previous?.fontSize != layout.fontSize
+            // A new family moves the lines as much as a new size does (the advance and the line
+            // height both change), so it takes the same path.
+            let resized = previous != nil
+                && (previous?.fontSize != layout.fontSize || previous?.codeFontFamily != layout.codeFontFamily)
             let anchor = resized ? topVisibleCharacter() : nil
             scrollView?.hasVerticalRuler = layout.showLineNumbers
             scrollView?.rulersVisible = layout.showLineNumbers
