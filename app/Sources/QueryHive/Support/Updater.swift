@@ -8,7 +8,9 @@ import SwiftUI
 /// signature `generate_appcast` made (the public half of that key sits in `Info.plist` as
 /// `SUPublicEDKey`), then swaps the bundle and relaunches. The scheduled half of that happens
 /// without any of this code running: the controller starts the timer, Sparkle decides when to ask
-/// the user, and the answer to "is there something newer" never passes through the app.
+/// the user, and the answer to "is there something newer" never passes through the app. The one
+/// exception is `init`, which also asks once at launch (see there), because the timer alone waits
+/// a day from the last check.
 ///
 /// What is left is the manual check, and a flag to keep the menu item honest while one is already
 /// running — `SPUUpdater` publishes that over KVO, which SwiftUI cannot observe, so it is mirrored
@@ -26,9 +28,19 @@ final class Updater: ObservableObject {
     /// decides to install.
     init() {
         // Not under `--bench`: a benchmark must not phone home or raise Sparkle's own dialogs.
-        controller = SPUStandardUpdaterController(startingUpdater: !CommandLine.arguments.contains("--bench"),
+        let starting = !CommandLine.arguments.contains("--bench")
+        controller = SPUStandardUpdaterController(startingUpdater: starting,
                                                   updaterDelegate: nil,
                                                   userDriverDelegate: nil)
+        // Sparkle's own schedule asks once per `SUScheduledCheckInterval` (a day) counted from the
+        // last check, so a launch inside that window found out nothing. Asking at launch is what
+        // "check for updates automatically" means to the person who agreed to it. SPUUpdater.h
+        // allows this only immediately after starting, and only when automatic checks are on.
+        // The check is silent unless something is newer, and a no-op while a session is running.
+        let updater = controller.updater
+        if starting, updater.automaticallyChecksForUpdates {
+            updater.checkForUpdatesInBackground()
+        }
         controller.updater.publisher(for: \.canCheckForUpdates)
             .receive(on: RunLoop.main)
             .assign(to: &$canCheckForUpdates)
